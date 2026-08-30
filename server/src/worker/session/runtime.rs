@@ -37,6 +37,10 @@ impl WorkerSession {
             Arc<crate::worker::agent::computer_use_broker::ComputerUseBroker>,
         >,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let worker_profile = init_payload
+            .worker_identity
+            .as_ref()
+            .map_or(WorkerProfile::SessionUser, |identity| identity.profile);
         let settings = match serde_json::from_str::<Settings>(&init_payload.config_json) {
             Ok(mut s) => {
                 // Args is #[serde(skip)] so it defaults to Args::default() after
@@ -95,18 +99,20 @@ impl WorkerSession {
         let computer_use_broker = shared_computer_use_broker.unwrap_or_else(|| {
             Arc::new(crate::worker::agent::computer_use_broker::ComputerUseBroker::new())
         });
-        crate::worker::agent::file_reference_store::configure_durable_artifact_store(
-            worker_data_dir.as_deref(),
-        );
-        crate::worker::agent::file_reference_store::reset_worker_incarnation();
-        crate::worker::agent::terminal_reference_store::reset_worker_incarnation();
+        if worker_profile == WorkerProfile::SessionUser {
+            crate::worker::agent::file_reference_store::configure_durable_artifact_store(
+                worker_data_dir.as_deref(),
+            );
+            crate::worker::agent::file_reference_store::reset_worker_incarnation();
+            crate::worker::agent::terminal_reference_store::reset_worker_incarnation();
+        }
         // Portable/DeskServer mode passes a broker whose loopback extension
         // bridge is already owned by the host process. A ServiceDaemon worker
         // is a separate interactive-user process and owns its broker, so it
         // must also own the bridge. Replacing the worker closes the old socket;
         // the MV3 service worker reconnects to the new bridge and receives a
         // fresh connection revision, invalidating every old page/surface ref.
-        if owns_computer_use_broker {
+        if owns_computer_use_broker && worker_profile == WorkerProfile::SessionUser {
             if let Some(data_root) = worker_data_dir.as_deref() {
                 let browser_device_id = shared_settings
                     .read()
@@ -126,7 +132,9 @@ impl WorkerSession {
             }
         }
         #[cfg(windows)]
-        let computer_use_input_monitor = if shared_settings.read().await.computer_use.enabled {
+        let computer_use_input_monitor = if worker_profile == WorkerProfile::SessionUser
+            && shared_settings.read().await.computer_use.enabled
+        {
             match crate::worker::agent::windows_input_ownership::WindowsInputOwnershipMonitor::start(
                 &computer_use_broker,
             ) {
@@ -140,7 +148,9 @@ impl WorkerSession {
             None
         };
         #[cfg(target_os = "macos")]
-        let computer_use_input_monitor = if shared_settings.read().await.computer_use.enabled {
+        let computer_use_input_monitor = if worker_profile == WorkerProfile::SessionUser
+            && shared_settings.read().await.computer_use.enabled
+        {
             match crate::worker::agent::macos_input_ownership::MacosInputOwnershipMonitor::start(
                 &computer_use_broker,
             ) {
@@ -268,8 +278,9 @@ impl WorkerSession {
         // joined at shutdown so the in-process transport's mpsc capacity is
         // fully drained before the test/runtime moves on.
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
-        let writer_task = spawn_event_forwarder_task(writer_rx, Arc::clone(&event_tx));
-        let computer_use_readiness_task = {
+        let writer_task =
+            spawn_profiled_event_forwarder_task(writer_rx, Arc::clone(&event_tx), worker_profile);
+        let computer_use_readiness_task = (worker_profile == WorkerProfile::SessionUser).then(|| {
             let readiness_writer = writer_tx.clone();
             let readiness_broker = computer_use_broker.clone();
             let readiness_settings = shared_settings.clone();
@@ -371,7 +382,7 @@ impl WorkerSession {
                     tokio::time::sleep(Duration::from_secs(10)).await;
                 }
             })
-        };
+        });
 
         #[cfg(target_os = "linux")]
         let portal_status_task = if let Some(broker) = portal_broker.as_ref() {
@@ -447,13 +458,19 @@ impl WorkerSession {
         };
         let capability_desktop_name = init_payload.desktop_name.clone();
         let capability_has_tauri = init_payload.host_upstream_url.is_some();
-        let capabilities = tokio::task::spawn_blocking(move || {
+        let mut capabilities = tokio::task::spawn_blocking(move || {
             MediaProducer::build_capabilities(
                 capability_desktop_name.as_deref(),
                 capability_has_tauri,
             )
         })
         .await?;
+        if worker_profile == WorkerProfile::RestrictedDesktop {
+            capabilities.audio_codecs.clear();
+            capabilities.audio_encoders.clear();
+            capabilities.audio_device_list.clear();
+            capabilities.has_tauri = false;
+        }
         let (capture_geometry_tx, mut capture_geometry_rx) =
             mpsc::unbounded_channel::<CaptureGeometryReady>();
         // Per-connection input handlers. Constructed once per
@@ -523,18 +540,22 @@ impl WorkerSession {
         // (Linux without a clipboard backend, etc.); on failure the
         // worker continues without clipboard sync — the IPC variants
         // log + drop in the main loop instead of dispatching.
-        let clipboard_dispatcher: Option<ClipboardDispatcher> = {
-            let desk_settings = shared_settings.read().await.desk.clone();
-            match ClipboardDispatcher::new(&desk_settings, writer_tx.clone()) {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    warn!("{e}");
-                    None
+        let clipboard_dispatcher: Option<ClipboardDispatcher> =
+            if worker_profile == WorkerProfile::RestrictedDesktop {
+                None
+            } else {
+                let desk_settings = shared_settings.read().await.desk.clone();
+                match ClipboardDispatcher::new(&desk_settings, writer_tx.clone()) {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        warn!("{e}");
+                        None
+                    }
                 }
-            }
-        };
-        // File transfer dispatcher. Always constructible —
-        // it owns no resource that can fail at init time. Holds the
+            };
+        // File transfer dispatcher. Session-user workers own the file lane;
+        // restricted-desktop workers deliberately do not construct this
+        // resource at all. Holds the
         // shared settings + host-control hub so it can run the per-
         // connection `allow_file_transfer` gate (which the daemon-side
         // DC router intentionally passes through; see the bug fix
@@ -552,22 +573,26 @@ impl WorkerSession {
         // Stop switches for the commands currently running, so a cancel arriving
         // on this loop can reach an execution running in a task of its own.
         let exec_registry = crate::worker::exec_registry::ExecRegistry::new();
-        let file_transfer_dispatcher = FileTransferDispatcher::new(
-            file_sender,
-            Arc::clone(&policy),
-            Arc::clone(&host_control_hub),
-            connection_ceilings.clone(),
-            writer_tx.clone(),
-        );
+        let file_transfer_dispatcher = (worker_profile == WorkerProfile::SessionUser).then(|| {
+            FileTransferDispatcher::new(
+                file_sender,
+                Arc::clone(&policy),
+                Arc::clone(&host_control_hub),
+                connection_ceilings.clone(),
+                writer_tx.clone(),
+            )
+        });
         // Whiteboard dispatcher. Spawns a bridge thread to
         // the host_control_hub on construction; reuses the same hub
         // the DeskSession (legacy / portable path) uses so messages
         // flow through a single Tauri overlay manager.
-        let whiteboard_dispatcher = WhiteboardDispatcher::new(
-            Arc::clone(&host_control_hub),
-            Arc::clone(&policy),
-            connection_ceilings.clone(),
-        );
+        let whiteboard_dispatcher = (worker_profile == WorkerProfile::SessionUser).then(|| {
+            WhiteboardDispatcher::new(
+                Arc::clone(&host_control_hub),
+                Arc::clone(&policy),
+                connection_ceilings.clone(),
+            )
+        });
         if writer_tx
             .send(WorkerToService::Capabilities(capabilities))
             .is_err()
@@ -576,19 +601,25 @@ impl WorkerSession {
             return Ok(());
         }
 
-        let mut desk_session = DeskSession::new(
-            shared_settings_data.clone(),
-            session_sender,
-            CurrentUser::new_admin("worker_node"),
-            host_control_hub,
-            connection_ceilings.clone(),
-            Arc::clone(&policy),
-            writer_tx.clone(),
-        )
-        .await
-        .map_err(|e| format!("Failed to create DeskSession: {}", e))?;
+        let mut desk_session = if worker_profile == WorkerProfile::SessionUser {
+            Some(
+                DeskSession::new(
+                    shared_settings_data.clone(),
+                    session_sender,
+                    CurrentUser::new_admin("worker_node"),
+                    host_control_hub,
+                    connection_ceilings.clone(),
+                    Arc::clone(&policy),
+                    writer_tx.clone(),
+                )
+                .await
+                .map_err(|e| format!("Failed to create DeskSession: {}", e))?,
+            )
+        } else {
+            None
+        };
 
-        info!("DeskSession created successfully, entering main loop");
+        info!("Worker runtime resources created; entering main loop");
 
         // Virtual display: platform controller (Windows IDD impl on
         // Windows; NotSupported stub everywhere else) + per-worker
@@ -646,8 +677,7 @@ impl WorkerSession {
         // `None` from `recv()` (lane closed → daemon vanished);
         // worker shutdown happens through the event lane so this
         // task is allowed to terminate quietly.
-        {
-            let dispatcher = file_transfer_dispatcher.clone();
+        if let Some(dispatcher) = file_transfer_dispatcher.clone() {
             let remote_access_locked = Arc::clone(&remote_access_locked);
             tokio::spawn(async move {
                 while let Some(payload) = file_receiver.recv().await {
@@ -731,6 +761,14 @@ impl WorkerSession {
                 msg_result = service_msg_rx.recv() => {
                     match msg_result {
                         Some(Some(msg)) => {
+                            if !msg.allowed_for_profile(worker_profile) {
+                                error!(
+                                    "Refusing inbound {:?} for {:?} worker",
+                                    std::mem::discriminant(&msg),
+                                    worker_profile
+                                );
+                                continue;
+                            }
                             if remote_access_locked.load(Ordering::Acquire)
                                 && !survives_remote_access_lock(&msg)
                             {
@@ -740,7 +778,9 @@ impl WorkerSession {
                             match msg {
                                 ServiceToWorker::Shutdown => {
                                     info!("Received Shutdown command");
-                                    if let Err(e) = desk_session.shutdown().await {
+                                    if let Some(session) = desk_session.take()
+                                        && let Err(e) = session.shutdown().await
+                                    {
                                         error!("DeskSession shutdown error: {}", e);
                                     }
                                     break;
@@ -812,19 +852,32 @@ impl WorkerSession {
                                         remote_access_locked.load(Ordering::Acquire);
                                     let (cancelled_terminals, cancelled_transfers, cancelled_execs) =
                                         if now_locked && !was_locked {
-                                            let cancelled_terminals = desk_session
-                                                .cancel_all_remote_activity()
-                                                .await;
-                                            let cancelled_transfers = file_transfer_dispatcher
-                                                .active_transfer_count()
-                                                .await;
-                                            file_transfer_dispatcher.shutdown().await;
+                                            let cancelled_terminals = if let Some(session) =
+                                                desk_session.as_mut()
+                                            {
+                                                session.cancel_all_remote_activity().await
+                                            } else {
+                                                0
+                                            };
+                                            let cancelled_transfers = if let Some(dispatcher) =
+                                                file_transfer_dispatcher.as_ref()
+                                            {
+                                                let count = dispatcher.active_transfer_count().await;
+                                                dispatcher.shutdown().await;
+                                                count
+                                            } else {
+                                                0
+                                            };
                                             let cancelled_execs = exec_registry.cancel_all();
                                             input_dispatcher.shutdown();
                                             if let Some(dispatcher) = clipboard_dispatcher.as_ref() {
                                                 dispatcher.shutdown().await;
                                             }
-                                            whiteboard_dispatcher.shutdown().await;
+                                            if let Some(dispatcher) =
+                                                whiteboard_dispatcher.as_ref()
+                                            {
+                                                dispatcher.shutdown().await;
+                                            }
                                             connection_ceilings.clear_all().await;
                                             if let Some(producer) = media_producer.as_ref() {
                                                 producer.shutdown();
@@ -925,10 +978,18 @@ impl WorkerSession {
                                         }
                                         // Subscribe the connection
                                         // to file transfer commands.
-                                        file_transfer_dispatcher.start_connection(&active).await;
+                                        if let Some(dispatcher) =
+                                            file_transfer_dispatcher.as_ref()
+                                        {
+                                            dispatcher.start_connection(&active).await;
+                                        }
                                         // Subscribe the connection
                                         // to whiteboard draw commands.
-                                        whiteboard_dispatcher.start_connection(&active).await;
+                                        if let Some(dispatcher) =
+                                            whiteboard_dispatcher.as_ref()
+                                        {
+                                            dispatcher.start_connection(&active).await;
+                                        }
                                     } else {
                                         warn!(
                                             "Worker received StartMedia but media producer is \
@@ -950,9 +1011,19 @@ impl WorkerSession {
                                     if let Some(d) = clipboard_dispatcher.as_ref() {
                                         d.stop_connection(&payload).await;
                                     }
-                                    file_transfer_dispatcher.stop_connection(&payload).await;
-                                    whiteboard_dispatcher.stop_connection(&payload).await;
-                                    desk_session.clear_file_permissions(&payload.connection_id);
+                                    if let Some(dispatcher) =
+                                        file_transfer_dispatcher.as_ref()
+                                    {
+                                        dispatcher.stop_connection(&payload).await;
+                                    }
+                                    if let Some(dispatcher) =
+                                        whiteboard_dispatcher.as_ref()
+                                    {
+                                        dispatcher.stop_connection(&payload).await;
+                                    }
+                                    if let Some(session) = desk_session.as_mut() {
+                                        session.clear_file_permissions(&payload.connection_id);
+                                    }
                                     connection_ceilings.clear(&payload.connection_id).await;
                                 }
                                 ServiceToWorker::ForceKeyframe(payload) => {
@@ -1005,7 +1076,9 @@ impl WorkerSession {
                                     }
                                 }
                                 ServiceToWorker::WhiteboardCommand(payload) => {
-                                    whiteboard_dispatcher.handle_command(payload).await;
+                                    if let Some(dispatcher) = whiteboard_dispatcher.as_ref() {
+                                        dispatcher.handle_command(payload).await;
+                                    }
                                 }
                                 // These typed requests replace the legacy
                                 // `SignalingMessage` opaque envelope. The worker still
@@ -1018,16 +1091,18 @@ impl WorkerSession {
                                 // from the typed payload so the existing
                                 // arms keep working without duplicating the handlers.
                                 ServiceToWorker::SetPrivateScreenVisibility(payload) => {
-                                    dispatch_typed_signaling_with_request_id(
-                                        &mut desk_session,
-                                        SignalingType::SetPrivateScreenVisibility,
-                                        payload.request_id,
-                                        Some(payload.connection_id),
-                                        Some(&SetPrivateScreenVisibilityData {
-                                            visible: payload.visible,
-                                        }),
-                                    )
-                                    .await;
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling_with_request_id(
+                                            session,
+                                            SignalingType::SetPrivateScreenVisibility,
+                                            payload.request_id,
+                                            Some(payload.connection_id),
+                                            Some(&SetPrivateScreenVisibilityData {
+                                                visible: payload.visible,
+                                            }),
+                                        )
+                                        .await;
+                                    }
                                 }
                                 // Manager-plane typed requests rebuild a
                                 // SignalingModel with the original
@@ -1037,34 +1112,40 @@ impl WorkerSession {
                                 // classifier turns into the matching
                                 // typed `WorkerToService::Manager*Response`.
                                 ServiceToWorker::GetSystemInfo(payload) => {
-                                    dispatch_typed_signaling_with_request_id(
-                                        &mut desk_session,
-                                        SignalingType::GetSystemInfo,
-                                        payload.request_id,
-                                        payload.connection_id,
-                                        Option::<&()>::None,
-                                    )
-                                    .await;
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling_with_request_id(
+                                            session,
+                                            SignalingType::GetSystemInfo,
+                                            payload.request_id,
+                                            payload.connection_id,
+                                            Option::<&()>::None,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 ServiceToWorker::ListFiles(payload) => {
-                                    dispatch_typed_signaling_with_request_id(
-                                        &mut desk_session,
-                                        SignalingType::ListFiles,
-                                        payload.request_id,
-                                        Some(payload.connection_id),
-                                        Some(&payload.params),
-                                    )
-                                    .await;
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling_with_request_id(
+                                            session,
+                                            SignalingType::ListFiles,
+                                            payload.request_id,
+                                            Some(payload.connection_id),
+                                            Some(&payload.params),
+                                        )
+                                        .await;
+                                    }
                                 }
                                 ServiceToWorker::DeleteFile(payload) => {
-                                    dispatch_typed_signaling_with_request_id(
-                                        &mut desk_session,
-                                        SignalingType::DeleteFile,
-                                        payload.request_id,
-                                        Some(payload.connection_id),
-                                        Some(&payload.request),
-                                    )
-                                    .await;
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling_with_request_id(
+                                            session,
+                                            SignalingType::DeleteFile,
+                                            payload.request_id,
+                                            Some(payload.connection_id),
+                                            Some(&payload.request),
+                                        )
+                                        .await;
+                                    }
                                 }
                                 ServiceToWorker::SetLocale(payload) => {
                                     // The daemon has already persisted this; the
@@ -1116,59 +1197,69 @@ impl WorkerSession {
                                 // ride `dispatch_typed_signaling`
                                 // because the worker emits no response.
                                 ServiceToWorker::StartTerminal(payload) => {
-                                    dispatch_typed_signaling_with_request_id(
-                                        &mut desk_session,
-                                        SignalingType::StartTerminal,
-                                        payload.request_id,
-                                        Some(payload.connection_id),
-                                        Some(&payload.session),
-                                    )
-                                    .await;
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling_with_request_id(
+                                            session,
+                                            SignalingType::StartTerminal,
+                                            payload.request_id,
+                                            Some(payload.connection_id),
+                                            Some(&payload.session),
+                                        )
+                                        .await;
+                                    }
                                 }
                                 ServiceToWorker::SendTerminalInput(payload) => {
-                                    dispatch_typed_signaling(
-                                        &mut desk_session,
-                                        SignalingType::SendTerminalInput,
-                                        Some(payload.connection_id),
-                                        &payload.data,
-                                    )
-                                    .await;
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling(
+                                            session,
+                                            SignalingType::SendTerminalInput,
+                                            Some(payload.connection_id),
+                                            &payload.data,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 ServiceToWorker::ResizeTerminal(payload) => {
-                                    dispatch_typed_signaling(
-                                        &mut desk_session,
-                                        SignalingType::ResizeTerminal,
-                                        Some(payload.connection_id),
-                                        &payload.data,
-                                    )
-                                    .await;
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling(
+                                            session,
+                                            SignalingType::ResizeTerminal,
+                                            Some(payload.connection_id),
+                                            &payload.data,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 ServiceToWorker::CloseTerminal(payload) => {
-                                    dispatch_typed_signaling_with_request_id(
-                                        &mut desk_session,
-                                        SignalingType::CloseTerminal,
-                                        // CloseTerminal has no response body
-                                        // but the legacy handler still calls
-                                        // `check_and_get_from_connection_id`
-                                        // for logging — `dispatch_typed_*`
-                                        // both feed it; we use the explicit
-                                        // form so a future test can pin the
-                                        // request_id surface in trace logs.
-                                        "typed-ipc".to_string(),
-                                        Some(payload.connection_id),
-                                        Option::<&()>::None,
-                                    )
-                                    .await;
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling_with_request_id(
+                                            session,
+                                            SignalingType::CloseTerminal,
+                                            // CloseTerminal has no response body
+                                            // but the legacy handler still calls
+                                            // `check_and_get_from_connection_id`
+                                            // for logging — `dispatch_typed_*`
+                                            // both feed it; we use the explicit
+                                            // form so a future test can pin the
+                                            // request_id surface in trace logs.
+                                            "typed-ipc".to_string(),
+                                            Some(payload.connection_id),
+                                            Option::<&()>::None,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 ServiceToWorker::ListTerminalCommands(payload) => {
-                                    dispatch_typed_signaling_with_request_id(
-                                        &mut desk_session,
-                                        SignalingType::ListTerminalCommands,
-                                        payload.request_id,
-                                        payload.connection_id,
-                                        Option::<&()>::None,
-                                    )
-                                    .await;
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling_with_request_id(
+                                            session,
+                                            SignalingType::ListTerminalCommands,
+                                            payload.request_id,
+                                            payload.connection_id,
+                                            Option::<&()>::None,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 // The daemon-side `dc.send` failed. The
                                 // daemon already classified and logged the
@@ -1178,9 +1269,9 @@ impl WorkerSession {
                                 // aborts the matching transfer and emits
                                 // a `TransferError` over its file lane.
                                 ServiceToWorker::FileTransferSendFailed(payload) => {
-                                    file_transfer_dispatcher
-                                        .handle_send_failed(payload)
-                                        .await;
+                                    if let Some(dispatcher) = file_transfer_dispatcher.as_ref() {
+                                        dispatcher.handle_send_failed(payload).await;
+                                    }
                                 }
                                 // Virtual display: the daemon owns the
                                 // SwDevice handle; the worker owns
@@ -2564,6 +2655,10 @@ impl WorkerSession {
                     info!("Reporting desktop drift to daemon: '{}'", new_desktop);
                     let payload = WorkerToService::DesktopChanged(DesktopChangedPayload {
                         name: new_desktop,
+                        observed_at_unix_ms: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
                     });
                     if writer_tx.send(payload).is_err() {
                         error!("IPC writer task died; exiting main loop");
@@ -2687,7 +2782,9 @@ impl WorkerSession {
         // own writer_tx so the event-pipe writer task observes "all
         // senders gone" and exits cleanly.
         heartbeat_task.abort();
-        computer_use_readiness_task.abort();
+        if let Some(task) = computer_use_readiness_task {
+            task.abort();
+        }
         #[cfg(any(windows, target_os = "macos"))]
         drop(computer_use_input_monitor);
         #[cfg(target_os = "linux")]
@@ -2711,8 +2808,12 @@ impl WorkerSession {
         if let Some(d) = clipboard_dispatcher.as_ref() {
             d.shutdown().await;
         }
-        file_transfer_dispatcher.shutdown().await;
-        whiteboard_dispatcher.shutdown().await;
+        if let Some(dispatcher) = file_transfer_dispatcher.as_ref() {
+            dispatcher.shutdown().await;
+        }
+        if let Some(dispatcher) = whiteboard_dispatcher.as_ref() {
+            dispatcher.shutdown().await;
+        }
         drop(writer_tx);
         let _ = writer_task.await;
 

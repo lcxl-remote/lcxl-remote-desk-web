@@ -75,12 +75,13 @@ pub async fn cleanup_pc(
     if let Some(ctx) = &removed {
         let connection_epoch = ctx.read().await.connection_epoch.clone();
         if let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::StopMedia(
-                desk_ipc_protocol::message::StopMediaPayload {
+            .send_to_interactive_connection_worker(
+                connection_id,
+                ServiceToWorker::StopMedia(desk_ipc_protocol::message::StopMediaPayload {
                     connection_id: connection_id.to_string(),
                     connection_epoch,
-                },
-            ))
+                }),
+            )
             .await
         {
             log::debug!("[pc_manager] StopMedia for {connection_id} could not reach worker: {e}");
@@ -94,11 +95,12 @@ pub async fn cleanup_pc(
     // revocation. Idempotent with the terminal's own `CloseTerminal` cleanup.
     if registry.is_terminal_connection(connection_id).await {
         if let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::CloseTerminal(
-                desk_ipc_protocol::message::CloseTerminalPayload {
+            .send_to_connection_worker(
+                connection_id,
+                ServiceToWorker::CloseTerminal(desk_ipc_protocol::message::CloseTerminalPayload {
                     connection_id: connection_id.to_string(),
-                },
-            ))
+                }),
+            )
             .await
         {
             log::debug!(
@@ -106,12 +108,15 @@ pub async fn cleanup_pc(
             );
         }
         if let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::SetConnectionCeiling(
-                desk_ipc_protocol::message::SetConnectionCeilingPayload {
-                    connection_id: connection_id.to_string(),
-                    ceiling: None,
-                },
-            ))
+            .send_to_connection_worker(
+                connection_id,
+                ServiceToWorker::SetConnectionCeiling(
+                    desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                        connection_id: connection_id.to_string(),
+                        ceiling: None,
+                    },
+                ),
+            )
             .await
         {
             log::debug!(
@@ -176,13 +181,16 @@ pub async fn hide_private_screen_best_effort(
     reason: &str,
 ) {
     if let Err(error) = worker_mgr
-        .send_to_worker(ServiceToWorker::SetPrivateScreenVisibility(
-            desk_ipc_protocol::message::SetPrivateScreenVisibilityPayload {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                connection_id: connection_id.to_string(),
-                visible: false,
-            },
-        ))
+        .send_to_connection_worker(
+            connection_id,
+            ServiceToWorker::SetPrivateScreenVisibility(
+                desk_ipc_protocol::message::SetPrivateScreenVisibilityPayload {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    connection_id: connection_id.to_string(),
+                    visible: false,
+                },
+            ),
+        )
         .await
     {
         log::debug!(
@@ -223,6 +231,7 @@ async fn finalize_logical_connection(
     registry.unindex_grant_connection(connection_id).await;
     registry.unmark_terminal_connection(connection_id).await;
     detach_virtual_display_if_unused(registry, virtual_display, reason).await;
+    worker_mgr.clear_connection_target(connection_id);
 }
 
 /// Host-initiated teardown has stronger semantics than browser `CloseRemoteSession`:
@@ -242,24 +251,31 @@ pub async fn force_disconnect_connection(
     registry.tombstone_connection(connection_id).await;
     cleanup_pc(registry, worker_mgr, virtual_display, connection_id, reason).await;
     if existed {
-        // Hide the privacy screen while the worker still has the connection
-        // ceiling. Clearing the ceiling first would make teardown ordering
-        // depend on the worker's fallback policy instead of the lifecycle.
-        finalize_logical_connection(registry, worker_mgr, virtual_display, connection_id, reason)
-            .await;
+        // Hide before clearing the worker ceiling. `finalize_logical_connection`
+        // repeats this best-effort operation for its shared cleanup path.
+        hide_private_screen_best_effort(worker_mgr, connection_id, reason).await;
     }
     if let Err(error) = worker_mgr
-        .send_to_worker(ServiceToWorker::SetConnectionCeiling(
-            desk_ipc_protocol::message::SetConnectionCeilingPayload {
-                connection_id: connection_id.to_string(),
-                ceiling: None,
-            },
-        ))
+        .send_to_connection_worker(
+            connection_id,
+            ServiceToWorker::SetConnectionCeiling(
+                desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                    connection_id: connection_id.to_string(),
+                    ceiling: None,
+                },
+            ),
+        )
         .await
     {
         log::debug!(
             "[pc_manager] force-disconnect ceiling clear for {connection_id} could not reach worker: {error}"
         );
+    }
+    if existed {
+        finalize_logical_connection(registry, worker_mgr, virtual_display, connection_id, reason)
+            .await;
+    } else {
+        worker_mgr.clear_connection_target(connection_id);
     }
     existed
 }
@@ -358,7 +374,7 @@ pub(super) fn register_peer_connection_state_cleanup(
                             "[pc_manager] PC for {connection_id} reconnected; requesting a fresh keyframe"
                         );
                         if let Err(e) = worker_mgr
-                            .send_to_worker(ServiceToWorker::ForceKeyframe(
+                            .send_to_interactive_connection_worker(&connection_id, ServiceToWorker::ForceKeyframe(
                                 ForceKeyframePayload {
                                     connection_id: connection_id.clone(),
                                 },

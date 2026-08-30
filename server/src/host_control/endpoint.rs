@@ -19,6 +19,11 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::protocol::{ClientRole, HostControlMessage};
 use super::{HostControlEvent, HostControlHub, HubMode, UpstreamSessionId};
+#[cfg(target_os = "linux")]
+use super::{
+    SessionShellRegistrationError,
+    session_shell::{MAX_HOST_CONTROL_FRAME_BYTES, SessionShellRegistry},
+};
 use crate::{TauriIsAdminOverride, TauriLoginToken, model::settings::SharedSettings};
 
 /// Constant-time byte comparison for query-string tokens. Returns `false` on
@@ -86,6 +91,8 @@ pub struct EndpointState {
     /// Native REST bearer token → owning WS session. Tokens are never
     /// broadcast and are revoked when that exact session disconnects.
     native_bridge_sessions: Arc<Mutex<HashMap<String, UpstreamSessionId>>>,
+    #[cfg(target_os = "linux")]
+    session_shell_registry: SessionShellRegistry,
 }
 
 impl EndpointState {
@@ -103,6 +110,8 @@ impl EndpointState {
             settings: None,
             settings_coordinator: None,
             native_bridge_sessions: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(target_os = "linux")]
+            session_shell_registry: SessionShellRegistry::default(),
         }
     }
 
@@ -119,6 +128,12 @@ impl EndpointState {
         self
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn with_session_shell_registry(mut self, registry: SessionShellRegistry) -> Self {
+        self.session_shell_registry = registry;
+        self
+    }
+
     pub fn with_settings(mut self, settings: web::Data<SharedSettings>) -> Self {
         self.settings = Some(settings);
         self
@@ -126,6 +141,11 @@ impl EndpointState {
 
     fn alloc_session_id(&self) -> UpstreamSessionId {
         self.next_session_id.fetch_add(1, Ordering::AcqRel)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn session_shell_registry(&self) -> SessionShellRegistry {
+        self.session_shell_registry.clone()
     }
 }
 
@@ -243,6 +263,8 @@ pub async fn ws_handler(
     }
 
     let (response, session, msg_stream) = actix_ws::handle(&req, stream)?;
+    #[cfg(target_os = "linux")]
+    let msg_stream = msg_stream.max_frame_size(MAX_HOST_CONTROL_FRAME_BYTES);
     let state_inner = state.into_inner();
     actix_web::rt::spawn(run_ws_session(state_inner, session, msg_stream));
     Ok(response)
@@ -350,7 +372,10 @@ async fn run_ws_session(
                                 )
                                 .await;
                             }
-                            Err(e) => warn!("[HostCtrl/WS] parse: {e} ({text})"),
+                            Err(e) => warn!(
+                                "[HostCtrl/WS] parse failed: {e} (frame_bytes={})",
+                                text.len()
+                            ),
                         }
                     }
                     Some(Ok(actix_ws::Message::Ping(data))) => {
@@ -386,6 +411,8 @@ fn is_outbound_for_role(msg: &HostControlMessage, role: Option<ClientRole>) -> b
         (
             ClientRole::Tauri,
             HostControlMessage::TauriToken { .. }
+            | HostControlMessage::SessionShellRegistered { .. }
+            | HostControlMessage::SessionShellRegistrationRejected { .. }
             | HostControlMessage::PrivateScreenShow { .. }
             | HostControlMessage::PrivateScreenHide { .. }
             | HostControlMessage::WhiteboardShow { .. }
@@ -476,6 +503,54 @@ async fn handle_client_message(
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        HostControlMessage::SessionShellInfo { info } => {
+            let result = if *role != Some(ClientRole::Tauri) {
+                Err((
+                    SessionShellRegistrationError::RoleRequired,
+                    "session-shell registration requires a Tauri Ready handshake".to_string(),
+                ))
+            } else if state.hub.mode() != HubMode::Aggregator {
+                Err((
+                    SessionShellRegistrationError::Unsupported,
+                    "session-shell registration is only accepted by ServiceDaemon".to_string(),
+                ))
+            } else {
+                state
+                    .session_shell_registry
+                    .register(session_id, info)
+                    .map_err(|error| (error.code(), error.to_string()))
+            };
+
+            match result {
+                Ok(registration) => {
+                    info!(
+                        "[HostCtrl/WS] registered Linux session shell registration_id={} generation={} session_id={session_id} pid={} uid={}",
+                        registration.registration_id,
+                        registration.registration_generation,
+                        registration.pid,
+                        registration.process_identity.uid
+                    );
+                    let _ = session_tx.send(HostControlMessage::SessionShellRegistered {
+                        registration_id: registration.registration_id.to_string(),
+                        registration_generation: registration.registration_generation,
+                    });
+                }
+                Err((code, detail)) => {
+                    warn!(
+                        "[HostCtrl/WS] rejected Linux session shell session_id={session_id} code={code:?}: {detail}"
+                    );
+                    let _ = session_tx
+                        .send(HostControlMessage::SessionShellRegistrationRejected { code });
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        HostControlMessage::SessionShellInfo { .. } => {
+            let _ = session_tx.send(HostControlMessage::SessionShellRegistrationRejected {
+                code: super::protocol::SessionShellRegistrationError::Unsupported,
+            });
+        }
         HostControlMessage::PrivateScreenStateChanged {
             connection_id,
             request_id,
@@ -538,6 +613,16 @@ fn on_disconnect(
     session_id: UpstreamSessionId,
     native_bridge_token: Option<&str>,
 ) {
+    #[cfg(target_os = "linux")]
+    if let Some(registration) = state
+        .session_shell_registry
+        .unregister_websocket(session_id)
+    {
+        info!(
+            "[HostCtrl/WS] unregistered Linux session shell registration_id={} generation={} session_id={session_id}",
+            registration.registration_id, registration.registration_generation
+        );
+    }
     if let Some(token) = native_bridge_token {
         state.native_bridge_sessions.lock().unwrap().remove(token);
     }

@@ -124,12 +124,29 @@ pub(super) fn should_init_worker_telemetry(shared_hub_is_some: bool) -> bool {
 /// handler cannot stall heartbeats or other queued outbound messages. The
 /// task exits when all dispatcher senders drop (clean shutdown) or when
 /// the underlying transport returns `Closed`.
+#[cfg(test)]
 pub(super) fn spawn_event_forwarder_task(
+    rx: mpsc::UnboundedReceiver<WorkerToService>,
+    sender: Arc<dyn EventSender<WorkerToService>>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_profiled_event_forwarder_task(rx, sender, WorkerProfile::SessionUser)
+}
+
+pub(super) fn spawn_profiled_event_forwarder_task(
     mut rx: mpsc::UnboundedReceiver<WorkerToService>,
     sender: Arc<dyn EventSender<WorkerToService>>,
+    profile: WorkerProfile,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
+            if !msg.allowed_for_profile(profile) {
+                error!(
+                    "Refusing outbound {:?} from {:?} worker",
+                    std::mem::discriminant(&msg),
+                    profile
+                );
+                continue;
+            }
             if let Err(e) = sender.send(msg).await {
                 warn!("Failed to forward IPC message: {}", e);
                 break;

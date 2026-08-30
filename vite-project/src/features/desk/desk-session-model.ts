@@ -198,6 +198,7 @@ type DesktopRequestRemotePayload = Pick<
     "purpose" | "grant_session_id" | "requested_wayland_control_mode" | "org_id"
 > & {
     connection_id: string
+    session_target_id?: string
 }
 
 export function buildDesktopRequestRemotePayload(
@@ -205,11 +206,13 @@ export function buildDesktopRequestRemotePayload(
     grantSessionId: string | null,
     requestedWaylandControlMode: string,
     orgId?: number,
+    sessionTargetId?: string,
 ): DesktopRequestRemotePayload {
     return {
         connection_id: connectionId,
         purpose: "remote_desktop",
         requested_wayland_control_mode: requestedWaylandControlMode,
+        ...(sessionTargetId ? { session_target_id: sessionTargetId } : {}),
         ...(grantSessionId ? { grant_session_id: grantSessionId } : {}),
         ...(grantSessionId == null && orgId != null ? { org_id: orgId } : {}),
     }

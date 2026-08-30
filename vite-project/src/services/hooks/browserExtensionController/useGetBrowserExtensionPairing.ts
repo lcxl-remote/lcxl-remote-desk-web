@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetBrowserExtensionPairingQueryResponse, GetBrowserExtensionPairing500 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { GetBrowserExtensionPairingQueryResponse, GetBrowserExtensionPairing500 } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getBrowserExtensionPairing } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const getBrowserExtensionPairingQueryKey = () => [{ url: '/api/desk/browser-extension/pairing' }] as const
 

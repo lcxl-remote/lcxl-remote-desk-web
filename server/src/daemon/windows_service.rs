@@ -614,7 +614,11 @@ pub fn default_install_dir() -> String {
         let pf = std::env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".to_string());
         format!("{}\\LCXL Remote Desktop", pf)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        "/usr/lib/lcxl-remote-desk".to_string()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         "/opt/lcxl-remote-desk".to_string()
     }

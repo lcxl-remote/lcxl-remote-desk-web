@@ -657,7 +657,10 @@ pub async fn run_signaling_proxy(
         // already cleared its capabilities and dropped its activity — so there
         // is nothing left for its backlog to say.
         if !worker_mgr
-            .note_message_from(worker_message.incarnation)
+            .note_message_from(
+                worker_message.worker_key.as_ref(),
+                worker_message.incarnation,
+            )
             .await
         {
             debug!(
@@ -665,6 +668,51 @@ pub async fn run_signaling_proxy(
                 worker_message.incarnation
             );
             continue;
+        }
+
+        let resident_worker_key = worker_message.worker_key.clone();
+        if let Some(key) = resident_worker_key.as_ref() {
+            let interactive_output = matches!(
+                &worker_message.message,
+                WorkerToService::CursorData(_)
+                    | WorkerToService::MediaPipelineState(_)
+                    | WorkerToService::AudioPipelineStateChanged(_)
+                    | WorkerToService::MediaSettingsApplied(_)
+            );
+            if interactive_output
+                && !worker_mgr
+                    .resident_worker_is_active_interactive(key, worker_message.incarnation)
+            {
+                debug!(
+                    "[SignalingProxy] dropping inactive interactive output from resident worker {:?}",
+                    key
+                );
+                continue;
+            }
+            let global_control = matches!(
+                &worker_message.message,
+                WorkerToService::Ready
+                    | WorkerToService::Heartbeat(_)
+                    | WorkerToService::Capabilities(_)
+                    | WorkerToService::DesktopChanged(_)
+                    | WorkerToService::RemoteAccessStateApplied(_)
+                    | WorkerToService::LocaleApplied(_)
+                    | WorkerToService::SecurityPolicyApplied(_)
+            );
+            let connection_owned =
+                worker_message
+                    .message
+                    .connection_id()
+                    .is_some_and(|connection_id| {
+                        worker_mgr.resident_worker_owns_connection(key, connection_id)
+                    });
+            if !global_control && !connection_owned {
+                warn!(
+                    "[SignalingProxy] dropping unbound or cross-session output from resident worker {:?}",
+                    key
+                );
+                continue;
+            }
         }
 
         match worker_message.message {
@@ -684,6 +732,15 @@ pub async fn run_signaling_proxy(
                     caps.has_tauri,
                     caps.is_admin,
                 );
+                if let Some(key) = resident_worker_key.as_ref() {
+                    if !worker_mgr.set_resident_worker_capabilities(key, caps).await {
+                        debug!(
+                            "[SignalingProxy] resident capabilities arrived after slot removal: {:?}",
+                            key
+                        );
+                    }
+                    continue;
+                }
                 worker_mgr.set_worker_capabilities(caps);
                 // A fresh worker starts from the policy serialized into its Init
                 // payload: the right values, but at sequence zero, which cannot
@@ -759,6 +816,33 @@ pub async fn run_signaling_proxy(
                 );
             }
             WorkerToService::DesktopChanged(payload) => {
+                if let Some(key) = resident_worker_key.as_ref() {
+                    if !worker_mgr.resident_desktop_observation_is_current(
+                        key,
+                        worker_message.incarnation,
+                        payload.observed_at_unix_ms,
+                    ) {
+                        debug!(
+                            "[SignalingProxy] stale or standby resident worker {:?} observed desktop '{}' at {}; ignoring",
+                            key, payload.name, payload.observed_at_unix_ms
+                        );
+                        continue;
+                    }
+                    match worker_mgr
+                        .switch_interactive_desktop(&key.session, &payload.name)
+                        .await
+                    {
+                        Ok(epoch) => info!(
+                            "[SignalingProxy] switched {:?} to desktop '{}' at route epoch {}",
+                            key.session, payload.name, epoch
+                        ),
+                        Err(error) => warn!(
+                            "[SignalingProxy] refusing desktop switch for {:?} to '{}': {}",
+                            key.session, payload.name, error
+                        ),
+                    }
+                    continue;
+                }
                 // Portable / Default mode: the "worker" is an in-process
                 // task and we can't cross window-stations from a single
                 // process anyway. The worker still spawns desktop_monitor

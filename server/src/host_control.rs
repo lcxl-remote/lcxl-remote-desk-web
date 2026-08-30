@@ -36,6 +36,8 @@
 pub mod bridge;
 pub mod endpoint;
 pub mod protocol;
+#[cfg(target_os = "linux")]
+pub mod session_shell;
 pub mod upstream;
 
 use std::collections::HashMap;
@@ -53,9 +55,10 @@ use desk_signal_facade::model::security_settings::DEFAULT_APPROVAL_TIMEOUT_SECS;
 use crate::model::security_approval::SecurityPermissionType;
 
 pub use protocol::{
-    ApprovalRequest, ApprovalResponse, CentralSyncState, ClientRole, HostAccessSession,
-    HostAccessSnapshot, HostControlMessage, HostFileTransferDirection, HostFileTransferSummary,
-    HostRemoteAccessMode, HostRemoteAccessStatus, ServiceOpKind,
+    ApprovalRequest, ApprovalResponse, CentralSyncState, ClientRole, EnvironmentEntryBase64,
+    HostAccessSession, HostAccessSnapshot, HostControlMessage, HostFileTransferDirection,
+    HostFileTransferSummary, HostRemoteAccessMode, HostRemoteAccessStatus,
+    SESSION_SHELL_PROTOCOL_VERSION, ServiceOpKind, SessionShellInfo, SessionShellRegistrationError,
 };
 pub use upstream::UpstreamForwarder;
 

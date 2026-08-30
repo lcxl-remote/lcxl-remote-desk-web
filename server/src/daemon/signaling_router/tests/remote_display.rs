@@ -20,6 +20,7 @@ pub(super) fn make_request_remote_model_with_purpose(
         None,
         Some(
             serde_json::to_value(RequestRemoteModel {
+                session_target_id: None,
                 requested_wayland_control_mode: Some("auto".to_string()),
                 purpose,
                 ice_servers: vec![],

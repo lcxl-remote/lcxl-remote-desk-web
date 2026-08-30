@@ -354,7 +354,7 @@ impl SettingsCoordinator {
             return;
         };
         if let Err(error) = manager
-            .send_to_worker(ServiceToWorker::SetLocale(SetLocalePayload {
+            .broadcast_to_workers(ServiceToWorker::SetLocale(SetLocalePayload {
                 operation_id: uuid::Uuid::new_v4().to_string(),
                 locale: locale.to_string(),
             }))

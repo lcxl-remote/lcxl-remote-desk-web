@@ -1,12 +1,14 @@
 use crate::daemon::pc_manager::PcRegistry;
+use crate::daemon::session_target::SessionTargetCatalog;
 use crate::host_control::HostControlHub;
 use crate::model::settings::{Args, SharedSettings};
 use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaReceiver, framed, inprocess},
     message::{
-        FileTransferPayload, MediaCapabilities, PolicyApplyOutcome, SecurityPolicyAppliedPayload,
-        ServiceToWorker, UpdateSecurityPolicyPayload, WorkerInitPayload, WorkerToService,
+        DesktopTarget, FileTransferPayload, MediaCapabilities, PolicyApplyOutcome,
+        SecurityPolicyAppliedPayload, ServiceToWorker, UpdateSecurityPolicyPayload, WorkerIdentity,
+        WorkerInitPayload, WorkerKey, WorkerProfile, WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -18,7 +20,7 @@ use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 
 /// Default heartbeat-watchdog grace period when settings don't override
@@ -50,10 +52,23 @@ impl std::fmt::Display for WorkerIncarnation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveInteractiveRoute {
+    worker_key: WorkerKey,
+    incarnation: WorkerIncarnation,
+    route_epoch: u64,
+    activated_at: Instant,
+    activated_at_unix_ms: u64,
+    accepting_interactive: bool,
+}
+
 /// A message from a worker, carrying which worker sent it.
 #[derive(Debug, Clone)]
 pub struct WorkerMessage {
     pub incarnation: WorkerIncarnation,
+    /// Present for a ServiceDaemon resident-pool worker. The legacy portable
+    /// adapter deliberately remains anonymous and single-worker.
+    pub worker_key: Option<WorkerKey>,
     pub message: WorkerToService,
 }
 
@@ -69,12 +84,51 @@ pub struct WorkerMessage {
 #[derive(Clone)]
 pub(super) struct IncarnationGate {
     mine: WorkerIncarnation,
+    worker_key: Option<WorkerKey>,
     current: Arc<AtomicU64>,
+    connection_targets: Arc<StdMutex<HashMap<String, desk_ipc_protocol::message::SessionKey>>>,
+    active_interactive_routes:
+        Arc<StdMutex<HashMap<desk_ipc_protocol::message::SessionKey, ActiveInteractiveRoute>>>,
 }
 
 impl IncarnationGate {
     fn is_current(&self) -> bool {
         self.current.load(Ordering::Relaxed) == self.mine.0
+    }
+
+    fn owns_session_connection(&self, connection_id: &str) -> bool {
+        let Some(key) = self.worker_key.as_ref() else {
+            return true;
+        };
+        self.connection_targets
+            .lock()
+            .unwrap()
+            .get(connection_id)
+            .is_some_and(|session| session == &key.session)
+    }
+
+    fn owns_interactive_connection(&self, connection_id: &str) -> bool {
+        let Some(key) = self.worker_key.as_ref() else {
+            return true;
+        };
+        let Some(session) = self
+            .connection_targets
+            .lock()
+            .unwrap()
+            .get(connection_id)
+            .cloned()
+        else {
+            return false;
+        };
+        self.active_interactive_routes
+            .lock()
+            .unwrap()
+            .get(&session)
+            .is_some_and(|route| {
+                route.worker_key == *key
+                    && route.incarnation == self.mine
+                    && route.accepting_interactive
+            })
     }
 
     /// Report the frames or payloads this lane must not deliver, once, when it
@@ -97,7 +151,11 @@ impl IncarnationGate {
 #[derive(Clone)]
 pub(super) struct WorkerMessageSink {
     incarnation: WorkerIncarnation,
+    worker_key: Option<WorkerKey>,
     current: Arc<AtomicU64>,
+    connection_targets: Arc<StdMutex<HashMap<String, desk_ipc_protocol::message::SessionKey>>>,
+    active_interactive_routes:
+        Arc<StdMutex<HashMap<desk_ipc_protocol::message::SessionKey, ActiveInteractiveRoute>>>,
     tx: mpsc::UnboundedSender<WorkerMessage>,
 }
 
@@ -106,11 +164,18 @@ impl WorkerMessageSink {
         self.incarnation
     }
 
+    pub(super) fn worker_key(&self) -> Option<&WorkerKey> {
+        self.worker_key.as_ref()
+    }
+
     /// A gate for this worker's other lanes, which carry no messages to stamp.
     pub(super) fn gate(&self) -> IncarnationGate {
         IncarnationGate {
             mine: self.incarnation,
+            worker_key: self.worker_key.clone(),
             current: Arc::clone(&self.current),
+            connection_targets: Arc::clone(&self.connection_targets),
+            active_interactive_routes: Arc::clone(&self.active_interactive_routes),
         }
     }
 
@@ -122,6 +187,7 @@ impl WorkerMessageSink {
         self.tx
             .send(WorkerMessage {
                 incarnation: self.incarnation,
+                worker_key: self.worker_key.clone(),
                 message,
             })
             .is_ok()
@@ -131,7 +197,10 @@ impl WorkerMessageSink {
     pub(super) fn for_test(incarnation: u64, tx: mpsc::UnboundedSender<WorkerMessage>) -> Self {
         Self {
             incarnation: WorkerIncarnation(incarnation),
+            worker_key: None,
             current: Arc::new(AtomicU64::new(incarnation)),
+            connection_targets: Arc::new(StdMutex::new(HashMap::new())),
+            active_interactive_routes: Arc::new(StdMutex::new(HashMap::new())),
             tx,
         }
     }
@@ -151,6 +220,9 @@ pub struct WorkerManager {
     /// a worker is minted, cleared to zero when one is taken away and nothing
     /// replaces it. See [`IncarnationGate`].
     current_incarnation: Arc<AtomicU64>,
+    /// Per-key lane fences for resident workers. Replacing one key updates only
+    /// that key's atomic, so another session's media/file lanes stay current.
+    resident_incarnation_gates: Arc<StdMutex<HashMap<WorkerKey, Arc<AtomicU64>>>>,
     /// Daemon-side per-`connection_id` PeerConnection registry.
     /// Held as a clonable handle so the media-pipe receiver task can
     /// look up `video_track`s and call `write_sample` without going back
@@ -167,6 +239,24 @@ pub struct WorkerManager {
     wayland_portal_snapshot: Arc<StdMutex<Option<PortalSnapshot>>>,
     #[cfg(target_os = "linux")]
     linux_display_server: Arc<StdMutex<LinuxDisplayServer>>,
+    #[cfg(target_os = "linux")]
+    session_shell_registry:
+        Arc<StdRwLock<Option<crate::host_control::session_shell::SessionShellRegistry>>>,
+    session_targets: SessionTargetCatalog,
+    session_targeting_enabled: Arc<AtomicBool>,
+    /// Immutable connection/task anchor chosen at admission. Every resident
+    /// business dispatch resolves through this map; no foreground-session
+    /// fallback exists when targeting is enabled.
+    connection_targets: Arc<StdMutex<HashMap<String, desk_ipc_protocol::message::SessionKey>>>,
+    /// Per-session desktop selected for capture and human input. Session-user
+    /// resources intentionally do not consult this map, so UAC can never move
+    /// terminal/file/AI work into the Winlogon SYSTEM worker.
+    active_interactive_routes:
+        Arc<StdMutex<HashMap<desk_ipc_protocol::message::SessionKey, ActiveInteractiveRoute>>>,
+    desired_interactive_desktops:
+        Arc<StdMutex<HashMap<desk_ipc_protocol::message::SessionKey, DesktopTarget>>>,
+    interactive_switch_locks:
+        Arc<StdMutex<HashMap<desk_ipc_protocol::message::SessionKey, Arc<Mutex<()>>>>>,
     /// Monotonic counter bumped every time [`Self::set_worker_capabilities`]
     /// installs a fresh snapshot. Paired with [`Self::capabilities_version_tx`]
     /// so async callers can wait until the cache reflects a known-newer
@@ -212,7 +302,12 @@ pub struct WorkerManager {
 }
 
 struct WorkerManagerInner {
+    /// Legacy single-worker adapter used by portable/in-process mode and by
+    /// the Windows ServiceDaemon until its keyed migration lands.
     active_worker: Option<WorkerHandle>,
+    /// Keyed ServiceDaemon workers. Linux registrations enter here; business
+    /// traffic is not allowed to use them through the legacy global sender.
+    resident_workers: HashMap<WorkerKey, WorkerHandle>,
 }
 
 struct WorkerHandle {
@@ -227,6 +322,7 @@ struct WorkerHandle {
     /// watchdog — if no heartbeat (or any other message) shows up
     /// within the configured timeout the worker is presumed stuck.
     last_heartbeat_at: Instant,
+    capabilities: Option<MediaCapabilities>,
     /// Stored so the heartbeat watchdog can hand them back to
     /// `handle_crash_recovery` when it triggers a restart.
     session_id: u32,
@@ -353,6 +449,121 @@ impl Drop for NativeWindowsChild {
 
 pub type WorkerMessageReceiver = mpsc::UnboundedReceiver<WorkerMessage>;
 
+#[cfg(target_os = "linux")]
+fn linux_session_key(
+    logical: &crate::host_control::session_shell::LogicalSessionKey,
+    generation: u64,
+) -> desk_ipc_protocol::message::SessionKey {
+    // JSON keeps arbitrary session/seat labels unambiguous without exposing
+    // the daemon-issued registration UUID as a platform session identifier.
+    let platform_session_id = format!(
+        "linux:{}",
+        serde_json::to_string(&(logical.uid, &logical.session_id, &logical.seat))
+            .expect("serializing string session labels cannot fail")
+    );
+    desk_ipc_protocol::message::SessionKey {
+        platform_session_id,
+        session_generation: generation,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_worker_key(
+    registration: &crate::host_control::session_shell::RegisteredSessionShell,
+) -> WorkerKey {
+    WorkerKey {
+        session: linux_session_key(
+            &registration.logical_session,
+            registration.registration_generation,
+        ),
+        desktop: DesktopTarget::LinuxSession,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_session_candidate(
+    registration: &crate::host_control::session_shell::RegisteredSessionShell,
+) -> crate::daemon::session_target::SessionCandidate {
+    let label = registration
+        .logical_session
+        .session_id
+        .as_deref()
+        .unwrap_or("unknown");
+    crate::daemon::session_target::SessionCandidate {
+        session: linux_session_key(
+            &registration.logical_session,
+            registration.registration_generation,
+        ),
+        display_name: format!(
+            "Linux session {label} (uid {})",
+            registration.logical_session.uid
+        ),
+        session_type: registration.session_type.clone(),
+        seat: registration.logical_session.seat.clone(),
+        foreground: false,
+        // Registration proves the session context, not that a worker has
+        // connected and completed its capability handshake.
+        remote_desktop_ready: false,
+        terminal_ready: false,
+        file_ready: false,
+        assistant_ready: false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reconcile_linux_session_targets(
+    targets: &SessionTargetCatalog,
+    registry: &crate::host_control::session_shell::SessionShellRegistry,
+) {
+    targets.replace_all(
+        registry
+            .snapshot()
+            .iter()
+            .map(|registration| linux_session_candidate(registration))
+            .collect(),
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn linux_worker_runtime_dirs(
+    registration: &crate::host_control::session_shell::RegisteredSessionShell,
+) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    fn environment_path(
+        registration: &crate::host_control::session_shell::RegisteredSessionShell,
+        name: &[u8],
+    ) -> Option<std::path::PathBuf> {
+        registration
+            .environment
+            .iter()
+            .find(|(key, _)| key.as_os_str().as_bytes() == name)
+            .map(|(_, value)| std::path::PathBuf::from(value))
+    }
+
+    let home = environment_path(registration, b"HOME")
+        .filter(|path| path.is_absolute())
+        .ok_or("registered session has no absolute HOME")?;
+    let state_root = environment_path(registration, b"XDG_STATE_HOME")
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".local/state"));
+    let data_root = environment_path(registration, b"XDG_DATA_HOME")
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share"));
+    let log_dir = state_root.join("lcxl-remote-desk/logs");
+    let data_dir = data_root.join("lcxl-remote-desk");
+    Ok((
+        log_dir
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "worker log directory is not valid UTF-8")?,
+        data_dir
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "worker data directory is not valid UTF-8")?,
+    ))
+}
+
 impl WorkerManager {
     pub fn new(
         settings: web::Data<SharedSettings>,
@@ -364,10 +575,12 @@ impl WorkerManager {
             settings,
             inner: Arc::new(Mutex::new(WorkerManagerInner {
                 active_worker: None,
+                resident_workers: HashMap::new(),
             })),
             worker_msg_tx: Arc::new(tx),
             next_incarnation: Arc::new(AtomicU64::new(1)),
             current_incarnation: Arc::new(AtomicU64::new(0)),
+            resident_incarnation_gates: Arc::new(StdMutex::new(HashMap::new())),
             pc_registry,
             worker_capabilities: Arc::new(StdMutex::new(None)),
             wayland_portal_snapshot: Arc::new(StdMutex::new(None)),
@@ -375,6 +588,14 @@ impl WorkerManager {
             linux_display_server: Arc::new(StdMutex::new(
                 detect_linux_display_environment().active_server(),
             )),
+            #[cfg(target_os = "linux")]
+            session_shell_registry: Arc::new(StdRwLock::new(None)),
+            session_targets: SessionTargetCatalog::default(),
+            session_targeting_enabled: Arc::new(AtomicBool::new(false)),
+            connection_targets: Arc::new(StdMutex::new(HashMap::new())),
+            active_interactive_routes: Arc::new(StdMutex::new(HashMap::new())),
+            desired_interactive_desktops: Arc::new(StdMutex::new(HashMap::new())),
+            interactive_switch_locks: Arc::new(StdMutex::new(HashMap::new())),
             capabilities_version: Arc::new(AtomicU64::new(0)),
             policy_applied_seq: Arc::new(AtomicU64::new(0)),
             capabilities_version_tx: Arc::new(cap_version_tx),
@@ -413,8 +634,40 @@ impl WorkerManager {
             .store(incarnation.0, Ordering::Relaxed);
         WorkerMessageSink {
             incarnation,
+            worker_key: None,
             current: Arc::clone(&self.current_incarnation),
+            connection_targets: Arc::clone(&self.connection_targets),
+            active_interactive_routes: Arc::clone(&self.active_interactive_routes),
             tx: (*self.worker_msg_tx).clone(),
+        }
+    }
+
+    /// Mint an independently fenced identity for one keyed resident worker.
+    /// Unlike the legacy adapter, starting one resident must not supersede any
+    /// other session's lanes.
+    fn mint_resident_worker(&self, key: WorkerKey) -> WorkerMessageSink {
+        let incarnation = WorkerIncarnation(self.next_incarnation.fetch_add(1, Ordering::Relaxed));
+        let current = self
+            .resident_incarnation_gates
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone();
+        current.store(incarnation.0, Ordering::Release);
+        WorkerMessageSink {
+            incarnation,
+            worker_key: Some(key),
+            current,
+            connection_targets: Arc::clone(&self.connection_targets),
+            active_interactive_routes: Arc::clone(&self.active_interactive_routes),
+            tx: (*self.worker_msg_tx).clone(),
+        }
+    }
+
+    fn fence_resident_worker(&self, key: &WorkerKey, incarnation: WorkerIncarnation) {
+        if let Some(current) = self.resident_incarnation_gates.lock().unwrap().get(key) {
+            let _ = current.compare_exchange(incarnation.0, 0, Ordering::AcqRel, Ordering::Acquire);
         }
     }
 
@@ -436,8 +689,639 @@ impl WorkerManager {
         }
     }
 
+    fn retire_resident_worker(&self, worker: &mut WorkerHandle) {
+        for task in worker.lane_tasks.drain(..) {
+            task.abort();
+        }
+        if let Some(task) = worker.inprocess_task.take() {
+            task.abort();
+        }
+    }
+
     pub fn bind_remote_access_gate(&self, gate: crate::daemon::remote_access::RemoteAccessGate) {
         *self.remote_access_gate.write().unwrap() = gate;
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn bind_session_shell_registry(
+        &self,
+        registry: crate::host_control::session_shell::SessionShellRegistry,
+    ) {
+        let mut slot = self.session_shell_registry.write().unwrap();
+        if slot.is_some() {
+            warn!("session-shell registry is already bound; ignoring duplicate binding");
+            return;
+        }
+
+        let mut events = registry.subscribe();
+        self.session_targeting_enabled
+            .store(true, Ordering::Release);
+        reconcile_linux_session_targets(&self.session_targets, &registry);
+        let initial_registrations = registry.snapshot();
+        *slot = Some(registry.clone());
+        drop(slot);
+
+        let targets = self.session_targets.clone();
+        let mgr = self.clone();
+        tokio::spawn(async move {
+            for registration in initial_registrations {
+                if let Err(error) = mgr.start_linux_resident_worker(registration).await {
+                    error!("failed to start registered Linux session worker: {error}");
+                }
+            }
+            loop {
+                match events.recv().await {
+                    Ok(crate::host_control::session_shell::SessionShellRegistryEvent::Registered(
+                        registration,
+                    )) => {
+                        targets.upsert(linux_session_candidate(&registration));
+                        if let Err(error) = mgr.start_linux_resident_worker(registration).await {
+                            error!("failed to start registered Linux session worker: {error}");
+                        }
+                    }
+                    Ok(
+                        crate::host_control::session_shell::SessionShellRegistryEvent::Disconnected {
+                            registration_generation,
+                            logical_session,
+                            ..
+                        },
+                    ) => {
+                        let session = linux_session_key(&logical_session, registration_generation);
+                        targets.remove(&session);
+                        for connection_id in mgr.connection_ids_for_session(&session) {
+                            crate::daemon::pc_manager::force_disconnect_connection(
+                                &mgr.pc_registry,
+                                &mgr,
+                                None,
+                                &connection_id,
+                                "desktop-session-disconnected",
+                            )
+                            .await;
+                        }
+                        mgr.stop_resident_worker(&WorkerKey {
+                            session,
+                            desktop: DesktopTarget::LinuxSession,
+                        })
+                        .await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            "session-shell registry event consumer lagged by {skipped}; reconciling from snapshot"
+                        );
+                        reconcile_linux_session_targets(&targets, &registry);
+                        mgr.reconcile_linux_resident_workers(&registry).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    pub fn session_targets(&self) -> SessionTargetCatalog {
+        self.session_targets.clone()
+    }
+
+    pub fn uses_session_targeting(&self) -> bool {
+        self.session_targeting_enabled.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub fn enable_session_targeting_for_test(&self) {
+        self.session_targeting_enabled
+            .store(true, Ordering::Release);
+    }
+
+    pub fn resolve_session_target(
+        &self,
+        capability: crate::daemon::session_target::SessionCapability,
+        requested_target_id: Option<&str>,
+    ) -> Result<
+        Option<desk_ipc_protocol::message::SessionKey>,
+        crate::daemon::session_target::SessionTargetSelectionError,
+    > {
+        if !self.session_targeting_enabled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        self.session_targets
+            .select(capability, requested_target_id)
+            .map(Some)
+    }
+
+    pub fn bind_connection_target(
+        &self,
+        connection_id: &str,
+        session: &desk_ipc_protocol::message::SessionKey,
+    ) -> Result<(), String> {
+        let mut bindings = self.connection_targets.lock().unwrap();
+        match bindings.get(connection_id) {
+            Some(existing) if existing != session => Err(format!(
+                "connection {connection_id} is already bound to another session target"
+            )),
+            Some(_) => Ok(()),
+            None => {
+                bindings.insert(connection_id.to_string(), session.clone());
+                Ok(())
+            }
+        }
+    }
+
+    pub fn clear_connection_target(&self, connection_id: &str) {
+        self.connection_targets
+            .lock()
+            .unwrap()
+            .remove(connection_id);
+    }
+
+    pub fn connection_target(
+        &self,
+        connection_id: &str,
+    ) -> Option<desk_ipc_protocol::message::SessionKey> {
+        self.connection_targets
+            .lock()
+            .unwrap()
+            .get(connection_id)
+            .cloned()
+    }
+
+    pub fn connection_ids_for_session(
+        &self,
+        session: &desk_ipc_protocol::message::SessionKey,
+    ) -> Vec<String> {
+        self.connection_targets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, bound)| *bound == session)
+            .map(|(connection_id, _)| connection_id.clone())
+            .collect()
+    }
+
+    pub fn resident_worker_owns_connection(&self, key: &WorkerKey, connection_id: &str) -> bool {
+        self.connection_target(connection_id)
+            .is_some_and(|session| session == key.session)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn start_linux_resident_worker(
+        &self,
+        registration: Arc<crate::host_control::session_shell::RegisteredSessionShell>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let key = linux_worker_key(&registration);
+        let mut inner = self.inner.lock().await;
+        if inner.resident_workers.contains_key(&key) {
+            return Ok(());
+        }
+
+        let owner = if unsafe { libc::geteuid() } == 0 {
+            Some((
+                registration.process_identity.uid,
+                registration.process_identity.gid,
+            ))
+        } else {
+            None
+        };
+        let pipe_name = allocate_worker_socket_path_for(registration.process_identity.uid, owner)?;
+        let (ipc_cmd_tx, ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
+        let (config_json, ipc_token) = {
+            let settings = self.settings.read().await;
+            (
+                serde_json::to_string(&*settings)
+                    .map_err(|error| format!("failed to serialize worker settings: {error}"))?,
+                settings.system.tauri_ipc_token.clone(),
+            )
+        };
+        let (log_dir, data_dir) = linux_worker_runtime_dirs(&registration)?;
+        let host_upstream_url = format!(
+            "ws://127.0.0.1:{}/ws/host_upstream",
+            crate::daemon::local_api::SERVICE_API_PORT
+        );
+        let sink = self.mint_resident_worker(key.clone());
+        let incarnation = sink.incarnation();
+        let identity = WorkerIdentity {
+            key: key.clone(),
+            profile: WorkerProfile::SessionUser,
+            incarnation: incarnation.0,
+        };
+        let file_sender_slot: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>> =
+            Arc::new(RwLock::new(None));
+        let (transport_ready_tx, transport_ready_rx) = oneshot::channel();
+
+        let mgr = self.clone();
+        let pipe_name_for_server = pipe_name.clone();
+        let file_sender_for_server = Arc::clone(&file_sender_slot);
+        let worker_uid = registration.process_identity.uid;
+        let identity_for_server = identity.clone();
+        let key_for_server = key.clone();
+        let pipe_task = tokio::spawn(async move {
+            if let Err(error) = run_pipe_server(
+                &pipe_name_for_server,
+                worker_uid,
+                None,
+                config_json,
+                log_dir,
+                data_dir,
+                ipc_cmd_rx,
+                sink,
+                mgr.clone(),
+                host_upstream_url,
+                ipc_token,
+                mgr.pc_registry.clone(),
+                file_sender_for_server,
+                Some(identity_for_server),
+                owner,
+                transport_ready_tx,
+            )
+            .await
+            {
+                error!(
+                    "resident worker pipe server failed for {:?}: {error}",
+                    key_for_server
+                );
+                mgr.handle_resident_crash_recovery(key_for_server, incarnation);
+            }
+        });
+
+        match tokio::time::timeout(Duration::from_secs(5), transport_ready_rx).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                pipe_task.abort();
+                cleanup_worker_socket_paths(&pipe_name);
+                return Err("resident worker IPC listener exited before readiness".into());
+            }
+            Err(_) => {
+                pipe_task.abort();
+                cleanup_worker_socket_paths(&pipe_name);
+                return Err("timed out preparing resident worker IPC listeners".into());
+            }
+        }
+
+        let executable = std::env::current_exe()?;
+        let process = match launch_linux_session_worker(&executable, &pipe_name, &registration) {
+            Ok(process) => process,
+            Err(error) => {
+                pipe_task.abort();
+                cleanup_worker_socket_paths(&pipe_name);
+                return Err(error);
+            }
+        };
+        inner.resident_workers.insert(
+            identity.key.clone(),
+            WorkerHandle {
+                incarnation,
+                pipe_name,
+                ipc_tx: ipc_cmd_tx,
+                process_handle: Some(ProcessHandle::Tokio(process)),
+                last_heartbeat_at: Instant::now(),
+                capabilities: None,
+                session_id: registration.process_identity.uid,
+                desktop_name: None,
+                file_sender_tx: file_sender_slot,
+                inprocess_task: None,
+                inprocess_restart: None,
+                lane_tasks: Vec::new(),
+            },
+        );
+        info!(
+            "resident Linux worker {incarnation} started for {:?}",
+            identity.key
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn start_windows_resident_worker(
+        &self,
+        key: WorkerKey,
+        session_id: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (desktop_name, profile) = match key.desktop {
+            DesktopTarget::WindowsDefault => ("Default", WorkerProfile::SessionUser),
+            DesktopTarget::WindowsWinlogon => ("Winlogon", WorkerProfile::RestrictedDesktop),
+            _ => return Err("invalid Windows resident desktop target".into()),
+        };
+        if key.session.platform_session_id != session_id.to_string() {
+            return Err("Windows worker key/session id mismatch".into());
+        }
+
+        let mut inner = self.inner.lock().await;
+        if inner.resident_workers.contains_key(&key) {
+            return Ok(());
+        }
+        let pipe_name = format!("lcxl-desk-ipc-{session_id}-{}", uuid::Uuid::new_v4());
+        let (ipc_cmd_tx, ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
+        let (config_json, ipc_token, log_dir, data_dir) = {
+            let settings = self.settings.read().await;
+            (
+                serde_json::to_string(&*settings)
+                    .map_err(|error| format!("failed to serialize worker settings: {error}"))?,
+                settings.system.tauri_ipc_token.clone(),
+                settings.paths().log_dir().to_string_lossy().into_owned(),
+                settings.paths().data_root().to_string_lossy().into_owned(),
+            )
+        };
+        let host_upstream_url = format!(
+            "ws://127.0.0.1:{}/ws/host_upstream",
+            crate::daemon::local_api::SERVICE_API_PORT
+        );
+        let sink = self.mint_resident_worker(key.clone());
+        let incarnation = sink.incarnation();
+        let identity = WorkerIdentity {
+            key: key.clone(),
+            profile,
+            incarnation: incarnation.0,
+        };
+        let file_sender_slot: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>> =
+            Arc::new(RwLock::new(None));
+        let (transport_ready_tx, transport_ready_rx) = oneshot::channel();
+
+        let mgr = self.clone();
+        let pipe_name_for_server = pipe_name.clone();
+        let file_sender_for_server = Arc::clone(&file_sender_slot);
+        let identity_for_server = identity.clone();
+        let key_for_server = key.clone();
+        let desktop_for_server = desktop_name.to_string();
+        let pipe_task = tokio::spawn(async move {
+            if let Err(error) = run_pipe_server(
+                &pipe_name_for_server,
+                session_id,
+                Some(desktop_for_server),
+                config_json,
+                log_dir,
+                data_dir,
+                ipc_cmd_rx,
+                sink,
+                mgr.clone(),
+                host_upstream_url,
+                ipc_token,
+                mgr.pc_registry.clone(),
+                file_sender_for_server,
+                Some(identity_for_server),
+                transport_ready_tx,
+            )
+            .await
+            {
+                error!(
+                    "resident Windows worker pipe server failed for {:?}: {error}",
+                    key_for_server
+                );
+                mgr.handle_resident_crash_recovery(key_for_server, incarnation);
+            }
+        });
+
+        match tokio::time::timeout(Duration::from_secs(5), transport_ready_rx).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                pipe_task.abort();
+                return Err("resident Windows worker IPC listener exited before readiness".into());
+            }
+            Err(_) => {
+                pipe_task.abort();
+                return Err("timed out preparing resident Windows worker IPC listeners".into());
+            }
+        }
+
+        let process = match self
+            .launch_worker_process(&pipe_name, session_id, Some(desktop_name))
+            .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                pipe_task.abort();
+                return Err(error);
+            }
+        };
+        inner.resident_workers.insert(
+            key.clone(),
+            WorkerHandle {
+                incarnation,
+                pipe_name,
+                ipc_tx: ipc_cmd_tx,
+                process_handle: Some(process),
+                last_heartbeat_at: Instant::now(),
+                capabilities: None,
+                session_id,
+                desktop_name: Some(desktop_name.to_string()),
+                file_sender_tx: file_sender_slot,
+                inprocess_task: None,
+                inprocess_restart: None,
+                lane_tasks: Vec::new(),
+            },
+        );
+        info!(
+            "resident Windows {:?} worker {incarnation} started for session {session_id}",
+            key.desktop
+        );
+        Ok(())
+    }
+
+    async fn stop_resident_worker(&self, key: &WorkerKey) {
+        let worker = self.inner.lock().await.resident_workers.remove(key);
+        let Some(mut worker) = worker else {
+            return;
+        };
+        self.fence_resident_worker(key, worker.incarnation);
+        self.revoke_interactive_route(key, worker.incarnation);
+        if key.desktop != DesktopTarget::WindowsWinlogon {
+            self.session_targets
+                .set_readiness(&key.session, false, false, false, false);
+        }
+        let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
+        self.retire_resident_worker(&mut worker);
+        if let Some(mut process) = worker.process_handle.take()
+            && tokio::time::timeout(Duration::from_secs(3), process.wait())
+                .await
+                .is_err()
+        {
+            let _ = process.kill().await;
+            process.wait().await;
+        }
+        let session_still_has_worker = self
+            .inner
+            .lock()
+            .await
+            .resident_workers
+            .keys()
+            .any(|resident_key| resident_key.session == key.session);
+        if !session_still_has_worker {
+            self.active_interactive_routes
+                .lock()
+                .unwrap()
+                .remove(&key.session);
+            self.desired_interactive_desktops
+                .lock()
+                .unwrap()
+                .remove(&key.session);
+            self.interactive_switch_locks
+                .lock()
+                .unwrap()
+                .remove(&key.session);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn reconcile_linux_resident_workers(
+        &self,
+        registry: &crate::host_control::session_shell::SessionShellRegistry,
+    ) {
+        let registrations = registry.snapshot();
+        let desired: HashMap<_, _> = registrations
+            .into_iter()
+            .map(|registration| (linux_worker_key(&registration), registration))
+            .collect();
+        let current: Vec<_> = self
+            .inner
+            .lock()
+            .await
+            .resident_workers
+            .keys()
+            .cloned()
+            .collect();
+
+        for key in current {
+            if !desired.contains_key(&key) {
+                for connection_id in self.connection_ids_for_session(&key.session) {
+                    crate::daemon::pc_manager::force_disconnect_connection(
+                        &self.pc_registry,
+                        self,
+                        None,
+                        &connection_id,
+                        "desktop-session-reconcile-removed",
+                    )
+                    .await;
+                }
+                self.stop_resident_worker(&key).await;
+            }
+        }
+        for (key, registration) in desired {
+            let already_running = self.inner.lock().await.resident_workers.contains_key(&key);
+            if !already_running
+                && let Err(error) = self.start_linux_resident_worker(registration).await
+            {
+                error!(
+                    "failed to reconcile Linux resident worker {:?}: {error}",
+                    key
+                );
+            }
+        }
+
+        // `replace_all` deliberately resets readiness because a Tauri
+        // registration alone does not prove that a worker completed Init. A
+        // broadcast-lag reconciliation can nevertheless retain already-live
+        // workers; restore their capability-derived readiness so they do not
+        // remain falsely unavailable until another capability refresh happens.
+        let live_capabilities: Vec<_> = self
+            .inner
+            .lock()
+            .await
+            .resident_workers
+            .iter()
+            .filter_map(|(key, worker)| {
+                worker
+                    .capabilities
+                    .clone()
+                    .map(|capabilities| (key.clone(), capabilities))
+            })
+            .collect();
+        for (key, capabilities) in live_capabilities {
+            self.set_resident_worker_capabilities(&key, capabilities)
+                .await;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub async fn reconcile_windows_resident_workers(
+        &self,
+        registrations: Vec<crate::daemon::session_monitor::WindowsSessionRegistration>,
+    ) {
+        use std::collections::HashSet;
+
+        self.session_targeting_enabled
+            .store(true, Ordering::Release);
+        let desired_sessions: HashSet<_> = registrations
+            .iter()
+            .map(|registration| registration.session.clone())
+            .collect();
+        let current_keys: Vec<_> = self
+            .inner
+            .lock()
+            .await
+            .resident_workers
+            .keys()
+            .filter(|key| {
+                matches!(
+                    key.desktop,
+                    DesktopTarget::WindowsDefault | DesktopTarget::WindowsWinlogon
+                )
+            })
+            .cloned()
+            .collect();
+
+        for key in current_keys {
+            if !desired_sessions.contains(&key.session) {
+                for connection_id in self.connection_ids_for_session(&key.session) {
+                    crate::daemon::pc_manager::force_disconnect_connection(
+                        &self.pc_registry,
+                        self,
+                        None,
+                        &connection_id,
+                        "windows-session-no-longer-schedulable",
+                    )
+                    .await;
+                }
+                self.stop_resident_worker(&key).await;
+            }
+        }
+
+        let mut candidates = Vec::with_capacity(registrations.len());
+        for registration in &registrations {
+            let default_key = WorkerKey {
+                session: registration.session.clone(),
+                desktop: DesktopTarget::WindowsDefault,
+            };
+            let default_ready = self
+                .resident_worker_capabilities(&default_key)
+                .await
+                .is_some_and(|caps| {
+                    !caps.video_codecs.is_empty()
+                        && caps
+                            .video_device_list
+                            .values()
+                            .any(|devices| !devices.is_empty())
+                });
+            candidates.push(crate::daemon::session_target::SessionCandidate {
+                session: registration.session.clone(),
+                display_name: registration.display_name.clone(),
+                session_type: Some("windows".to_string()),
+                seat: Some(registration.station_name.clone()),
+                foreground: registration.foreground,
+                remote_desktop_ready: default_ready,
+                terminal_ready: default_ready,
+                file_ready: default_ready,
+                assistant_ready: default_ready,
+            });
+        }
+        self.session_targets.replace_all(candidates);
+
+        for registration in registrations {
+            for desktop in [
+                DesktopTarget::WindowsDefault,
+                DesktopTarget::WindowsWinlogon,
+            ] {
+                let key = WorkerKey {
+                    session: registration.session.clone(),
+                    desktop,
+                };
+                if let Err(error) = self
+                    .start_windows_resident_worker(key.clone(), registration.session_id)
+                    .await
+                {
+                    error!(
+                        "failed to reconcile Windows resident worker {:?}: {error}",
+                        key
+                    );
+                }
+            }
+        }
     }
 
     fn remote_access_state(&self) -> crate::daemon::remote_access::RemoteAccessState {
@@ -478,7 +1362,10 @@ impl WorkerManager {
             }
         }
 
+        #[cfg(target_os = "windows")]
         let pipe_name = format!("lcxl-desk-ipc-{}-{}", session_id, uuid::Uuid::new_v4());
+        #[cfg(not(target_os = "windows"))]
+        let pipe_name = allocate_worker_socket_path(session_id)?;
 
         let (ipc_cmd_tx, ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
 
@@ -518,7 +1405,8 @@ impl WorkerManager {
         let file_sender_slot: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>> =
             Arc::new(RwLock::new(None));
         let file_sender_slot_c = Arc::clone(&file_sender_slot);
-        tokio::spawn(async move {
+        let (transport_ready_tx, transport_ready_rx) = oneshot::channel();
+        let pipe_task = tokio::spawn(async move {
             if let Err(e) = run_pipe_server(
                 &pipe_name_c,
                 session_id,
@@ -533,6 +1421,10 @@ impl WorkerManager {
                 ipc_token_c,
                 pc_registry_c,
                 file_sender_slot_c,
+                None,
+                #[cfg(not(target_os = "windows"))]
+                None,
+                transport_ready_tx,
             )
             .await
             {
@@ -540,9 +1432,34 @@ impl WorkerManager {
             }
         });
 
-        let process = self
+        match tokio::time::timeout(Duration::from_secs(5), transport_ready_rx).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                pipe_task.abort();
+                #[cfg(not(target_os = "windows"))]
+                cleanup_worker_socket_paths(&pipe_name);
+                return Err("worker IPC listener task exited before publishing readiness".into());
+            }
+            Err(_) => {
+                pipe_task.abort();
+                #[cfg(not(target_os = "windows"))]
+                cleanup_worker_socket_paths(&pipe_name);
+                return Err("timed out preparing worker IPC listeners".into());
+            }
+        }
+
+        let process = match self
             .launch_worker_process(&pipe_name, session_id, desktop_name.as_deref())
-            .await?;
+            .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                pipe_task.abort();
+                #[cfg(not(target_os = "windows"))]
+                cleanup_worker_socket_paths(&pipe_name);
+                return Err(error);
+            }
+        };
 
         inner.active_worker = Some(WorkerHandle {
             incarnation,
@@ -550,6 +1467,7 @@ impl WorkerManager {
             ipc_tx: ipc_cmd_tx,
             process_handle: Some(process),
             last_heartbeat_at: Instant::now(),
+            capabilities: None,
             session_id,
             desktop_name: desktop_name.clone(),
             file_sender_tx: file_sender_slot,
@@ -630,6 +1548,7 @@ impl WorkerManager {
 
         let remote_access_state = self.remote_access_state();
         let init_payload = WorkerInitPayload {
+            worker_identity: None,
             session_id: format!("session-{session_id}"),
             os_session_id: session_id,
             desktop_name: desktop_name.clone(),
@@ -771,6 +1690,7 @@ impl WorkerManager {
             // `ipc_tx` alive-ness, not process state.
             process_handle: None,
             last_heartbeat_at: Instant::now(),
+            capabilities: None,
             session_id,
             desktop_name,
             file_sender_tx: file_sender_slot,
@@ -797,6 +1717,299 @@ impl WorkerManager {
         *self.worker_capabilities.lock().unwrap() = Some(caps);
         let new_version = self.capabilities_version.fetch_add(1, Ordering::SeqCst) + 1;
         let _ = self.capabilities_version_tx.send_replace(new_version);
+    }
+
+    /// Install the readiness snapshot for one resident worker. It is kept out
+    /// of the legacy global cache so an unrelated session can never change the
+    /// codecs or devices used by an already-bound PC.
+    pub async fn set_resident_worker_capabilities(
+        &self,
+        key: &WorkerKey,
+        caps: MediaCapabilities,
+    ) -> bool {
+        let remote_desktop_ready = !caps.video_codecs.is_empty()
+            && caps
+                .video_device_list
+                .values()
+                .any(|devices| !devices.is_empty());
+        let incarnation = {
+            let mut inner = self.inner.lock().await;
+            let Some(worker) = inner.resident_workers.get_mut(key) else {
+                return false;
+            };
+            worker.capabilities = Some(caps);
+            worker.incarnation
+        };
+        let updated = if key.desktop == DesktopTarget::WindowsWinlogon {
+            // The secure-desktop worker contributes only warm interactive
+            // readiness. It must never make session-user capabilities appear
+            // available and it never replaces the Default worker's catalog
+            // snapshot.
+            true
+        } else {
+            self.session_targets
+                .set_readiness(&key.session, remote_desktop_ready, true, true, true)
+        };
+
+        let route_is_current = self
+            .active_interactive_routes
+            .lock()
+            .unwrap()
+            .get(&key.session)
+            .is_some_and(|route| {
+                route.worker_key == *key
+                    && route.incarnation == incarnation
+                    && route.accepting_interactive
+            });
+        let desired = self
+            .desired_interactive_desktops
+            .lock()
+            .unwrap()
+            .get(&key.session)
+            .copied()
+            .or_else(|| {
+                matches!(
+                    key.desktop,
+                    DesktopTarget::LinuxSession | DesktopTarget::WindowsDefault
+                )
+                .then_some(key.desktop)
+            });
+        if remote_desktop_ready && desired == Some(key.desktop) && !route_is_current {
+            if self.activate_interactive_worker(key).await.is_ok() {
+                let connection_ids = self.connection_ids_for_session(&key.session);
+                if !connection_ids.is_empty() {
+                    self.pc_registry
+                        .pause_media_for_connections(&connection_ids)
+                        .await;
+                    self.pc_registry
+                        .resume_media_for_connections(self, None, &connection_ids)
+                        .await;
+                }
+            }
+        }
+        updated
+    }
+
+    /// Publish one resident slot as the current capture/human-input route for
+    /// its session. The route and incarnation are changed in one mutex critical
+    /// section, so media drains can never observe a new key with an old epoch.
+    pub async fn activate_interactive_worker(&self, key: &WorkerKey) -> Result<u64, String> {
+        let incarnation = {
+            let inner = self.inner.lock().await;
+            let worker = inner
+                .resident_workers
+                .get(key)
+                .ok_or_else(|| format!("resident worker {key:?} is unavailable"))?;
+            let capabilities = worker
+                .capabilities
+                .as_ref()
+                .ok_or_else(|| format!("resident worker {key:?} is not ready"))?;
+            if capabilities.video_codecs.is_empty()
+                || !capabilities
+                    .video_device_list
+                    .values()
+                    .any(|devices| !devices.is_empty())
+            {
+                return Err(format!("resident worker {key:?} has no video capability"));
+            }
+            worker.incarnation
+        };
+        let mut routes = self.active_interactive_routes.lock().unwrap();
+        let next_epoch = routes
+            .get(&key.session)
+            .map_or(1, |route| route.route_epoch.saturating_add(1));
+        routes.insert(
+            key.session.clone(),
+            ActiveInteractiveRoute {
+                worker_key: key.clone(),
+                incarnation,
+                route_epoch: next_epoch,
+                activated_at: Instant::now(),
+                activated_at_unix_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                accepting_interactive: true,
+            },
+        );
+        drop(routes);
+        self.desired_interactive_desktops
+            .lock()
+            .unwrap()
+            .insert(key.session.clone(), key.desktop);
+        info!(
+            "activated resident interactive route {:?} incarnation {} epoch {}",
+            key, incarnation, next_epoch
+        );
+        Ok(next_epoch)
+    }
+
+    /// Windows desktop transition without replacing either resident process.
+    /// Old media is stopped best-effort while its route is still authoritative;
+    /// publication of the new key then fences every queued old frame before
+    /// cached media is restarted on the warm target.
+    pub async fn switch_interactive_desktop(
+        &self,
+        session: &desk_ipc_protocol::message::SessionKey,
+        desktop_name: &str,
+    ) -> Result<u64, String> {
+        let switch_lock = self
+            .interactive_switch_locks
+            .lock()
+            .unwrap()
+            .entry(session.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _switch_guard = switch_lock.lock().await;
+        let desktop = match desktop_name {
+            "Default" => DesktopTarget::WindowsDefault,
+            "Winlogon" => DesktopTarget::WindowsWinlogon,
+            other => {
+                return Err(format!(
+                    "unknown Windows input desktop {other:?}; retaining the current route"
+                ));
+            }
+        };
+        let key = WorkerKey {
+            session: session.clone(),
+            desktop,
+        };
+        {
+            let inner = self.inner.lock().await;
+            let worker = inner
+                .resident_workers
+                .get(&key)
+                .ok_or_else(|| format!("warm desktop worker {key:?} is unavailable"))?;
+            if worker.capabilities.is_none() {
+                return Err(format!("warm desktop worker {key:?} is not ready"));
+            }
+        }
+        let current_epoch = self
+            .active_interactive_routes
+            .lock()
+            .unwrap()
+            .get(session)
+            .filter(|route| route.worker_key == key && route.accepting_interactive)
+            .map(|route| route.route_epoch);
+        if let Some(epoch) = current_epoch {
+            return Ok(epoch);
+        }
+
+        let old_route = {
+            let mut routes = self.active_interactive_routes.lock().unwrap();
+            let route = routes
+                .get_mut(session)
+                .ok_or_else(|| format!("session {session:?} has no current interactive route"))?;
+            route.accepting_interactive = false;
+            route.clone()
+        };
+        let old_sender = {
+            let inner = self.inner.lock().await;
+            inner
+                .resident_workers
+                .get(&old_route.worker_key)
+                .filter(|worker| worker.incarnation == old_route.incarnation)
+                .map(|worker| worker.ipc_tx.clone())
+        };
+        let connection_ids = self.connection_ids_for_session(session);
+        self.pc_registry
+            .pause_media_for_connections(&connection_ids)
+            .await;
+        for connection_id in &connection_ids {
+            let Some(connection_epoch) = self.pc_registry.connection_epoch(connection_id).await
+            else {
+                continue;
+            };
+            let stop = ServiceToWorker::StopMedia(desk_ipc_protocol::message::StopMediaPayload {
+                connection_id: connection_id.clone(),
+                connection_epoch,
+            });
+            if let Some(sender) = old_sender.as_ref()
+                && let Err(error) = sender.send(stop)
+            {
+                warn!(
+                    "failed to stop old interactive media for {connection_id}: {error}; route fencing will drop its queued frames"
+                );
+            }
+        }
+        let epoch = self.activate_interactive_worker(&key).await?;
+        self.pc_registry
+            .resume_media_for_connections(self, None, &connection_ids)
+            .await;
+        Ok(epoch)
+    }
+
+    fn revoke_interactive_route(&self, key: &WorkerKey, incarnation: WorkerIncarnation) {
+        let mut routes = self.active_interactive_routes.lock().unwrap();
+        if routes
+            .get(&key.session)
+            .is_some_and(|route| route.worker_key == *key && route.incarnation == incarnation)
+        {
+            routes.remove(&key.session);
+        }
+    }
+
+    pub fn resident_worker_is_active_interactive(
+        &self,
+        key: &WorkerKey,
+        incarnation: WorkerIncarnation,
+    ) -> bool {
+        self.active_interactive_routes
+            .lock()
+            .unwrap()
+            .get(&key.session)
+            .is_some_and(|route| {
+                route.worker_key == *key
+                    && route.incarnation == incarnation
+                    && route.accepting_interactive
+                    && route.activated_at <= Instant::now()
+            })
+    }
+
+    pub fn resident_desktop_observation_is_current(
+        &self,
+        key: &WorkerKey,
+        incarnation: WorkerIncarnation,
+        observed_at_unix_ms: u64,
+    ) -> bool {
+        self.active_interactive_routes
+            .lock()
+            .unwrap()
+            .get(&key.session)
+            .is_some_and(|route| {
+                route.worker_key == *key
+                    && route.incarnation == incarnation
+                    && route.accepting_interactive
+                    && observed_at_unix_ms >= route.activated_at_unix_ms
+            })
+    }
+
+    pub async fn resident_worker_capabilities(&self, key: &WorkerKey) -> Option<MediaCapabilities> {
+        self.inner
+            .lock()
+            .await
+            .resident_workers
+            .get(key)
+            .and_then(|worker| worker.capabilities.clone())
+    }
+
+    pub async fn session_worker_capabilities(
+        &self,
+        session: &desk_ipc_protocol::message::SessionKey,
+    ) -> Option<MediaCapabilities> {
+        let inner = self.inner.lock().await;
+        [DesktopTarget::LinuxSession, DesktopTarget::WindowsDefault]
+            .into_iter()
+            .map(|desktop| WorkerKey {
+                session: session.clone(),
+                desktop,
+            })
+            .find_map(|key| {
+                inner
+                    .resident_workers
+                    .get(&key)
+                    .and_then(|worker| worker.capabilities.clone())
+            })
     }
 
     fn clear_worker_capabilities(&self) {
@@ -917,6 +2130,7 @@ impl WorkerManager {
             ipc_tx,
             process_handle: None,
             last_heartbeat_at: Instant::now(),
+            capabilities: None,
             session_id: 0,
             desktop_name: None,
             file_sender_tx: Arc::new(RwLock::new(None)),
@@ -924,6 +2138,33 @@ impl WorkerManager {
             inprocess_restart: None,
             lane_tasks: Vec::new(),
         });
+        incarnation
+    }
+
+    #[cfg(test)]
+    pub async fn install_resident_for_test(
+        &self,
+        key: WorkerKey,
+        ipc_tx: mpsc::UnboundedSender<ServiceToWorker>,
+    ) -> WorkerIncarnation {
+        let incarnation = self.mint_resident_worker(key.clone()).incarnation();
+        self.inner.lock().await.resident_workers.insert(
+            key,
+            WorkerHandle {
+                incarnation,
+                pipe_name: "resident-test".to_string(),
+                ipc_tx,
+                process_handle: None,
+                last_heartbeat_at: Instant::now(),
+                capabilities: None,
+                session_id: 0,
+                desktop_name: None,
+                file_sender_tx: Arc::new(RwLock::new(None)),
+                inprocess_task: None,
+                inprocess_restart: None,
+                lane_tasks: Vec::new(),
+            },
+        );
         incarnation
     }
 
@@ -946,40 +2187,149 @@ impl WorkerManager {
         payload: desk_ipc_protocol::message::RemoteAccessStatePayload,
         timeout: Duration,
     ) -> Result<bool, String> {
-        let has_worker = self.inner.lock().await.active_worker.is_some();
-        if !has_worker {
+        let destinations = self.worker_destinations().await;
+        if destinations.is_empty() {
             return Ok(false);
         }
-        let operation_id = payload.operation_id.clone();
         let state_version = payload.state_version;
-        let (tx, rx) = oneshot::channel();
-        self.remote_access_acks
-            .lock()
-            .unwrap()
-            .insert(operation_id.clone(), tx);
-        if let Err(error) = self
-            .send_to_worker(ServiceToWorker::SetRemoteAccessState(payload))
-            .await
-        {
+        let mut waiters = Vec::with_capacity(destinations.len());
+        let mut pending_operation_ids = Vec::with_capacity(destinations.len());
+        let mut resident_keys = Vec::new();
+        for (worker_key, incarnation, ipc_tx) in destinations {
+            let operation_id = format!(
+                "{}:{}:{incarnation}",
+                payload.operation_id,
+                uuid::Uuid::new_v4()
+            );
+            let mut per_worker = payload.clone();
+            per_worker.operation_id = operation_id.clone();
+            let (tx, rx) = oneshot::channel();
             self.remote_access_acks
                 .lock()
                 .unwrap()
-                .remove(&operation_id);
-            return Err(error);
-        }
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(ack)) if ack.state_version == state_version => Ok(true),
-            Ok(Ok(_)) => Err("worker acknowledged a different remote-access version".into()),
-            Ok(Err(_)) => Err("worker remote-access acknowledgement channel closed".into()),
-            Err(_) => {
+                .insert(operation_id.clone(), tx);
+            if ipc_tx
+                .send(ServiceToWorker::SetRemoteAccessState(per_worker))
+                .is_err()
+            {
                 self.remote_access_acks
                     .lock()
                     .unwrap()
                     .remove(&operation_id);
+                let mut acknowledgements = self.remote_access_acks.lock().unwrap();
+                for pending in &pending_operation_ids {
+                    acknowledgements.remove(pending);
+                }
+                drop(acknowledgements);
+                if let Some(key) = worker_key {
+                    self.session_targets
+                        .set_readiness(&key.session, false, false, false, false);
+                }
+                return Err(format!("worker {incarnation} event channel is closed"));
+            }
+            pending_operation_ids.push(operation_id);
+            if let Some(key) = worker_key {
+                resident_keys.push(key);
+            }
+            waiters.push((incarnation, rx));
+        }
+
+        let outcome = tokio::time::timeout(timeout, async {
+            for (incarnation, rx) in waiters {
+                match rx.await {
+                    Ok(ack) if ack.state_version == state_version => {}
+                    Ok(_) => {
+                        return Err(format!(
+                            "worker {incarnation} acknowledged a different remote-access version"
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(format!(
+                            "worker {incarnation} remote-access acknowledgement channel closed"
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await;
+        match outcome {
+            Ok(Ok(())) => Ok(true),
+            Ok(Err(error)) => {
+                let mut acknowledgements = self.remote_access_acks.lock().unwrap();
+                for operation_id in &pending_operation_ids {
+                    acknowledgements.remove(operation_id);
+                }
+                drop(acknowledgements);
+                for key in &resident_keys {
+                    self.session_targets
+                        .set_readiness(&key.session, false, false, false, false);
+                }
+                Err(error)
+            }
+            Err(_) => {
+                let mut acknowledgements = self.remote_access_acks.lock().unwrap();
+                for operation_id in &pending_operation_ids {
+                    acknowledgements.remove(operation_id);
+                }
+                drop(acknowledgements);
+                for key in &resident_keys {
+                    self.session_targets
+                        .set_readiness(&key.session, false, false, false, false);
+                }
                 Err(format!(
-                    "worker did not acknowledge remote-access version {state_version} within {timeout:?}"
+                    "not every worker acknowledged remote-access version {state_version} within {timeout:?}"
                 ))
             }
+        }
+    }
+
+    async fn worker_destinations(
+        &self,
+    ) -> Vec<(
+        Option<WorkerKey>,
+        WorkerIncarnation,
+        mpsc::UnboundedSender<ServiceToWorker>,
+    )> {
+        let inner = self.inner.lock().await;
+        let mut destinations = Vec::with_capacity(
+            inner.resident_workers.len() + usize::from(inner.active_worker.is_some()),
+        );
+        if let Some(worker) = inner.active_worker.as_ref() {
+            destinations.push((None, worker.incarnation, worker.ipc_tx.clone()));
+        }
+        destinations.extend(
+            inner.resident_workers.iter().map(|(key, worker)| {
+                (Some(key.clone()), worker.incarnation, worker.ipc_tx.clone())
+            }),
+        );
+        destinations
+    }
+
+    /// Broadcast process-wide state to every resident worker. Connection-scoped
+    /// traffic must use the immutable connection binding helpers instead.
+    pub async fn broadcast_to_workers(&self, message: ServiceToWorker) -> Result<usize, String> {
+        let destinations = self.worker_destinations().await;
+        let mut delivered = 0;
+        let mut failed = Vec::new();
+        for (worker_key, incarnation, ipc_tx) in destinations {
+            if ipc_tx.send(message.clone()).is_ok() {
+                delivered += 1;
+            } else {
+                if let Some(key) = worker_key {
+                    self.session_targets
+                        .set_readiness(&key.session, false, false, false, false);
+                }
+                failed.push(incarnation.to_string());
+            }
+        }
+        if failed.is_empty() {
+            Ok(delivered)
+        } else {
+            Err(format!(
+                "worker event channels are closed: {}",
+                failed.join(", ")
+            ))
         }
     }
 
@@ -1043,6 +2393,12 @@ impl WorkerManager {
     }
 
     pub async fn send_to_worker(&self, msg: ServiceToWorker) -> Result<(), String> {
+        if self.session_targeting_enabled.load(Ordering::Acquire) {
+            return Err(
+                "session targeting is enabled; refusing unscoped resident-worker dispatch"
+                    .to_string(),
+            );
+        }
         let inner = self.inner.lock().await;
         if let Some(worker) = &inner.active_worker {
             worker
@@ -1052,6 +2408,112 @@ impl WorkerManager {
         } else {
             Err("No active worker".to_string())
         }
+    }
+
+    pub async fn send_to_session_worker(
+        &self,
+        session: &desk_ipc_protocol::message::SessionKey,
+        msg: ServiceToWorker,
+    ) -> Result<(), String> {
+        let inner = self.inner.lock().await;
+        let key = [DesktopTarget::LinuxSession, DesktopTarget::WindowsDefault]
+            .into_iter()
+            .map(|desktop| WorkerKey {
+                session: session.clone(),
+                desktop,
+            })
+            .find(|key| inner.resident_workers.contains_key(key))
+            .ok_or_else(|| format!("no session-user worker for target {session:?}"))?;
+        inner
+            .resident_workers
+            .get(&key)
+            .expect("selected resident key disappeared while manager lock is held")
+            .ipc_tx
+            .send(msg)
+            .map_err(|error| format!("failed to send to resident worker {key:?}: {error}"))
+    }
+
+    pub async fn send_to_connection_worker(
+        &self,
+        connection_id: &str,
+        msg: ServiceToWorker,
+    ) -> Result<(), String> {
+        if let Some(session) = self.connection_target(connection_id) {
+            return self.send_to_session_worker(&session, msg).await;
+        }
+        if self.session_targeting_enabled.load(Ordering::Acquire) {
+            return Err(format!(
+                "connection {connection_id} has no immutable session target"
+            ));
+        }
+        self.send_to_worker(msg).await
+    }
+
+    /// Route capture and human-input traffic through the currently active
+    /// desktop of the connection's immutable session. Unlike
+    /// `send_to_connection_worker`, this may select Winlogon, but it can never
+    /// move the connection to another WTS/Linux session.
+    pub async fn send_to_interactive_connection_worker(
+        &self,
+        connection_id: &str,
+        msg: ServiceToWorker,
+    ) -> Result<(), String> {
+        let session = match self.connection_target(connection_id) {
+            Some(session) => session,
+            None if !self.session_targeting_enabled.load(Ordering::Acquire) => {
+                return self.send_to_worker(msg).await;
+            }
+            None => {
+                return Err(format!(
+                    "connection {connection_id} has no immutable session target"
+                ));
+            }
+        };
+        let route = self
+            .active_interactive_routes
+            .lock()
+            .unwrap()
+            .get(&session)
+            .cloned()
+            .ok_or_else(|| format!("session {session:?} has no active interactive worker"))?;
+        if !route.accepting_interactive {
+            return Err(format!(
+                "session {session:?} is transitioning between interactive desktops"
+            ));
+        }
+        let inner = self.inner.lock().await;
+        let worker = inner
+            .resident_workers
+            .get(&route.worker_key)
+            .filter(|worker| worker.incarnation == route.incarnation)
+            .ok_or_else(|| format!("interactive route for {session:?} is stale"))?;
+        let profile = if route.worker_key.desktop == DesktopTarget::WindowsWinlogon {
+            WorkerProfile::RestrictedDesktop
+        } else {
+            WorkerProfile::SessionUser
+        };
+        let msg = match (profile, msg) {
+            (WorkerProfile::RestrictedDesktop, ServiceToWorker::StartMedia(mut payload)) => {
+                // Audio remains a session-user resource. The secure-desktop
+                // route may pause it, but must never open an audio device under
+                // the persistent SYSTEM worker.
+                payload.audio = None;
+                ServiceToWorker::StartMedia(payload)
+            }
+            (_, msg) => msg,
+        };
+        if !msg.allowed_for_profile(profile) {
+            return Err(format!(
+                "message is outside the {:?} worker capability profile",
+                profile
+            ));
+        }
+        worker.ipc_tx.send(msg).map_err(|error| {
+            format!(
+                "failed to send through interactive route {:?} epoch {}: {error}",
+                route.worker_key, route.route_epoch
+            )
+        })
     }
 
     /// Send a `FileTransferPayload` over the dedicated file lane to the
@@ -1066,6 +2528,12 @@ impl WorkerManager {
     /// recovery / heartbeat / `send_to_worker` for the same window
     /// the SCTP backpressure runs.
     pub async fn send_file_to_worker(&self, payload: FileTransferPayload) -> Result<(), String> {
+        if self.session_targeting_enabled.load(Ordering::Acquire) {
+            return Err(
+                "session targeting is enabled; refusing unscoped resident file dispatch"
+                    .to_string(),
+            );
+        }
         // Step 1: clone the slot Arc under the manager mutex, drop guard.
         let slot = {
             let inner = self.inner.lock().await;
@@ -1088,6 +2556,52 @@ impl WorkerManager {
         sender.send(payload).await.map_err(|e| format!("{e}"))
     }
 
+    pub async fn send_file_to_connection_worker(
+        &self,
+        connection_id: &str,
+        payload: FileTransferPayload,
+    ) -> Result<(), String> {
+        let session = match self.connection_target(connection_id) {
+            Some(session) => session,
+            None if !self.session_targeting_enabled.load(Ordering::Acquire) => {
+                return self.send_file_to_worker(payload).await;
+            }
+            None => {
+                return Err(format!(
+                    "connection {connection_id} has no immutable session target"
+                ));
+            }
+        };
+        let slot = {
+            let inner = self.inner.lock().await;
+            let key = [DesktopTarget::LinuxSession, DesktopTarget::WindowsDefault]
+                .into_iter()
+                .map(|desktop| WorkerKey {
+                    session: session.clone(),
+                    desktop,
+                })
+                .find(|key| inner.resident_workers.contains_key(key))
+                .ok_or_else(|| format!("no session-user worker for target {session:?}"))?;
+            Arc::clone(
+                &inner
+                    .resident_workers
+                    .get(&key)
+                    .expect("selected resident key disappeared while manager lock is held")
+                    .file_sender_tx,
+            )
+        };
+        let sender = slot
+            .read()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "resident worker file lane is not ready".to_string())?;
+        sender
+            .send(payload)
+            .await
+            .map_err(|error| format!("{error}"))
+    }
+
     /// Record that a message arrived from `incarnation`, and report whether
     /// that worker is the one the daemon is running.
     ///
@@ -1101,8 +2615,21 @@ impl WorkerManager {
     /// as a sign of life, but only for the worker that sent it: crediting a
     /// replaced worker's backlog to its replacement would keep the watchdog
     /// quiet about a replacement that has never said anything.
-    pub async fn note_message_from(&self, incarnation: WorkerIncarnation) -> bool {
+    pub async fn note_message_from(
+        &self,
+        worker_key: Option<&WorkerKey>,
+        incarnation: WorkerIncarnation,
+    ) -> bool {
         let mut inner = self.inner.lock().await;
+        if let Some(key) = worker_key {
+            return match inner.resident_workers.get_mut(key) {
+                Some(worker) if worker.incarnation == incarnation => {
+                    worker.last_heartbeat_at = Instant::now();
+                    true
+                }
+                _ => false,
+            };
+        }
         match inner.active_worker.as_mut() {
             Some(worker) if worker.incarnation == incarnation => {
                 worker.last_heartbeat_at = Instant::now();
@@ -1112,8 +2639,8 @@ impl WorkerManager {
         }
     }
 
-    /// Send the security policy to the active worker and follow up on whether it
-    /// arrived.
+    /// Send the security policy to every worker and follow up on whether it
+    /// arrived at each one.
     ///
     /// Returns as soon as the message is queued. The acknowledgement is awaited
     /// on a background task instead of here because the caller is a settings
@@ -1125,44 +2652,56 @@ impl WorkerManager {
     /// older policy.
     pub async fn publish_security_policy(&self, snapshot: PolicySnapshot, timeout: Duration) {
         let seq = snapshot.seq();
-        let operation_id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = oneshot::channel();
-        self.policy_acks
-            .lock()
-            .unwrap()
-            .insert(operation_id.clone(), tx);
-        if let Err(error) = self
-            .send_to_worker(ServiceToWorker::UpdateSecurityPolicy(
-                UpdateSecurityPolicyPayload {
-                    operation_id: operation_id.clone(),
-                    snapshot,
-                },
-            ))
-            .await
-        {
-            self.policy_acks.lock().unwrap().remove(&operation_id);
+        let destinations = self.worker_destinations().await;
+        if destinations.is_empty() {
             debug!(
-                "[worker_manager] security policy {seq} has no worker to reach ({error}); a \
-                 worker starting later picks it up from its own configuration"
+                "[worker_manager] security policy {seq} has no worker to reach; a worker starting later picks it up from Init"
             );
             return;
         }
-        let acks = Arc::clone(&self.policy_acks);
-        tokio::spawn(async move {
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) => {
-                    acks.lock().unwrap().remove(&operation_id);
+        for (worker_key, incarnation, ipc_tx) in destinations {
+            let operation_id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = oneshot::channel();
+            self.policy_acks
+                .lock()
+                .unwrap()
+                .insert(operation_id.clone(), tx);
+            if ipc_tx
+                .send(ServiceToWorker::UpdateSecurityPolicy(
+                    UpdateSecurityPolicyPayload {
+                        operation_id: operation_id.clone(),
+                        snapshot: snapshot.clone(),
+                    },
+                ))
+                .is_err()
+            {
+                self.policy_acks.lock().unwrap().remove(&operation_id);
+                if let Some(key) = worker_key {
+                    self.session_targets
+                        .set_readiness(&key.session, false, false, false, false);
                 }
-                Err(_) => {
-                    acks.lock().unwrap().remove(&operation_id);
-                    error!(
-                        "[worker_manager] the worker did not confirm security policy {seq} \
-                         within {timeout:?}; it may still be enforcing an older one"
-                    );
-                }
+                error!(
+                    "[worker_manager] worker {incarnation} event channel closed before security policy {seq} was delivered"
+                );
+                continue;
             }
-        });
+            let acks = Arc::clone(&self.policy_acks);
+            let targets = self.session_targets.clone();
+            tokio::spawn(async move {
+                match tokio::time::timeout(timeout, rx).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(_)) | Err(_) => {
+                        acks.lock().unwrap().remove(&operation_id);
+                        if let Some(key) = worker_key {
+                            targets.set_readiness(&key.session, false, false, false, false);
+                        }
+                        error!(
+                            "[worker_manager] worker {incarnation} did not confirm security policy {seq} within {timeout:?}; it may still be enforcing an older one"
+                        );
+                    }
+                }
+            });
+        }
     }
 
     /// Record what the worker reported after a security policy was published to
@@ -1231,6 +2770,16 @@ impl WorkerManager {
         })
     }
 
+    async fn resident_worker_snapshots(&self) -> Vec<(WorkerKey, WorkerIncarnation, Instant)> {
+        self.inner
+            .lock()
+            .await
+            .resident_workers
+            .iter()
+            .map(|(key, worker)| (key.clone(), worker.incarnation, worker.last_heartbeat_at))
+            .collect()
+    }
+
     /// Whether restarting on `incarnation`'s behalf is still the right thing to
     /// do: either it is the worker the daemon is running, or the daemon has no
     /// worker at all, so a restart has nothing newer to trample.
@@ -1273,23 +2822,32 @@ impl WorkerManager {
                     )
                 };
 
-                let Some((incarnation, session_id, desktop_name, last)) =
+                if let Some((incarnation, session_id, desktop_name, last)) =
                     mgr.active_worker_snapshot().await
-                else {
-                    continue;
-                };
-                let elapsed = Instant::now().saturating_duration_since(last);
-                if !worker_is_stale(enabled, timeout, elapsed) {
-                    continue;
+                {
+                    let elapsed = Instant::now().saturating_duration_since(last);
+                    if worker_is_stale(enabled, timeout, elapsed) {
+                        warn!(
+                            "[WorkerWatchdog] no IPC traffic for {:?} (timeout={:?}, worker={incarnation}, \
+                             session={session_id}, desktop={desktop_name:?}) — declaring worker stuck and \
+                             restarting",
+                            elapsed, timeout
+                        );
+                        mgr.handle_crash_recovery(incarnation, session_id, desktop_name);
+                    }
                 }
 
-                warn!(
-                    "[WorkerWatchdog] no IPC traffic for {:?} (timeout={:?}, worker={incarnation}, \
-                     session={session_id}, desktop={desktop_name:?}) — declaring worker stuck and \
-                     restarting",
-                    elapsed, timeout
-                );
-                mgr.handle_crash_recovery(incarnation, session_id, desktop_name);
+                for (key, incarnation, last) in mgr.resident_worker_snapshots().await {
+                    let elapsed = Instant::now().saturating_duration_since(last);
+                    if worker_is_stale(enabled, timeout, elapsed) {
+                        warn!(
+                            "[WorkerWatchdog] no IPC traffic for {:?} (timeout={:?}, resident={:?}, \
+                             worker={incarnation}) — restarting only that slot",
+                            elapsed, timeout, key
+                        );
+                        mgr.handle_resident_crash_recovery(key, incarnation);
+                    }
+                }
             }
         })
     }
@@ -1364,6 +2922,94 @@ impl WorkerManager {
         });
     }
 
+    pub(super) fn handle_worker_transport_failure(
+        &self,
+        worker_key: Option<WorkerKey>,
+        incarnation: WorkerIncarnation,
+        session_id: u32,
+        desktop_name: Option<String>,
+    ) {
+        if let Some(key) = worker_key {
+            self.handle_resident_crash_recovery(key, incarnation);
+        } else {
+            self.handle_crash_recovery(incarnation, session_id, desktop_name);
+        }
+    }
+
+    fn handle_resident_crash_recovery(&self, key: WorkerKey, incarnation: WorkerIncarnation) {
+        let mgr = self.clone();
+        tokio::spawn(async move {
+            let mut removed = {
+                let mut inner = mgr.inner.lock().await;
+                match inner.resident_workers.get(&key) {
+                    Some(worker) if worker.incarnation == incarnation => {
+                        inner.resident_workers.remove(&key)
+                    }
+                    _ => None,
+                }
+            };
+            let Some(mut worker) = removed.take() else {
+                debug!(
+                    "[WorkerManager] ignoring stale resident-worker failure for {:?} {incarnation}",
+                    key
+                );
+                return;
+            };
+            #[cfg(target_os = "windows")]
+            let session_id = worker.session_id;
+            mgr.fence_resident_worker(&key, incarnation);
+            mgr.revoke_interactive_route(&key, incarnation);
+            mgr.retire_resident_worker(&mut worker);
+            if let Some(mut process) = worker.process_handle.take() {
+                let _ = process.kill().await;
+                process.wait().await;
+            }
+            if key.desktop != DesktopTarget::WindowsWinlogon {
+                mgr.session_targets
+                    .set_readiness(&key.session, false, false, false, false);
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                let registration = mgr
+                    .session_shell_registry
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|registry| {
+                        registry.snapshot().into_iter().find(|registration| {
+                            linux_session_key(
+                                &registration.logical_session,
+                                registration.registration_generation,
+                            ) == key.session
+                        })
+                    });
+                if let Some(registration) = registration {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if let Err(error) = mgr.start_linux_resident_worker(registration).await {
+                        error!(
+                            "[WorkerManager] failed to restart resident worker {:?}: {error}",
+                            key
+                        );
+                    }
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if let Err(error) = mgr
+                    .start_windows_resident_worker(key.clone(), session_id)
+                    .await
+                {
+                    error!(
+                        "[WorkerManager] failed to restart Windows resident worker {:?}: {error}",
+                        key
+                    );
+                }
+            }
+        });
+    }
+
     pub async fn shutdown_all(&self) {
         let mut inner = self.inner.lock().await;
         if let Some(mut worker) = inner.active_worker.take() {
@@ -1376,6 +3022,26 @@ impl WorkerManager {
                     Err(_) => {
                         warn!("Worker did not exit in time, killing");
                         let _ = proc.kill().await;
+                    }
+                }
+            }
+        }
+        let residents: Vec<_> = inner.resident_workers.drain().collect();
+        for (key, mut worker) in residents {
+            info!(
+                "Shutting down resident worker {:?}: {}",
+                key, worker.pipe_name
+            );
+            self.fence_resident_worker(&key, worker.incarnation);
+            self.revoke_interactive_route(&key, worker.incarnation);
+            let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
+            self.retire_resident_worker(&mut worker);
+            if let Some(mut process) = worker.process_handle.take() {
+                match tokio::time::timeout(Duration::from_secs(3), process.wait()).await {
+                    Ok(()) => info!("Resident worker {:?} exited gracefully", key),
+                    Err(_) => {
+                        warn!("Resident worker {:?} did not exit in time, killing", key);
+                        let _ = process.kill().await;
                     }
                 }
             }
@@ -1403,25 +3069,38 @@ impl WorkerManager {
             // everything else keep the user token (richer profile, narrower
             // privileges).
             let force_system_token = desktop_requires_system_token(desktop_name);
-            match launch_worker_as_user(session_id, desktop_name, &cmd_line, force_system_token) {
+            return match launch_worker_as_user(
+                session_id,
+                desktop_name,
+                &cmd_line,
+                force_system_token,
+            ) {
                 Ok(child) => {
                     info!(
                         "Worker launched via CreateProcessAsUserW (PID {})",
                         child.pid
                     );
-                    return Ok(ProcessHandle::WindowsNative(child));
+                    Ok(ProcessHandle::WindowsNative(child))
                 }
-                Err(e) => {
-                    warn!(
-                        "CreateProcessAsUserW failed (not SYSTEM?), falling back to simple spawn: {e}"
-                    );
-                }
-            }
+                Err(error) => Err(format!(
+                    "CreateProcessAsUserW failed for session {session_id} desktop {desktop_name:?}; refusing daemon-identity fallback: {error}"
+                )
+                .into()),
+            };
         }
 
         #[cfg(not(target_os = "windows"))]
         let _ = (session_id, desktop_name);
 
+        #[cfg(target_os = "linux")]
+        if !inherited_linux_worker_identity_is_safe(unsafe { libc::geteuid() }) {
+            return Err(
+                "refusing to spawn a Linux SessionWorker with inherited root identity; a validated Tauri session launch context is required"
+                    .into(),
+            );
+        }
+
+        #[cfg(not(target_os = "windows"))]
         let child = tokio::process::Command::new(&exe_path)
             .arg("--startup-mode")
             .arg("session-worker")
@@ -1429,7 +3108,11 @@ impl WorkerManager {
             .arg(pipe_name)
             .spawn()?;
 
-        Ok(ProcessHandle::Tokio(child))
+        #[cfg(not(target_os = "windows"))]
+        return Ok(ProcessHandle::Tokio(child));
+
+        #[allow(unreachable_code)]
+        Err("worker launch is unavailable on this platform".into())
     }
 }
 

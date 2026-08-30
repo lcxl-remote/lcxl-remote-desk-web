@@ -5022,6 +5022,7 @@ dependencies = [
  "actix-rt",
  "anyhow",
  "awc",
+ "base64 0.22.1",
  "clap",
  "config",
  "core-foundation 0.9.4",

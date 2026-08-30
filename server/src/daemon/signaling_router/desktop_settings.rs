@@ -386,7 +386,7 @@ pub(super) async fn handle_change_display_settings_inbound(
     let connection_id = model.from_connection_id.clone().unwrap_or_default();
     let ipc_payload = SetVirtualDisplayModePayload {
         request_id: model.request_id.clone(),
-        connection_id,
+        connection_id: connection_id.clone(),
         connection_epoch: payload.connection_epoch,
         width: payload.width,
         height: payload.height,
@@ -394,7 +394,10 @@ pub(super) async fn handle_change_display_settings_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::SetVirtualDisplayMode(ipc_payload))
+        .send_to_connection_worker(
+            &connection_id,
+            ServiceToWorker::SetVirtualDisplayMode(ipc_payload),
+        )
         .await
     {
         emit_error_response(
@@ -457,7 +460,10 @@ pub(super) async fn handle_set_private_screen_visibility_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::SetPrivateScreenVisibility(payload))
+        .send_to_connection_worker(
+            &from_connection_id,
+            ServiceToWorker::SetPrivateScreenVisibility(payload),
+        )
         .await
     {
         log::warn!(
@@ -721,8 +727,9 @@ async fn recover_audio_from_accepted_snapshot(
 
     let sent = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::ApplyMediaSettings(
-            ApplyMediaSettingsPayload {
+        .send_to_interactive_connection_worker(
+            connection_id,
+            ServiceToWorker::ApplyMediaSettings(ApplyMediaSettingsPayload {
                 source_request_id: None,
                 connection_id: connection_id.to_string(),
                 connection_epoch: connection_epoch.to_string(),
@@ -731,8 +738,8 @@ async fn recover_audio_from_accepted_snapshot(
                     new_generation: next_generation,
                     settings: recovery.clone(),
                 },
-            },
-        ))
+            }),
+        )
         .await
         .is_ok();
     let active = sent
@@ -894,7 +901,10 @@ pub(super) fn spawn_initial_audio_authorization(ctx: &RouterContext, connection_
             },
         };
         let sent = worker_mgr
-            .send_to_worker(ServiceToWorker::ApplyMediaSettings(command))
+            .send_to_interactive_connection_worker(
+                &connection_id,
+                ServiceToWorker::ApplyMediaSettings(command),
+            )
             .await
             .is_ok();
         let active = sent
@@ -1274,7 +1284,10 @@ pub(super) async fn handle_apply_remote_session_settings_inbound(
 
     let video_sent = if let Some(command) = video_command {
         ctx.worker_mgr
-            .send_to_worker(ServiceToWorker::ApplyMediaSettings(command))
+            .send_to_interactive_connection_worker(
+                connection_id,
+                ServiceToWorker::ApplyMediaSettings(command),
+            )
             .await
             .is_ok()
     } else {
@@ -1433,7 +1446,10 @@ pub(super) async fn handle_apply_remote_session_settings_inbound(
                 false
             } else if let Some(command) = audio_command {
                 ctx.worker_mgr
-                    .send_to_worker(ServiceToWorker::ApplyMediaSettings(command))
+                    .send_to_interactive_connection_worker(
+                        connection_id,
+                        ServiceToWorker::ApplyMediaSettings(command),
+                    )
                     .await
                     .is_ok()
             } else {
@@ -1800,8 +1816,9 @@ pub(super) async fn handle_update_adaptive_video_quality_inbound(
 
     let sent = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::UpdateMediaSettings(
-            UpdateMediaSettingsPayload {
+        .send_to_interactive_connection_worker(
+            connection_id,
+            ServiceToWorker::UpdateMediaSettings(UpdateMediaSettingsPayload {
                 connection_id: connection_id.to_string(),
                 connection_epoch: request.connection_epoch.clone(),
                 video_generation: generation,
@@ -1810,8 +1827,8 @@ pub(super) async fn handle_update_adaptive_video_quality_inbound(
                 quality: Some(request.video_quality),
                 enable_dirty_rect: None,
                 show_mouse: None,
-            },
-        ))
+            }),
+        )
         .await
         .is_ok();
 

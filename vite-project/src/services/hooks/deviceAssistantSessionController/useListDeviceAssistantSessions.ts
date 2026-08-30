@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { ListDeviceAssistantSessionsQueryResponse, ListDeviceAssistantSessionsQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { ListDeviceAssistantSessionsQueryResponse, ListDeviceAssistantSessionsQueryParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listDeviceAssistantSessions } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const listDeviceAssistantSessionsQueryKey = (params: ListDeviceAssistantSessionsQueryParams) => [{ url: '/api/my/device-assistant-sessions' }, ...(params ? [params] : [])] as const
 

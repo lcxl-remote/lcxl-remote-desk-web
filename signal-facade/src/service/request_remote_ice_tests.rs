@@ -138,6 +138,7 @@ fn peer_request_uses_authenticated_host_when_inbound_sender_is_absent() {
 #[test]
 fn turn_rebuild_preserves_requested_wayland_control_mode() {
     let payload = RequestRemoteModel {
+        session_target_id: None,
         purpose: crate::model::signal::RemoteSessionPurpose::RemoteDesktop,
         requested_wayland_control_mode: Some("uinput".to_string()),
         ..RequestRemoteModel::default()
@@ -185,6 +186,7 @@ fn model_with_payload(to: Option<&str>, payload: RequestRemoteModel) -> Signalin
 #[test]
 fn session_request_forwards_browser_org_context() {
     let payload = RequestRemoteModel {
+        session_target_id: None,
         purpose: crate::model::signal::RemoteSessionPurpose::RemoteDesktop,
         org_id: Some(42),
         ..RequestRemoteModel::default()
@@ -216,6 +218,7 @@ fn session_request_without_org_id_is_personal_context() {
 #[test]
 fn turn_rebuild_preserves_org_id() {
     let payload = RequestRemoteModel {
+        session_target_id: None,
         purpose: crate::model::signal::RemoteSessionPurpose::RemoteDesktop,
         org_id: Some(7),
         ..RequestRemoteModel::default()

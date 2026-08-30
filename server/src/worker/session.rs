@@ -28,7 +28,7 @@ use desk_agent_protocol::computer_use::{
 use desk_agent_protocol::{AgentOutcome, DeviceAgent};
 use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
-    dual_transport::{EventReceiver, EventSender, MediaSender, framed},
+    dual_transport::{EventReceiver, EventSender, MediaSender, framed, inprocess},
     message::{
         AgentResponsePayload, ComputerActionCompletedPayload, ComputerActionStartedPayload,
         ComputerActionStateReportedPayload, ComputerUseReadinessPayload, DesktopChangedPayload,
@@ -39,7 +39,7 @@ use desk_ipc_protocol::{
         SignalingErrorPayload, StopMediaPayload, SystemInfoRetrievedPayload, TerminalClosedPayload,
         TerminalCommandsListedPayload, TerminalOutputProducedPayload, TerminalStartedPayload,
         VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
-        WorkerToService,
+        WorkerProfile, WorkerToService,
     },
     transport::{read_message, write_message},
 };

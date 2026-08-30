@@ -31,6 +31,181 @@ pub(super) fn worker_is_stale(
     enabled && elapsed_since_heartbeat > timeout
 }
 
+#[cfg(target_os = "linux")]
+pub(super) fn inherited_linux_worker_identity_is_safe(effective_uid: u32) -> bool {
+    effective_uid != 0
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // wired by the map-backed resident-worker runtime in the next implementation slice
+pub(super) fn launch_linux_session_worker(
+    executable: &std::path::Path,
+    pipe_name: &str,
+    registration: &crate::host_control::session_shell::RegisteredSessionShell,
+) -> Result<tokio::process::Child, Box<dyn std::error::Error + Send + Sync>> {
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .arg("--startup-mode")
+        .arg("session-worker")
+        .arg("--pipe")
+        .arg(pipe_name);
+    configure_linux_session_command(&mut command, executable, registration)?;
+    let mut child = command.spawn()?;
+    let result = child
+        .id()
+        .ok_or("spawned Linux session worker has no process id")
+        .and_then(|pid| verify_linux_worker_process_identity(pid, registration));
+    if let Err(error) = result {
+        let _ = child.start_kill();
+        return Err(error.into());
+    }
+    Ok(child)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_linux_worker_process_identity(
+    pid: u32,
+    registration: &crate::host_control::session_shell::RegisteredSessionShell,
+) -> Result<(), &'static str> {
+    let actual = crate::host_control::session_shell::read_process_identity(pid)
+        .map_err(|_| "cannot verify spawned Linux worker identity through /proc")?;
+    let expected = &registration.process_identity;
+    if actual.uid != expected.uid
+        || actual.gid != expected.gid
+        || actual.supplementary_groups != expected.supplementary_groups
+    {
+        return Err("spawned Linux worker credentials differ from the registered Tauri process");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // see launch_linux_session_worker staging note
+fn configure_linux_session_command(
+    command: &mut tokio::process::Command,
+    executable: &std::path::Path,
+    registration: &crate::host_control::session_shell::RegisteredSessionShell,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::ffi::CString;
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    use std::process::Stdio;
+
+    let identity = &registration.process_identity;
+    if identity.uid == 0 {
+        return Err("refusing to launch a Linux session worker as root".into());
+    }
+
+    let daemon_euid = unsafe { libc::geteuid() };
+    if daemon_euid != 0 && daemon_euid != identity.uid {
+        return Err(format!(
+            "non-root daemon uid {daemon_euid} cannot launch worker for uid {}",
+            identity.uid
+        )
+        .into());
+    }
+    if daemon_euid != 0 {
+        let mut expected_groups = identity.supplementary_groups.clone();
+        expected_groups.sort_unstable();
+        expected_groups.dedup();
+        if unsafe { libc::getegid() } != identity.gid
+            || current_supplementary_groups()? != expected_groups
+        {
+            return Err("non-root daemon groups differ from the registered Tauri process".into());
+        }
+    }
+
+    if daemon_euid == 0 {
+        let metadata = executable.symlink_metadata()?;
+        if !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(format!(
+                "worker executable {} must be root-owned and not group/world-writable",
+                executable.display()
+            )
+            .into());
+        }
+    }
+
+    let cwd = CString::new(registration.cwd.as_os_str().as_bytes())?;
+    let home = registration
+        .environment
+        .iter()
+        .find(|(key, _)| key.as_os_str().as_bytes() == b"HOME")
+        .map(|(_, value)| value.as_os_str())
+        .filter(|value| std::path::Path::new(value).is_absolute())
+        .ok_or("registered session environment lacks an absolute HOME")?;
+    let home = CString::new(home.as_bytes())?;
+    let uid = identity.uid;
+    let gid = identity.gid;
+    let groups = identity.supplementary_groups.clone();
+    let umask = registration.umask as libc::mode_t;
+
+    command
+        .env_clear()
+        .envs(registration.environment.iter().cloned())
+        .stdin(Stdio::null());
+
+    // SAFETY: all captured inputs are owned and the closure only invokes
+    // async-signal-safe libc credential, umask, and chdir operations before
+    // exec. Credential order is supplementary groups -> gid -> uid.
+    unsafe {
+        command.pre_exec(move || {
+            if daemon_euid == 0 {
+                if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setresgid(gid, gid, gid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setresuid(uid, uid, uid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getuid() != uid
+                    || libc::geteuid() != uid
+                    || libc::getgid() != gid
+                    || libc::getegid() != gid
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "worker credential drop did not converge",
+                    ));
+                }
+            } else if libc::geteuid() != uid || libc::getegid() != gid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "daemon identity changed before worker exec",
+                ));
+            }
+
+            libc::umask(umask);
+            if libc::chdir(cwd.as_ptr()) != 0 && libc::chdir(home.as_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn current_supplementary_groups() -> std::io::Result<Vec<u32>> {
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    if count < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut groups = vec![0; count as usize];
+    if count > 0 && unsafe { libc::getgroups(count, groups.as_mut_ptr()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    Ok(groups)
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn launch_worker_as_user(
     session_id: u32,
@@ -135,13 +310,10 @@ pub(super) fn launch_worker_as_user(
                     false
                 }
                 Err(e) => {
-                    warn!(
-                        "WTSQueryUserToken failed (session={session_id}): {e}, \
-                         falling back to SYSTEM token with SessionId injection"
-                    );
-                    OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut user_token)
-                        .map_err(|e| format!("OpenProcessToken: {e}"))?;
-                    true
+                    return Err(format!(
+                        "WTSQueryUserToken failed for SessionUser worker session={session_id}; refusing SYSTEM-token fallback: {e}"
+                    )
+                    .into());
                 }
             }
         };
@@ -237,5 +409,102 @@ pub(super) fn launch_worker_as_user(
 
         let _ = CloseHandle(pi.hThread);
         Ok(NativeWindowsChild::new(pi.hProcess, pi.dwProcessId))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_daemon_identity_is_never_a_valid_inherited_worker_identity() {
+        assert!(!inherited_linux_worker_identity_is_safe(0));
+        assert!(inherited_linux_worker_identity_is_safe(1_000));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn current_registration(
+        environment: Vec<(&[u8], &[u8])>,
+    ) -> std::sync::Arc<crate::host_control::session_shell::RegisteredSessionShell> {
+        use crate::host_control::protocol::{
+            EnvironmentEntryBase64, SESSION_SHELL_PROTOCOL_VERSION, SessionShellInfo,
+        };
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", std::process::id())).unwrap();
+        let after_name = &stat[stat.rfind(") ").unwrap() + 2..];
+        let start_ticks = after_name
+            .split_ascii_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse()
+            .unwrap();
+        crate::host_control::session_shell::SessionShellRegistry::default()
+            .register(
+                1,
+                SessionShellInfo {
+                    app_version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: SESSION_SHELL_PROTOCOL_VERSION,
+                    pid: std::process::id(),
+                    process_start_ticks: start_ticks,
+                    reported_uid: unsafe { libc::geteuid() },
+                    session_id: Some("launch-test".to_string()),
+                    seat: Some("seat-test".to_string()),
+                    session_type: Some("tty".to_string()),
+                    cwd_base64: STANDARD.encode(b"/tmp"),
+                    umask: 0o027,
+                    environment: environment
+                        .into_iter()
+                        .map(|(key, value)| EnvironmentEntryBase64 {
+                            key_base64: STANDARD.encode(key),
+                            value_base64: STANDARD.encode(value),
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn configured_linux_worker_uses_only_registered_environment() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let registration =
+            current_registration(vec![(b"HOME", b"/tmp"), (b"ONLY_REGISTERED", b"present")]);
+        let executable = std::path::Path::new("/usr/bin/env");
+        let mut command = tokio::process::Command::new(executable);
+        command.arg("-0").stdout(std::process::Stdio::piped());
+        configure_linux_session_command(&mut command, executable, &registration).unwrap();
+
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        assert!(
+            output
+                .stdout
+                .windows(24)
+                .any(|part| part == b"ONLY_REGISTERED=present\0")
+        );
+        assert!(output.stdout.windows(10).any(|part| part == b"HOME=/tmp\0"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_worker_target_uid_zero_is_rejected_before_spawn() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let mut registration =
+            (*current_registration(vec![(b"HOME", b"/tmp"), (b"PATH", b"/usr/bin")])).clone();
+        registration.process_identity.uid = 0;
+        let error = launch_linux_session_worker(
+            std::path::Path::new("/usr/bin/env"),
+            "/tmp/never-used-worker-socket",
+            &registration,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("as root"));
     }
 }

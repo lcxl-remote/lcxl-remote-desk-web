@@ -10,6 +10,61 @@ use serde::{Deserialize, Serialize};
 use crate::model::security_approval::SecurityPermissionType;
 use desk_signal_facade::model::request_remote_authz::ActorSummary;
 
+pub const SESSION_SHELL_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct EnvironmentEntryBase64 {
+    pub key_base64: String,
+    pub value_base64: String,
+}
+
+/// Byte-safe Linux desktop-session context reported by the trusted Tauri shell.
+///
+/// Environment values are intentionally opaque base64 strings. Keep `Debug`
+/// redacted so a rejected frame cannot copy session secrets into daemon logs.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SessionShellInfo {
+    pub app_version: String,
+    pub protocol_version: u32,
+    pub pid: u32,
+    pub process_start_ticks: u64,
+    pub reported_uid: u32,
+    pub session_id: Option<String>,
+    pub seat: Option<String>,
+    pub session_type: Option<String>,
+    pub cwd_base64: String,
+    pub umask: u32,
+    pub environment: Vec<EnvironmentEntryBase64>,
+}
+
+impl std::fmt::Debug for SessionShellInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionShellInfo")
+            .field("app_version", &self.app_version)
+            .field("protocol_version", &self.protocol_version)
+            .field("pid", &self.pid)
+            .field("process_start_ticks", &self.process_start_ticks)
+            .field("reported_uid", &self.reported_uid)
+            .field("session_id", &self.session_id)
+            .field("seat", &self.seat)
+            .field("session_type", &self.session_type)
+            .field("cwd_bytes", &"<redacted>")
+            .field("umask", &format_args!("{:04o}", self.umask))
+            .field("environment_entries", &self.environment.len())
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionShellRegistrationError {
+    Unsupported,
+    RoleRequired,
+    InvalidPayload,
+    IdentityMismatch,
+    SessionConflict,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostFileTransferDirection {
@@ -164,6 +219,15 @@ pub enum HostControlMessage {
         locale_persisted: bool,
     },
 
+    /// Daemon-issued identity for one validated Tauri WebSocket registration.
+    SessionShellRegistered {
+        registration_id: String,
+        registration_generation: u64,
+    },
+
+    /// Stable rejection category. Details stay in redacted daemon diagnostics.
+    SessionShellRegistrationRejected { code: SessionShellRegistrationError },
+
     /// Authoritative locale changed. Broadcast to every connected Tauri shell
     /// so multiple windows converge.
     GlobalLocaleChanged { locale: String },
@@ -248,6 +312,10 @@ pub enum HostControlMessage {
         is_admin: Option<bool>,
     },
 
+    /// Linux service shell reports the context from which a user worker should
+    /// be launched. The daemon, not this payload, assigns registration identity.
+    SessionShellInfo { info: SessionShellInfo },
+
     /// Tauri reports a private-screen visibility change.
     PrivateScreenStateChanged {
         connection_id: String,
@@ -307,6 +375,13 @@ mod tests {
                 token: "bridge-123".to_string(),
                 locale: "en-US".to_string(),
                 locale_persisted: true,
+            },
+            HostControlMessage::SessionShellRegistered {
+                registration_id: "registration-1".to_string(),
+                registration_generation: 9,
+            },
+            HostControlMessage::SessionShellRegistrationRejected {
+                code: SessionShellRegistrationError::SessionConflict,
             },
             HostControlMessage::GlobalLocaleChanged {
                 locale: "zh-CN".to_string(),
@@ -394,6 +469,24 @@ mod tests {
             HostControlMessage::Ready {
                 role: ClientRole::Forwarder,
                 is_admin: None,
+            },
+            HostControlMessage::SessionShellInfo {
+                info: SessionShellInfo {
+                    app_version: "1.0.0".to_string(),
+                    protocol_version: SESSION_SHELL_PROTOCOL_VERSION,
+                    pid: 42,
+                    process_start_ticks: 123,
+                    reported_uid: 1000,
+                    session_id: Some("2".to_string()),
+                    seat: Some("seat0".to_string()),
+                    session_type: Some("wayland".to_string()),
+                    cwd_base64: "L2hvbWUvdXNlcg==".to_string(),
+                    umask: 0o022,
+                    environment: vec![EnvironmentEntryBase64 {
+                        key_base64: "UEFUSA==".to_string(),
+                        value_base64: "L3Vzci9iaW4=".to_string(),
+                    }],
+                },
             },
             HostControlMessage::PrivateScreenStateChanged {
                 connection_id: "c1".to_string(),
@@ -486,6 +579,31 @@ mod tests {
             }
             other => panic!("expected Ready, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_shell_debug_redacts_environment_and_cwd() {
+        let info = SessionShellInfo {
+            app_version: "1.0.0".to_string(),
+            protocol_version: SESSION_SHELL_PROTOCOL_VERSION,
+            pid: 42,
+            process_start_ticks: 123,
+            reported_uid: 1000,
+            session_id: Some("2".to_string()),
+            seat: Some("seat0".to_string()),
+            session_type: Some("wayland".to_string()),
+            cwd_base64: "c2VjcmV0L2N3ZA==".to_string(),
+            umask: 0o077,
+            environment: vec![EnvironmentEntryBase64 {
+                key_base64: "U0VDUkVU".to_string(),
+                value_base64: "ZG8tbm90LWxvZw==".to_string(),
+            }],
+        };
+
+        let rendered = format!("{info:?}");
+        assert!(!rendered.contains("c2VjcmV0L2N3ZA=="));
+        assert!(!rendered.contains("ZG8tbm90LWxvZw=="));
+        assert!(rendered.contains("environment_entries: 1"));
     }
 
     #[test]

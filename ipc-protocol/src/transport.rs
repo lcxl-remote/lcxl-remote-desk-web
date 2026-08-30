@@ -101,6 +101,7 @@ mod tests {
     #[tokio::test]
     async fn roundtrip_init() {
         let msg = ServiceToWorker::Init(WorkerInitPayload {
+            worker_identity: None,
             session_id: "test-session".to_string(),
             os_session_id: 1,
             desktop_name: Some("Default".to_string()),
@@ -163,6 +164,7 @@ mod tests {
         // Construct a payload that, after wincode encoding, exceeds 16 MB.
         let huge_blob = "x".repeat(20 * 1024 * 1024);
         let msg = ServiceToWorker::Init(WorkerInitPayload {
+            worker_identity: None,
             session_id: "s".to_string(),
             os_session_id: 1,
             desktop_name: None,

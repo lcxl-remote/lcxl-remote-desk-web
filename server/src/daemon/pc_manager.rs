@@ -740,17 +740,20 @@ impl PcRegistry {
                     drop(coordinator);
                     drop(pc_guard);
                     if let Err(error) = worker_mgr
-                        .send_to_worker(ServiceToWorker::ApplyMediaSettings(
-                            desk_ipc_protocol::message::ApplyMediaSettingsPayload {
-                                source_request_id: None,
-                                connection_id: connection_id.clone(),
-                                connection_epoch: connection_epoch.clone(),
-                                media_kind: desk_ipc_protocol::message::MediaKind::Audio,
-                                action: desk_ipc_protocol::message::MediaSettingsAction::Stop {
-                                    target_generation: generation,
+                        .send_to_connection_worker(
+                            &connection_id,
+                            ServiceToWorker::ApplyMediaSettings(
+                                desk_ipc_protocol::message::ApplyMediaSettingsPayload {
+                                    source_request_id: None,
+                                    connection_id: connection_id.clone(),
+                                    connection_epoch: connection_epoch.clone(),
+                                    media_kind: desk_ipc_protocol::message::MediaKind::Audio,
+                                    action: desk_ipc_protocol::message::MediaSettingsAction::Stop {
+                                        target_generation: generation,
+                                    },
                                 },
-                            },
-                        ))
+                            ),
+                        )
                         .await
                     {
                         log::warn!(
@@ -1480,6 +1483,22 @@ impl PcRegistry {
         }
     }
 
+    pub async fn pause_media_for_connections(&self, connection_ids: &[String]) {
+        for id in connection_ids {
+            let Some(ctx) = self.get(id).await else {
+                continue;
+            };
+            let ctx = ctx.read().await;
+            ctx.media_paused.store(true, Ordering::Relaxed);
+            log::debug!("[pc_manager] paused media for {id} (interactive route switch)");
+        }
+    }
+
+    pub async fn connection_epoch(&self, connection_id: &str) -> Option<String> {
+        let ctx = self.get(connection_id).await?;
+        Some(ctx.read().await.connection_epoch.clone())
+    }
+
     /// Build the authoritative worker-recovery payload with fresh per-media
     /// generations. The accepted recovery snapshot, cache, coordinator slots
     /// and output fence advance together before anything reaches the worker, so
@@ -1569,6 +1588,41 @@ impl PcRegistry {
             }
             out
         };
+        self.resume_media_snapshot(worker_mgr, virtual_display, snapshot)
+            .await;
+    }
+
+    pub async fn resume_media_for_connections(
+        &self,
+        worker_mgr: &WorkerManager,
+        virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+        connection_ids: &[String],
+    ) {
+        let snapshot = {
+            let admissions = self.admissions.read().await;
+            connection_ids
+                .iter()
+                .map(|id| {
+                    (
+                        id.clone(),
+                        admissions
+                            .by_connection
+                            .get(id)
+                            .map(|record| record.class.clone()),
+                    )
+                })
+                .collect()
+        };
+        self.resume_media_snapshot(worker_mgr, virtual_display, snapshot)
+            .await;
+    }
+
+    async fn resume_media_snapshot(
+        &self,
+        worker_mgr: &WorkerManager,
+        virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+        snapshot: Vec<(String, Option<Admission>)>,
+    ) {
         for (id, admission) in snapshot {
             // Re-register the capability ceiling with the freshly spawned worker
             // before any media / terminal / file frame for this connection. A worker
@@ -1583,12 +1637,15 @@ impl PcRegistry {
             // than resume it uncapped (mirrors the admit path at `handle_request_remote`).
             if let Some(Admission::Capped(ceiling)) = admission.as_ref() {
                 if let Err(e) = worker_mgr
-                    .send_to_worker(ServiceToWorker::SetConnectionCeiling(
-                        desk_ipc_protocol::message::SetConnectionCeilingPayload {
-                            connection_id: id.clone(),
-                            ceiling: Some(ceiling.clone()),
-                        },
-                    ))
+                    .send_to_connection_worker(
+                        &id,
+                        ServiceToWorker::SetConnectionCeiling(
+                            desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                                connection_id: id.clone(),
+                                ceiling: Some(ceiling.clone()),
+                            },
+                        ),
+                    )
                     .await
                 {
                     log::warn!(
@@ -1632,16 +1689,19 @@ impl PcRegistry {
             };
             log::info!("[pc_manager] resume: re-issuing StartMedia + ForceKeyframe for {id}");
             if let Err(e) = worker_mgr
-                .send_to_worker(ServiceToWorker::StartMedia(payload))
+                .send_to_interactive_connection_worker(&id, ServiceToWorker::StartMedia(payload))
                 .await
             {
                 log::warn!("[pc_manager] resume StartMedia for {id} failed: {e}");
                 continue;
             }
             if let Err(e) = worker_mgr
-                .send_to_worker(ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
-                    connection_id: id.clone(),
-                }))
+                .send_to_interactive_connection_worker(
+                    &id,
+                    ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
+                        connection_id: id.clone(),
+                    }),
+                )
                 .await
             {
                 log::warn!("[pc_manager] resume ForceKeyframe for {id} failed: {e}");
@@ -1715,10 +1775,13 @@ impl PcRegistry {
              issuing StopMedia + StartMedia + ForceKeyframe"
         );
         if let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::StopMedia(StopMediaPayload {
-                connection_id: connection_id.to_string(),
-                connection_epoch: payload.connection_epoch.clone(),
-            }))
+            .send_to_interactive_connection_worker(
+                connection_id,
+                ServiceToWorker::StopMedia(StopMediaPayload {
+                    connection_id: connection_id.to_string(),
+                    connection_epoch: payload.connection_epoch.clone(),
+                }),
+            )
             .await
         {
             log::warn!(
@@ -1729,7 +1792,10 @@ impl PcRegistry {
         }
 
         if let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::StartMedia(payload))
+            .send_to_interactive_connection_worker(
+                connection_id,
+                ServiceToWorker::StartMedia(payload),
+            )
             .await
         {
             log::warn!(
@@ -1741,9 +1807,12 @@ impl PcRegistry {
             };
         }
         if let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
-                connection_id: connection_id.to_string(),
-            }))
+            .send_to_interactive_connection_worker(
+                connection_id,
+                ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
+                    connection_id: connection_id.to_string(),
+                }),
+            )
             .await
         {
             log::warn!(
@@ -1796,7 +1865,10 @@ impl PcRegistry {
         };
         drop(ctx);
         if let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::UpdateMediaSettings(payload))
+            .send_to_interactive_connection_worker(
+                connection_id,
+                ServiceToWorker::UpdateMediaSettings(payload),
+            )
             .await
         {
             log::warn!(
@@ -1843,7 +1915,10 @@ pub(crate) async fn send_cap_directive(
         show_mouse: None,
     };
     match worker_mgr
-        .send_to_worker(ServiceToWorker::UpdateMediaSettings(payload))
+        .send_to_interactive_connection_worker(
+            connection_id,
+            ServiceToWorker::UpdateMediaSettings(payload),
+        )
         .await
     {
         Ok(()) => {
@@ -1906,7 +1981,10 @@ fn spawn_rtcp_feedback_task(
                             let msg = ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
                                 connection_id: connection_id.clone(),
                             });
-                            if let Err(e) = worker_mgr.send_to_worker(msg).await {
+                            if let Err(e) = worker_mgr
+                                .send_to_interactive_connection_worker(&connection_id, msg)
+                                .await
+                            {
                                 log::warn!(
                                     "[RtcpReader] {connection_id}: ForceKeyframe IPC failed: {e}"
                                 );

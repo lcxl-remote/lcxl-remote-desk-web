@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { DisposeDeviceAssistantUnknownOutcomeMutationRequest, DisposeDeviceAssistantUnknownOutcomeMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { DisposeDeviceAssistantUnknownOutcomeMutationRequest, DisposeDeviceAssistantUnknownOutcomeMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { disposeDeviceAssistantUnknownOutcome } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const disposeDeviceAssistantUnknownOutcomeMutationKey = () => [{ url: '/api/my/device-assistant-session/outcome-unknown/dispose' }] as const
 

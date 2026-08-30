@@ -12,6 +12,15 @@ use lcxl_remote_desk_server::{
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+#[cfg(target_os = "linux")]
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(target_os = "linux")]
+use lcxl_remote_desk_server::host_control::{
+    EnvironmentEntryBase64, SESSION_SHELL_PROTOCOL_VERSION, SessionShellInfo,
+};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeBridgeEvent {
     Ready {
@@ -43,6 +52,7 @@ pub async fn run_ipc_loop(
     mut state_rx: Option<UnboundedReceiver<HostControlEventType>>,
     token_holder: Arc<Mutex<Option<String>>>,
     native_bridge_tx: std::sync::mpsc::Sender<NativeBridgeEvent>,
+    register_session_shell: bool,
 ) {
     let ws_url = format!("{daemon_ws_url}?token={ipc_token}");
 
@@ -76,6 +86,40 @@ pub async fn run_ipc_loop(
                     log::error!("[IpcClient] Failed to send Ready message");
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
+                }
+
+                if register_session_shell {
+                    #[cfg(target_os = "linux")]
+                    match collect_session_shell_info() {
+                        Ok(info) => {
+                            let message = HostControlMessage::SessionShellInfo { info };
+                            match serde_json::to_string(&message) {
+                                Ok(json) => {
+                                    if sink
+                                        .send(awc::ws::Message::Text(json.into()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        log::warn!(
+                                            "[IpcClient] Failed to send Linux session-shell registration"
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                        continue;
+                                    }
+                                }
+                                Err(error) => log::error!(
+                                    "[IpcClient] Failed to serialize Linux session-shell registration: {error}"
+                                ),
+                            }
+                        }
+                        Err(error) => log::error!(
+                            "[IpcClient] Cannot collect Linux session-shell context: {error}"
+                        ),
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    log::warn!(
+                        "[IpcClient] Session-shell registration requested on an unsupported platform"
+                    );
                 }
 
                 // Main select loop
@@ -187,6 +231,17 @@ fn handle_server_msg(
                 });
             }
         }
+        HostControlMessage::SessionShellRegistered {
+            registration_id,
+            registration_generation,
+        } => {
+            log::info!(
+                "[IpcClient] Linux session shell registered id={registration_id} generation={registration_generation}"
+            );
+        }
+        HostControlMessage::SessionShellRegistrationRejected { code } => {
+            log::error!("[IpcClient] Linux session-shell registration rejected: {code:?}");
+        }
         HostControlMessage::GlobalLocaleChanged { locale } => {
             if let Some(tx) = native_bridge_tx {
                 let _ = tx.send(NativeBridgeEvent::LocaleChanged { locale });
@@ -262,9 +317,73 @@ fn handle_server_msg(
         | HostControlMessage::PrivateScreenStateChangedToWorker { .. } => {}
         // Client → server frames; receiving is unexpected but harmless.
         HostControlMessage::Ready { .. }
+        | HostControlMessage::SessionShellInfo { .. }
         | HostControlMessage::PrivateScreenStateChanged { .. }
         | HostControlMessage::SecurityApprovalResolved { .. } => {}
     }
+}
+
+#[cfg(target_os = "linux")]
+fn collect_session_shell_info() -> Result<SessionShellInfo, String> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|error| format!("read /proc/self/status: {error}"))?;
+    let stat = std::fs::read_to_string("/proc/self/stat")
+        .map_err(|error| format!("read /proc/self/stat: {error}"))?;
+    let reported_uid = parse_effective_uid(&status)?;
+    let process_start_ticks = parse_process_start_ticks(&stat)?;
+    let umask = parse_umask(&status)?;
+    let cwd =
+        std::env::current_dir().map_err(|error| format!("read current directory: {error}"))?;
+    let environment = std::env::vars_os()
+        .map(|(key, value)| EnvironmentEntryBase64 {
+            key_base64: STANDARD.encode(key.as_os_str().as_bytes()),
+            value_base64: STANDARD.encode(value.as_os_str().as_bytes()),
+        })
+        .collect();
+
+    Ok(SessionShellInfo {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: SESSION_SHELL_PROTOCOL_VERSION,
+        pid: std::process::id(),
+        process_start_ticks,
+        reported_uid,
+        session_id: std::env::var("XDG_SESSION_ID").ok(),
+        seat: std::env::var("XDG_SEAT").ok(),
+        session_type: std::env::var("XDG_SESSION_TYPE").ok(),
+        cwd_base64: STANDARD.encode(cwd.as_os_str().as_bytes()),
+        umask,
+        environment,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_effective_uid(status: &str) -> Result<u32, String> {
+    status
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .and_then(|line| line.split_ascii_whitespace().nth(2))
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| "invalid Uid field in /proc/self/status".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_umask(status: &str) -> Result<u32, String> {
+    status
+        .lines()
+        .find(|line| line.starts_with("Umask:"))
+        .and_then(|line| line.split_ascii_whitespace().nth(1))
+        .and_then(|value| u32::from_str_radix(value, 8).ok())
+        .filter(|value| *value <= 0o777)
+        .ok_or_else(|| "invalid Umask field in /proc/self/status".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_process_start_ticks(stat: &str) -> Result<u64, String> {
+    stat.rfind(") ")
+        .and_then(|index| stat.get(index + 2..))
+        .and_then(|fields| fields.split_ascii_whitespace().nth(19))
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| "invalid start ticks in /proc/self/stat".to_string())
 }
 
 fn map_state_event(event: HostControlEventType) -> Option<HostControlMessage> {
@@ -298,6 +417,44 @@ fn map_state_event(event: HostControlEventType) -> Option<HostControlMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_fields_are_parsed_without_changing_umask() {
+        let status = "Name:\ttest\nUmask:\t0077\nUid:\t1000\t1001\t1002\t1003\n";
+        assert_eq!(parse_effective_uid(status).unwrap(), 1001);
+        assert_eq!(parse_umask(status).unwrap(), 0o077);
+
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[19] = "4242";
+        let stat = format!("12 (name with ) marker) {}", fields.join(" "));
+        assert_eq!(parse_process_start_ticks(&stat).unwrap(), 4242);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_session_shell_snapshot_is_byte_safe_and_current() {
+        let info = collect_session_shell_info().unwrap();
+        assert_eq!(info.pid, std::process::id());
+        assert_eq!(info.protocol_version, SESSION_SHELL_PROTOCOL_VERSION);
+        assert!(info.process_start_ticks > 0);
+        assert!(info.umask <= 0o777);
+        assert!(!STANDARD.decode(&info.cwd_base64).unwrap().is_empty());
+        assert!(!info.environment.is_empty());
+        for entry in &info.environment {
+            assert!(STANDARD.decode(&entry.key_base64).is_ok());
+            assert!(STANDARD.decode(&entry.value_base64).is_ok());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_parser_rejects_missing_or_out_of_range_values() {
+        assert!(parse_effective_uid("Name:\ttest\n").is_err());
+        assert!(parse_umask("Umask:\t1777\n").is_err());
+        assert!(parse_process_start_ticks("invalid").is_err());
+    }
 
     // Smoke test: build the message dispatch pipeline with no panics.
     // Ensures HostControlMessage <-> mpsc senders compile and route correctly.

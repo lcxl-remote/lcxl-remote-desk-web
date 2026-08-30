@@ -43,6 +43,7 @@ import { deskErrorCodeEnum, startupModeEnum, type StartupMode } from "@/services
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { deskErrorMessage, errorCodeOf, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
 import { useDeviceAssistantFileContext } from "./use-device-assistant-file-context"
+import { SessionTargetDialog } from "@/features/desk/session-target-selection"
 
 // File browse / delete rejections the host phrases as raw English. Only the
 // permission refusal gets a localized line: it is the one outcome whose backend
@@ -133,6 +134,8 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
         prepareTransfers,
         channelStatus,
         channelFailure,
+        sessionTargets,
+        selectSessionTarget,
     } = useFileTransfer(connectionId, orgId)
     const restricted = useRestrictedSession(connectionId)
     const canDelete = restricted.capabilityVisible("allow_file_delete")
@@ -358,6 +361,10 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
 
     return (
         <div className="space-y-4 h-full flex flex-col">
+            <SessionTargetDialog
+                targets={sessionTargets}
+                onSelect={selectSessionTarget}
+            />
             <div className="flex items-center justify-between px-4 py-2 border-b">
                 <div className="flex items-center gap-2 overflow-hidden">
                     <Button variant="outline" size="icon" onClick={() => navigate(`/desk/${connectionId}`)} title={t('pages.fileManager.backToDashboard')}>

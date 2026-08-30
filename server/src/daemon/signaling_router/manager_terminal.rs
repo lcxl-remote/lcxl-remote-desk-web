@@ -4,15 +4,19 @@ pub(super) async fn handle_manager_system_info_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
+    let connection_id = optional_from_connection_id(model);
     let payload = ManagerRequestRefPayload {
         request_id: model.request_id.clone(),
-        connection_id: optional_from_connection_id(model),
+        connection_id: connection_id.clone(),
     };
-    if let Err(e) = ctx
-        .worker_mgr
-        .send_to_worker(ServiceToWorker::GetSystemInfo(payload))
-        .await
-    {
+    let result = if let Some(connection_id) = connection_id.as_deref() {
+        ctx.worker_mgr
+            .send_to_connection_worker(connection_id, ServiceToWorker::GetSystemInfo(payload))
+            .await
+    } else {
+        Err("GetSystemInfo has no selected desktop session".to_string())
+    };
+    if let Err(e) = result {
         log::warn!("[router] failed to send typed GetSystemInfo: {e}");
     }
     Ok(())
@@ -49,7 +53,7 @@ pub(super) async fn handle_manager_file_list_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::ListFiles(payload))
+        .send_to_connection_worker(connection_id, ServiceToWorker::ListFiles(payload))
         .await
     {
         log::warn!("[router] failed to send typed ListFiles: {e}");
@@ -82,7 +86,7 @@ pub(super) async fn handle_manager_file_delete_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::DeleteFile(payload))
+        .send_to_connection_worker(connection_id, ServiceToWorker::DeleteFile(payload))
         .await
     {
         log::warn!("[router] failed to send typed DeleteFile: {e}");
@@ -132,6 +136,29 @@ pub(super) async fn handle_start_terminal_inbound(
             return Ok(());
         }
     };
+    let selected_session = match ctx.worker_mgr.resolve_session_target(
+        crate::daemon::session_target::SessionCapability::Terminal,
+        session.session_target_id.as_deref(),
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            emit_session_target_error(
+                ctx,
+                model,
+                crate::daemon::session_target::SessionCapability::Terminal,
+                error,
+            );
+            return Ok(());
+        }
+    };
+    if let Some(selected) = selected_session.as_ref()
+        && let Err(error) = ctx
+            .worker_mgr
+            .bind_connection_target(connection_id, selected)
+    {
+        emit_error_response(ctx, model, DeskErrorCode::INVALID_STATE, &error);
+        return Ok(());
+    }
     // The terminal WS is a distinct connection that never does a `RequestRemoteAccess`, so
     // this is its admission-establishing frame: register the connection's capability
     // ceiling + admission (+ grant index) from the validated stamp before shipping
@@ -139,6 +166,7 @@ pub(super) async fn handle_start_terminal_inbound(
     // enforces it from the very first terminal request. Fail-closed: a capped ceiling
     // that cannot reach the worker refuses the terminal (never starts it ceiling-less).
     if !register_terminal_admission(ctx, connection_id).await {
+        ctx.worker_mgr.clear_connection_target(connection_id);
         emit_error_response(
             ctx,
             model,
@@ -162,9 +190,10 @@ pub(super) async fn handle_start_terminal_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::StartTerminal(payload))
+        .send_to_connection_worker(connection_id, ServiceToWorker::StartTerminal(payload))
         .await
     {
+        ctx.worker_mgr.clear_connection_target(connection_id);
         log::warn!("[router] failed to send typed StartTerminal: {e}");
         emit_error_response(
             ctx,
@@ -211,12 +240,15 @@ pub(super) async fn register_terminal_admission(ctx: &RouterContext, connection_
             if let Some(ceiling) = authz.access_ceiling.as_ref() {
                 if let Err(e) = ctx
                     .worker_mgr
-                    .send_to_worker(ServiceToWorker::SetConnectionCeiling(
-                        desk_ipc_protocol::message::SetConnectionCeilingPayload {
-                            connection_id: connection_id.to_string(),
-                            ceiling: Some(ceiling.clone()),
-                        },
-                    ))
+                    .send_to_connection_worker(
+                        connection_id,
+                        ServiceToWorker::SetConnectionCeiling(
+                            desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                                connection_id: connection_id.to_string(),
+                                ceiling: Some(ceiling.clone()),
+                            },
+                        ),
+                    )
                     .await
                 {
                     log::warn!(
@@ -293,7 +325,7 @@ pub(super) async fn handle_send_data_to_terminal_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::SendTerminalInput(payload))
+        .send_to_connection_worker(connection_id, ServiceToWorker::SendTerminalInput(payload))
         .await
     {
         log::warn!("[router] failed to send typed SendTerminalInput: {e}");
@@ -326,7 +358,7 @@ pub(super) async fn handle_resize_terminal_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::ResizeTerminal(payload))
+        .send_to_connection_worker(connection_id, ServiceToWorker::ResizeTerminal(payload))
         .await
     {
         log::warn!("[router] failed to send typed ResizeTerminal: {e}");
@@ -346,7 +378,7 @@ pub(super) async fn handle_close_terminal_inbound(
     };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::CloseTerminal(payload))
+        .send_to_connection_worker(connection_id, ServiceToWorker::CloseTerminal(payload))
         .await
     {
         log::warn!("[router] failed to send typed CloseTerminal: {e}");
@@ -360,12 +392,15 @@ pub(super) async fn handle_close_terminal_inbound(
     if ctx.pc_registry.is_terminal_connection(connection_id).await {
         if let Err(e) = ctx
             .worker_mgr
-            .send_to_worker(ServiceToWorker::SetConnectionCeiling(
-                desk_ipc_protocol::message::SetConnectionCeilingPayload {
-                    connection_id: connection_id.to_string(),
-                    ceiling: None,
-                },
-            ))
+            .send_to_connection_worker(
+                connection_id,
+                ServiceToWorker::SetConnectionCeiling(
+                    desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                        connection_id: connection_id.to_string(),
+                        ceiling: None,
+                    },
+                ),
+            )
             .await
         {
             log::debug!(
@@ -379,6 +414,7 @@ pub(super) async fn handle_close_terminal_inbound(
         ctx.pc_registry
             .unmark_terminal_connection(connection_id)
             .await;
+        ctx.worker_mgr.clear_connection_target(connection_id);
     }
     Ok(())
 }

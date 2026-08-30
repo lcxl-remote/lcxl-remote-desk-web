@@ -18,9 +18,16 @@ pub(super) async fn run_pipe_server(
     ipc_token: Option<String>,
     pc_registry: PcRegistry,
     file_sender_slot: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>>,
+    worker_identity: Option<WorkerIdentity>,
+    transport_ready_tx: oneshot::Sender<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pipe_path = format!(r"\\.\pipe\{}", pipe_name);
     let incarnation = msg_tx.incarnation();
+    let worker_key = msg_tx.worker_key().cloned();
+    let worker_profile = worker_identity
+        .as_ref()
+        .map_or(WorkerProfile::SessionUser, |identity| identity.profile);
+    let restricted = worker_profile == WorkerProfile::RestrictedDesktop;
     info!("Creating Named Pipe server for worker {incarnation}: {pipe_path}");
 
     // Look up the SID owning the target session so the pipe ACL grants
@@ -59,9 +66,18 @@ pub(super) async fn run_pipe_server(
     // running independent of event + media so SCTP backpressure on a
     // slow browser DC propagates end-to-end without HOL-blocking
     // heartbeat or signaling.
-    let file_pipe_name = format!("{pipe_name}-file");
-    let file_pipe_path = format!(r"\\.\pipe\{file_pipe_name}");
-    let file_server = create_named_pipe_with_sddl(&file_pipe_path, &sddl_str)?;
+    let (file_pipe_name, file_pipe_path, file_server) = if restricted {
+        (None, None, None)
+    } else {
+        let name = format!("{pipe_name}-file");
+        let path = format!(r"\\.\pipe\{name}");
+        let server = create_named_pipe_with_sddl(&path, &sddl_str)?;
+        (Some(name), Some(path), Some(server))
+    };
+
+    // Publish readiness only after every mandatory lane exists, before the
+    // worker process is allowed to dial any of them.
+    let _ = transport_ready_tx.send(());
 
     let desktop_name_copy = desktop_name.clone();
 
@@ -70,12 +86,22 @@ pub(super) async fn run_pipe_server(
         Ok(Ok(())) => info!("Worker connected"),
         Ok(Err(e)) => {
             error!("Pipe connection error for {pipe_path}: {e}");
-            worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
+            worker_mgr.handle_worker_transport_failure(
+                worker_key.clone(),
+                incarnation,
+                session_id,
+                desktop_name_copy,
+            );
             return Ok(());
         }
         Err(_) => {
             warn!("Timed out waiting for worker to connect on {pipe_path}; triggering recovery");
-            worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
+            worker_mgr.handle_worker_transport_failure(
+                worker_key.clone(),
+                incarnation,
+                session_id,
+                desktop_name_copy,
+            );
             return Ok(());
         }
     }
@@ -91,25 +117,26 @@ pub(super) async fn run_pipe_server(
     write_message(
         &mut writer,
         &ServiceToWorker::Init(WorkerInitPayload {
+            worker_identity,
             session_id: format!("session-{session_id}"),
             os_session_id: session_id,
             desktop_name,
             config_json,
-            log_dir: Some(log_dir),
-            data_dir: Some(data_dir),
+            log_dir: (!restricted).then_some(log_dir),
+            data_dir: (!restricted).then_some(data_dir),
             signaling_url: None,
-            auth_token: ipc_token,
-            host_upstream_url: Some(host_upstream_url),
+            auth_token: (!restricted).then_some(ipc_token).flatten(),
+            host_upstream_url: (!restricted).then_some(host_upstream_url),
             media_pipe_name: Some(media_pipe_name.clone()),
-            file_pipe_name: Some(file_pipe_name.clone()),
+            file_pipe_name: file_pipe_name.clone(),
             remote_access_locked: remote_access_state.is_locked(),
             remote_access_state_version: remote_access_state.state_version,
         }),
     )
     .await?;
     info!(
-        "Sent Init to Worker (media_pipe_name={}, file_pipe_name={})",
-        media_pipe_name, file_pipe_name
+        "Sent Init to {:?} Worker (media_pipe_name={}, file_pipe_name={:?})",
+        worker_profile, media_pipe_name, file_pipe_name
     );
 
     // Wait for the worker to dial back on the media pipe. The connect
@@ -146,13 +173,16 @@ pub(super) async fn run_pipe_server(
             }
         };
 
-    // Wait for the worker to dial back on the file pipe. Unlike media,
+    // Wait for a SessionUser worker to dial back on the file pipe.
+    // RestrictedDesktop has no file pipe by construction. For SessionUser,
     // the file lane is mandatory: file_transfer is the only way the
     // browser's file UI talks to the host worker, and routing it onto
     // the event lane on failure would silently restore the HOL bug
     // fix-2026-05-05 was supposed to prevent. On accept failure we
     // surface a warning and drop into recovery rather than degrading.
-    let file_drain_handle =
+    let file_drain_handle = if let (Some(file_server), Some(file_pipe_path)) =
+        (file_server, file_pipe_path.as_deref())
+    {
         match tokio::time::timeout(Duration::from_secs(15), file_server.connect()).await {
             Ok(Ok(())) => {
                 info!("Worker connected on file pipe {file_pipe_path}");
@@ -178,7 +208,12 @@ pub(super) async fn run_pipe_server(
                     "File pipe connect failed for {file_pipe_path}: {e}; \
                  dropping into recovery (no file lane = no file transfer)"
                 );
-                worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
+                worker_mgr.handle_worker_transport_failure(
+                    worker_key.clone(),
+                    incarnation,
+                    session_id,
+                    desktop_name_copy,
+                );
                 return Ok(());
             }
             Err(_) => {
@@ -186,10 +221,18 @@ pub(super) async fn run_pipe_server(
                     "Timed out waiting for worker on file pipe {file_pipe_path}; \
                  dropping into recovery"
                 );
-                worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
+                worker_mgr.handle_worker_transport_failure(
+                    worker_key.clone(),
+                    incarnation,
+                    session_id,
+                    desktop_name_copy,
+                );
                 return Ok(());
             }
-        };
+        }
+    } else {
+        None
+    };
 
     // Keep-PC semantics: browser-facing `SignalingType::DesktopReady` is
     // not emitted on worker (re)spawn. The browser's WebRTC PC stays up
@@ -198,7 +241,15 @@ pub(super) async fn run_pipe_server(
     // `Capabilities` to re-issue cached `StartMedia` + `ForceKeyframe`,
     // and the per-PC `media_paused` flag clears on the first IDR.
 
-    let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, pipe_name).await;
+    let expected = bridge_loop_with_profile(
+        reader,
+        writer,
+        &mut cmd_rx,
+        &msg_tx,
+        pipe_name,
+        worker_profile,
+    )
+    .await;
     info!("Pipe server for {pipe_name} exiting");
 
     // Stop the auxiliary readers so their tasks don't keep a reference
@@ -215,7 +266,12 @@ pub(super) async fn run_pipe_server(
     *file_sender_slot.write().await = None;
 
     if !expected {
-        worker_mgr.handle_crash_recovery(incarnation, session_id, desktop_name_copy);
+        worker_mgr.handle_worker_transport_failure(
+            worker_key,
+            incarnation,
+            session_id,
+            desktop_name_copy,
+        );
     }
 
     Ok(())

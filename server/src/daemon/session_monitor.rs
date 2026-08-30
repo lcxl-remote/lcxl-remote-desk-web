@@ -1,6 +1,26 @@
 use super::worker_manager::WorkerManager;
-use log::{error, info};
+use log::info;
+#[cfg(target_os = "windows")]
+use log::{error, warn};
 use std::time::Duration;
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsSessionRegistration {
+    pub session: desk_ipc_protocol::message::SessionKey,
+    pub session_id: u32,
+    pub display_name: String,
+    pub station_name: String,
+    pub foreground: bool,
+}
+
+#[cfg(target_os = "windows")]
+pub fn windows_resident_pool_enabled() -> bool {
+    std::env::var("LRD_EXPERIMENTAL_WINDOWS_RESIDENT_WORKERS")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
 
 pub async fn run_session_monitor(
     worker_mgr: WorkerManager,
@@ -26,6 +46,9 @@ pub async fn run_session_monitor(
 async fn run_windows_session_monitor(
     worker_mgr: WorkerManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if windows_resident_pool_enabled() {
+        return run_windows_resident_session_monitor(worker_mgr).await;
+    }
     let mut last_desktop_name = String::new();
     let poll_interval = Duration::from_secs(1);
 
@@ -67,6 +90,145 @@ async fn run_windows_session_monitor(
         }
 
         last_desktop_name = current_desktop;
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn run_windows_resident_session_monitor(
+    worker_mgr: WorkerManager,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+
+    info!("experimental Windows resident-session worker monitor starting");
+    let mut tracked: HashMap<u32, (String, u64)> = HashMap::new();
+    let mut next_generation = 1u64;
+    loop {
+        let observed = match enumerate_schedulable_windows_sessions() {
+            Ok(observed) => observed,
+            Err(error) => {
+                warn!("Windows session enumeration failed; retaining current workers: {error}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        let mut registrations = Vec::with_capacity(observed.len());
+        let mut next_tracked = HashMap::new();
+        for observed in observed {
+            let generation = match tracked.get(&observed.session_id) {
+                Some((user, generation)) if user == &observed.user => *generation,
+                _ => {
+                    let generation = next_generation;
+                    next_generation = next_generation.saturating_add(1);
+                    generation
+                }
+            };
+            next_tracked.insert(observed.session_id, (observed.user.clone(), generation));
+            registrations.push(WindowsSessionRegistration {
+                session: desk_ipc_protocol::message::SessionKey {
+                    platform_session_id: observed.session_id.to_string(),
+                    session_generation: generation,
+                },
+                session_id: observed.session_id,
+                display_name: format!("{} (session {})", observed.user, observed.session_id),
+                station_name: observed.station_name,
+                foreground: observed.foreground,
+            });
+        }
+        tracked = next_tracked;
+        worker_mgr
+            .reconcile_windows_resident_workers(registrations)
+            .await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct ObservedWindowsSession {
+    session_id: u32,
+    user: String,
+    station_name: String,
+    foreground: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_schedulable_windows_sessions() -> Result<Vec<ObservedWindowsSession>, String> {
+    use windows::Win32::System::RemoteDesktop::{
+        WTS_CURRENT_SERVER_HANDLE, WTSActive, WTSConnected, WTSDomainName, WTSEnumerateSessionsW,
+        WTSFreeMemory, WTSGetActiveConsoleSessionId, WTSQuerySessionInformationW, WTSUserName,
+        WTSWinStationName,
+    };
+    use windows::core::PWSTR;
+
+    unsafe fn query(
+        session_id: u32,
+        class: windows::Win32::System::RemoteDesktop::WTS_INFO_CLASS,
+    ) -> Option<String> {
+        let mut buffer = PWSTR::null();
+        let mut bytes = 0u32;
+        if unsafe {
+            WTSQuerySessionInformationW(
+                Some(WTS_CURRENT_SERVER_HANDLE),
+                session_id,
+                class,
+                &mut buffer,
+                &mut bytes,
+            )
+        }
+        .is_err()
+            || buffer.is_null()
+        {
+            return None;
+        }
+        let len = (bytes as usize / 2).saturating_sub(1);
+        let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(buffer.0, len) });
+        unsafe { WTSFreeMemory(buffer.0.cast()) };
+        Some(value)
+    }
+
+    unsafe {
+        let mut session_info_ptr = std::ptr::null_mut();
+        let mut count = 0u32;
+        if WTSEnumerateSessionsW(
+            Some(WTS_CURRENT_SERVER_HANDLE),
+            0,
+            1,
+            &mut session_info_ptr,
+            &mut count,
+        )
+        .is_err()
+            || session_info_ptr.is_null()
+        {
+            return Err("WTSEnumerateSessionsW returned no snapshot".to_string());
+        }
+        let active_console = WTSGetActiveConsoleSessionId();
+        let mut result = Vec::new();
+        for session in std::slice::from_raw_parts(session_info_ptr, count as usize) {
+            if session.SessionId == 0
+                || (session.State != WTSActive && session.State != WTSConnected)
+            {
+                continue;
+            }
+            let Some(user_name) =
+                query(session.SessionId, WTSUserName).filter(|name| !name.trim().is_empty())
+            else {
+                continue;
+            };
+            let domain = query(session.SessionId, WTSDomainName).unwrap_or_default();
+            let user = if domain.trim().is_empty() {
+                user_name
+            } else {
+                format!(r"{domain}\{user_name}")
+            };
+            result.push(ObservedWindowsSession {
+                session_id: session.SessionId,
+                user,
+                station_name: query(session.SessionId, WTSWinStationName)
+                    .unwrap_or_else(|| "WinSta0".to_string()),
+                foreground: session.SessionId == active_console || session.State == WTSActive,
+            });
+        }
+        WTSFreeMemory(session_info_ptr.cast());
+        Ok(result)
     }
 }
 

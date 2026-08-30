@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { InitRequirementsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { InitRequirementsQueryResponse } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { initRequirements } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const initRequirementsQueryKey = () => [{ url: '/api/init/requirements' }] as const
 

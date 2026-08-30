@@ -50,6 +50,17 @@ fn exec_spawn_report_round_trips() {
 #[test]
 fn worker_init_payload_round_trip_with_host_upstream_fields() {
     let original = WorkerInitPayload {
+        worker_identity: Some(WorkerIdentity {
+            key: WorkerKey {
+                session: SessionKey {
+                    platform_session_id: "wts:7".to_string(),
+                    session_generation: 3,
+                },
+                desktop: DesktopTarget::WindowsDefault,
+            },
+            profile: WorkerProfile::SessionUser,
+            incarnation: 11,
+        }),
         session_id: "session-1".to_string(),
         os_session_id: 7,
         desktop_name: Some("Default".to_string()),
@@ -67,6 +78,7 @@ fn worker_init_payload_round_trip_with_host_upstream_fields() {
     let json = serde_json::to_string(&original).unwrap();
     let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.session_id, original.session_id);
+    assert_eq!(decoded.worker_identity, original.worker_identity);
     assert_eq!(decoded.os_session_id, original.os_session_id);
     assert_eq!(decoded.auth_token, original.auth_token);
     assert_eq!(decoded.host_upstream_url, original.host_upstream_url);
@@ -82,6 +94,7 @@ fn worker_init_payload_round_trip_with_host_upstream_fields() {
 fn desktop_changed_round_trips() {
     let msg = WorkerToService::DesktopChanged(DesktopChangedPayload {
         name: "Winlogon".to_string(),
+        observed_at_unix_ms: 42,
     });
     let json = serde_json::to_string(&msg).unwrap();
     let decoded: WorkerToService = serde_json::from_str(&json).unwrap();
@@ -110,6 +123,43 @@ fn worker_init_payload_accepts_missing_optional_fields() {
     assert!(decoded.auth_token.is_none());
     assert!(decoded.media_pipe_name.is_none());
     assert!(decoded.file_pipe_name.is_none());
+    assert!(decoded.worker_identity.is_none());
+}
+
+#[test]
+fn worker_identity_round_trips_wincode() {
+    let identity = WorkerIdentity {
+        key: WorkerKey {
+            session: SessionKey {
+                platform_session_id: "linux:seat0:2".to_string(),
+                session_generation: 17,
+            },
+            desktop: DesktopTarget::LinuxSession,
+        },
+        profile: WorkerProfile::SessionUser,
+        incarnation: 99,
+    };
+    let message = ServiceToWorker::Init(WorkerInitPayload {
+        worker_identity: Some(identity.clone()),
+        session_id: "session-2".to_string(),
+        os_session_id: 0,
+        desktop_name: None,
+        config_json: "{}".to_string(),
+        log_dir: None,
+        data_dir: None,
+        signaling_url: None,
+        auth_token: None,
+        host_upstream_url: None,
+        media_pipe_name: None,
+        file_pipe_name: None,
+        remote_access_locked: false,
+        remote_access_state_version: 1,
+    });
+
+    match wincode_round_trip(&message) {
+        ServiceToWorker::Init(decoded) => assert_eq!(decoded.worker_identity, Some(identity)),
+        other => panic!("expected Init, got {other:?}"),
+    }
 }
 
 // ============== IPC variants — wincode round-trips ==============
@@ -794,6 +844,7 @@ fn start_terminal_round_trips_wincode() {
         request_id: "req-start".to_string(),
         connection_id: "conn-term".to_string(),
         session: StartTerminalSession {
+            session_target_id: None,
             command: "C:\\Windows\\System32\\cmd.exe,/k,echo,hello".to_string(),
             device_id: None,
             grant_session_id: None,
@@ -1089,6 +1140,7 @@ fn wayland_portal_commands_and_status_keep_operation_fencing() {
 fn service_to_worker_all_variants_round_trip() {
     let cases: Vec<ServiceToWorker> = vec![
         ServiceToWorker::Init(WorkerInitPayload {
+            worker_identity: None,
             session_id: "s".to_string(),
             os_session_id: 1,
             desktop_name: Some("Default".to_string()),
@@ -1204,6 +1256,7 @@ fn service_to_worker_all_variants_round_trip() {
             request_id: "r6".to_string(),
             connection_id: "c".to_string(),
             session: StartTerminalSession {
+                session_target_id: None,
                 command: "cmd.exe".to_string(),
                 device_id: None,
                 grant_session_id: None,
@@ -1480,6 +1533,7 @@ fn worker_to_service_all_variants_round_trip() {
         }),
         WorkerToService::DesktopChanged(DesktopChangedPayload {
             name: "Default".to_string(),
+            observed_at_unix_ms: 42,
         }),
         WorkerToService::Error(ErrorPayload {
             code: -1,
@@ -2433,4 +2487,28 @@ fn agent_capability_completed_round_trips_wincode_both_arms() {
         }
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+#[test]
+fn restricted_desktop_profile_has_no_session_user_protocol_surface() {
+    let restricted = WorkerProfile::RestrictedDesktop;
+    assert!(ServiceToWorker::RefreshCapabilities.allowed_for_profile(restricted));
+    assert!(ServiceToWorker::Shutdown.allowed_for_profile(restricted));
+    assert!(!ServiceToWorker::DetachVirtualDisplay.allowed_for_profile(restricted));
+    assert!(
+        !ServiceToWorker::InvokeAgentCapability(AgentRequestPayload {
+            request_id: "restricted-negative".to_string(),
+            connection_id: Some("conn-1".to_string()),
+            envelope: sample_readonly_agent_envelope(),
+        })
+        .allowed_for_profile(restricted)
+    );
+
+    assert!(WorkerToService::Ready.allowed_for_profile(restricted));
+    assert!(
+        !WorkerToService::ComputerUseReadinessUpdated(ComputerUseReadinessPayload {
+            readiness: sample_computer_use_readiness(),
+        })
+        .allowed_for_profile(restricted)
+    );
 }

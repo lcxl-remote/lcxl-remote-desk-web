@@ -201,7 +201,9 @@ pub(super) fn spawn_file_transfer_writer_task(
                             kind,
                             error: e.to_string(),
                         });
-                    if let Err(send_err) = mgr.send_to_worker(notify).await {
+                    if let Err(send_err) =
+                        mgr.send_to_connection_worker(&connection_id, notify).await
+                    {
                         log::debug!(
                             "[pc_manager] {connection_id}: could not deliver \
                              FileTransferSendFailed to worker: {send_err}"

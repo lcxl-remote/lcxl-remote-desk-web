@@ -1455,5 +1455,9 @@ export default {
   'hostAccess.followUpAccount': '如果登录会话可能泄露，请退出其他会话或修改账号密码。',
   'hostAccess.followUpToken': '撤销可能已经泄露的 API 令牌或 Manager 令牌。',
   'hostAccess.followUpCode': '设备码可能泄露时请重新生成；支持码可能泄露时请撤销。',
+  'pages.sessionTarget.title': '选择桌面会话',
+  'pages.sessionTarget.description': '当前有多个可用桌面，请选择本次操作要使用的桌面。',
+  'pages.sessionTarget.desktop': '桌面会话',
+  'pages.sessionTarget.unavailable': '所选桌面已不可用，请重新选择可用桌面。',
   'common.unknownError': '未知错误',
 };

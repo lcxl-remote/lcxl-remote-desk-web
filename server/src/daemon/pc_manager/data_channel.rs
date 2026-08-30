@@ -313,7 +313,10 @@ fn install_browser_dc_message_forwarder(
                         is_text,
                         transfer_id: None,
                     };
-                    if let Err(e) = worker_mgr.send_file_to_worker(payload).await {
+                    if let Err(e) = worker_mgr
+                        .send_file_to_connection_worker(&connection_id, payload)
+                        .await
+                    {
                         // Possible causes: worker not yet up (file lane
                         // not yet ready) or peer crashed mid-stream.
                         // Either way the browser's SCTP timeout will
@@ -327,7 +330,19 @@ fn install_browser_dc_message_forwarder(
                     return;
                 }
                 let svc_msg = route_to_service_msg(route, &connection_id, bytes);
-                if let Err(e) = worker_mgr.send_to_worker(svc_msg).await {
+                let result = if matches!(
+                    route,
+                    DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard
+                ) {
+                    worker_mgr
+                        .send_to_interactive_connection_worker(&connection_id, svc_msg)
+                        .await
+                } else {
+                    worker_mgr
+                        .send_to_connection_worker(&connection_id, svc_msg)
+                        .await
+                };
+                if let Err(e) = result {
                     log::warn!(
                         "[DcRouter] {connection_id}: failed to forward {route:?} to worker: {e}"
                     );

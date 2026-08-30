@@ -9,7 +9,10 @@ use desk_signal_facade::model::{
         AudioEncoderId, AudioPipelineSettings, RemoteSessionSettings, RemoteSessionSettingsApplied,
         SuggestedSessionSettings, SystemAudioCaptureStateData,
     },
-    signal::{RemoteAccessInitializedData, RequestRemoteModel, SignalingModel},
+    signal::{
+        RemoteAccessInitializedData, RequestRemoteModel, SessionTargetDescriptor,
+        SessionTargetListData, SignalingModel,
+    },
     terminal::{TerminalInputData, TerminalOutputData, TerminalResizeData},
 };
 use desk_turn::model::{TurnInterface, TurnSettings};
@@ -31,6 +34,8 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
 #[openapi(components(schemas(
     SignalingModel,
     RequestRemoteModel,
+    SessionTargetDescriptor,
+    SessionTargetListData,
     RemoteAccessInitializedData,
     DeskSettings,
     KeyboardEventData,

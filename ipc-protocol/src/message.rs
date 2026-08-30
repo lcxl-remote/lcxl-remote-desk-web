@@ -269,6 +269,39 @@ pub enum ServiceToWorker {
     CancelWaylandPortal(CancelWaylandPortalPayload),
 }
 
+impl ServiceToWorker {
+    /// Protocol-level capability ceiling for a resident worker profile. A
+    /// restricted Winlogon worker is intentionally unable to receive any
+    /// session-user resource operation even if a daemon routing bug selects it.
+    pub fn allowed_for_profile(&self, profile: WorkerProfile) -> bool {
+        match profile {
+            WorkerProfile::SessionUser => true,
+            WorkerProfile::RestrictedDesktop => {
+                matches!(
+                    self,
+                    Self::Init(_)
+                        | Self::Shutdown
+                        | Self::SetRemoteAccessState(_)
+                        | Self::StartMedia(_)
+                        | Self::StopMedia(_)
+                        | Self::SetConnectionCeiling(_)
+                        | Self::UpdateMediaSettings(_)
+                        | Self::ForceKeyframe(_)
+                        | Self::MouseInput(_)
+                        | Self::MouseMoveInput(_)
+                        | Self::KeyboardInput(_)
+                        | Self::RefreshCapabilities
+                        | Self::SetLocale(_)
+                        | Self::UpdateSecurityPolicy(_)
+                ) || matches!(
+                    self,
+                    Self::ApplyMediaSettings(payload) if payload.media_kind == MediaKind::Video
+                )
+            }
+        }
+    }
+}
+
 /// Messages sent from Worker process to Service Core (daemon) over the
 /// **event** transport.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
@@ -496,6 +529,78 @@ pub enum WorkerToService {
     /// daemon can store it, so the worker forwards the answer along with the
     /// capability's stamp from when the prompt went out.
     RememberSecurityDecision(RememberSecurityDecisionPayload),
+}
+
+impl WorkerToService {
+    /// Reverse-lane companion to [`ServiceToWorker::allowed_for_profile`].
+    /// Media bytes are separately fenced by the daemon's active route; this
+    /// allowlist covers the reliable event lane.
+    pub fn allowed_for_profile(&self, profile: WorkerProfile) -> bool {
+        match profile {
+            WorkerProfile::SessionUser => true,
+            WorkerProfile::RestrictedDesktop => matches!(
+                self,
+                Self::Ready
+                    | Self::Capabilities(_)
+                    | Self::Heartbeat(_)
+                    | Self::DesktopChanged(_)
+                    | Self::Error(_)
+                    | Self::CursorData(_)
+                    | Self::MediaPipelineState(_)
+                    | Self::AudioPipelineStateChanged(_)
+                    | Self::MediaSettingsApplied(_)
+                    | Self::RemoteAccessStateApplied(_)
+                    | Self::LocaleApplied(_)
+                    | Self::SecurityPolicyApplied(_)
+            ),
+        }
+    }
+
+    /// Connection anchor for outputs that belong to one browser/task. Resident
+    /// worker routing uses this before any payload can affect daemon state or an
+    /// outbound websocket. `None` means process/global lifecycle state.
+    pub fn connection_id(&self) -> Option<&str> {
+        match self {
+            Self::SignalingError(payload) => Some(&payload.connection_id),
+            Self::Error(payload) => payload.connection_id.as_deref(),
+            Self::ClipboardRead(payload) => Some(&payload.connection_id),
+            Self::CursorData(payload) => Some(&payload.connection_id),
+            Self::FileManagerOpened(payload) => Some(&payload.connection_id),
+            Self::FileTransferStarted(payload) => Some(&payload.connection_id),
+            Self::FileTransferFinished(payload) => Some(&payload.connection_id),
+            Self::PrivateScreenStateChanged(payload) => Some(&payload.connection_id),
+            Self::MediaPipelineState(payload) => Some(&payload.connection_id),
+            Self::AudioPipelineStateChanged(payload) => Some(&payload.connection_id),
+            Self::MediaSettingsApplied(payload) => Some(&payload.connection_id),
+            Self::SystemInfoRetrieved(payload) => payload.connection_id.as_deref(),
+            Self::FilesListed(payload) => payload.connection_id.as_deref(),
+            Self::FileDeleted(payload) => payload.connection_id.as_deref(),
+            Self::TerminalStarted(payload) => Some(&payload.connection_id),
+            Self::TerminalClosed(payload) => Some(&payload.connection_id),
+            Self::TerminalOutputProduced(payload) => Some(&payload.connection_id),
+            Self::TerminalCommandsListed(payload) => payload.connection_id.as_deref(),
+            Self::VirtualDisplayMode(payload) => Some(&payload.connection_id),
+            Self::AgentCapabilityCompleted(payload) => payload.connection_id.as_deref(),
+            Self::ComputerActionStarted(payload) => payload.connection_id.as_deref(),
+            Self::ComputerActionCompleted(payload) => payload.connection_id.as_deref(),
+            Self::ComputerActionStateReported(payload) => payload.connection_id.as_deref(),
+            Self::ExecutionCompleted(payload) => payload.connection_id.as_deref(),
+            Self::ExecSpawnReport(payload) => payload.connection_id.as_deref(),
+            Self::ExecHeartbeat(payload) => payload.connection_id.as_deref(),
+            Self::Ready
+            | Self::Capabilities(_)
+            | Self::WaylandPortalStatus(_)
+            | Self::Heartbeat(_)
+            | Self::DesktopChanged(_)
+            | Self::VirtualDisplayAttachResult(_)
+            | Self::ExclusiveResult(_)
+            | Self::ComputerUseReadinessUpdated(_)
+            | Self::RemoteAccessStateApplied(_)
+            | Self::LocaleApplied(_)
+            | Self::SecurityPolicyApplied(_)
+            | Self::RememberSecurityDecision(_) => None,
+        }
+    }
 }
 
 mod agent;

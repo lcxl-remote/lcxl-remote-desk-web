@@ -32,6 +32,11 @@ import {
     type AssistantTerminalObjectRef,
     useDeviceAssistantTerminalContext,
 } from './use-device-assistant-terminal-context'
+import {
+    SessionTargetDialog,
+    parseSessionTargetList,
+    type SessionTargetDescriptor,
+} from '@/features/desk/session-target-selection'
 
 // Max bytes of recent terminal scrollback kept as a non-authoritative copilot
 // prompt hint (the server re-redacts and re-caps it). Bounded so the ring buffer
@@ -58,6 +63,9 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
     const resizeObserverRef = useRef<ResizeObserver | null>(null)
     const terminalStarted = useRef<boolean>(false)
     const heartbeatTimerRef = useRef<number | null>(null)
+    const sessionTargetIdRef = useRef<string | undefined>(undefined)
+    const resumeSessionTargetRef = useRef<((targetId: string) => void) | null>(null)
+    const [sessionTargets, setSessionTargets] = useState<SessionTargetDescriptor[]>([])
     const { markStarted: markTerminalStarted, markClosed: markTerminalClosed } = useTerminalSessionGuard()
 
     // Copilot: a control-plane signaling connection (separate from the terminal
@@ -274,7 +282,11 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
 
             const connectWS = () => {
                 try {
-                    ws = new WebSocket(url.toString());
+                    const connectUrl = new URL(url.toString());
+                    if (sessionTargetIdRef.current) {
+                        connectUrl.searchParams.set("session_target_id", sessionTargetIdRef.current);
+                    }
+                    ws = new WebSocket(connectUrl.toString());
                     socketRef.current = ws;
 
                     ws.onopen = () => {
@@ -307,6 +319,31 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                             try {
                                 const msg = JSON.parse(event.data)
                                 if (
+                                    !terminalStarted.current
+                                    && (
+                                        msg.response_state?.error_code
+                                            === deskErrorCodeEnum.SESSION_SELECTION_REQUIRED
+                                        || msg.response_state?.error_code
+                                            === deskErrorCodeEnum.SESSION_TARGET_STALE
+                                    )
+                                ) {
+                                    const list = parseSessionTargetList(msg.signaling_data)
+                                    sessionTargetIdRef.current = undefined
+                                    ws!.onclose = null
+                                    ws!.close()
+                                    setIsConnected(false)
+                                    if (list?.targets.length) {
+                                        setSessionTargets(list.targets)
+                                        resumeSessionTargetRef.current = (targetId) => {
+                                            if (disposed) return
+                                            sessionTargetIdRef.current = targetId
+                                            setSessionTargets([])
+                                            connectWS()
+                                        }
+                                    } else {
+                                        term.write(`\r\n\x1b[31m${t('pages.sessionTarget.unavailable')}\x1b[0m\r\n`)
+                                    }
+                                } else if (
                                     msg.signaling_type === SIGNALING_TYPE_CODE_ERROR
                                     && !terminalStarted.current
                                     && msg.response_state?.error_code === deskErrorCodeEnum.ACTION_NEED_RETRY
@@ -480,6 +517,8 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
         return () => {
             console.log("Cleaning up terminal session")
             disposed = true;
+            resumeSessionTargetRef.current = null
+            setSessionTargets([])
             terminalStarted.current = false
             markTerminalClosed()
             clearTimeout(connectTimer);
@@ -507,8 +546,18 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
         }
     }, [connectionId, deviceId, command, onClose, t, markTerminalStarted, markTerminalClosed])
 
+    const selectSessionTarget = useCallback((targetId: string) => {
+        const resume = resumeSessionTargetRef.current
+        resumeSessionTargetRef.current = null
+        resume?.(targetId)
+    }, [])
+
     return (
         <div className="h-full w-full flex bg-[#1e1e1e] overflow-hidden">
+            <SessionTargetDialog
+                targets={sessionTargets}
+                onSelect={selectSessionTarget}
+            />
             <div className="relative flex-1 flex flex-col overflow-hidden">
                 <div className="absolute top-2 right-4 z-10 flex gap-2">
                     <Button

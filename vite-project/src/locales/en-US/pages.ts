@@ -1467,5 +1467,9 @@ export default {
   'hostAccess.followUpAccount': 'Sign out or change the account password if a login session may be exposed.',
   'hostAccess.followUpToken': 'Revoke any API or manager token that may have leaked.',
   'hostAccess.followUpCode': 'Regenerate a device code or revoke a support code if that code was exposed.',
+  'pages.sessionTarget.title': 'Choose a desktop session',
+  'pages.sessionTarget.description': 'More than one desktop is available. Choose which desktop this operation should use.',
+  'pages.sessionTarget.desktop': 'Desktop session',
+  'pages.sessionTarget.unavailable': 'The selected desktop is no longer available. Choose an available desktop and try again.',
   'common.unknownError': 'Unknown error',
 };

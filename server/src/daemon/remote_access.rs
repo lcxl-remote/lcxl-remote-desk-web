@@ -636,24 +636,34 @@ impl RemoteAccessCoordinator {
             state_version: state.state_version,
             locked: state.is_locked(),
         };
+        let mut resident_apply_error = None;
         if let Err(first_error) = runtime
             .worker_manager
             .apply_remote_access_state(payload.clone(), WORKER_STATE_ACK_TIMEOUT)
             .await
         {
-            log::warn!(
-                "Worker did not apply remote-access state; recycling it before retry: {first_error}"
-            );
-            runtime
-                .worker_manager
-                .recycle_for_remote_access_timeout()
-                .await
-                .map_err(anyhow::Error::msg)?;
-            runtime
-                .worker_manager
-                .apply_remote_access_state(payload, RESTARTED_WORKER_STATE_ACK_TIMEOUT)
-                .await
-                .map_err(anyhow::Error::msg)?;
+            if runtime.worker_manager.uses_session_targeting() {
+                // A resident pool cannot be repaired by replacing the legacy
+                // global worker. Failed residents were removed from readiness
+                // by the broadcast path; still finish the daemon-side lock and
+                // disconnect work before reporting the incomplete convergence.
+                log::error!("Not every resident worker applied remote-access state: {first_error}");
+                resident_apply_error = Some(first_error);
+            } else {
+                log::warn!(
+                    "Worker did not apply remote-access state; recycling it before retry: {first_error}"
+                );
+                runtime
+                    .worker_manager
+                    .recycle_for_remote_access_timeout()
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                runtime
+                    .worker_manager
+                    .apply_remote_access_state(payload, RESTARTED_WORKER_STATE_ACK_TIMEOUT)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+            }
         }
         if close_connections {
             for connection_id in runtime.pc_registry.all_connection_ids().await {
@@ -673,6 +683,9 @@ impl RemoteAccessCoordinator {
             if let Some(hub) = runtime.host_control_hub.upgrade() {
                 hub.cancel_all_pending_for_security_lock();
             }
+        }
+        if let Some(error) = resident_apply_error {
+            return Err(anyhow::Error::msg(error));
         }
         Ok(())
     }

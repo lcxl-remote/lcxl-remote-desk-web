@@ -615,19 +615,22 @@ pub async fn handle_offer(
     // the SDP exchange above but must not re-issue StartMedia.
     if is_first_offer
         && let Err(e) = worker_mgr
-            .send_to_worker(ServiceToWorker::StartMedia({
-                let mut initial_payload = start_media_payload;
-                let (start_video, start_audio) = initial_worker_media_flags(
-                    initial_payload.start_video,
-                    initial_payload.audio.is_some(),
-                    has_video && negotiated_video.is_none(),
-                );
-                initial_payload.start_video = start_video;
-                if !start_audio {
-                    initial_payload.audio = None;
-                }
-                initial_payload
-            }))
+            .send_to_interactive_connection_worker(
+                from_connection_id,
+                ServiceToWorker::StartMedia({
+                    let mut initial_payload = start_media_payload;
+                    let (start_video, start_audio) = initial_worker_media_flags(
+                        initial_payload.start_video,
+                        initial_payload.audio.is_some(),
+                        has_video && negotiated_video.is_none(),
+                    );
+                    initial_payload.start_video = start_video;
+                    if !start_audio {
+                        initial_payload.audio = None;
+                    }
+                    initial_payload
+                }),
+            )
             .await
     {
         log::warn!(

@@ -21,6 +21,11 @@ import WhiteboardCanvas from "./whiteboard-canvas"
 import WhiteboardToolbar from "./whiteboard-toolbar"
 import { useDeskMicrophone } from "./use-desk-microphone"
 import { DeskConfigDialog } from "./desk-config-dialog"
+import {
+    SessionTargetDialog,
+    parseSessionTargetList,
+    type SessionTargetDescriptor,
+} from "./session-target-selection"
 import { useAdaptiveResolution, isAdaptiveResolutionGateOpen } from "./use-adaptive-resolution"
 import { useResolutionToast } from "./use-resolution-toast"
 import { isWebRtcAvailable } from "./webrtc-support"
@@ -201,6 +206,8 @@ export default function DeskSession({
         preferenceStoreRef.current = new DeskPreferenceStore(storage);
     }
     const admittedWaylandModeRef = useRef<WaylandControlMode>("auto");
+    const selectedSessionTargetRef = useRef<string | undefined>(undefined);
+    const [sessionTargets, setSessionTargets] = useState<SessionTargetDescriptor[]>([]);
 
     const clearAdmissionRetry = useCallback(() => {
         const state = admissionRetryRef.current;
@@ -234,6 +241,7 @@ export default function DeskSession({
             grantSessionId,
             admittedWaylandModeRef.current,
             orgId,
+            selectedSessionTargetRef.current,
         )
         const requestId = sendMessage(
             SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
@@ -800,6 +808,23 @@ export default function DeskSession({
                 && admissionRetryRef.current.requestIds.delete(message.request_id)
             ) {
                 if (
+                    message.response_state?.error_code
+                        === deskErrorCodeEnum.SESSION_SELECTION_REQUIRED
+                    || message.response_state?.error_code
+                        === deskErrorCodeEnum.SESSION_TARGET_STALE
+                ) {
+                    clearAdmissionRetry();
+                    selectedSessionTargetRef.current = undefined;
+                    const list = parseSessionTargetList(message.signaling_data);
+                    if (list?.targets.length) {
+                        setSessionTargets(list.targets);
+                    } else {
+                        toast({
+                            title: t("pages.sessionTarget.unavailable"),
+                            variant: "destructive",
+                        });
+                    }
+                } else if (
                     message.response_state?.error_code === deskErrorCodeEnum.ACTION_NEED_RETRY
                     || message.response_state?.error_code
                         === deskErrorCodeEnum.REMOTE_DESKTOP_CAPABILITIES_NOT_READY
@@ -1507,6 +1532,14 @@ export default function DeskSession({
 
     return (
         <div className="flex h-full flex-col">
+            <SessionTargetDialog
+                targets={sessionTargets}
+                onSelect={(targetId) => {
+                    selectedSessionTargetRef.current = targetId;
+                    setSessionTargets([]);
+                    sendRemoteAdmission(true);
+                }}
+            />
             <DeskConfigDialog
                 open={isConfigOpen}
                 onOpenChange={setIsConfigOpen}

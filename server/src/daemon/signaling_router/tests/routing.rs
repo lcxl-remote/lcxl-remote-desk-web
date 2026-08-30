@@ -41,6 +41,7 @@ pub(super) async fn make_ctx_with_attached_supervisor() -> (
     // commands are connection-scoped and are rejected when either the
     // source PC or its epoch is absent.
     let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -203,6 +204,7 @@ pub(super) async fn route_terminal_requests_handled_inline_not_bridged() {
         (
             SignalingType::StartTerminal,
             serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
+                session_target_id: None,
                 command: "C:\\Windows\\System32\\cmd.exe".to_string(),
                 device_id: None,
                 grant_session_id: None,
@@ -272,6 +274,7 @@ pub(super) async fn route_start_terminal_owner_stamp_records_admission_and_marks
         None,
         Some(
             serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
+                session_target_id: None,
                 command: "cmd.exe".to_string(),
                 device_id: None,
                 grant_session_id: None,
@@ -328,6 +331,7 @@ pub(super) async fn route_start_terminal_dispatch_failure_clears_capability_foot
         None,
         Some(
             serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
+                session_target_id: None,
                 command: "cmd.exe".to_string(),
                 device_id: None,
                 grant_session_id: None,
@@ -597,6 +601,7 @@ pub(super) async fn route_revoke_access_grant_session_scoped_closes_only_that_gr
     let ctx = make_ctx().await;
     let s = crate::model::settings::Settings::default();
     let rr = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -657,6 +662,7 @@ pub(super) async fn apply_remote_settings_adaptive_bitrate_scopes_to_source_conn
 
     let ctx = make_ctx().await;
     let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -825,6 +831,7 @@ pub(super) async fn apply_remote_settings_adaptive_bitrate_scopes_to_source_conn
 pub(super) async fn codec_change_compares_the_accepted_offer_baseline() {
     let (ctx, mut outbound) = make_ctx_with_rx().await;
     let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -919,6 +926,7 @@ pub(super) async fn codec_change_compares_the_accepted_offer_baseline() {
 pub(super) async fn same_wire_codec_restart_advances_video_output_fence() {
     let (ctx, mut outbound) = make_ctx_with_rx().await;
     let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1072,6 +1080,7 @@ pub(super) async fn same_wire_codec_restart_advances_video_output_fence() {
 pub(super) async fn audio_stop_compares_the_accepted_baseline_not_host_defaults() {
     let ctx = make_ctx().await;
     let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1190,6 +1199,7 @@ pub(super) async fn audio_prompt_does_not_block_the_signaling_handler() {
     let _approval_rx = ctx.host_control_hub.subscribe_outbound();
     ctx.host_control_hub.mark_tauri_connected();
     let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1346,6 +1356,7 @@ pub(super) async fn audio_prompt_does_not_block_the_signaling_handler() {
 pub(super) async fn adaptive_quality_command_updates_only_runtime_override() {
     let ctx = make_ctx().await;
     let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],

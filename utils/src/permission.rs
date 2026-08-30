@@ -19,10 +19,10 @@ pub fn is_admin() -> bool {
     }
 }
 
-/// Check whether a Windows Service with the given name is currently running.
+/// Check whether the platform service with the given name is currently running.
 ///
-/// Returns `false` on non-Windows platforms or when the service state cannot
-/// be determined (e.g. insufficient permissions).
+/// Windows queries SCM. Linux queries the system systemd manager only when the
+/// host actually booted with systemd. Other platforms return `false`.
 pub fn is_service_running(service_name: &str) -> bool {
     #[cfg(windows)]
     {
@@ -64,17 +64,27 @@ pub fn is_service_running(service_name: &str) -> bool {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        if !std::path::Path::new("/run/systemd/system").is_dir() {
+            return false;
+        }
+        std::process::Command::new("systemctl")
+            .args(["is-active", "--quiet", service_name])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = service_name;
         false
     }
 }
 
-/// Check whether a Windows Service with the given name is registered in SCM.
+/// Check whether the platform service with the given name is installed.
 ///
-/// Returns `false` on non-Windows platforms or when the SCM cannot be opened
-/// (e.g. insufficient permissions — service may still exist).
+/// Windows queries SCM; Linux asks systemd whether the unit is loaded.
 pub fn is_service_installed(service_name: &str) -> bool {
     #[cfg(windows)]
     {
@@ -112,7 +122,21 @@ pub fn is_service_installed(service_name: &str) -> bool {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        if !std::path::Path::new("/run/systemd/system").is_dir() {
+            return false;
+        }
+        std::process::Command::new("systemctl")
+            .args(["show", "--property=LoadState", "--value", service_name])
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).trim() == "loaded"
+            })
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = service_name;
         false

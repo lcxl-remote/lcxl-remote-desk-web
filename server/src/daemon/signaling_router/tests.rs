@@ -97,6 +97,7 @@ async fn make_ctx() -> RouterContext {
 
 async fn seed_test_desktop_pc(ctx: &RouterContext, connection_id: &str) {
     let request = desk_signal_facade::model::signal::RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],

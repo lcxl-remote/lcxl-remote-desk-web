@@ -457,6 +457,7 @@ fn request_remote_bare_from_relay_passes_unchanged() {
 
 fn start_terminal_session() -> desk_signal_facade::model::terminal::StartTerminalSession {
     desk_signal_facade::model::terminal::StartTerminalSession {
+        session_target_id: None,
         command: "cmd.exe".to_string(),
         device_id: None,
         grant_session_id: None,

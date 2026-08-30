@@ -5,6 +5,8 @@ pub mod command_templates;
 pub mod exec_approval;
 pub mod exec_capacity;
 pub mod exec_ledger;
+#[cfg(target_os = "linux")]
+pub mod linux_service;
 pub mod local_access_control;
 pub mod local_access_control_transport;
 pub mod local_api;
@@ -15,8 +17,10 @@ pub mod pc_manager;
 #[cfg(target_os = "windows")]
 pub mod pipe_security;
 pub mod remote_access;
+pub mod resident_pool;
 pub mod session_approval;
 pub mod session_monitor;
+pub mod session_target;
 pub mod signaling_proxy;
 pub mod signaling_router;
 pub mod support_link_state;
@@ -157,6 +161,9 @@ pub async fn run_service_daemon_inner(
     // The host control endpoint owns `/ws/tauri_ipc` and `/ws/host_upstream` and
     // refreshes `tauri_login_token` on every Tauri ws connect.
     let tauri_bridge = TauriIpcBridge::new();
+    #[cfg(target_os = "linux")]
+    let session_shell_registry =
+        crate::host_control::session_shell::SessionShellRegistry::default();
 
     // Spawn local_api first so /ws/host_upstream is reachable before any
     // forwarder starts trying to connect.
@@ -169,6 +176,8 @@ pub async fn run_service_daemon_inner(
         let support_state = Arc::clone(&support_link_state);
         let link_gate = Arc::clone(&manager_link_gate);
         let coordinator = Arc::clone(&settings_coordinator);
+        #[cfg(target_os = "linux")]
+        let session_shell_registry = session_shell_registry.clone();
         tokio::spawn(async move {
             if let Err(e) = local_api::run_local_api(
                 settings,
@@ -178,6 +187,8 @@ pub async fn run_service_daemon_inner(
                 link_state,
                 support_state,
                 link_gate,
+                #[cfg(target_os = "linux")]
+                session_shell_registry,
                 Some(api_ready_tx),
             )
             .await
@@ -211,6 +222,8 @@ pub async fn run_service_daemon_inner(
 
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(shared_settings_data.clone(), pc_registry.clone());
+    #[cfg(target_os = "linux")]
+    worker_mgr.bind_session_shell_registry(session_shell_registry.clone());
     worker_mgr.bind_remote_access_gate(host_control_hub.remote_access_gate());
     settings_coordinator.bind_worker_manager(worker_mgr.clone());
     pc_registry.spawn_system_audio_policy_enforcer(
@@ -226,14 +239,38 @@ pub async fn run_service_daemon_inner(
     // to the legacy log-and-drop behaviour.
     pc_registry.set_worker_manager(worker_mgr.clone());
 
-    let initial_session = get_current_session_id();
-    let initial_desktop = get_initial_desktop_name();
-    if let Err(e) = worker_mgr
-        .start_worker(initial_session, initial_desktop)
-        .await
+    #[cfg(target_os = "windows")]
     {
-        error!("Failed to start initial worker: {e}");
+        if session_monitor::windows_resident_pool_enabled() {
+            info!(
+                "experimental Windows resident worker pool enabled; session monitor owns worker startup"
+            );
+        } else {
+            let initial_session = get_current_session_id();
+            let initial_desktop = get_initial_desktop_name();
+            if let Err(e) = worker_mgr
+                .start_worker(initial_session, initial_desktop)
+                .await
+            {
+                error!("Failed to start initial worker: {e}");
+            }
+        }
     }
+    #[cfg(target_os = "macos")]
+    {
+        let initial_session = get_current_session_id();
+        let initial_desktop = get_initial_desktop_name();
+        if let Err(e) = worker_mgr
+            .start_worker(initial_session, initial_desktop)
+            .await
+        {
+            error!("Failed to start initial worker: {e}");
+        }
+    }
+    #[cfg(target_os = "linux")]
+    info!(
+        "Linux ServiceDaemon is waiting for a validated Tauri session registration; inherited daemon-identity worker launch is disabled"
+    );
 
     let monitor_handle = {
         let worker_mgr = worker_mgr.clone();

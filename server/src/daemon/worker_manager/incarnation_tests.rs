@@ -26,13 +26,28 @@ async fn install_worker(manager: &WorkerManager) -> WorkerIncarnation {
     manager.install_active_for_test(ipc_tx).await
 }
 
+fn resident_key(name: &str) -> WorkerKey {
+    WorkerKey {
+        session: desk_ipc_protocol::message::SessionKey {
+            platform_session_id: name.to_string(),
+            session_generation: 1,
+        },
+        desktop: DesktopTarget::LinuxSession,
+    }
+}
+
+async fn install_resident(manager: &WorkerManager, key: WorkerKey) -> WorkerIncarnation {
+    let (ipc_tx, _ipc_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
+    manager.install_resident_for_test(key, ipc_tx).await
+}
+
 /// The ordinary case: the worker that is running is heard.
 #[tokio::test]
 async fn the_running_worker_is_heard() {
     let (manager, _worker_rx) = test_manager();
     let worker = install_worker(&manager).await;
 
-    assert!(manager.note_message_from(worker).await);
+    assert!(manager.note_message_from(None, worker).await);
 }
 
 /// A worker that has been replaced is not. Its message describes a process the
@@ -48,8 +63,293 @@ async fn a_replaced_worker_is_not() {
         outgoing, incoming,
         "a replacement must be a different worker, not the same slot reused",
     );
-    assert!(!manager.note_message_from(outgoing).await);
-    assert!(manager.note_message_from(incoming).await);
+    assert!(!manager.note_message_from(None, outgoing).await);
+    assert!(manager.note_message_from(None, incoming).await);
+}
+
+#[tokio::test]
+async fn resident_sessions_have_independent_incarnation_fences() {
+    let (manager, _worker_rx) = test_manager();
+    let first_key = resident_key("session-a");
+    let second_key = resident_key("session-b");
+    let first = install_resident(&manager, first_key.clone()).await;
+    let second = install_resident(&manager, second_key.clone()).await;
+
+    assert!(manager.note_message_from(Some(&first_key), first).await);
+    assert!(manager.note_message_from(Some(&second_key), second).await);
+    assert!(!manager.note_message_from(Some(&first_key), second).await);
+    assert!(!manager.note_message_from(Some(&second_key), first).await);
+}
+
+#[tokio::test]
+async fn replacing_one_resident_does_not_supersede_another_session() {
+    let (manager, _worker_rx) = test_manager();
+    let first_key = resident_key("session-a");
+    let second_key = resident_key("session-b");
+    let old_first = install_resident(&manager, first_key.clone()).await;
+    let second = install_resident(&manager, second_key.clone()).await;
+    let new_first = install_resident(&manager, first_key.clone()).await;
+
+    assert!(!manager.note_message_from(Some(&first_key), old_first).await);
+    assert!(manager.note_message_from(Some(&first_key), new_first).await);
+    assert!(manager.note_message_from(Some(&second_key), second).await);
+}
+
+#[test]
+fn resident_lane_gates_are_replaced_per_key_not_globally() {
+    let (manager, _worker_rx) = test_manager();
+    let first_key = resident_key("session-a");
+    let second_key = resident_key("session-b");
+    let old_first = manager.mint_resident_worker(first_key.clone());
+    let second = manager.mint_resident_worker(second_key);
+    let old_first_gate = old_first.gate();
+    let second_gate = second.gate();
+
+    let new_first = manager.mint_resident_worker(first_key);
+
+    assert!(!old_first_gate.is_current());
+    assert!(new_first.gate().is_current());
+    assert!(second_gate.is_current());
+}
+
+#[tokio::test]
+async fn connection_target_dispatch_reaches_only_the_selected_resident() {
+    let (manager, _worker_rx) = test_manager();
+    manager.enable_session_targeting_for_test();
+    let first_key = resident_key("session-a");
+    let second_key = resident_key("session-b");
+    let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+    let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+    manager
+        .install_resident_for_test(first_key.clone(), first_tx)
+        .await;
+    manager
+        .install_resident_for_test(second_key, second_tx)
+        .await;
+    manager
+        .bind_connection_target("connection-a", &first_key.session)
+        .unwrap();
+
+    manager
+        .send_to_connection_worker("connection-a", ServiceToWorker::RefreshCapabilities)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        first_rx.recv().await,
+        Some(ServiceToWorker::RefreshCapabilities)
+    ));
+    assert!(second_rx.try_recv().is_err());
+    assert!(
+        manager
+            .send_to_connection_worker("unbound", ServiceToWorker::RefreshCapabilities,)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn interactive_route_switches_per_desktop_but_session_resources_stay_on_default() {
+    let (manager, _worker_rx) = test_manager();
+    manager.enable_session_targeting_for_test();
+    let session = desk_ipc_protocol::message::SessionKey {
+        platform_session_id: "7".to_string(),
+        session_generation: 3,
+    };
+    let default_key = WorkerKey {
+        session: session.clone(),
+        desktop: DesktopTarget::WindowsDefault,
+    };
+    let winlogon_key = WorkerKey {
+        session: session.clone(),
+        desktop: DesktopTarget::WindowsWinlogon,
+    };
+    let (default_tx, mut default_rx) = mpsc::unbounded_channel();
+    let (winlogon_tx, mut winlogon_rx) = mpsc::unbounded_channel();
+    let default_incarnation = manager
+        .install_resident_for_test(default_key.clone(), default_tx)
+        .await;
+    let winlogon_incarnation = manager
+        .install_resident_for_test(winlogon_key.clone(), winlogon_tx)
+        .await;
+    manager
+        .bind_connection_target("connection-7", &session)
+        .unwrap();
+    manager.active_interactive_routes.lock().unwrap().insert(
+        session.clone(),
+        ActiveInteractiveRoute {
+            worker_key: default_key.clone(),
+            incarnation: default_incarnation,
+            route_epoch: 1,
+            activated_at: Instant::now(),
+            activated_at_unix_ms: 100,
+            accepting_interactive: true,
+        },
+    );
+    assert!(manager.resident_desktop_observation_is_current(
+        &default_key,
+        default_incarnation,
+        100,
+    ));
+    assert!(
+        !manager.resident_desktop_observation_is_current(&default_key, default_incarnation, 99,),
+        "an observation queued before route activation must stay fenced"
+    );
+
+    manager
+        .send_to_interactive_connection_worker(
+            "connection-7",
+            ServiceToWorker::MouseInput(desk_ipc_protocol::message::InputPayload {
+                connection_id: "connection-7".to_string(),
+                data: vec![1],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        default_rx.recv().await,
+        Some(ServiceToWorker::MouseInput(_))
+    ));
+
+    manager
+        .active_interactive_routes
+        .lock()
+        .unwrap()
+        .get_mut(&session)
+        .unwrap()
+        .accepting_interactive = false;
+    assert!(
+        manager
+            .send_to_interactive_connection_worker(
+                "connection-7",
+                ServiceToWorker::MouseInput(desk_ipc_protocol::message::InputPayload {
+                    connection_id: "connection-7".to_string(),
+                    data: vec![9],
+                }),
+            )
+            .await
+            .is_err(),
+        "human input must be dropped while the desktop route is transitioning"
+    );
+
+    manager.active_interactive_routes.lock().unwrap().insert(
+        session.clone(),
+        ActiveInteractiveRoute {
+            worker_key: winlogon_key,
+            incarnation: winlogon_incarnation,
+            route_epoch: 2,
+            activated_at: Instant::now(),
+            activated_at_unix_ms: 200,
+            accepting_interactive: true,
+        },
+    );
+    manager
+        .send_to_interactive_connection_worker(
+            "connection-7",
+            ServiceToWorker::KeyboardInput(desk_ipc_protocol::message::InputPayload {
+                connection_id: "connection-7".to_string(),
+                data: vec![2],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        winlogon_rx.recv().await,
+        Some(ServiceToWorker::KeyboardInput(_))
+    ));
+
+    manager
+        .send_to_connection_worker("connection-7", ServiceToWorker::RefreshCapabilities)
+        .await
+        .unwrap();
+    assert!(matches!(
+        default_rx.recv().await,
+        Some(ServiceToWorker::RefreshCapabilities)
+    ));
+    assert!(winlogon_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn process_wide_remote_access_state_reaches_and_waits_for_every_resident() {
+    let (manager, _worker_rx) = test_manager();
+    manager.enable_session_targeting_for_test();
+    let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+    let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+    manager
+        .install_resident_for_test(resident_key("session-a"), first_tx)
+        .await;
+    manager
+        .install_resident_for_test(resident_key("session-b"), second_tx)
+        .await;
+
+    let applying = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            manager
+                .apply_remote_access_state(
+                    desk_ipc_protocol::message::RemoteAccessStatePayload {
+                        operation_id: "lock-7".to_string(),
+                        state_version: 7,
+                        locked: true,
+                    },
+                    Duration::from_secs(1),
+                )
+                .await
+        })
+    };
+
+    for receiver in [&mut first_rx, &mut second_rx] {
+        let ServiceToWorker::SetRemoteAccessState(payload) = receiver.recv().await.unwrap() else {
+            panic!("expected remote-access broadcast");
+        };
+        manager.complete_remote_access_ack(
+            desk_ipc_protocol::message::RemoteAccessStateAppliedPayload {
+                operation_id: payload.operation_id,
+                state_version: payload.state_version,
+                cancelled_terminals: 0,
+                cancelled_transfers: 0,
+                cancelled_execs: 0,
+            },
+        );
+    }
+
+    assert_eq!(applying.await.unwrap(), Ok(true));
+}
+
+#[test]
+fn resident_output_gate_requires_matching_connection_binding() {
+    let (manager, _worker_rx) = test_manager();
+    let first_key = resident_key("session-a");
+    let second_key = resident_key("session-b");
+    let first = manager.mint_resident_worker(first_key.clone());
+    manager
+        .bind_connection_target("connection-a", &first_key.session)
+        .unwrap();
+
+    assert!(first.gate().owns_session_connection("connection-a"));
+    assert!(!first.gate().owns_session_connection("missing"));
+    let second = manager.mint_resident_worker(second_key);
+    assert!(!second.gate().owns_session_connection("connection-a"));
+}
+
+#[test]
+fn session_logout_can_enumerate_only_its_bound_connections() {
+    let (manager, _worker_rx) = test_manager();
+    let first = resident_key("session-a");
+    let second = resident_key("session-b");
+    manager
+        .bind_connection_target("connection-a1", &first.session)
+        .unwrap();
+    manager
+        .bind_connection_target("connection-a2", &first.session)
+        .unwrap();
+    manager
+        .bind_connection_target("connection-b", &second.session)
+        .unwrap();
+
+    let mut ids = manager.connection_ids_for_session(&first.session);
+    ids.sort();
+    assert_eq!(ids, ["connection-a1", "connection-a2"]);
 }
 
 /// Portal authorization is owned by the user-session worker. Replacing that
@@ -104,7 +404,7 @@ async fn a_replaced_workers_backlog_is_not_its_successors_heartbeat() {
         .3;
 
     tokio::time::sleep(Duration::from_millis(5)).await;
-    assert!(!manager.note_message_from(outgoing).await);
+    assert!(!manager.note_message_from(None, outgoing).await);
     assert_eq!(
         manager
             .active_worker_snapshot()
@@ -116,7 +416,7 @@ async fn a_replaced_workers_backlog_is_not_its_successors_heartbeat() {
     );
 
     tokio::time::sleep(Duration::from_millis(5)).await;
-    assert!(manager.note_message_from(incoming).await);
+    assert!(manager.note_message_from(None, incoming).await);
     assert!(
         manager
             .active_worker_snapshot()
@@ -213,6 +513,7 @@ mod lanes {
 
     async fn paused_connection(registry: &PcRegistry, connection_id: &str) {
         let request_remote = RequestRemoteModel {
+            session_target_id: None,
             requested_wayland_control_mode: Some("auto".to_string()),
             purpose: RemoteSessionPurpose::RemoteDesktop,
             ice_servers: vec![],

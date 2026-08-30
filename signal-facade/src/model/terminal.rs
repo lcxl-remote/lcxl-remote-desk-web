@@ -8,6 +8,10 @@ use utoipa::{IntoParams, ToSchema};
 pub struct StartTerminalSession {
     /// The command to start the terminal session. with the format of "path/to/executable,arg1,arg2"
     pub command: String,
+    /// Opaque daemon-issued session target. Omitted only for the single-ready-
+    /// worker auto-selection case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_target_id: Option<String>,
     /// Target device handle (UUID; manager multi-instance addressing). The manager
     /// routes by this; the OSS single-instance signal leaves it `None` and routes
     /// by the path `connection_id` (dual-target wire model).
@@ -109,6 +113,7 @@ mod wincode_tests {
     fn start_terminal_session_round_trips_wincode() {
         let original = StartTerminalSession {
             command: r"C:\Windows\System32\cmd.exe,/k,echo,hello".to_string(),
+            session_target_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
             device_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             grant_session_id: Some("GRANTSESSION00000000000000000000".to_string()),
         };
@@ -117,6 +122,7 @@ mod wincode_tests {
         let back: StartTerminalSession =
             wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.command, original.command);
+        assert_eq!(back.session_target_id, original.session_target_id);
         assert_eq!(back.device_id, original.device_id);
         assert_eq!(back.grant_session_id, original.grant_session_id);
     }

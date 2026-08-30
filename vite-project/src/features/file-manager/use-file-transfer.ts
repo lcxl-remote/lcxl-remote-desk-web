@@ -48,6 +48,10 @@ import {
     type DiagnosticsCollector,
 } from './connection-diagnostics';
 import { deskErrorCodeEnum, type SystemInfo } from '@/services/types';
+import {
+    parseSessionTargetList,
+    type SessionTargetDescriptor,
+} from '@/features/desk/session-target-selection';
 
 /**
  * A signaling request the host answered with an error frame.
@@ -275,6 +279,9 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
     const diagnosticsRef = useRef<DiagnosticsCollector>(createDiagnosticsCollector());
     const [channelStatus, setChannelStatus] = useState<TransferChannelStatus>('idle');
     const [channelFailure, setChannelFailure] = useState<TransferChannelFailure | null>(null);
+    const [sessionTargets, setSessionTargets] = useState<SessionTargetDescriptor[]>([]);
+    const sessionTargetIdRef = useRef<string | undefined>(undefined);
+    const resumeSessionTargetRef = useRef<((targetId: string) => void) | null>(null);
 
     const pendingRequests = useRef(new Map<string, {
         resolve: (value: any) => void;
@@ -627,6 +634,8 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
      * or repair a peer connection, and no way to deliver a reply.
      */
     const teardownSession = useCallback((error: Error) => {
+        resumeSessionTargetRef.current = null;
+        setSessionTargets([]);
         if (retryTimerRef.current) {
             clearTimeout(retryTimerRef.current);
             retryTimerRef.current = null;
@@ -698,10 +707,14 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
             attempt.resolve(session);
         };
 
-        attempt.timeout = setTimeout(() => {
-            if (sessionAttemptRef.current !== attempt) return;
-            teardownSession(new ConnectionError('session-timeout', 'File manager session timed out'));
-        }, SESSION_TIMEOUT_MS);
+        const armSessionTimeout = () => {
+            if (attempt.timeout) clearTimeout(attempt.timeout);
+            attempt.timeout = setTimeout(() => {
+                if (sessionAttemptRef.current !== attempt) return;
+                teardownSession(new ConnectionError('session-timeout', 'File manager session timed out'));
+            }, SESSION_TIMEOUT_MS);
+        };
+        armSessionTimeout();
 
         // Start the file page session with its restricted grant context when present.
         // The trusted central validates the token and stamps the capability ceiling;
@@ -712,6 +725,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
                 purpose: "file_manager";
                 grant_session_id?: string;
                 org_id?: number;
+                session_target_id?: string;
             } = {
                 purpose: "file_manager",
             };
@@ -720,6 +734,9 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
             }
             if (!grant?.grantSessionId && orgId != null) {
                 signaling_data.org_id = orgId;
+            }
+            if (sessionTargetIdRef.current) {
+                signaling_data.session_target_id = sessionTargetIdRef.current;
             }
             ws.send(JSON.stringify({
                 request_id: uuidv4(),
@@ -776,6 +793,28 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
                 return;
             }
             if (errorCode) {
+                if (
+                    errorCode === deskErrorCodeEnum.SESSION_SELECTION_REQUIRED
+                    || errorCode === deskErrorCodeEnum.SESSION_TARGET_STALE
+                ) {
+                    const list = parseSessionTargetList(signaling.signaling_data);
+                    sessionTargetIdRef.current = undefined;
+                    if (attempt.timeout) {
+                        clearTimeout(attempt.timeout);
+                        attempt.timeout = undefined;
+                    }
+                    if (list?.targets.length) {
+                        setSessionTargets(list.targets);
+                        resumeSessionTargetRef.current = (targetId) => {
+                            if (sessionAttemptRef.current !== attempt) return;
+                            sessionTargetIdRef.current = targetId;
+                            setSessionTargets([]);
+                            armSessionTimeout();
+                            sendRemoteAccessRequest();
+                        };
+                        return;
+                    }
+                }
                 if (
                     errorCode === deskErrorCodeEnum.ACTION_NEED_RETRY
                     && remoteAccessRetryRef.current < REMOTE_ACCESS_RETRY_LIMIT
@@ -1368,6 +1407,12 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         setTransfers(prev => prev.filter(t => t.transferId !== transferId));
     }, [settleTransfer]);
 
+    const selectSessionTarget = useCallback((targetId: string) => {
+        const resume = resumeSessionTargetRef.current;
+        resumeSessionTargetRef.current = null;
+        resume?.(targetId);
+    }, []);
+
     return {
         transfers,
         downloadFile,
@@ -1381,5 +1426,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         prepareTransfers,
         channelStatus,
         channelFailure,
+        sessionTargets,
+        selectSessionTarget,
     };
 }

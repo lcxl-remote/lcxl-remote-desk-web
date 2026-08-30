@@ -715,6 +715,7 @@ fn request_test_worker_mgr(settings: &Settings, registry: &PcRegistry) -> Worker
 async fn any_with_accept_control_covers_empty_single_and_multi() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -771,6 +772,7 @@ async fn any_with_accept_control_covers_empty_single_and_multi() {
 async fn pc_registry_create_get_remove_cycle() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -802,6 +804,7 @@ async fn pc_registry_create_get_remove_cycle() {
 async fn pc_registry_rejects_duplicate_connection_id() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -852,6 +855,7 @@ fn start_media_payload_for(connection_id: &str) -> StartMediaPayload {
 async fn install_initial_media_marks_only_first_offer() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -891,6 +895,7 @@ async fn install_initial_media_marks_only_first_offer() {
 async fn concurrent_offers_mark_first_once() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -981,6 +986,7 @@ async fn write_video_frame_unknown_connection_is_silent_noop() {
 async fn write_video_frame_no_track_yet_is_silent_noop() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1016,6 +1022,7 @@ async fn write_video_frame_no_track_yet_is_silent_noop() {
 async fn pause_all_media_marks_every_pc() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1056,6 +1063,7 @@ async fn pause_all_media_marks_every_pc() {
 async fn write_video_frame_paused_p_frame_keeps_flag_set() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1098,6 +1106,7 @@ async fn write_video_frame_paused_p_frame_keeps_flag_set() {
 async fn write_video_frame_paused_i_frame_clears_flag() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1178,6 +1187,7 @@ async fn reset_media_for_unknown_connection_is_noop() {
 async fn reset_media_for_pauses_pc_even_without_cached_offer() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1221,6 +1231,7 @@ async fn reset_media_for_pauses_pc_even_without_cached_offer() {
 async fn resume_active_media_skips_pc_without_cached_offer() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1253,6 +1264,7 @@ async fn resume_active_media_allocates_fresh_generations_and_advances_fence() {
 
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1310,6 +1322,7 @@ async fn resume_active_media_resends_ceiling_for_capped_admission() {
 
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1363,6 +1376,7 @@ async fn resume_active_media_resends_ceiling_for_capped_admission() {
 async fn resume_active_media_tears_down_capped_when_ceiling_undeliverable() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1403,6 +1417,7 @@ async fn resume_active_media_tears_down_capped_when_ceiling_undeliverable() {
 async fn write_video_frame_audio_kind_uses_audio_track_slot() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -1457,6 +1472,7 @@ async fn handle_request_remote_uses_worker_capabilities_when_present() {
         None,
         Some(
             serde_json::to_value(RequestRemoteModel {
+                session_target_id: None,
                 requested_wayland_control_mode: Some("auto".to_string()),
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
@@ -1518,6 +1534,7 @@ async fn handle_request_remote_fails_closed_when_no_capabilities() {
         None,
         Some(
             serde_json::to_value(RequestRemoteModel {
+                session_target_id: None,
                 requested_wayland_control_mode: Some("auto".to_string()),
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
@@ -1582,6 +1599,7 @@ async fn handle_request_remote_stamps_ceiling_and_grant_onto_signaling_state() {
         None,
         Some(
             serde_json::to_value(RequestRemoteModel {
+                session_target_id: None,
                 requested_wayland_control_mode: Some("auto".to_string()),
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
@@ -1673,6 +1691,7 @@ async fn handle_request_remote_grant_fails_closed_without_worker() {
         None,
         Some(
             serde_json::to_value(RequestRemoteModel {
+                session_target_id: None,
                 requested_wayland_control_mode: Some("auto".to_string()),
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
@@ -1751,6 +1770,7 @@ async fn handle_request_remote_preserves_x264_h264_distinction_in_encoder_list()
         None,
         Some(
             serde_json::to_value(RequestRemoteModel {
+                session_target_id: None,
                 requested_wayland_control_mode: Some("auto".to_string()),
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
@@ -1893,6 +1913,7 @@ async fn handle_request_remote_registers_ice_candidate_forwarder() {
         None,
         Some(
             serde_json::to_value(RequestRemoteModel {
+                session_target_id: None,
                 requested_wayland_control_mode: Some("auto".to_string()),
                 purpose: RemoteSessionPurpose::RemoteDesktop,
                 ice_servers: vec![],
@@ -1979,6 +2000,7 @@ async fn peer_connection_state_change_terminal_removes_registry_entry() {
 
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2055,6 +2077,7 @@ async fn cleanup_pc_unknown_connection_is_silent_noop() {
 async fn cleanup_pc_removes_registry_entry_even_without_worker() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2085,6 +2108,7 @@ async fn cleanup_pc_removes_registry_entry_even_without_worker() {
 async fn handle_connection_removed_clears_registry_for_existing_pc() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2156,6 +2180,7 @@ async fn cleanup_pc_detaches_supervisor_when_last_pc_removed_and_no_pending() {
     use crate::daemon::virtual_display::VirtualDisplaySupervisor;
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2199,6 +2224,7 @@ async fn cleanup_pc_keeps_virtual_display_for_an_admitted_replacement_session() 
     use crate::daemon::virtual_display::VirtualDisplaySupervisor;
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2247,6 +2273,7 @@ async fn pc_cleanup_preserves_logical_activity_until_signaling_connection_ends()
     let hub = Arc::new(HostControlHub::new_local());
     registry.set_host_control_hub(&hub);
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2326,6 +2353,7 @@ async fn cleanup_pc_keeps_supervisor_when_other_pcs_remain() {
     use crate::daemon::virtual_display::VirtualDisplaySupervisor;
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2374,6 +2402,7 @@ async fn cleanup_pc_keeps_supervisor_when_pending_request_active() {
     use crate::daemon::virtual_display::VirtualDisplaySupervisor;
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2425,6 +2454,7 @@ async fn cleanup_pc_unknown_connection_does_not_detach_supervisor() {
     use crate::daemon::virtual_display::VirtualDisplaySupervisor;
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2488,6 +2518,7 @@ async fn cleanup_pc_triggers_exclusive_recompute_when_other_pcs_remain() {
 
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2581,6 +2612,7 @@ async fn cleanup_pc_does_not_recompute_on_stale_unknown_removal() {
 
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -2634,6 +2666,7 @@ async fn cleanup_pc_does_not_recompute_on_stale_unknown_removal() {
 async fn cleanup_pc_skips_supervisor_when_none() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3038,6 +3071,7 @@ async fn route_is_permitted_routes_on_accept_bits_not_a_restricted_flag() {
 async fn close_grant_session_tears_down_all_grant_connections() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3082,6 +3116,7 @@ async fn close_grant_session_tears_down_all_grant_connections() {
 async fn close_grants_up_to_generation_closes_only_superseded_grants() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3125,6 +3160,7 @@ async fn close_grants_up_to_generation_closes_only_superseded_grants() {
 async fn cleanup_pc_preserves_grant_index_until_logical_connection_ends() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3324,6 +3360,7 @@ async fn force_disconnect_closes_terminal_without_peer_connection() {
 async fn admission_survives_close_control_but_cleared_on_connection_removed() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3427,6 +3464,7 @@ async fn write_cursor_data_unknown_connection_is_silent_noop() {
 async fn write_cursor_data_no_dc_registered_is_silent_noop() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3459,6 +3497,7 @@ async fn write_cursor_data_no_dc_registered_is_silent_noop() {
 async fn write_cursor_data_invalid_utf8_is_silent_noop() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3508,6 +3547,7 @@ async fn write_clipboard_data_unknown_connection_is_silent_noop() {
 async fn write_clipboard_data_drops_when_permission_not_granted() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3535,6 +3575,7 @@ async fn write_clipboard_data_drops_when_permission_not_granted() {
 async fn write_clipboard_data_no_dc_is_silent_noop() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3567,6 +3608,7 @@ async fn write_clipboard_data_no_dc_is_silent_noop() {
 async fn write_clipboard_data_invalid_utf8_is_silent_noop() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3628,6 +3670,7 @@ async fn write_file_transfer_data_unknown_connection_is_silent_noop() {
 async fn write_file_transfer_data_does_not_gate_on_accept_control() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3661,6 +3704,7 @@ async fn write_file_transfer_data_does_not_gate_on_accept_control() {
 async fn write_file_transfer_data_binary_no_dc_is_silent_noop() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3699,6 +3743,7 @@ async fn write_file_transfer_data_binary_no_dc_is_silent_noop() {
 async fn write_file_transfer_data_dispatch_returns_quickly_under_backlog() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3745,6 +3790,7 @@ async fn write_file_transfer_data_dispatch_returns_quickly_under_backlog() {
 async fn write_file_transfer_data_after_registry_remove_is_silent_noop() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -3832,6 +3878,7 @@ async fn file_transfer_writer_task_exits_when_sender_drops() {
 async fn write_file_transfer_data_awaits_when_writer_queue_full() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -4269,6 +4316,7 @@ async fn handle_require_control_auto_allows_and_emits_accept() {
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -4313,6 +4361,7 @@ async fn handle_require_control_auto_denies_and_emits_deny() {
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -4359,6 +4408,7 @@ async fn handle_require_control_meets_ceiling_and_denies_when_ceiling_denies() {
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -4406,6 +4456,7 @@ async fn handle_release_control_emits_result_and_resets_state() {
     let (settings, _policy) = settings_with_security(Some(true), Some(true));
 
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -4460,6 +4511,7 @@ async fn handle_release_control_does_not_prompt_when_ask_mode() {
     let (settings, _policy) = settings_with_security(None, None);
 
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -4521,6 +4573,7 @@ async fn handle_require_control_regrant_short_circuits() {
     let hub = Arc::new(HostControlHub::new_local());
 
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],
@@ -4578,6 +4631,7 @@ async fn handle_require_control_unknown_connection_errors() {
 async fn pc_registry_supports_multiple_independent_connections() {
     let registry = PcRegistry::new();
     let request_remote = RequestRemoteModel {
+        session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
         purpose: RemoteSessionPurpose::RemoteDesktop,
         ice_servers: vec![],

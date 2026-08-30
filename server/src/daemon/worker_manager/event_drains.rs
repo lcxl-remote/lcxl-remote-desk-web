@@ -28,6 +28,13 @@ pub(super) fn spawn_media_receiver_task(
                 gate.superseded_once("MediaReceiver", &mut superseded);
                 continue;
             }
+            if !gate.owns_interactive_connection(&frame.connection_id) {
+                warn!(
+                    "[MediaReceiver] dropping inactive-route or cross-session frame for {}",
+                    frame.connection_id
+                );
+                continue;
+            }
             debug!(
                 "[MediaReceiver] frame seq={} kind={:?} len={} for {}",
                 frame.seq,
@@ -61,6 +68,13 @@ pub(super) fn spawn_file_drain_task(
             // browser as though the worker running now had sent them.
             if !gate.is_current() {
                 gate.superseded_once("FileDrain", &mut superseded);
+                continue;
+            }
+            if !gate.owns_session_connection(&payload.connection_id) {
+                warn!(
+                    "[FileDrain] dropping cross-session payload for {}",
+                    payload.connection_id
+                );
                 continue;
             }
             crate::daemon::pc_manager::write_file_transfer_data(&pc_registry, payload).await;

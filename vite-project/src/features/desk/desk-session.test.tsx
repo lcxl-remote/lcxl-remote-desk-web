@@ -466,6 +466,12 @@ describe('buildDesktopRequestRemotePayload', () => {
       requested_wayland_control_mode: 'auto',
       grant_session_id: 'grant-1',
     });
+    expect(buildDesktopRequestRemotePayload('desk-1', null, 'auto', undefined, 'target-1')).toEqual({
+      connection_id: 'desk-1',
+      purpose: 'remote_desktop',
+      requested_wayland_control_mode: 'auto',
+      session_target_id: 'target-1',
+    });
   });
 });
 

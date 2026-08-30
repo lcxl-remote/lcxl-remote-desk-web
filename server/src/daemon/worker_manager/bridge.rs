@@ -18,9 +18,32 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    bridge_loop_with_profile(
+        reader,
+        writer,
+        cmd_rx,
+        msg_tx,
+        name,
+        WorkerProfile::SessionUser,
+    )
+    .await
+}
+
+pub(super) async fn bridge_loop_with_profile<R, W>(
+    reader: R,
+    writer: W,
+    cmd_rx: &mut mpsc::UnboundedReceiver<ServiceToWorker>,
+    msg_tx: &WorkerMessageSink,
+    name: &str,
+    profile: WorkerProfile,
+) -> bool
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let event_tx: Arc<dyn EventSender<ServiceToWorker>> = framed::spawn_event_sender(writer);
     let event_rx: Box<dyn EventReceiver<WorkerToService>> = framed::make_event_receiver(reader);
-    bridge_event_transport(event_rx, event_tx, cmd_rx, msg_tx, name).await
+    bridge_event_transport_with_profile(event_rx, event_tx, cmd_rx, msg_tx, name, profile).await
 }
 
 /// Transport-agnostic bridge between the daemon's internal channels (`cmd_rx`
@@ -35,11 +58,30 @@ where
 /// whose messages these are and stamps them, so the daemon can still tell them
 /// apart after this worker has been replaced.
 pub(super) async fn bridge_event_transport(
+    event_rx: Box<dyn EventReceiver<WorkerToService>>,
+    event_tx: Arc<dyn EventSender<ServiceToWorker>>,
+    cmd_rx: &mut mpsc::UnboundedReceiver<ServiceToWorker>,
+    msg_tx: &WorkerMessageSink,
+    name: &str,
+) -> bool {
+    bridge_event_transport_with_profile(
+        event_rx,
+        event_tx,
+        cmd_rx,
+        msg_tx,
+        name,
+        WorkerProfile::SessionUser,
+    )
+    .await
+}
+
+pub(super) async fn bridge_event_transport_with_profile(
     mut event_rx: Box<dyn EventReceiver<WorkerToService>>,
     event_tx: Arc<dyn EventSender<ServiceToWorker>>,
     cmd_rx: &mut mpsc::UnboundedReceiver<ServiceToWorker>,
     msg_tx: &WorkerMessageSink,
     name: &str,
+    profile: WorkerProfile,
 ) -> bool {
     let (worker_msg_tx, mut worker_msg_rx) = mpsc::unbounded_channel::<Option<WorkerToService>>();
     tokio::spawn(async move {
@@ -64,6 +106,14 @@ pub(super) async fn bridge_event_transport(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(msg) => {
+                        if !msg.allowed_for_profile(profile) {
+                            error!(
+                                "Refusing daemon command {:?} for {:?} worker [{name}]",
+                                std::mem::discriminant(&msg),
+                                profile
+                            );
+                            continue;
+                        }
                         if matches!(msg, ServiceToWorker::Shutdown) {
                             daemon_initiated = true;
                         }
@@ -82,6 +132,14 @@ pub(super) async fn bridge_event_transport(
             msg_result = worker_msg_rx.recv() => {
                 match msg_result {
                     Some(Some(msg)) => {
+                        if !msg.allowed_for_profile(profile) {
+                            error!(
+                                "Refusing worker event {:?} from {:?} worker [{name}]",
+                                std::mem::discriminant(&msg),
+                                profile
+                            );
+                            continue;
+                        }
                         if !msg_tx.send(msg) {
                             error!("SignalingProxy receiver dropped for [{name}]");
                             break;

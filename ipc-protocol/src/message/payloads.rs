@@ -25,8 +25,50 @@ use desk_wayland_portal::{AuthorizationTarget, PortalSnapshot};
 use super::{ServiceToWorker, WorkerToService};
 // ==================== Payload Types ====================
 
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash)]
+pub struct SessionKey {
+    pub platform_session_id: String,
+    pub session_generation: u64,
+}
+
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopTarget {
+    WindowsDefault,
+    WindowsWinlogon,
+    LinuxSession,
+}
+
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerProfile {
+    SessionUser,
+    RestrictedDesktop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash)]
+pub struct WorkerKey {
+    pub session: SessionKey,
+    pub desktop: DesktopTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct WorkerIdentity {
+    pub key: WorkerKey,
+    pub profile: WorkerProfile,
+    pub incarnation: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct WorkerInitPayload {
+    /// Stable slot identity assigned by a ServiceDaemon worker pool. Portable
+    /// and older single-worker adapters omit it.
+    #[serde(default)]
+    pub worker_identity: Option<WorkerIdentity>,
     /// Session ID for this worker instance
     pub session_id: String,
     /// OS session ID
@@ -72,12 +114,10 @@ pub struct WorkerInitPayload {
     /// chunks (download responses, upload commands) travel over a
     /// dedicated bidirectional transport. Carries
     /// [`FileTransferPayload`] in both directions at
-    /// `FILE_QUEUE_CAP = 32` per direction. `None` only in portable /
-    /// in-process mode where the daemon constructs an in-process
-    /// channel pair instead — in named-pipe `ServiceDaemon` mode the
-    /// daemon **must** populate this field; the worker treats a
-    /// missing `file_pipe_name` in that mode as a fatal init error
-    /// and exits via `WorkerToService::Error`.
+    /// `FILE_QUEUE_CAP = 32` per direction. `None` in portable/in-process
+    /// mode and for `RestrictedDesktop`: portable supplies an in-process pair,
+    /// while restricted workers deliberately have no file lane at all. A
+    /// named-pipe `SessionUser` worker still treats a missing name as fatal.
     #[serde(default)]
     pub file_pipe_name: Option<String>,
 
@@ -865,7 +905,12 @@ pub struct TerminalCommandsListedPayload {
 pub struct DesktopChangedPayload {
     /// New input desktop name as returned by `OpenInputDesktop` +
     /// `GetUserObjectInformationW(UOI_NAME)`. Examples: "Default", "Winlogon",
-    /// "Screen-saver". The daemon launches the next worker with this name as
-    /// the `lpDesktop` argument to `CreateProcessAsUserW`.
+    /// "Screen-saver". A resident-worker daemon uses this observation to
+    /// atomically route interactive traffic to the matching warm worker.
     pub name: String,
+    /// Wall-clock timestamp captured by the observing worker. Because all
+    /// workers and the daemon run on the same host, this lets the daemon reject
+    /// an event queued while the worker was still on standby but delivered
+    /// after that worker became active.
+    pub observed_at_unix_ms: u64,
 }

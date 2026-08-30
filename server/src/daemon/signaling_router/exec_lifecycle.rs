@@ -474,13 +474,19 @@ pub(super) async fn handle_exec_control_inbound(
         // Best-effort by design: the worker may be gone, or the command may have
         // just finished. Either way the ledger below reports what is actually
         // true, rather than this send's success standing in for it.
-        if let Err(e) = ctx
-            .worker_mgr
-            .send_to_worker(ServiceToWorker::ExecCancel(ExecCancelPayload {
-                execution_generation: generation.clone(),
-            }))
-            .await
-        {
+        let result = if let Some(connection_id) = to.as_deref() {
+            ctx.worker_mgr
+                .send_to_connection_worker(
+                    connection_id,
+                    ServiceToWorker::ExecCancel(ExecCancelPayload {
+                        execution_generation: generation.clone(),
+                    }),
+                )
+                .await
+        } else {
+            Err("exec cancel has no selected desktop session".to_string())
+        };
+        if let Err(e) = result {
             log::warn!("[router] could not pass the cancel to the worker: {e}");
         }
         // `requested_by` is a wire hint only; the audit pipeline stamps the
@@ -838,11 +844,14 @@ pub(super) async fn dispatch_exec_plan(
         plan,
         audit_source_request_id,
     };
-    if let Err(e) = ctx
-        .worker_mgr
-        .send_to_worker(ServiceToWorker::ExecPlan(payload))
-        .await
-    {
+    let dispatch = if let Some(connection_id) = to_connection_id.as_deref() {
+        ctx.worker_mgr
+            .send_to_connection_worker(connection_id, ServiceToWorker::ExecPlan(payload))
+            .await
+    } else {
+        Err("exec request has no selected desktop session".to_string())
+    };
+    if let Err(e) = dispatch {
         // Nothing was started, so the slot is free again immediately.
         ctx.exec_capacity.release(&plan_generation);
         send_execution_completed(

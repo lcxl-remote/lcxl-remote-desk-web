@@ -96,6 +96,12 @@ pub struct RequestRemoteModel {
     /// Required session purpose hint. It only controls resource preparation and
     /// never grants a capability.
     pub purpose: RemoteSessionPurpose,
+    /// Opaque daemon-issued session target. Omit only when the requested
+    /// capability has exactly one ready worker, in which case the host binds it
+    /// automatically. With multiple candidates the host fails closed and
+    /// returns the selectable target descriptors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_target_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_wayland_control_mode: Option<String>,
     /// ICE servers, the value comes from signaling server
@@ -117,6 +123,28 @@ pub struct RequestRemoteModel {
     /// servers ignore it. `None` is personal context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i32>,
+}
+
+/// Safe, user-visible projection of one daemon-owned session worker target.
+/// Raw OS session ids and worker keys are intentionally not exposed.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SessionTargetDescriptor {
+    pub target_id: String,
+    pub display_name: String,
+    pub session_type: Option<String>,
+    pub seat: Option<String>,
+    pub foreground: bool,
+    pub remote_desktop_ready: bool,
+    pub terminal_ready: bool,
+    pub file_ready: bool,
+    pub assistant_ready: bool,
+}
+
+/// Error response data returned when a request needs an explicit session.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SessionTargetListData {
+    pub revision: u64,
+    pub targets: Vec<SessionTargetDescriptor>,
 }
 
 /// Browser-facing knobs that drive the adaptive-resolution hook. Server

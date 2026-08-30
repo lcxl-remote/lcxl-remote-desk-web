@@ -155,8 +155,12 @@ pub async fn query_server_info(
     #[cfg(not(target_os = "linux"))]
     let _ = &wayland_default_mode;
 
-    let service_installed = desk_utils::permission::is_service_installed("LcxlDeskService");
-    let service_running = desk_utils::permission::is_service_running("LcxlDeskService");
+    #[cfg(target_os = "linux")]
+    let platform_service_name = crate::daemon::linux_service::SERVICE_UNIT_NAME;
+    #[cfg(not(target_os = "linux"))]
+    let platform_service_name = "LcxlDeskService";
+    let service_installed = desk_utils::permission::is_service_installed(platform_service_name);
+    let service_running = desk_utils::permission::is_service_running(platform_service_name);
     // In ServiceDaemon mode the process runs as SYSTEM (is_admin always true).
     // Use the override reported by the Tauri process when available.
     let is_admin = tauri_is_admin

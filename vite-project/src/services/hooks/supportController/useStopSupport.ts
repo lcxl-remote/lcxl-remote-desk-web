@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { StopSupportMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { StopSupportMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { stopSupport } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const stopSupportMutationKey = () => [{ url: '/api/desk/support/stop' }] as const
 

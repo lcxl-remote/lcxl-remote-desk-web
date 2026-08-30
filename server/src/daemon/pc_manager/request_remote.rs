@@ -133,12 +133,15 @@ pub async fn handle_request_remote(
                 ),
             ))
         })?;
-        mgr.send_to_worker(ServiceToWorker::SetConnectionCeiling(
-            desk_ipc_protocol::message::SetConnectionCeilingPayload {
-                connection_id: from_connection_id.to_string(),
-                ceiling: Some(ceiling.clone()),
-            },
-        ))
+        mgr.send_to_connection_worker(
+            from_connection_id,
+            ServiceToWorker::SetConnectionCeiling(
+                desk_ipc_protocol::message::SetConnectionCeilingPayload {
+                    connection_id: from_connection_id.to_string(),
+                    ceiling: Some(ceiling.clone()),
+                },
+            ),
+        )
         .await
         .map_err(|e| {
             DeskError::CustomError(CustomDeskError::new(
@@ -438,6 +441,7 @@ mod tests {
 
     fn request(mode: Option<&str>) -> RequestRemoteModel {
         RequestRemoteModel {
+            session_target_id: None,
             purpose: desk_signal_facade::model::signal::RemoteSessionPurpose::RemoteDesktop,
             requested_wayland_control_mode: mode.map(str::to_string),
             ..RequestRemoteModel::default()

@@ -226,6 +226,7 @@ mod remote_access_initialized_data_tests {
         assert!(serde_json::from_value::<RequestRemoteModel>(missing).is_err());
 
         let model = RequestRemoteModel {
+            session_target_id: None,
             purpose: RemoteSessionPurpose::FileManager,
             ..RequestRemoteModel::default()
         };

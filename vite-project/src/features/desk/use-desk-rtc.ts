@@ -278,6 +278,11 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
         // DesktopReady signals are no longer emitted, so the
         // tear-down-and-reconnect path that lived here is gone.
         if (signaling_type === SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED) {
+            // Business refusals use the normal response type and may carry a
+            // session-target candidate list instead of initialization data.
+            // The admission owner handles those; never install them as an RTC
+            // epoch/capability snapshot.
+            if (message.response_state?.error_code) return;
             console.log('Received REMOTE_ACCESS_INITIALIZED', signaling_data);
             const initialized = signaling_data as RemoteAccessInitializedData;
             if (

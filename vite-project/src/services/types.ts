@@ -1066,6 +1066,9 @@ export const deskErrorCodeEnum = {
     MEDIA_WORKER_RESTART_REQUIRED: 100,
     AI_CONTEXT_ITEM_TOO_LARGE: 101,
     AI_CONTEXT_COMPRESSION_FAILED: 102,
+    SESSION_UNAVAILABLE: 103,
+    SESSION_SELECTION_REQUIRED: 104,
+    SESSION_TARGET_STALE: 105,
     CONNECTION_UNREACHABLE: 64,
     CONNECTION_NOT_SIGNALING: 65,
     CONNECTION_AUTH_FAILED: 66,
@@ -3727,6 +3730,11 @@ export type RequestRemoteModel = {
      * @type string,null
     */
     requested_wayland_control_mode?: string | null;
+    /**
+     * @description Opaque daemon-issued session target. Omit only when the requested\ncapability has exactly one ready worker, in which case the host binds it\nautomatically. With multiple candidates the host fails closed and\nreturns the selectable target descriptors.
+     * @type string,null
+    */
+    session_target_id?: string | null;
 };
 
 export type RestResponseAiExecutionPolicyPublic = {
@@ -5792,6 +5800,63 @@ export type ServerInfo = {
 };
 
 /**
+ * @description Safe, user-visible projection of one daemon-owned session worker target.\nRaw OS session ids and worker keys are intentionally not exposed.
+*/
+export type SessionTargetDescriptor = {
+    /**
+     * @type boolean
+    */
+    assistant_ready: boolean;
+    /**
+     * @type string
+    */
+    display_name: string;
+    /**
+     * @type boolean
+    */
+    file_ready: boolean;
+    /**
+     * @type boolean
+    */
+    foreground: boolean;
+    /**
+     * @type boolean
+    */
+    remote_desktop_ready: boolean;
+    /**
+     * @type string,null
+    */
+    seat?: string | null;
+    /**
+     * @type string,null
+    */
+    session_type?: string | null;
+    /**
+     * @type string
+    */
+    target_id: string;
+    /**
+     * @type boolean
+    */
+    terminal_ready: boolean;
+};
+
+/**
+ * @description Error response data returned when a request needs an explicit session.
+*/
+export type SessionTargetListData = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @type array
+    */
+    targets: SessionTargetDescriptor[];
+};
+
+/**
  * @description Signal request control data
 */
 export type SignalRequestControlData = {
@@ -7158,6 +7223,11 @@ export type OpenTerminalSessionQueryParams = {
      * @type string
     */
     command: string;
+    /**
+     * @description Opaque daemon-issued session target. Omitted only for the single-ready-\nworker auto-selection case.
+     * @type string,null
+    */
+    session_target_id?: string | null;
     /**
      * @description Target device handle (UUID; manager multi-instance addressing). The manager\nroutes by this; the OSS single-instance signal leaves it `None` and routes\nby the path `connection_id` (dual-target wire model).
      * @type string,null

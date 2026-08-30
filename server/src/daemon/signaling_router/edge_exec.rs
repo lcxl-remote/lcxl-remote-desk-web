@@ -480,9 +480,25 @@ pub(super) async fn handle_invoke_agent_capability_inbound(
         connection_id: model.from_connection_id.clone(),
         envelope,
     };
+    let Some(connection_id) = model.from_connection_id.as_deref() else {
+        emit_agent_error(
+            ctx,
+            model,
+            agent_error(
+                AgentErrorKind::TargetOffline,
+                "AI Assistant request has no selected desktop session",
+                false,
+                true,
+            ),
+        );
+        return Ok(());
+    };
     if let Err(e) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::InvokeAgentCapability(payload))
+        .send_to_connection_worker(
+            connection_id,
+            ServiceToWorker::InvokeAgentCapability(payload),
+        )
         .await
     {
         emit_agent_error(
@@ -569,9 +585,18 @@ pub(super) async fn handle_computer_action_inbound(
         connection_id: model.from_connection_id.clone(),
         plan,
     };
+    let Some(connection_id) = model.from_connection_id.as_deref() else {
+        emit_standard_error_response(
+            ctx,
+            model,
+            DeskErrorCode::SESSION_SELECTION_REQUIRED,
+            "Computer Action request has no selected desktop session",
+        );
+        return Ok(());
+    };
     if let Err(error) = ctx
         .worker_mgr
-        .send_to_worker(ServiceToWorker::ComputerActionPlan(payload))
+        .send_to_connection_worker(connection_id, ServiceToWorker::ComputerActionPlan(payload))
         .await
     {
         emit_standard_error_response(

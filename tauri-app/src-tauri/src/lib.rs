@@ -171,7 +171,12 @@ fn start_native_bridge_event_loop(
     });
 }
 
-/// Windows service name registered by the install flow.
+/// Platform service name registered by the install flow.
+#[cfg(target_os = "windows")]
+const SERVICE_NAME: &str = "LcxlDeskService";
+#[cfg(target_os = "linux")]
+const SERVICE_NAME: &str = "lcxl-remote-desk.service";
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const SERVICE_NAME: &str = "LcxlDeskService";
 
 /// Build the Tauri context. With the `macos-private-api` feature enabled,
@@ -283,12 +288,16 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                 Some(state_rx),
                 token_holder_ipc,
                 native_bridge_tx,
+                true,
             )
             .await;
         });
     });
 
     // Service-op handler (ShellExecute runas — does not need Tauri handle).
+    #[cfg(target_os = "linux")]
+    let service_config_override = Some(remote_access_paths.config_file().to_path_buf());
+    #[cfg(not(target_os = "linux"))]
     let service_config_override = remote_access_paths
         .explicit_config_file()
         .map(std::path::Path::to_path_buf);
@@ -810,6 +819,9 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             .start(host_access_rx);
 
             // Spawn handler for Install / Uninstall operations.
+            #[cfg(target_os = "linux")]
+            let service_config_override = Some(settings.paths().config_file().to_path_buf());
+            #[cfg(not(target_os = "linux"))]
             let service_config_override = settings
                 .paths()
                 .explicit_config_file()
@@ -880,6 +892,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                         Some(state_rx),
                         token_holder_ipc,
                         native_bridge_tx,
+                        false,
                     )
                     .await;
                 });

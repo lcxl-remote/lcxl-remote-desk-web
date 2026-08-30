@@ -88,29 +88,51 @@ impl WorkerSession {
         // chunks / control replies / upload chunks / cancels — split
         // off from the event lane so SCTP backpressure on a slow
         // browser DataChannel does not head-of-line block heartbeats /
-        // manager responses. The daemon always provisions this pipe
-        // for named-pipe workers, so a missing `file_pipe_name` is a
-        // fatal init error: the worker surfaces an `Error` and exits
-        // (no fallback, since that would silently put file bytes back
-        // on the event lane).
-        let file_pipe_name = match init_payload.file_pipe_name.as_deref() {
-            Some(name) => name,
-            None => {
-                let msg = "WorkerInit lacked file_pipe_name in named-pipe mode; \
-                           daemon must provision a dedicated file lane";
+        // manager responses. The daemon provisions this pipe for every
+        // named-pipe SessionUser worker. RestrictedDesktop is the explicit
+        // exception: it must have no file lane; a missing lane remains fatal
+        // for SessionUser (no fallback onto the event lane).
+        let restricted = init_payload
+            .worker_identity
+            .as_ref()
+            .is_some_and(|identity| {
+                identity.profile == desk_ipc_protocol::message::WorkerProfile::RestrictedDesktop
+            });
+        let (file_sender, file_receiver) = if restricted {
+            if init_payload.file_pipe_name.is_some() {
+                let msg = "RestrictedDesktop Init must not expose a file lane";
                 error!("{msg}");
-                let err = WorkerToService::Error(desk_ipc_protocol::message::ErrorPayload {
-                    code: -1,
-                    message: msg.to_string(),
-                    recoverable: false,
-                    connection_id: None,
-                });
-                let _ = event_tx.send(err).await;
                 return Err(msg.into());
             }
+            // The shared runtime API accepts file transports, but a restricted
+            // worker gets two deliberately disconnected in-process endpoints:
+            // no named pipe exists and neither direction can carry a byte.
+            let (file_sender, file_sink) = inprocess::make_file_inprocess::<FileTransferPayload>();
+            drop(file_sink);
+            let (file_source, file_receiver) =
+                inprocess::make_file_inprocess::<FileTransferPayload>();
+            drop(file_source);
+            (file_sender, file_receiver)
+        } else {
+            let file_pipe_name = match init_payload.file_pipe_name.as_deref() {
+                Some(name) => name,
+                None => {
+                    let msg = "WorkerInit lacked file_pipe_name in named-pipe mode; \
+                           daemon must provision a dedicated file lane";
+                    error!("{msg}");
+                    let err = WorkerToService::Error(desk_ipc_protocol::message::ErrorPayload {
+                        code: -1,
+                        message: msg.to_string(),
+                        recoverable: false,
+                        connection_id: None,
+                    });
+                    let _ = event_tx.send(err).await;
+                    return Err(msg.into());
+                }
+            };
+            info!("Worker connecting to file pipe: {file_pipe_name}");
+            connect_file_pipe(file_pipe_name).await?
         };
-        info!("Worker connecting to file pipe: {file_pipe_name}");
-        let (file_sender, file_receiver) = connect_file_pipe(file_pipe_name).await?;
 
         // Named-pipe path: no shared hub — worker constructs its own
         // (Forwarder if `host_upstream_url` is set, Local otherwise).

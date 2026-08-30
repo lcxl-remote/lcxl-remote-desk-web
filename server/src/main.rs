@@ -7,29 +7,29 @@ use std::path::PathBuf;
 #[derive(clap::Parser, Debug, Default)]
 #[command(ignore_errors = true)]
 struct ServerArgs {
-    /// Install the Windows Service (requires elevation)
-    #[cfg(target_os = "windows")]
+    /// Install the OS system service (requires elevation)
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[arg(long)]
     install_service: bool,
 
-    /// Uninstall the Windows Service (requires elevation)
-    #[cfg(target_os = "windows")]
+    /// Uninstall the OS system service (requires elevation)
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[arg(long)]
     uninstall_service: bool,
 
     /// Target installation directory for --install-service
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[arg(long)]
     install_path: Option<String>,
 
     /// Explicit host config override inherited by the installed service.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[arg(long)]
     config_file_path: Option<PathBuf>,
 
     /// Also stage the LcxlVirtualDisplay IDD driver during
     /// `--install-service`. Ignored unless `--install-service` is set.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[arg(long)]
     install_idd_driver: bool,
 }
@@ -197,6 +197,36 @@ fn main() {
             use lcxl_remote_desk_server::daemon::windows_service::uninstall_service;
             if let Err(e) = uninstall_service() {
                 eprintln!("Failed to uninstall service: {e}");
+                std::process::exit(1);
+            }
+            println!("Service uninstalled successfully");
+            return;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let server_args = ServerArgs::parse();
+        if server_args.install_service {
+            use lcxl_remote_desk_server::daemon::linux_service::install_service;
+            let default_dir =
+                lcxl_remote_desk_server::daemon::windows_service::default_install_dir();
+            let dir = server_args.install_path.as_deref().unwrap_or(&default_dir);
+            if server_args.install_idd_driver {
+                eprintln!("--install-idd-driver is unsupported on Linux");
+                std::process::exit(2);
+            }
+            if let Err(error) = install_service(dir, server_args.config_file_path.as_deref()) {
+                eprintln!("Failed to install service: {error}");
+                std::process::exit(1);
+            }
+            println!("Service installed successfully");
+            return;
+        }
+        if server_args.uninstall_service {
+            if let Err(error) = lcxl_remote_desk_server::daemon::linux_service::uninstall_service()
+            {
+                eprintln!("Failed to uninstall service: {error}");
                 std::process::exit(1);
             }
             println!("Service uninstalled successfully");

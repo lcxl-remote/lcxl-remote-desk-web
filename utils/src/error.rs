@@ -471,6 +471,14 @@ desk_error_codes! {
     /// validated summary for the current turn. The turn fails closed and does
     /// not silently fall back to destructive window trimming.
     AI_CONTEXT_COMPRESSION_FAILED = 102,
+    /// No ready session worker can serve the requested capability.
+    SESSION_UNAVAILABLE = 103,
+    /// More than one ready session worker can serve the request and the caller
+    /// must retry with one opaque `session_target_id` from the response data.
+    SESSION_SELECTION_REQUIRED = 104,
+    /// The supplied opaque session target was revoked by logout, reconnect, or
+    /// daemon restart and must not be rebound by a raw OS session identifier.
+    SESSION_TARGET_STALE = 105,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the

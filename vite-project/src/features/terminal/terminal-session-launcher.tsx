@@ -33,6 +33,19 @@ function TerminalLoading() {
     )
 }
 
+function fallbackTerminalCommands(operationSystem: string | undefined): string[][] {
+    switch (operationSystem) {
+        case "Windows":
+            return [["cmd.exe"], ["powershell.exe"]]
+        case "Linux":
+            return [["/bin/bash"], ["/bin/sh"]]
+        case "Mac":
+            return [["/bin/zsh"], ["/bin/bash"]]
+        default:
+            return []
+    }
+}
+
 export default function TerminalSessionLauncher({
     orgId,
 }: TerminalSessionLauncherProps = {}) {
@@ -52,7 +65,11 @@ export default function TerminalSessionLauncher({
         setSelectedCommand("")
     }, [])
 
-    if (isLoading) {
+    const commands = terminalList?.commands?.length
+        ? terminalList.commands
+        : fallbackTerminalCommands(operationSystem)
+
+    if (isLoading && commands.length === 0) {
         return <TerminalLoading />
     }
 
@@ -70,8 +87,6 @@ export default function TerminalSessionLauncher({
             </Suspense>
         )
     }
-
-    const commands = terminalList?.commands || []
 
     return (
         <div className="flex h-full items-center justify-center bg-muted/40 p-4 relative">

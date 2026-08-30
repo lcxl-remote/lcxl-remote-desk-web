@@ -7,6 +7,7 @@ fn payload_with(
     auth_token: Option<String>,
 ) -> WorkerInitPayload {
     WorkerInitPayload {
+        worker_identity: None,
         session_id: "session-1".into(),
         os_session_id: 1,
         desktop_name: None,
@@ -140,6 +141,28 @@ async fn event_forwarder_drains_queue_and_exits_when_senders_dropped() {
         .await
         .expect("forwarder task must exit after senders drop")
         .expect("task panicked");
+}
+
+#[tokio::test]
+async fn restricted_event_forwarder_drops_session_user_outputs() {
+    use desk_ipc_protocol::dual_transport::inprocess;
+
+    let (sender, mut receiver) = inprocess::make_event::<WorkerToService>();
+    let (tx, rx) = mpsc::unbounded_channel::<WorkerToService>();
+    let task = spawn_profiled_event_forwarder_task(rx, sender, WorkerProfile::RestrictedDesktop);
+    tx.send(WorkerToService::TerminalClosed(TerminalClosedPayload {
+        connection_id: "forbidden".to_string(),
+    }))
+    .unwrap();
+    tx.send(WorkerToService::Ready).unwrap();
+    drop(tx);
+
+    assert!(matches!(
+        receiver.recv().await,
+        Some(WorkerToService::Ready)
+    ));
+    assert!(receiver.recv().await.is_none());
+    task.await.unwrap();
 }
 
 /// A `PrivateScreenStateChanged`

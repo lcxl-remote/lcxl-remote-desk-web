@@ -37,6 +37,8 @@ pub async fn run_local_api(
     manager_link_state: Arc<super::manager_link_state::ManagerLinkState>,
     support_link_state: Arc<super::support_link_state::SupportLinkState>,
     manager_link_gate: Arc<super::manager_link_gate::ManagerLinkGate>,
+    #[cfg(target_os = "linux")]
+    session_shell_registry: host_control::session_shell::SessionShellRegistry,
     ready_tx: Option<oneshot::Sender<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("ServiceDaemon HTTP server starting on 0.0.0.0:{SERVICE_API_PORT}");
@@ -101,16 +103,18 @@ pub async fn run_local_api(
         let s = settings.read().await;
         s.system.tauri_ipc_token.clone().unwrap_or_default()
     };
-    let endpoint_state = Arc::new(
-        host_control::endpoint::EndpointState::new(
-            Arc::clone(&host_control_hub),
-            ipc_token,
-            tauri_bridge.tauri_login_token.clone(),
-        )
-        .with_settings(settings_data.clone())
-        .with_settings_coordinator(settings_coordinator_data.clone().into_inner())
-        .with_tauri_is_admin(Arc::clone(&tauri_bridge.tauri_is_admin)),
-    );
+    let endpoint_state_builder = host_control::endpoint::EndpointState::new(
+        Arc::clone(&host_control_hub),
+        ipc_token,
+        tauri_bridge.tauri_login_token.clone(),
+    )
+    .with_settings(settings_data.clone())
+    .with_settings_coordinator(settings_coordinator_data.clone().into_inner())
+    .with_tauri_is_admin(Arc::clone(&tauri_bridge.tauri_is_admin));
+    #[cfg(target_os = "linux")]
+    let endpoint_state_builder =
+        endpoint_state_builder.with_session_shell_registry(session_shell_registry);
+    let endpoint_state = Arc::new(endpoint_state_builder);
 
     let route_config = ApiRouteConfig {
         settings: settings_data.clone(),

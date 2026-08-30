@@ -66,7 +66,8 @@ use desk_signal_facade::model::remote_session::{
 };
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{
-    OfferModel, RemoteSessionPurpose, RequestRemoteModel, SignalingModel, SignalingType,
+    OfferModel, RemoteSessionPurpose, RequestRemoteModel, SessionTargetListData, SignalingModel,
+    SignalingResponseState, SignalingType,
 };
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalResizeData,
@@ -658,6 +659,46 @@ pub async fn admit_exec(ctx: &RouterContext, plan: &ExecPlan) -> ExecAdmission {
     }
 }
 
+fn emit_session_target_error(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+    capability: crate::daemon::session_target::SessionCapability,
+    error: crate::daemon::session_target::SessionTargetSelectionError,
+) {
+    let code = match error {
+        crate::daemon::session_target::SessionTargetSelectionError::Unavailable => {
+            DeskErrorCode::SESSION_UNAVAILABLE
+        }
+        crate::daemon::session_target::SessionTargetSelectionError::SelectionRequired => {
+            DeskErrorCode::SESSION_SELECTION_REQUIRED
+        }
+        crate::daemon::session_target::SessionTargetSelectionError::Stale => {
+            DeskErrorCode::SESSION_TARGET_STALE
+        }
+    };
+    let (revision, targets) = ctx.worker_mgr.session_targets().list_for(capability);
+    let data = SessionTargetListData { revision, targets };
+    let response_type =
+        response_type_for_request(model.signaling_type).unwrap_or(SignalingType::Error);
+    let response = SignalingModel::new_response(
+        &model.request_id,
+        response_type,
+        None,
+        model.from_connection_id.clone(),
+        Some(&data),
+        SignalingResponseState {
+            error_code: code.code(),
+            message: Some(error.to_string()),
+        },
+    );
+    match response.and_then(|response| serde_json::to_string(&response).map_err(Into::into)) {
+        Ok(text) => {
+            let _ = ctx.outbound_tx.send(text);
+        }
+        Err(error) => log::warn!("[router] failed to encode session target error: {error}"),
+    }
+}
+
 pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), RouterError> {
     if let Some(connection_id) = model.from_connection_id.as_deref()
         && ctx.pc_registry.is_tombstoned(connection_id).await
@@ -731,6 +772,24 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             let connection_id = model
                 .check_and_get_from_connection_id()
                 .map_err(DeskError::from)?;
+            let session_capability = match request_remote.purpose {
+                RemoteSessionPurpose::RemoteDesktop => {
+                    crate::daemon::session_target::SessionCapability::RemoteDesktop
+                }
+                RemoteSessionPurpose::FileManager => {
+                    crate::daemon::session_target::SessionCapability::FileManager
+                }
+            };
+            let selected_session = match ctx.worker_mgr.resolve_session_target(
+                session_capability,
+                request_remote.session_target_id.as_deref(),
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    emit_session_target_error(ctx, model, session_capability, error);
+                    return Ok(());
+                }
+            };
             let s = ctx.settings.read().await.clone();
             // Block on virtual display attach BEFORE assembling the
             // RemoteAccessInitialized response so the daemon's capabilities cache reflects
@@ -764,7 +823,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 }
             }
 
-            let capabilities = if request_remote.purpose == RemoteSessionPurpose::RemoteDesktop {
+            let capabilities = if let Some(session) = selected_session.as_ref() {
+                ctx.worker_mgr.session_worker_capabilities(session).await
+            } else if request_remote.purpose == RemoteSessionPurpose::RemoteDesktop {
                 Some(
                     ctx.worker_mgr
                         .wait_current_worker_capabilities(
@@ -781,6 +842,16 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             } else {
                 ctx.worker_mgr.worker_capabilities()
             };
+            if selected_session.is_some() && capabilities.is_none()
+            {
+                emit_session_target_error(
+                    ctx,
+                    model,
+                    session_capability,
+                    crate::daemon::session_target::SessionTargetSelectionError::Unavailable,
+                );
+                return Ok(());
+            }
 
             // Capability readiness is checked before creating manager admission,
             // PC, pending-request, or HostActivity residue.
@@ -834,6 +905,19 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                         desk_signal_facade::model::request_remote_authz::ActorSummary::unknown,
                     ),
             );
+            if let Some(session) = selected_session.as_ref()
+                && let Err(error) = ctx
+                    .worker_mgr
+                    .bind_connection_target(connection_id, session)
+            {
+                emit_error_response(
+                    ctx,
+                    model,
+                    DeskErrorCode::INVALID_STATE,
+                    &error,
+                );
+                return Ok(());
+            }
             let result = pc_manager::handle_request_remote(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
@@ -849,6 +933,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 grant_generation,
             )
             .await;
+
+            if result.is_err() {
+                ctx.worker_mgr.clear_connection_target(connection_id);
+            }
 
             // Release the guard before the post-handler cleanup check so
             // pending_requests reflects the actual outstanding work.
