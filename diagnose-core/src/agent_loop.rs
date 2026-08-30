@@ -24,7 +24,12 @@
 //! [`MAX_STEPS_PER_TURN`]: crate::MAX_STEPS_PER_TURN
 //! [`MAX_SAME_TOOL_PER_TURN`]: crate::MAX_SAME_TOOL_PER_TURN
 
-use desk_agent_protocol::computer_use::{ComputerActionCompleted, ComputerActionOutput};
+use desk_agent_protocol::browser_control::{
+    BrowserActionResult, BrowserElementRef, BrowserElementRole, BrowserPageRef,
+};
+use desk_agent_protocol::computer_use::{
+    ComputerActionCompleted, ComputerActionOutput, ComputerActionResultClass,
+};
 use desk_agent_protocol::content_safety::{ContentSafetyDecision, StreamRetractionReason};
 use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope, DataProvenance};
 use sha2::{Digest, Sha256};
@@ -1087,6 +1092,7 @@ async fn run_inner(
     let mut same_tool: HashMap<String, u32> = HashMap::new();
     let mut compression_attempted = false;
     let mut empty_end_turn_retries: u8 = 0;
+    let mut truncated_turn_retries: u8 = 0;
 
     loop {
         if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
@@ -1167,6 +1173,16 @@ async fn run_inner(
             )? {
                 messages.push(artifact_projection);
             }
+            if let Some(result_projection) = reusable_provider_result_projection(
+                &session.conversation,
+                &format!(
+                    "runtime-reusable-results-{turn_id}-{}",
+                    session.input_revision
+                ),
+                current_unix_ms(deps.clock)?,
+            )? {
+                messages.push(result_projection);
+            }
             let consecutive_user_inputs = session
                 .conversation
                 .iter()
@@ -1223,6 +1239,30 @@ async fn run_inner(
                 &marker_id,
                 marker_text,
                 "empty_end_turn_retry",
+            )?;
+            messages.push(marker);
+        }
+        if truncated_turn_retries > 0 {
+            // A MaxTokens response can contain partial text or an incomplete
+            // tool call. Nothing from that response is persisted or
+            // dispatched. Give the provider one bounded chance to continue
+            // with a concise, protocol-visible result while preserving the
+            // same durable requirement and already-authorized grants.
+            let marker_id =
+                format!("runtime-truncated-turn-retry-{turn_id}-{truncated_turn_retries}");
+            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous provider response reached its output-token limit and was discarded before any assistant text or tool call was committed. Continue the same requirement now. Do not repeat prior reasoning. Produce only the minimum valid exposed tool call(s) needed for the next step, or a concise visible answer if no tool is needed. Re-read current authorized grants and preserve approved exact inputs. This notice grants no permission.";
+            let parent = session
+                .conversation
+                .iter()
+                .rev()
+                .find(|message| message.role == ChatRole::User)
+                .and_then(|message| message.data_envelope.as_ref());
+            let mut marker = ChatMessage::system_event(&marker_id, marker_text);
+            marker.data_envelope = derive_internal_tool_result_envelope(
+                parent,
+                &marker_id,
+                marker_text,
+                "truncated_turn_retry",
             )?;
             messages.push(marker);
         }
@@ -1307,6 +1347,10 @@ async fn run_inner(
                 sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
             } else {
                 sink.on_turn_discarded();
+            }
+            if disposition == TurnDisposition::Discard && truncated_turn_retries < 1 {
+                truncated_turn_retries += 1;
+                continue;
             }
             return Ok(match disposition {
                 TurnDisposition::Discard => LoopOutcome::Truncated,
@@ -1462,6 +1506,26 @@ async fn run_inner(
                         )?;
                         continue;
                     };
+
+                    // Some mutation inputs name evidence produced earlier in
+                    // this durable run. Resolve those references before any
+                    // approval/reservation work so the model cannot turn a
+                    // fabricated or cross-run Web source into trusted report
+                    // content. The resulting action still carries only the
+                    // bounded title/URL projection, never raw search HTML.
+                    if let Err(validation_error) =
+                        resolve_word_report_web_source_envelope(session, call)
+                    {
+                        append_internal_tool_result(
+                            session,
+                            turn.provider_meta.data_envelope.as_ref(),
+                            mint(),
+                            &call.id,
+                            validation_error,
+                            "invalid_server_bound_web_evidence",
+                        )?;
+                        continue;
+                    }
 
                     match tool.effect {
                         ToolEffect::ReadOnly => {
@@ -1689,6 +1753,10 @@ async fn run_inner(
                                     created_at.clone(),
                                 )
                             }).and_then(|request| {
+                                validate_browser_permission_references(
+                                    &session.conversation,
+                                    &request,
+                                )?;
                                 let inventory = deps.capability_inventory.ok_or_else(|| AgentError {
                                     kind: AgentErrorKind::Internal,
                                     message: "permission planning has no live capability inventory".into(),
@@ -1705,6 +1773,80 @@ async fn run_inner(
                             });
                             match request {
                                 Ok(request) => {
+                                    if let Some(existing) = session
+                                        .permission_requests
+                                        .iter()
+                                        .rev()
+                                        .find(|existing| {
+                                            crate::permission_tools::equivalent_permission_request(
+                                                existing, &request,
+                                            )
+                                        })
+                                        .cloned()
+                                    {
+                                        let decision_state = match existing.state {
+                                            crate::dynamic_run::PermissionRequestState::Pending => {
+                                                "pending"
+                                            }
+                                            crate::dynamic_run::PermissionRequestState::NeedsRevalidation => {
+                                                "needs_revalidation"
+                                            }
+                                            crate::dynamic_run::PermissionRequestState::Approved => {
+                                                "approved"
+                                            }
+                                            crate::dynamic_run::PermissionRequestState::PartiallyApproved => {
+                                                "partially_approved"
+                                            }
+                                            crate::dynamic_run::PermissionRequestState::Denied => {
+                                                "denied"
+                                            }
+                                            crate::dynamic_run::PermissionRequestState::Replaced => {
+                                                "replaced"
+                                            }
+                                            crate::dynamic_run::PermissionRequestState::Withdrawn => {
+                                                "withdrawn"
+                                            }
+                                        };
+                                        let content = serde_json::json!({
+                                            "status": "existing_permission_request",
+                                            "decision_state": decision_state,
+                                            "request_id": existing.request_id,
+                                            "authority": "unchanged",
+                                            "message": "An authority-equivalent permission batch already exists for this input revision. Do not request it again; use the current authorization snapshot or adapt to the recorded decision."
+                                        })
+                                        .to_string();
+                                        let envelope = derive_internal_tool_result_envelope(
+                                            turn.provider_meta.data_envelope.as_ref(),
+                                            &call.id,
+                                            &content,
+                                            crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                                        )?;
+                                        let mut message =
+                                            ChatMessage::tool_result(mint(), &call.id, content);
+                                        message.data_envelope = envelope;
+                                        session.conversation.push(message);
+                                        finish_tool(session, &call.id, true, sink);
+                                        if existing.state.can_user_decide() {
+                                            append_unstarted_tool_results(
+                                                session,
+                                                &turn.tool_calls[call_index + 1..],
+                                                turn.provider_meta.data_envelope.as_ref(),
+                                                &mut mint,
+                                                "not executed: waiting for the existing user permission decision",
+                                                "permission_pause_tool_call",
+                                            )?;
+                                            deps.session_seam.save(session).await?;
+                                            sink.on_permission_requested(
+                                                &existing.request_id,
+                                                existing.items.len(),
+                                            );
+                                            return Ok(LoopOutcome::PermissionRequested {
+                                                request_id: existing.request_id,
+                                            });
+                                        }
+                                        deps.session_seam.save(session).await?;
+                                        continue;
+                                    }
                                     let content = serde_json::json!({
                                         "status": "pending_user_decision",
                                         "request_id": request.request_id,
@@ -1895,6 +2037,59 @@ fn stable_lineage_id(prefix: &str, value: &str) -> String {
     format!("{prefix}-{:x}", Sha256::digest(value.as_bytes()))
 }
 
+fn current_unix_ms(clock: &dyn Fn() -> String) -> Result<u64, AgentError> {
+    chrono::DateTime::parse_from_rfc3339(&clock())
+        .map_err(|_| AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "agent clock returned an invalid server timestamp".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })?
+        .timestamp_millis()
+        .try_into()
+        .map_err(|_| AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "agent clock returned a timestamp outside the supported range".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })
+}
+
+fn verified_browser_result(message: &ChatMessage) -> Option<BrowserActionResult> {
+    if message.role != ChatRole::Tool {
+        return None;
+    }
+    if let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text)
+        && completion.result == ComputerActionResultClass::Verified
+        && let Some(ComputerActionOutput::Browser(result)) = completion.output
+        && result.validate().is_ok()
+    {
+        return Some(result);
+    }
+    let source_tool = message
+        .data_envelope
+        .as_ref()?
+        .provenance
+        .source_tool_name
+        .as_str();
+    if !matches!(
+        source_tool,
+        "browser_open_page"
+            | "browser_navigate_page"
+            | "browser_take_snapshot"
+            | "browser_wait_for"
+            | "browser_fill_form"
+            | "browser_activate_element"
+    ) {
+        return None;
+    }
+    let result = serde_json::from_str::<BrowserActionResult>(&message.text).ok()?;
+    result.validate().ok()?;
+    Some(result)
+}
+
 /// Re-project only typed immutable artifacts that the newest user message names
 /// verbatim. This lets a reviewed downstream Provider consume a still-valid
 /// artifact after context trimming, a model/profile switch, or process recovery
@@ -1994,6 +2189,379 @@ fn requested_artifact_registry_projection(
         })?;
     }
     Ok(Some(projection))
+}
+
+/// Re-project only the bounded opaque references needed to continue a tool
+/// chain on every Device Assistant model request. This must also run for an
+/// ordinary user follow-up: context compression or a new turn can otherwise
+/// retain the requirement while dropping the worker-issued BrowserPageRef.
+/// Historical raw Provider results deliberately are not replayed across the
+/// egress boundary; the projection keeps only the worker-retained merge
+/// preview id, the exact same-run Web Search call reference it must pass to
+/// reviewed artifact Providers, and up to four recent validated browser page
+/// identities plus at most 32 prioritized closed element refs per origin needed
+/// for subsequent semantic browser actions. No rows, snippets, raw DOM, page
+/// titles, native paths, arbitrary result text, or authority are copied.
+/// Downstream calls must still pass the current grant, selected-object,
+/// same-run result, source-pair, page-incarnation and expiry checks.
+fn reusable_provider_result_projection(
+    conversation: &[ChatMessage],
+    message_id: &str,
+    now_unix_ms: u64,
+) -> Result<Option<ChatMessage>, AgentError> {
+    const MAX_WEB_SOURCES: usize = 8;
+    const MAX_BROWSER_RESULTS: usize = 2;
+    const MAX_BROWSER_ELEMENTS_PER_RESULT: usize = 32;
+
+    let Some(parent) = conversation
+        .iter()
+        .rev()
+        .find(|message| message.role == ChatRole::User)
+        .and_then(|message| message.data_envelope.as_ref())
+    else {
+        return Ok(None);
+    };
+
+    let mut preview = None;
+    let mut preview_envelope = None;
+    let mut web_search = None;
+    let mut web_envelope = None;
+    let mut browser_results = Vec::new();
+    let mut browser_envelopes = Vec::new();
+    let mut seen_browser_pages = HashSet::new();
+    for message in conversation.iter().rev() {
+        if message.role != ChatRole::Tool {
+            continue;
+        }
+        let Some(envelope) = message.data_envelope.as_ref() else {
+            continue;
+        };
+        if envelope
+            .retention
+            .expires_at_unix_ms
+            .is_some_and(|expires| expires <= now_unix_ms)
+        {
+            continue;
+        }
+        if preview.is_none()
+            && envelope.provenance.source_tool_name == "preview_spreadsheet_merge"
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.text)
+            && let Some(preview_id) = value
+                .pointer("/ReadContext/SpreadsheetMergePreview/preview_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 160)
+        {
+            preview = Some(serde_json::json!({"preview_id": preview_id}));
+            preview_envelope = Some(envelope.clone());
+        }
+        if web_search.is_none()
+            && envelope.provenance.source_tool_name == "search_public_web"
+            && let Some(call_id) = message.tool_call_id.as_deref()
+            && conversation.iter().any(|candidate| {
+                candidate.role == ChatRole::Assistant
+                    && candidate
+                        .tool_calls
+                        .iter()
+                        .any(|call| call.id == call_id && call.name == "search_public_web")
+            })
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.text)
+            && value
+                .get("web_search_call_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(call_id)
+            && let Some(results) = value.get("results").and_then(serde_json::Value::as_array)
+        {
+            let sources = results
+                .iter()
+                .filter_map(|source| {
+                    let title = source.get("title")?.as_str()?;
+                    let url = source.get("url")?.as_str()?;
+                    (!title.is_empty()
+                        && title.chars().count() <= 240
+                        && url.starts_with("https://")
+                        && url.len() <= 2_048)
+                        .then(|| serde_json::json!({"title": title, "url": url}))
+                })
+                .take(MAX_WEB_SOURCES)
+                .collect::<Vec<_>>();
+            if !sources.is_empty() {
+                web_search = Some(serde_json::json!({
+                    "web_search_call_id": call_id,
+                    "sources": sources,
+                }));
+                web_envelope = Some(envelope.clone());
+            }
+        }
+        if browser_results.len() < MAX_BROWSER_RESULTS
+            && let Some(result) = verified_browser_result(message)
+        {
+            // Only the newest page for one adapter origin is useful to a
+            // subsequent semantic action. Keeping older incarnations of the
+            // same Gmail/Slack surface bloats the model request and makes it
+            // easier for the model to copy a stale opaque identity. Two
+            // origins are enough for the current cross-application handoff.
+            let page_key = format!(
+                "{}\0{}\0{}\0{}\0{:?}\0{}\0{}",
+                result.page.adapter.device_id,
+                result.page.adapter.os_session_id,
+                result.page.adapter.profile_incarnation,
+                result.page.adapter.connection_revision,
+                result.page.origin.kind,
+                result.page.origin.host_ascii,
+                result.page.origin.port,
+            );
+            if seen_browser_pages.insert(page_key) {
+                let mut elements = result
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.elements.clone())
+                    .unwrap_or_default();
+                elements.sort_by_key(|element| {
+                    let name = element.accessible_name.to_ascii_lowercase();
+                    let semantic_priority = [
+                        "to recipients",
+                        "subject",
+                        "message body",
+                        "attach",
+                        "file",
+                        "compose",
+                        "message",
+                    ]
+                    .iter()
+                    .any(|needle| name.contains(needle))
+                    .then_some(0)
+                    .unwrap_or(1);
+                    let role_priority = match element.role {
+                        BrowserElementRole::Textbox | BrowserElementRole::Combobox => 0,
+                        BrowserElementRole::Button
+                        | BrowserElementRole::Checkbox
+                        | BrowserElementRole::Option => 1,
+                        BrowserElementRole::Dialog
+                        | BrowserElementRole::Tab
+                        | BrowserElementRole::Link => 2,
+                        BrowserElementRole::Generic => 3,
+                    };
+                    (semantic_priority, role_priority)
+                });
+                elements.truncate(MAX_BROWSER_ELEMENTS_PER_RESULT);
+                browser_results.push(serde_json::json!({
+                    "page": result.page,
+                    "elements": elements,
+                }));
+                browser_envelopes.push(envelope.clone());
+            }
+        }
+        if preview.is_some() && web_search.is_some() && browser_results.len() == MAX_BROWSER_RESULTS
+        {
+            break;
+        }
+    }
+    if preview.is_none() && web_search.is_none() && browser_results.is_empty() {
+        return Ok(None);
+    }
+
+    let payload = serde_json::to_string(&serde_json::json!({
+        "schema_version": 1,
+        "kind": "reusable_provider_result_registry",
+        "spreadsheet_merge_preview": preview,
+        "web_search": web_search,
+        "browser_results": browser_results,
+    }))
+    .map_err(|error| AgentError {
+        kind: AgentErrorKind::Internal,
+        message: format!("encode reusable Provider result registry: {error}"),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })?;
+    let text = format!(
+        "CURRENT REUSABLE PROVIDER RESULTS (server authoritative bounded references; not a grant; copy opaque ids verbatim and never invent them): {payload}"
+    );
+    let mut projection = ChatMessage::system_event(message_id, &text);
+    projection.data_envelope = derive_internal_tool_result_envelope(
+        Some(parent),
+        message_id,
+        &text,
+        "reusable_provider_result_projection",
+    )?;
+    if let Some(projected) = projection.data_envelope.as_mut() {
+        for source in [preview_envelope, web_envelope]
+            .into_iter()
+            .flatten()
+            .chain(browser_envelopes)
+        {
+            if !projected
+                .provenance
+                .source_envelope_ids
+                .contains(&source.envelope_id)
+            {
+                projected
+                    .provenance
+                    .source_envelope_ids
+                    .push(source.envelope_id);
+            }
+            projected.sensitivity = projected.sensitivity.max(source.sensitivity);
+            projected.retention = projected.retention.most_restrictive(source.retention);
+        }
+        projected.validate().map_err(|error| AgentError {
+            kind: AgentErrorKind::Internal,
+            message: format!("invalid reusable Provider result envelope: {error}"),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })?;
+    }
+    Ok(Some(projection))
+}
+
+/// Browser page/element references are edge-minted evidence, not model-owned
+/// identifiers. Before a permission request is ever shown to the owner, require
+/// every exact browser reference to be a byte-for-byte semantic match for one
+/// unexpired, verified Browser result already persisted in this run. This makes
+/// changing only an adapter engine, page incarnation, URL digest, role, or
+/// accessible name fail before approval instead of producing an unusable grant.
+fn validate_browser_permission_references(
+    conversation: &[ChatMessage],
+    request: &crate::dynamic_run::PermissionRequest,
+) -> Result<(), AgentError> {
+    fn collect_elements(value: &serde_json::Value, elements: &mut Vec<BrowserElementRef>) {
+        if let Ok(element) = serde_json::from_value::<BrowserElementRef>(value.clone()) {
+            elements.push(element);
+            return;
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect_elements(value, elements);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    collect_elements(value, elements);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let now_unix_ms = chrono::DateTime::parse_from_rfc3339(&request.created_at)
+        .map_err(|_| AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "permission request has an invalid server timestamp".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })?
+        .timestamp_millis()
+        .try_into()
+        .map_err(|_| AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "permission request timestamp is outside the supported range".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })?;
+
+    for item in &request.items {
+        if !matches!(
+            item.tool_name.as_str(),
+            "browser_navigate_page"
+                | "browser_fill_form"
+                | "browser_activate_element"
+                | "prepare_gmail_web_draft_handoff"
+                | "prepare_slack_web_message_handoff"
+        ) {
+            continue;
+        }
+        let canonical = item.canonical_input_json.as_deref().ok_or_else(|| AgentError {
+            kind: AgentErrorKind::InvalidInput,
+            message: format!(
+                "invalid request_capability_grants arguments: tool `{}` requires exact browser input",
+                item.tool_name
+            ),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        })?;
+        let value: serde_json::Value = serde_json::from_str(canonical).map_err(|_| AgentError {
+            kind: AgentErrorKind::InvalidInput,
+            message: format!(
+                "invalid request_capability_grants arguments: tool `{}` has invalid exact browser input",
+                item.tool_name
+            ),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        })?;
+        let page: BrowserPageRef = serde_json::from_value(
+            value
+                .get("page")
+                .cloned()
+                .ok_or_else(|| AgentError {
+                    kind: AgentErrorKind::InvalidInput,
+                    message: format!(
+                        "invalid request_capability_grants arguments: tool `{}` is missing its exact page reference",
+                        item.tool_name
+                    ),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                })?,
+        )
+        .map_err(|_| AgentError {
+            kind: AgentErrorKind::InvalidInput,
+            message: format!(
+                "invalid request_capability_grants arguments: tool `{}` has an invalid exact page reference",
+                item.tool_name
+            ),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        })?;
+        let mut elements = Vec::new();
+        for (key, child) in value.as_object().into_iter().flatten() {
+            if key != "page" {
+                collect_elements(child, &mut elements);
+            }
+        }
+        let grounded = conversation.iter().rev().any(|message| {
+            if message.role != ChatRole::Tool
+                || message.data_envelope.as_ref().is_none_or(|envelope| {
+                    envelope
+                        .retention
+                        .expires_at_unix_ms
+                        .is_some_and(|expires| expires <= now_unix_ms)
+                })
+            {
+                return false;
+            }
+            let Some(result) = verified_browser_result(message) else {
+                return false;
+            };
+            if result.validate().is_err() || result.page != page {
+                return false;
+            }
+            elements.is_empty()
+                || result.snapshot.as_ref().is_some_and(|snapshot| {
+                    elements
+                        .iter()
+                        .all(|element| snapshot.elements.contains(element))
+                })
+        });
+        if !grounded {
+            return Err(AgentError {
+                kind: AgentErrorKind::InvalidInput,
+                message: format!(
+                    "invalid request_capability_grants arguments: tool `{}` must copy its exact page and element references from one unexpired verified browser result in this run",
+                    item.tool_name
+                ),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Derive the exact model-visible acknowledgement envelope from the model turn
@@ -2133,6 +2701,34 @@ fn bind_tool_input_envelopes(
     collect_identity_values(&arguments, &mut artifact_ids, &mut preview_ids);
     let mut source_ids = envelope.provenance.source_envelope_ids.clone();
 
+    // A Word report may opt into an exact subset of one prior Web Search
+    // result. The lookup below has already been enforced before dispatch; bind
+    // the server-owned result envelope directly so the artifact lineage does
+    // not rely only on the model-turn transitive edge.
+    if let Ok(Some(web_source)) = resolve_word_report_web_source_envelope(session, call) {
+        source_ids.push(web_source.envelope_id.clone());
+    }
+
+    // A tool call is an output of the immediately persisted assistant model
+    // turn. That response envelope is the authoritative transitive link to
+    // every user/tool/Web envelope projected into that model request. Bind it
+    // by the server-owned tool-call id; the model never supplies an envelope id.
+    if let Some(model_turn) = session
+        .conversation
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == ChatRole::Assistant
+                && message
+                    .tool_calls
+                    .iter()
+                    .any(|tool_call| tool_call.id == call.id)
+        })
+        .and_then(|message| message.data_envelope.as_ref())
+    {
+        source_ids.push(model_turn.envelope_id.clone());
+    }
+
     // Every Provider call in this run reacts to the most recent durable owner
     // requirement (including a permission-resume projection derived from it).
     if let Some(user) = session
@@ -2204,6 +2800,103 @@ fn bind_tool_input_envelopes(
         safe_for_model: false,
         error_code: None,
     })
+}
+
+/// Match optional Word report source entries against one exact Web Search tool
+/// result already persisted in the same conversation. The model supplies a
+/// server-owned tool call id plus title/URL pairs, but never envelope ids. Both
+/// fields may be omitted for a report without Web sources.
+fn resolve_word_report_web_source_envelope<'a>(
+    session: &'a crate::session::PersistedAgentSession,
+    call: &crate::chat::ToolCall,
+) -> Result<Option<&'a DataEnvelope>, String> {
+    if call.name != "create_word_report_from_merge_preview" {
+        return Ok(None);
+    }
+    let arguments: serde_json::Value = serde_json::from_str(&call.arguments_json)
+        .map_err(|_| "Word report input is not valid JSON".to_string())?;
+    let call_id = arguments
+        .get("web_search_call_id")
+        .and_then(serde_json::Value::as_str);
+    let sources = arguments
+        .get("web_sources")
+        .and_then(serde_json::Value::as_array);
+    match (call_id, sources) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => {}
+        _ => {
+            return Err(
+                "Word report Web sources require both web_search_call_id and web_sources".into(),
+            );
+        }
+    }
+    let call_id = call_id.expect("paired above");
+    let sources = sources.expect("paired above");
+    if call_id.is_empty() || call_id.len() > 128 || !(1..=8).contains(&sources.len()) {
+        return Err(
+            "Word report Web sources require one bounded prior Web Search call and 1 to 8 entries"
+                .into(),
+        );
+    }
+    let search_call_exists = session.conversation.iter().any(|message| {
+        message.role == ChatRole::Assistant
+            && message
+                .tool_calls
+                .iter()
+                .any(|tool_call| tool_call.id == call_id && tool_call.name == "search_public_web")
+    });
+    if !search_call_exists {
+        return Err("Word report Web Search call is not part of this durable run".into());
+    }
+    let result = session
+        .conversation
+        .iter()
+        .find(|message| {
+            message.role == ChatRole::Tool && message.tool_call_id.as_deref() == Some(call_id)
+        })
+        .ok_or_else(|| "Word report Web Search result is not available yet".to_string())?;
+    let result_envelope = result
+        .data_envelope
+        .as_ref()
+        .filter(|envelope| envelope.provenance.source_tool_name == "search_public_web")
+        .ok_or_else(|| "Word report Web Search result has no authoritative envelope".to_string())?;
+    let result_json: serde_json::Value = serde_json::from_str(&result.text)
+        .map_err(|_| "Word report Web Search result is not valid structured data".to_string())?;
+    let observed = result_json
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Word report Web Search result has no bounded result list".to_string())?;
+    let mut requested = HashSet::new();
+    for source in sources {
+        let object = source
+            .as_object()
+            .filter(|object| object.len() == 2)
+            .ok_or_else(|| "Word report Web source must contain only title and url".to_string())?;
+        let title = object
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Word report Web source title is invalid".to_string())?;
+        let url = object
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Word report Web source URL is invalid".to_string())?;
+        if title.is_empty()
+            || title.chars().count() > 240
+            || url.len() > 2_048
+            || !url.starts_with("https://")
+            || !requested.insert((title, url))
+            || !observed.iter().any(|candidate| {
+                candidate.get("title").and_then(serde_json::Value::as_str) == Some(title)
+                    && candidate.get("url").and_then(serde_json::Value::as_str) == Some(url)
+            })
+        {
+            return Err(
+                "Word report Web source was not copied exactly from the referenced search result"
+                    .into(),
+            );
+        }
+    }
+    Ok(Some(result_envelope))
 }
 
 /// Run one validated mutating tool call: approval + execution via the seam, then

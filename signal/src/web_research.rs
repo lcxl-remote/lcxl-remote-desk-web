@@ -241,14 +241,16 @@ pub(crate) fn validate_search_call(
 
 pub(crate) async fn search_public_web(
     validated: ValidatedSearch,
+    server_call_id: &str,
 ) -> Result<ToolRunOutput, AgentError> {
     let connector = DuckDuckGoHtmlConnector;
-    search_with_connector(&connector, validated).await
+    search_with_connector(&connector, validated, server_call_id).await
 }
 
 async fn search_with_connector(
     connector: &dyn WebSearchConnector,
     validated: ValidatedSearch,
+    server_call_id: &str,
 ) -> Result<ToolRunOutput, AgentError> {
     let descriptor = connector.descriptor();
     let results = connector
@@ -256,6 +258,7 @@ async fn search_with_connector(
         .await?;
     let result = serde_json::json!({
         "schema_version": 1,
+        "web_search_call_id": server_call_id,
         "untrusted_external_content": true,
         "connector": {
             "connector_id": descriptor.connector_id,
@@ -661,6 +664,32 @@ fn duckduckgo_result_url(href: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    struct FixedSearchConnector;
+
+    #[async_trait(?Send)]
+    impl WebSearchConnector for FixedSearchConnector {
+        fn descriptor(&self) -> WebSearchConnectorDescriptor {
+            WebSearchConnectorDescriptor {
+                connector_id: "fixed-test-search",
+                display_name: "Fixed Test Search",
+                requires_api_key: false,
+                experimental: true,
+            }
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+            _max_results: u8,
+        ) -> Result<Vec<WebSearchResult>, AgentError> {
+            Ok(vec![WebSearchResult {
+                title: "Example source".into(),
+                url: "https://example.com/source".into(),
+                snippet: "Untrusted excerpt".into(),
+            }])
+        }
+    }
+
     fn call(url: &str) -> ToolCall {
         ToolCall {
             id: "web-1".into(),
@@ -709,6 +738,27 @@ mod tests {
             ..call
         };
         assert!(validate_search_call(&too_many, "Rust language").is_err());
+    }
+
+    #[tokio::test]
+    async fn search_result_exposes_the_exact_server_call_reference() {
+        let output = search_with_connector(
+            &FixedSearchConnector,
+            ValidatedSearch {
+                query: "Rust language".into(),
+                max_results: 5,
+            },
+            "server-search-call-1",
+        )
+        .await
+        .unwrap();
+        let result: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(
+            result["web_search_call_id"],
+            serde_json::json!("server-search-call-1")
+        );
+        assert_eq!(result["results"][0]["title"], "Example source");
+        assert_eq!(result["results"][0]["url"], "https://example.com/source");
     }
 
     #[test]

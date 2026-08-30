@@ -6,7 +6,8 @@
 
 use std::collections::BTreeSet;
 
-use desk_agent_protocol::capability_grant::{CapabilityGrant, CapabilityGrantUsePolicy};
+use desk_agent_protocol::browser_control::{BrowserNavigationTarget, BrowserPageRef};
+use desk_agent_protocol::capability_grant::CapabilityGrant;
 use desk_agent_protocol::capability_provider::{AuthorizationResourceKind, CapabilityEffect};
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
 use serde::Deserialize;
@@ -53,19 +54,35 @@ pub fn capability_authorization_prompt(
     grants: &[CapabilityGrant],
     permission_requests: &[PermissionRequest],
     now_unix_ms: u64,
+    current_readiness_revision: u64,
 ) -> CapabilityAuthorizationPrompt {
     let mut approved_exact_input_expires_at_unix_ms: Option<u64> = None;
     let mut entries = Vec::with_capacity(grants.len());
     for grant in grants {
-        let state = if grant.revoked_at_unix_ms.is_some() {
+        let mut state = if grant.revoked_at_unix_ms.is_some() {
             "revoked"
         } else if grant.expires_at_unix_ms <= now_unix_ms {
             "expired"
         } else if grant.remaining_uses == 0 {
             "exhausted"
+        } else if grant.readiness_revision != current_readiness_revision {
+            "stale_readiness"
         } else {
             "active"
         };
+        let approved_exact = (state == "active")
+            .then(|| approved_exact_input(grant, permission_requests))
+            .flatten();
+        if state == "active"
+            && grant.canonical_input_digest_sha256.is_some()
+            && approved_exact.is_none()
+        {
+            // An exact grant without a recoverable current-schema input cannot
+            // be called safely. Keep it out of the model's active authority
+            // set instead of encouraging the model to reconstruct old wire
+            // shapes or guess fields from a digest.
+            state = "schema_incompatible";
+        }
         let mut entry = json!({
             "provider_id": grant.provider_id,
             "capability_id": grant.capability_id,
@@ -79,9 +96,7 @@ pub fn capability_authorization_prompt(
             "operation_scope": grant.operation_scope,
         });
         if state == "active"
-            && grant.use_policy == CapabilityGrantUsePolicy::OneShotExact
-            && let Some((canonical_input, digest)) =
-                approved_exact_input(grant, permission_requests)
+            && let Some((canonical_input, digest)) = approved_exact
         {
             entry["canonical_input_digest_sha256"] = json!(digest);
             entry["approved_exact_input"] = canonical_input;
@@ -96,7 +111,7 @@ pub fn capability_authorization_prompt(
     }
     CapabilityAuthorizationPrompt {
         text: format!(
-            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For an active one-shot exact grant, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it after the tool returns. Exact input is deliberately omitted for every non-active or non-exact grant. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
+            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
             serde_json::to_string(&entries).expect("authorization projection is serializable")
         ),
         approved_exact_input_expires_at_unix_ms,
@@ -128,8 +143,32 @@ fn approved_exact_input(
             (format!("{:x}", Sha256::digest(canonical.as_bytes())) == digest)
                 .then(|| serde_json::from_str(canonical).ok())
                 .flatten()
+                .filter(|value| exact_input_matches_current_contract(&grant.tool_name, value))
                 .map(|value| (value, digest.to_string()))
         })
+}
+
+fn exact_input_matches_current_contract(tool_name: &str, value: &serde_json::Value) -> bool {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct BrowserOpenInput {
+        target: BrowserNavigationTarget,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct BrowserNavigateInput {
+        page: BrowserPageRef,
+        target: BrowserNavigationTarget,
+    }
+
+    match tool_name {
+        "browser_open_page" => serde_json::from_value::<BrowserOpenInput>(value.clone())
+            .is_ok_and(|input| input.target.validate().is_ok()),
+        "browser_navigate_page" => serde_json::from_value::<BrowserNavigateInput>(value.clone())
+            .is_ok_and(|input| input.page.validate().is_ok() && input.target.validate().is_ok()),
+        _ => true,
+    }
 }
 
 /// Build the exact server-owned capability catalog shown to the model. The
@@ -276,13 +315,31 @@ pub fn canonical_permission_input_json(
     serde_json::to_string(&sort_json(value))
 }
 
+/// Canonicalize one tool input after expanding server-owned JSON-schema
+/// defaults whose omission is semantically identical to the explicit value.
+/// Keep this list closed: adding an entry changes exact-grant matching and must
+/// be backed by a matching runtime default and regression test.
+pub fn canonical_tool_permission_input_json(
+    tool_name: &str,
+    mut value: serde_json::Value,
+) -> Result<String, serde_json::Error> {
+    if tool_name == "search_public_web"
+        && let serde_json::Value::Object(input) = &mut value
+    {
+        input
+            .entry("max_results".to_string())
+            .or_insert_with(|| serde_json::json!(5));
+    }
+    canonical_permission_input_json(value)
+}
+
 /// The placeholder capability is ignored by PermissionPlanning exposure. It
 /// exists only because RegisteredTool deliberately requires a closed capability.
 pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-            description: "Ask the user for one bounded batch of tool permissions. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Prefer one batch after read-only research; request additional items later only when new facts require them.".into(),
+            description: "Ask the user for one bounded batch of tool permissions. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -303,8 +360,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 ]},
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
-                                "export_destinations": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "object"}},
-                                "exact_input": {"type": "object", "description": "Exact server-canonicalized tool input required for inherently R3 calls"},
+                                "exact_input": {"type": "object", "description": "Required only for write_external_draft, send_external, input_fallback, execute_command, and formula-workbook creation. Omit it for ordinary read_file, write_artifact, and mutate_application requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
@@ -372,7 +428,7 @@ pub fn build_permission_request(
         }
         let (canonical_input_json, canonical_input_digest_sha256) = match item.exact_input {
             Some(input) => {
-                let canonical = canonical_permission_input_json(input)
+                let canonical = canonical_tool_permission_input_json(&item.tool_name, input)
                     .map_err(|error| invalid(format!("canonicalize exact_input: {error}")))?;
                 if canonical.len() > crate::dynamic_run::MAX_PERMISSION_EXACT_INPUT_BYTES {
                     return Err(invalid("exact_input exceeds the bounded storage limit"));
@@ -411,6 +467,28 @@ pub fn build_permission_request(
             == crate::device_assistant::GMAIL_WEB_HANDOFF_CAPABILITY_ID;
         let exact_slack_handoff = capability.wire.capability_id
             == crate::device_assistant::SLACK_WEB_HANDOFF_CAPABILITY_ID;
+        let exact_browser_navigation = matches!(
+            capability.wire.capability_id.as_str(),
+            crate::device_assistant::BROWSER_OPEN_CAPABILITY_ID
+                | crate::device_assistant::BROWSER_NAVIGATE_CAPABILITY_ID
+        );
+        if exact_browser_navigation && canonical_input_json.is_none() {
+            return Err(invalid(
+                "browser open/navigation permissions require exact_input so the approved origin and URL are immutable",
+            ));
+        }
+        if exact_browser_navigation {
+            let canonical = canonical_input_json
+                .as_deref()
+                .expect("browser navigation exact input was checked");
+            let value: serde_json::Value = serde_json::from_str(canonical)
+                .map_err(|error| invalid(format!("decode browser navigation input: {error}")))?;
+            if !exact_input_matches_current_contract(&item.tool_name, &value) {
+                return Err(invalid(
+                    "browser open/navigation exact_input does not match the current closed tool contract",
+                ));
+            }
+        }
         if exact_outlook_handoff {
             let canonical = canonical_input_json
                 .as_deref()
@@ -686,6 +764,39 @@ pub fn build_permission_request(
     Ok(request)
 }
 
+/// Compare only the server-normalized authority and limits of two requests.
+/// Model-chosen item ids and explanatory prose are deliberately excluded so a
+/// denied/approved batch cannot be recreated by merely rewording its reason.
+/// Item order is also non-authoritative.
+pub(crate) fn equivalent_permission_request(
+    left: &PermissionRequest,
+    right: &PermissionRequest,
+) -> bool {
+    if left.input_revision != right.input_revision || left.items.len() != right.items.len() {
+        return false;
+    }
+    let mut matched = vec![false; right.items.len()];
+    left.items.iter().all(|left_item| {
+        let Some((index, _)) = right.items.iter().enumerate().find(|(index, right_item)| {
+            !matched[*index]
+                && left_item.provider_id == right_item.provider_id
+                && left_item.tool_name == right_item.tool_name
+                && left_item.expected_effect == right_item.expected_effect
+                && left_item.resource_scope == right_item.resource_scope
+                && left_item.operation_scope == right_item.operation_scope
+                && left_item.export_destinations == right_item.export_destinations
+                && left_item.canonical_input_digest_sha256
+                    == right_item.canonical_input_digest_sha256
+                && left_item.suggested_ttl_seconds == right_item.suggested_ttl_seconds
+                && left_item.suggested_max_uses == right_item.suggested_max_uses
+        }) else {
+            return false;
+        };
+        matched[index] = true;
+        true
+    })
+}
+
 fn normalize_scope(values: Vec<String>) -> Vec<String> {
     let mut values = values
         .into_iter()
@@ -735,6 +846,53 @@ mod tests {
             MAX_REQUEST_TTL_SECONDS
         );
         assert_eq!(request.items[0].suggested_max_uses, MAX_REQUEST_USES);
+    }
+
+    #[test]
+    fn equivalent_request_ignores_model_labels_but_not_authority_or_limits() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let first = build_permission_request(
+            &call(
+                r#"{"items":[{"item_id":"open-a","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","exact_input":{"target":{"origin":{"kind":"https","host_ascii":"app.slack.com","port":443},"url":"https://app.slack.com/"}},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"first wording"}]}"#,
+            ),
+            &registry,
+            "permission-a".into(),
+            7,
+            "2026-08-29T00:00:00Z".into(),
+        )
+        .unwrap();
+        let same = build_permission_request(
+            &call(
+                r#"{"items":[{"item_id":"open-b","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","exact_input":{"target":{"url":"https://app.slack.com/","origin":{"port":443,"host_ascii":"app.slack.com","kind":"https"}}},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"different wording"}]}"#,
+            ),
+            &registry,
+            "permission-b".into(),
+            7,
+            "2026-08-29T00:01:00Z".into(),
+        )
+        .unwrap();
+        let mut different_limit = same.clone();
+        different_limit.items[0].suggested_ttl_seconds = 301;
+
+        assert!(equivalent_permission_request(&first, &same));
+        assert!(!equivalent_permission_request(&first, &different_limit));
+    }
+
+    #[test]
+    fn browser_navigation_permission_requires_exact_input() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let missing = call(
+            r#"{"items":[{"item_id":"open","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"open Slack"}]}"#,
+        );
+        let error = build_permission_request(
+            &missing,
+            &registry,
+            "permission-open".into(),
+            1,
+            "2026-08-29T00:00:00Z".into(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("require exact_input"));
     }
 
     #[test]
@@ -837,6 +995,27 @@ mod tests {
     }
 
     #[test]
+    fn browser_navigation_permission_rejects_non_tool_wire_shape_before_approval() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let malformed = r#"{"items":[{"item_id":"browser","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","exact_input":{"origin":{"kind":"https","host_ascii":"lcxl-remote.slack.com","port":443},"url":"https://lcxl-remote.slack.com/"},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Open the selected Slack workspace"}]}"#;
+
+        let error = build_permission_request(
+            &call(malformed),
+            &registry,
+            "permission-browser-malformed".into(),
+            1,
+            "2026-08-29T00:00:00Z".into(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("does not match the current closed tool contract")
+        );
+    }
+
+    #[test]
     fn external_query_permission_fixes_input_scope_and_connector_destination() {
         let registry = crate::device_assistant::device_assistant_provider_registry();
         let missing = r#"{"items":[{"item_id":"search","provider_id":"web.search","tool_name":"search_public_web","expected_effect":"export_data","suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Search public sources"}]}"#;
@@ -874,6 +1053,43 @@ mod tests {
         assert_eq!(
             item.canonical_input_json.as_deref(),
             Some(r#"{"max_results":5,"query":"Rust language"}"#)
+        );
+
+        let defaulted = exact.replace(r#",\"max_results\":5"#, "");
+        let defaulted_request = build_permission_request(
+            &call(&defaulted),
+            &registry,
+            "permission-search-defaulted".into(),
+            1,
+            "2026-08-26T00:00:00Z".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            defaulted_request.items[0].canonical_input_json,
+            item.canonical_input_json
+        );
+        assert_eq!(
+            defaulted_request.items[0].canonical_input_digest_sha256,
+            item.canonical_input_digest_sha256
+        );
+    }
+
+    #[test]
+    fn permission_tool_keeps_export_destinations_server_owned() {
+        let tool = permission_planning_tool_registry().remove(0);
+        let item_properties =
+            &tool.spec.parameters_schema["properties"]["items"]["items"]["properties"];
+        assert!(item_properties.get("export_destinations").is_none());
+        assert!(
+            tool.spec
+                .description
+                .contains("Never supply an export destination")
+        );
+        assert!(
+            item_properties["exact_input"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Omit it for ordinary read_file, write_artifact")
         );
     }
 
@@ -1212,7 +1428,7 @@ mod tests {
             revoked_at_unix_ms: None,
             revoked_reason: None,
         };
-        let prompt = capability_authorization_prompt(&[grant], &[], 500);
+        let prompt = capability_authorization_prompt(&[grant], &[], 500, 1);
         assert!(prompt.text.contains("\"state\":\"active\""));
         assert!(prompt.text.contains("inspect_office_selection"));
         assert!(!prompt.text.contains("secret-grant-id"));
@@ -1295,11 +1511,23 @@ mod tests {
             std::slice::from_ref(&grant),
             std::slice::from_ref(&request),
             500,
+            1,
         );
         assert!(active.text.contains("\"approved_exact_input\""));
         assert!(active.text.contains("\"value\":\"approved\""));
         assert!(!active.text.contains("secret-exact-grant-id"));
         assert_eq!(active.approved_exact_input_expires_at_unix_ms, Some(1_000));
+
+        let mut reusable_exact = grant.clone();
+        reusable_exact.use_policy = CapabilityGrantUsePolicy::Reusable;
+        let reusable =
+            capability_authorization_prompt(&[reusable_exact], &[request.clone()], 500, 1);
+        assert!(reusable.text.contains("\"approved_exact_input\""));
+        assert!(reusable.text.contains("\"value\":\"approved\""));
+        assert_eq!(
+            reusable.approved_exact_input_expires_at_unix_ms,
+            Some(1_000)
+        );
 
         for inactive in [
             {
@@ -1321,10 +1549,40 @@ mod tests {
         ] {
             // Keep the stored contract internally valid for every state fixture.
             inactive.validate().unwrap();
-            let projection = capability_authorization_prompt(&[inactive], &[request.clone()], 500);
+            let projection =
+                capability_authorization_prompt(&[inactive], &[request.clone()], 500, 1);
             assert!(!projection.text.contains("\"approved_exact_input\""));
             assert_eq!(projection.approved_exact_input_expires_at_unix_ms, None);
         }
+
+        let mut stale_readiness = grant.clone();
+        stale_readiness.readiness_revision = 2;
+        let stale = capability_authorization_prompt(&[stale_readiness], &[request.clone()], 500, 1);
+        assert!(stale.text.contains("\"state\":\"stale_readiness\""));
+        assert!(!stale.text.contains("\"approved_exact_input\""));
+        assert_eq!(stale.approved_exact_input_expires_at_unix_ms, None);
+
+        let legacy_flat = r#"{"target":{"host_ascii":"app.slack.com","kind":"https","port":443,"url":"https://app.slack.com/"}}"#;
+        let legacy_digest = format!("{:x}", Sha256::digest(legacy_flat.as_bytes()));
+        let mut legacy_grant = grant;
+        legacy_grant.provider_id = "browser.page.open".into();
+        legacy_grant.capability_id = "browser.page.open".into();
+        legacy_grant.tool_name = "browser_open_page".into();
+        legacy_grant.canonical_input_digest_sha256 = Some(legacy_digest.clone());
+        let mut legacy_request = request;
+        legacy_request.items[0].provider_id = legacy_grant.provider_id.clone();
+        legacy_request.items[0].tool_name = legacy_grant.tool_name.clone();
+        legacy_request.items[0].canonical_input_json = Some(legacy_flat.into());
+        legacy_request.items[0].canonical_input_digest_sha256 = Some(legacy_digest);
+        let incompatible =
+            capability_authorization_prompt(&[legacy_grant], &[legacy_request], 500, 1);
+        assert!(
+            incompatible
+                .text
+                .contains("\"state\":\"schema_incompatible\"")
+        );
+        assert!(!incompatible.text.contains("\"approved_exact_input\""));
+        assert_eq!(incompatible.approved_exact_input_expires_at_unix_ms, None);
     }
 
     #[test]

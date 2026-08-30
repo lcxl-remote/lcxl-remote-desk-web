@@ -1,3 +1,5 @@
+import { permissionPatternForUrl } from "./host-permissions.js";
+
 const bridgeUrl = document.querySelector("#bridge-url");
 const pairingToken = document.querySelector("#pairing-token");
 const status = document.querySelector("#status");
@@ -50,7 +52,7 @@ document.querySelector("#allow-site").addEventListener("click", async () => {
         status.textContent = message("httpsOnly");
         return;
     }
-    const originPattern = `${url.origin}/*`;
+    const originPattern = permissionPatternForUrl(tab.url);
     const granted = await chrome.permissions.request({ origins: [originPattern] });
     if (!granted) {
         status.textContent = message("siteDenied");

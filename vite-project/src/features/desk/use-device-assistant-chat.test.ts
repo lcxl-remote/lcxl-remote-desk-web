@@ -131,6 +131,102 @@ describe('useDeviceAssistantChat', () => {
         ]);
     });
 
+    it('keeps two mounted pages on one durable snapshot and closing one does not cancel the run', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('device-assistant-conversation:device-1', 'shared-conversation');
+        let snapshot = {
+            active: true,
+            latestInputSeq: 3,
+            handledInputSeq: 2,
+            messages: [{ id: 'user-1', role: 'user', text: 'shared request' }],
+            contextAttachments: [],
+            permissionRequests: [],
+            backgroundTasks: [{
+                taskId: 'task-1',
+                callId: 'call-1',
+                providerId: 'browser.control',
+                capabilityId: 'browser.control.semantic',
+                toolName: 'prepare_gmail_web_draft_handoff',
+                effect: 'write_external_draft',
+                state: 'running',
+                progressSequence: 4,
+                supportsCancel: true,
+                updatedAt: '2026-08-29T00:00:00Z',
+            }],
+            capabilityGrants: [{
+                grantId: 'grant-1',
+                providerId: 'browser.control',
+                capabilityId: 'browser.control.semantic',
+                toolName: 'prepare_gmail_web_draft_handoff',
+                riskTier: 'r2',
+                resourceScope: ['browser-extension-surface'],
+                operationScope: ['write_external_draft'],
+                remainingUses: 1,
+                expiresAtUnixMs: 999,
+                revokedAtUnixMs: null,
+            }],
+            unresolvedOutcome: null,
+        };
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: true,
+            json: async () => ({ data: snapshot }),
+        })));
+        const firstSend = vi.fn(() => 'first-request');
+        const secondSend = vi.fn(() => 'second-request');
+        const first = renderHook(() => useDeviceAssistantChat({
+            deskId: 'connection-1',
+            conversationStorageScope: 'device-1',
+            subscribe: () => () => undefined,
+            sendMessage: firstSend,
+        }));
+        const second = renderHook(() => useDeviceAssistantChat({
+            deskId: 'connection-1',
+            conversationStorageScope: 'device-1',
+            subscribe: () => () => undefined,
+            sendMessage: secondSend,
+        }));
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(first.result.current.messages).toEqual(second.result.current.messages);
+        expect(first.result.current.backgroundTasks).toEqual(second.result.current.backgroundTasks);
+        expect(first.result.current.capabilityGrants).toEqual(second.result.current.capabilityGrants);
+        expect(first.result.current.pendingInputCount).toBe(1);
+        expect(second.result.current.pendingInputCount).toBe(1);
+
+        first.unmount();
+        snapshot = {
+            ...snapshot,
+            active: false,
+            handledInputSeq: 3,
+            messages: [
+                snapshot.messages[0],
+                { id: 'assistant-1', role: 'assistant', text: 'shared answer' },
+            ],
+            backgroundTasks: [{
+                ...snapshot.backgroundTasks[0],
+                state: 'succeeded',
+                progressSequence: 5,
+                terminalAt: '2026-08-29T00:00:02Z',
+            }],
+        };
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+
+        expect(firstSend).not.toHaveBeenCalled();
+        expect(secondSend).not.toHaveBeenCalled();
+        expect(second.result.current.running).toBe(false);
+        expect(second.result.current.status).toBe('done');
+        expect(second.result.current.messages.at(-1)?.text).toBe('shared answer');
+        expect(second.result.current.pendingInputCount).toBe(0);
+        expect(second.result.current.backgroundTasks[0]).toEqual(
+            expect.objectContaining({ state: 'succeeded', progressSequence: 5 }),
+        );
+    });
+
     it('persists context independently and blocks a turn until the ack arrives', async () => {
         let subscriber: SignalingSubscriber | null = null;
         vi.stubGlobal('fetch', vi.fn(async () => ({

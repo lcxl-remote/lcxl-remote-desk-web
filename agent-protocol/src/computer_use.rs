@@ -723,6 +723,17 @@ pub struct PresentationLiveBatchPatchAction {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
+#[serde(deny_unknown_fields)]
+pub struct WordReportWebSource {
+    /// Exact plain-text title copied from a server-observed Web Search result.
+    pub title: String,
+    /// Exact public HTTPS URL copied from the same result.
+    pub url: String,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
 #[serde(tag = "kind", content = "params", rename_all = "snake_case")]
 pub enum FilePatchAction {
     /// Create one new UTF-8 artifact relative to an exact edge-issued directory
@@ -757,6 +768,10 @@ pub enum FilePatchAction {
         preview_id: String,
         file_name: String,
         title: String,
+        /// Optional public sources already matched by the orchestrator against
+        /// one prior Web Search result in the same durable run. The worker
+        /// accepts only this closed title/URL projection, never raw HTML.
+        web_sources: Vec<WordReportWebSource>,
     },
     /// Create one inert local-only communication draft as UTF-8 plain text.
     /// The typed document is validated and rendered by shared trusted logic;

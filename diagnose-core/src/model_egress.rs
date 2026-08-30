@@ -33,6 +33,12 @@ pub struct ModelEgressPolicy {
     pub export_authorization_id: String,
     pub now_unix_ms: u64,
     pub byte_cap: usize,
+    /// Permission decisions can arrive long after the model produced the
+    /// request. On that resume boundary, finite observations from every older
+    /// turn must be refreshed instead of being replayed or allowed to expire
+    /// the whole continuation. The server-owned resume message and exact grant
+    /// projection carry the durable requirement/authority needed to continue.
+    pub omit_finite_retention_historical_turns: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +151,23 @@ impl ModelEgressPolicy {
         let historical_retention_cutoff = self
             .now_unix_ms
             .saturating_add(MODEL_CALL_RETENTION_HEADROOM_MS);
+        // Permission resumes synthesize a bounded registry of reusable Provider
+        // references at the recency edge. Its lineage deliberately inherits the
+        // most restrictive source retention, so a long user approval delay can
+        // make that freshly-created projection already stale. It is optional
+        // context rather than authority: omit it when it cannot cover another
+        // model round trip instead of letting an expired preview/search result
+        // strand an otherwise durable permission continuation. Artifact
+        // registry projections and the exact permission decision are separate
+        // messages and remain fail-closed.
+        if self.omit_finite_retention_historical_turns {
+            request.messages.retain(|message| {
+                message.data_envelope.as_ref().is_none_or(|envelope| {
+                    envelope.provenance.source_tool_name != "reusable_provider_result_projection"
+                        || !envelope_expires_by(envelope, historical_retention_cutoff)
+                })
+            });
+        }
         let expired_historical_turns = request
             .messages
             .iter()
@@ -157,7 +180,9 @@ impl ModelEgressPolicy {
                         .and_then(|call_id| tool_call_turns.get(call_id))
                 })?;
                 (current_turn_id.as_ref() != Some(turn_id)
-                    && envelope_expires_by(envelope, historical_retention_cutoff))
+                    && (envelope_expires_by(envelope, historical_retention_cutoff)
+                        || (self.omit_finite_retention_historical_turns
+                            && envelope_has_finite_retention(envelope))))
                 .then_some(turn_id.clone())
             })
             .collect::<BTreeSet<_>>();
@@ -255,6 +280,15 @@ impl ModelEgressPolicy {
                 bytes: bytes.as_slice(),
             })
             .collect::<Vec<_>>();
+        if let Some(expired) = projected_envelopes
+            .iter()
+            .find(|envelope| envelope_is_expired(envelope, self.now_unix_ms))
+        {
+            return Err(ModelEgressError::ExpiredInputEnvelope {
+                envelope_id: expired.envelope_id.clone(),
+                source_tool_name: expired.provenance.source_tool_name.clone(),
+            });
+        }
         let projection = DefaultSinkAuthorizer
             .authorize(&self.destination, &inputs, self.now_unix_ms, self.byte_cap)
             .map_err(ModelEgressError::Sink)?;
@@ -397,6 +431,11 @@ fn envelope_is_expired(envelope: &DataEnvelope, now_unix_ms: u64) -> bool {
     envelope_expires_by(envelope, now_unix_ms)
 }
 
+fn envelope_has_finite_retention(envelope: &DataEnvelope) -> bool {
+    envelope.retention.expires_at_unix_ms.is_some()
+        || matches!(envelope.content, ContentRef::EphemeralObservation { .. })
+}
+
 fn envelope_expires_by(envelope: &DataEnvelope, cutoff_unix_ms: u64) -> bool {
     envelope
         .retention
@@ -504,6 +543,10 @@ pub enum ModelEgressError {
     EmptySystemPrompt,
     EmptyInputs,
     EmptyModelOutput,
+    ExpiredInputEnvelope {
+        envelope_id: String,
+        source_tool_name: String,
+    },
     DerivedDestinationLost,
     Encode(String),
     InvalidDerivedEnvelope(String),
@@ -531,6 +574,13 @@ impl std::fmt::Display for ModelEgressError {
             Self::EmptySystemPrompt => formatter.write_str("system prompt is empty"),
             Self::EmptyInputs => formatter.write_str("model output has no source envelopes"),
             Self::EmptyModelOutput => formatter.write_str("model output is empty"),
+            Self::ExpiredInputEnvelope {
+                envelope_id,
+                source_tool_name,
+            } => write!(
+                formatter,
+                "model input envelope {envelope_id} from {source_tool_name} is expired"
+            ),
             Self::DerivedDestinationLost => {
                 formatter.write_str("derived output lost the current model destination")
             }
@@ -611,6 +661,7 @@ mod tests {
             export_authorization_id: "explicit-user-context-selection".into(),
             now_unix_ms: 100,
             byte_cap: MAX_SINK_BYTES,
+            omit_finite_retention_historical_turns: false,
         }
     }
 
@@ -806,6 +857,103 @@ mod tests {
     }
 
     #[test]
+    fn permission_resume_omits_finite_historical_turn_before_it_expires() {
+        let destination = destination();
+        let mut observation = envelope(
+            "historical-observation-envelope",
+            "browser_take_snapshot",
+            b"fresh only for the old turn",
+            Sensitivity::Sensitive,
+            vec![destination.clone()],
+        );
+        observation.retention.expires_at_unix_ms = Some(1_000_000);
+        let request = ModelRequest::text_only(
+            vec![
+                message(
+                    "historical-tool",
+                    ChatRole::Tool,
+                    "fresh only for the old turn",
+                    Some(observation),
+                )
+                .with_turn_id("historical-turn"),
+                message(
+                    "permission-resume",
+                    ChatRole::User,
+                    "continue from the durable requirement and refresh observations",
+                    Some(envelope(
+                        "permission-resume-envelope",
+                        "permission-decision-resume",
+                        b"continue from the durable requirement and refresh observations",
+                        Sensitivity::UserContent,
+                        vec![destination],
+                    )),
+                )
+                .with_turn_id("current-turn"),
+            ],
+            ResponseFormatSpec::None,
+        );
+        let mut resume_policy = policy(&["browser_take_snapshot"]);
+        resume_policy.omit_finite_retention_historical_turns = true;
+
+        let authorized = resume_policy.authorize_request(request).unwrap();
+        let message_ids = authorized
+            .request
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(message_ids, vec!["permission-resume"]);
+    }
+
+    #[test]
+    fn permission_resume_omits_expired_reusable_result_projection() {
+        let destination = destination();
+        let mut reusable = envelope(
+            "reusable-result-envelope",
+            "reusable_provider_result_projection",
+            b"bounded stale provider references",
+            Sensitivity::Sensitive,
+            vec![destination.clone()],
+        );
+        reusable.retention.expires_at_unix_ms = Some(100);
+        let request = ModelRequest::text_only(
+            vec![
+                message(
+                    "reusable-results",
+                    ChatRole::System,
+                    "bounded stale provider references",
+                    Some(reusable),
+                ),
+                message(
+                    "permission-resume",
+                    ChatRole::User,
+                    "continue from durable state without stale provider references",
+                    Some(envelope(
+                        "permission-resume-envelope",
+                        "permission-decision-resume",
+                        b"continue from durable state without stale provider references",
+                        Sensitivity::UserContent,
+                        vec![destination],
+                    )),
+                )
+                .with_turn_id("current-turn"),
+            ],
+            ResponseFormatSpec::None,
+        );
+        let mut resume_policy = policy(&[]);
+        resume_policy.omit_finite_retention_historical_turns = true;
+
+        let authorized = resume_policy.authorize_request(request).unwrap();
+        let message_ids = authorized
+            .request
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(message_ids, vec!["permission-resume"]);
+    }
+
+    #[test]
     fn old_model_turn_is_omitted_but_current_sink_mismatch_still_fails_closed() {
         let destination = destination();
         let old_destination = DestinationIdentity::Model {
@@ -920,9 +1068,7 @@ mod tests {
 
         assert!(matches!(
             policy(&["inspect_office_selection"]).authorize_request(request),
-            Err(ModelEgressError::Sink(
-                SinkAuthorizationError::ExpiredEnvelope
-            ))
+            Err(ModelEgressError::ExpiredInputEnvelope { .. })
         ));
     }
 

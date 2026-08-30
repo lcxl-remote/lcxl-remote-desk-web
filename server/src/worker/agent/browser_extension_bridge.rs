@@ -681,6 +681,7 @@ impl BrowserExtensionBroker {
         )?;
         let serialized = serde_json::to_string(&wire)
             .map_err(|_| BrowserExtensionBridgeError::InvalidBrowserAction)?;
+        let action_kind = extension_action_kind(&canonical_request.action);
         let (sender, adapter) = {
             let mut state = self
                 .state
@@ -701,6 +702,12 @@ impl BrowserExtensionBroker {
             state.pending.insert(request.call_id.clone(), result_tx);
             (sender, (adapter, result_rx))
         };
+        log::info!(
+            "[browser-extension] dispatch request_id={} action={} connection_revision={}",
+            request.call_id,
+            action_kind,
+            adapter.0.connection_revision
+        );
         if sender.send(serialized).is_err() {
             self.state
                 .lock()
@@ -719,6 +726,12 @@ impl BrowserExtensionBroker {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pending
                     .remove(&request.call_id);
+                log::warn!(
+                    "[browser-extension] timeout request_id={} action={} timeout_seconds={}",
+                    request.call_id,
+                    action_kind,
+                    BROWSER_EXTENSION_CALL_TIMEOUT.as_secs()
+                );
                 return Err(BrowserExtensionBridgeError::Timeout);
             }
         };
@@ -728,7 +741,26 @@ impl BrowserExtensionBroker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pages
             .insert(result.page.page_id.clone(), result.page.clone());
+        log::info!(
+            "[browser-extension] completed request_id={} action={} connection_revision={}",
+            request.call_id,
+            action_kind,
+            adapter.connection_revision
+        );
         Ok(result)
+    }
+}
+
+fn extension_action_kind(action: &BrowserAction) -> &'static str {
+    match action {
+        BrowserAction::OpenPage { .. } => "open_page",
+        BrowserAction::NavigatePage { .. } => "navigate_page",
+        BrowserAction::TakeSnapshot { .. } => "take_snapshot",
+        BrowserAction::WaitFor { .. } => "wait_for",
+        BrowserAction::FillForm { .. } => "fill_form",
+        BrowserAction::FillFormAndUpload { .. } => "fill_form_and_upload",
+        BrowserAction::UploadFile { .. } => "upload_file",
+        BrowserAction::ActivateElement { .. } => "activate_element",
     }
 }
 
@@ -1321,6 +1353,61 @@ mod tests {
             error_code: None,
         });
         assert_eq!(first.await.unwrap().unwrap().page.page_id, "tab-original");
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_keeps_call_id_reserved_until_a_late_result() {
+        let broker = Arc::new(BrowserExtensionBroker::default());
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        broker
+            .attach("device-1", "session-1", &extension_hello(), outbound_tx)
+            .unwrap();
+        let surface = broker.surface_ref().unwrap();
+        let request = BrowserActionRequest {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            call_id: "call-cancelled-waiter".into(),
+            action: BrowserAction::OpenPage {
+                target: BrowserNavigationTarget {
+                    url: "https://mail.google.com/mail/u/0/".into(),
+                    origin: BrowserOrigin {
+                        kind: BrowserOriginKind::Https,
+                        host_ascii: "mail.google.com".into(),
+                        port: 443,
+                    },
+                },
+            },
+        };
+        let task_broker = Arc::clone(&broker);
+        let task_surface = surface.clone();
+        let task_request = request.clone();
+        let task =
+            tokio::spawn(async move { task_broker.execute(&task_surface, &task_request).await });
+        let _: BrowserExtensionRequest =
+            serde_json::from_str(&outbound_rx.recv().await.unwrap()).unwrap();
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            broker.execute(&surface, &request).await,
+            Err(BrowserExtensionBridgeError::DuplicateRequest)
+        );
+
+        broker.complete(BrowserExtensionResponse {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            message_type: BrowserExtensionResponseType::Response,
+            request_id: request.call_id.clone(),
+            ok: false,
+            result: None,
+            error_code: Some("late_after_cancel".into()),
+        });
+        assert!(
+            !broker
+                .state
+                .lock()
+                .unwrap()
+                .pending
+                .contains_key(&request.call_id)
+        );
     }
 
     #[tokio::test]

@@ -10,8 +10,8 @@ use desk_diagnose_core::{
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, RuntimeErr,
+    Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,6 +39,27 @@ pub const DISPATCH_OUTBOX_PENDING: &str = "pending";
 pub const DISPATCH_OUTBOX_SENDING: &str = "sending";
 pub const DISPATCH_OUTBOX_COMPLETED: &str = "completed";
 pub const DISPATCH_OUTBOX_OUTCOME_UNKNOWN: &str = "outcome_unknown";
+
+const SQLITE_COMPLETION_BUSY_INITIAL_DELAY_MS: u64 = 5;
+const SQLITE_COMPLETION_BUSY_MAX_DELAY_MS: u64 = 250;
+const SQLITE_COMPLETION_BUSY_BUDGET_MS: u64 = 5_000;
+
+fn retryable_sqlite_write_contention(error: &DbErr) -> bool {
+    let runtime = match error {
+        DbErr::Exec(runtime) | DbErr::Query(runtime) => runtime,
+        _ => return false,
+    };
+    let RuntimeErr::SqlxError(error) = runtime else {
+        return false;
+    };
+    let sea_orm::sqlx::Error::Database(database_error) = error.as_ref() else {
+        return false;
+    };
+    database_error
+        .code()
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| matches!(code & 0xff, 5 | 6))
+}
 
 #[cfg(test)]
 fn pause_crash_fixture_before_commit(phase: &str) {
@@ -893,120 +914,172 @@ impl SignalCapabilityGrantStore {
         now_unix_ms: u64,
     ) -> Result<DispatchCompletionResult, DbErr> {
         validate_completion(completion)?;
-        let txn = self.db.begin().await?;
-        let outbox = agent_capability_dispatch_outbox::Entity::find()
-            .filter(
-                agent_capability_dispatch_outbox::Column::DispatchId.eq(&completion.dispatch_id),
-            )
-            .one(&txn)
-            .await?
-            .ok_or_else(|| DbErr::Custom("capability dispatch was not found".into()))?;
-        let payload: CapabilityDispatchPayload =
-            serde_json::from_str(&outbox.payload_json).map_err(json_error)?;
-        if payload.dispatch_id != completion.dispatch_id
-            || payload.call_id != completion.call_id
-            || payload.generation != completion.generation
-            || outbox.call_id != completion.call_id
-            || u64::try_from(outbox.generation).ok() != Some(completion.generation)
-        {
-            txn.rollback().await.ok();
-            return Err(DbErr::Custom(
-                "capability completion disagrees with dispatch authority".into(),
-            ));
-        }
-        let work = agent_action_item::Entity::find_by_id(outbox.work_id)
-            .one(&txn)
-            .await?
-            .ok_or_else(|| DbErr::Custom("capability dispatch work was not found".into()))?;
-        let expected_work_status = match completion.outcome {
-            CapabilityDispatchOutcome::Succeeded => CAPABILITY_WORK_SUCCEEDED,
-            CapabilityDispatchOutcome::Failed => CAPABILITY_WORK_FAILED,
-        };
-        let result_json = serde_json::to_string(completion).map_err(json_error)?;
-        if outbox.state == DISPATCH_OUTBOX_COMPLETED {
-            if work.status == expected_work_status
-                && work.result_json.as_deref() == Some(result_json.as_str())
-                && work.result_schema_version == Some(1)
+        let mut delay_ms = SQLITE_COMPLETION_BUSY_INITIAL_DELAY_MS;
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(SQLITE_COMPLETION_BUSY_BUDGET_MS);
+        loop {
+            match self
+                .record_dispatch_completion_once(completion, now_unix_ms)
+                .await
             {
-                txn.rollback().await.ok();
-                return Ok(DispatchCompletionResult {
-                    work_id: work.id,
-                    idempotent_replay: true,
-                });
+                Ok(result) => return Ok(result),
+                Err(error) if retryable_sqlite_write_contention(&error) => {
+                    // This retries only the idempotent database fact keyed by
+                    // dispatch_id/call_id/generation. The Provider action is
+                    // never called again. SQLite can reject a deferred
+                    // read-to-write transaction upgrade immediately when a
+                    // concurrent completion owns the WAL writer; beginning a
+                    // fresh transaction after a bounded delay is the safe
+                    // recovery path.
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        return Err(error);
+                    }
+                    let remaining = deadline.saturating_duration_since(now);
+                    let delay = std::time::Duration::from_millis(delay_ms).min(remaining);
+                    tokio::time::sleep(delay).await;
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    delay_ms = delay_ms
+                        .saturating_mul(2)
+                        .min(SQLITE_COMPLETION_BUSY_MAX_DELAY_MS);
+                }
+                Err(error) => return Err(error),
             }
-            txn.rollback().await.ok();
-            return Err(DbErr::Custom(
-                "capability dispatch completion conflicts with the terminal fact".into(),
-            ));
         }
-        if !matches!(
-            outbox.state.as_str(),
-            DISPATCH_OUTBOX_SENDING | DISPATCH_OUTBOX_OUTCOME_UNKNOWN
-        ) || !matches!(
-            work.status.as_str(),
-            CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
-        ) {
-            txn.rollback().await.ok();
-            return Err(DbErr::Custom(
-                "capability dispatch was not handed off; completion is not admissible".into(),
-            ));
+    }
+
+    async fn record_dispatch_completion_once(
+        &self,
+        completion: &CapabilityDispatchCompletion,
+        now_unix_ms: u64,
+    ) -> Result<DispatchCompletionResult, DbErr> {
+        let txn = self.db.begin().await?;
+        let result = async {
+            let outbox = agent_capability_dispatch_outbox::Entity::find()
+                .filter(
+                    agent_capability_dispatch_outbox::Column::DispatchId
+                        .eq(&completion.dispatch_id),
+                )
+                .one(&txn)
+                .await?
+                .ok_or_else(|| DbErr::Custom("capability dispatch was not found".into()))?;
+            let payload: CapabilityDispatchPayload =
+                serde_json::from_str(&outbox.payload_json).map_err(json_error)?;
+            if payload.dispatch_id != completion.dispatch_id
+                || payload.call_id != completion.call_id
+                || payload.generation != completion.generation
+                || outbox.call_id != completion.call_id
+                || u64::try_from(outbox.generation).ok() != Some(completion.generation)
+            {
+                return Err(DbErr::Custom(
+                    "capability completion disagrees with dispatch authority".into(),
+                ));
+            }
+            let work = agent_action_item::Entity::find_by_id(outbox.work_id)
+                .one(&txn)
+                .await?
+                .ok_or_else(|| DbErr::Custom("capability dispatch work was not found".into()))?;
+            let expected_work_status = match completion.outcome {
+                CapabilityDispatchOutcome::Succeeded => CAPABILITY_WORK_SUCCEEDED,
+                CapabilityDispatchOutcome::Failed => CAPABILITY_WORK_FAILED,
+            };
+            let result_json = serde_json::to_string(completion).map_err(json_error)?;
+            if outbox.state == DISPATCH_OUTBOX_COMPLETED {
+                if work.status == expected_work_status
+                    && work.result_json.as_deref() == Some(result_json.as_str())
+                    && work.result_schema_version == Some(1)
+                {
+                    return Ok(DispatchCompletionResult {
+                        work_id: work.id,
+                        idempotent_replay: true,
+                    });
+                }
+                return Err(DbErr::Custom(
+                    "capability dispatch completion conflicts with the terminal fact".into(),
+                ));
+            }
+            if !matches!(
+                outbox.state.as_str(),
+                DISPATCH_OUTBOX_SENDING | DISPATCH_OUTBOX_OUTCOME_UNKNOWN
+            ) || !matches!(
+                work.status.as_str(),
+                CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
+            ) {
+                return Err(DbErr::Custom(
+                    "capability dispatch was not handed off; completion is not admissible".into(),
+                ));
+            }
+            let now = timestamp(now_unix_ms)?;
+            let completed_outbox = agent_capability_dispatch_outbox::Entity::update_many()
+                .col_expr(
+                    agent_capability_dispatch_outbox::Column::State,
+                    Expr::value(DISPATCH_OUTBOX_COMPLETED),
+                )
+                .col_expr(
+                    agent_capability_dispatch_outbox::Column::UpdatedAt,
+                    Expr::value(now),
+                )
+                .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))
+                .filter(
+                    agent_capability_dispatch_outbox::Column::State
+                        .is_in([DISPATCH_OUTBOX_SENDING, DISPATCH_OUTBOX_OUTCOME_UNKNOWN]),
+                )
+                .exec(&txn)
+                .await?;
+            let completed_work = agent_action_item::Entity::update_many()
+                .col_expr(
+                    agent_action_item::Column::Status,
+                    Expr::value(expected_work_status),
+                )
+                .col_expr(
+                    agent_action_item::Column::ResultJson,
+                    Expr::value(result_json),
+                )
+                .col_expr(
+                    agent_action_item::Column::ResultSchemaVersion,
+                    Expr::value(1),
+                )
+                .col_expr(
+                    agent_action_item::Column::Resolution,
+                    Expr::value(match completion.outcome {
+                        CapabilityDispatchOutcome::Succeeded => "provider_succeeded",
+                        CapabilityDispatchOutcome::Failed => "provider_failed",
+                    }),
+                )
+                .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
+                .filter(agent_action_item::Column::Id.eq(work.id))
+                .filter(
+                    agent_action_item::Column::Status
+                        .is_in([CAPABILITY_WORK_DISPATCHING, CAPABILITY_WORK_OUTCOME_UNKNOWN]),
+                )
+                .exec(&txn)
+                .await?;
+            if completed_outbox.rows_affected != 1 || completed_work.rows_affected != 1 {
+                return Err(DbErr::Custom(
+                    "capability dispatch completion conflicted".into(),
+                ));
+            }
+            Ok(DispatchCompletionResult {
+                work_id: work.id,
+                idempotent_replay: false,
+            })
         }
-        let now = timestamp(now_unix_ms)?;
-        let completed_outbox = agent_capability_dispatch_outbox::Entity::update_many()
-            .col_expr(
-                agent_capability_dispatch_outbox::Column::State,
-                Expr::value(DISPATCH_OUTBOX_COMPLETED),
-            )
-            .col_expr(
-                agent_capability_dispatch_outbox::Column::UpdatedAt,
-                Expr::value(now),
-            )
-            .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))
-            .filter(
-                agent_capability_dispatch_outbox::Column::State
-                    .is_in([DISPATCH_OUTBOX_SENDING, DISPATCH_OUTBOX_OUTCOME_UNKNOWN]),
-            )
-            .exec(&txn)
-            .await?;
-        let completed_work = agent_action_item::Entity::update_many()
-            .col_expr(
-                agent_action_item::Column::Status,
-                Expr::value(expected_work_status),
-            )
-            .col_expr(
-                agent_action_item::Column::ResultJson,
-                Expr::value(result_json),
-            )
-            .col_expr(
-                agent_action_item::Column::ResultSchemaVersion,
-                Expr::value(1),
-            )
-            .col_expr(
-                agent_action_item::Column::Resolution,
-                Expr::value(match completion.outcome {
-                    CapabilityDispatchOutcome::Succeeded => "provider_succeeded",
-                    CapabilityDispatchOutcome::Failed => "provider_failed",
-                }),
-            )
-            .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
-            .filter(agent_action_item::Column::Id.eq(work.id))
-            .filter(
-                agent_action_item::Column::Status
-                    .is_in([CAPABILITY_WORK_DISPATCHING, CAPABILITY_WORK_OUTCOME_UNKNOWN]),
-            )
-            .exec(&txn)
-            .await?;
-        if completed_outbox.rows_affected != 1 || completed_work.rows_affected != 1 {
-            txn.rollback().await.ok();
-            return Err(DbErr::Custom(
-                "capability dispatch completion conflicted".into(),
-            ));
+        .await;
+        match result {
+            Ok(result) => {
+                txn.commit().await?;
+                Ok(result)
+            }
+            Err(error) => {
+                // Do not rely on the asynchronous transaction Drop path here:
+                // the next bounded retry must start only after this attempt has
+                // definitely released every SQLite read/write lock.
+                txn.rollback().await.ok();
+                Err(error)
+            }
         }
-        txn.commit().await?;
-        Ok(DispatchCompletionResult {
-            work_id: work.id,
-            idempotent_replay: false,
-        })
     }
 
     /// Startup fence. It must run before a dispatcher starts claiming new work.
@@ -2091,6 +2164,128 @@ mod tests {
         assert_eq!(work.status, CAPABILITY_WORK_SUCCEEDED);
         assert!(work.manual_resolved_at.is_some());
         assert_eq!(stored_grant.remaining_uses, 0);
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completion_retries_sqlite_writer_contention_without_replaying_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("grant-completion-contention.db");
+        let db = file_db(&path).await;
+        insert_session(&db, 1, 1).await;
+        let store = SignalCapabilityGrantStore::new(db.clone());
+        store.issue(&grant(1)).await.unwrap();
+        let resources = vec!["root:selected".into()];
+        let operations = vec!["create_new".into()];
+        let canonical_json = r#"{"path":"contended.txt"}"#;
+        let canonical = format!("{:x}", Sha256::digest(canonical_json.as_bytes()));
+        store
+            .prepare(request(
+                "call-contended",
+                canonical_json,
+                &canonical,
+                &resources,
+                &operations,
+                1,
+            ))
+            .await
+            .unwrap();
+        let intent = store
+            .record_dispatch_intent(request(
+                "call-contended",
+                canonical_json,
+                &canonical,
+                &resources,
+                &operations,
+                1,
+            ))
+            .await
+            .unwrap();
+        let DispatchIntentResult::Recorded { dispatch_id, .. } = intent else {
+            panic!("current input must record an intent")
+        };
+        let claimed = store.claim_dispatch(&dispatch_id, 600).await.unwrap();
+        let DispatchClaimResult::Claimed(payload) = claimed else {
+            panic!("dispatch must be claimed exactly once")
+        };
+
+        let lock_path = path.clone();
+        let lock_work_id = payload.work_id;
+        let (lock_ready_tx, lock_ready_rx) = std::sync::mpsc::sync_channel(1);
+        // Keep the competing writer on an independent OS thread and runtime.
+        // This models another process and prevents the fixture's unlock from
+        // being queued behind completion retries on SQLx's test worker pool.
+        let lock_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let lock_db =
+                    Database::connect(format!("sqlite://{}?mode=rw", lock_path.display()))
+                        .await
+                        .unwrap();
+                lock_db
+                    .execute_unprepared("PRAGMA busy_timeout = 1000")
+                    .await
+                    .unwrap();
+                let lock_txn = lock_db.begin().await.unwrap();
+                agent_action_item::Entity::update_many()
+                    .col_expr(
+                        agent_action_item::Column::UpdatedAt,
+                        Expr::value(timestamp(601).unwrap()),
+                    )
+                    .filter(agent_action_item::Column::Id.eq(lock_work_id))
+                    .exec(&lock_txn)
+                    .await
+                    .unwrap();
+                lock_ready_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                lock_txn.commit().await.unwrap();
+                lock_db.close().await.unwrap();
+            });
+        });
+        lock_ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+
+        let completion = CapabilityDispatchCompletion {
+            dispatch_id: dispatch_id.clone(),
+            call_id: "call-contended".into(),
+            generation: 1,
+            outcome: CapabilityDispatchOutcome::Succeeded,
+            result_digest_sha256: format!("{:x}", Sha256::digest(b"verified result")),
+        };
+        let completion_store = store.clone();
+        let completion_task = tokio::spawn(async move {
+            completion_store
+                .record_dispatch_completion(&completion, 700)
+                .await
+        });
+        let unlock_task = tokio::task::spawn_blocking(move || lock_thread.join().unwrap());
+
+        let result = completion_task.await.unwrap().unwrap();
+        unlock_task.await.unwrap();
+        assert_eq!(result.work_id, payload.work_id);
+        assert!(!result.idempotent_replay);
+        let outbox = agent_capability_dispatch_outbox::Entity::find()
+            .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let work = agent_action_item::Entity::find_by_id(payload.work_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let action_count = agent_action_item::Entity::find().count(&db).await.unwrap();
+        assert_eq!(outbox.state, DISPATCH_OUTBOX_COMPLETED);
+        assert_eq!(work.status, CAPABILITY_WORK_SUCCEEDED);
+        assert_eq!(
+            action_count, 1,
+            "database retry must not replay the Provider call"
+        );
         db.close().await.unwrap();
     }
 

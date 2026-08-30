@@ -16,9 +16,9 @@ use desk_agent_protocol::authz::{
 };
 use desk_agent_protocol::browser_control::{
     BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionRequest, BrowserActionResult,
-    BrowserActivationClass, BrowserElementRef, BrowserFormField, BrowserFormFieldReadback,
-    BrowserFormReadbackKind, BrowserMutationClass, BrowserNavigationTarget, BrowserPageRef,
-    BrowserWaitState,
+    BrowserActivationClass, BrowserElementRef, BrowserEngineKind, BrowserFormField,
+    BrowserFormFieldReadback, BrowserFormReadbackKind, BrowserMutationClass,
+    BrowserNavigationTarget, BrowserPageRef, BrowserWaitState,
 };
 use desk_agent_protocol::capability_grant::{
     CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant, CapabilityGrantIssuer, CapabilityGrantLimits,
@@ -68,7 +68,7 @@ use desk_diagnose_core::chunk::ByteReassembler;
 use desk_diagnose_core::device_assistant::{
     EXECUTE_CONFIRMED_UI_ACTION_TOOL, PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call,
 };
-use desk_diagnose_core::permission_tools::canonical_permission_input_json;
+use desk_diagnose_core::permission_tools::canonical_tool_permission_input_json;
 use desk_diagnose_core::provider_registry::ProviderRegistry;
 use desk_diagnose_core::read_tools::build_read_operation;
 use desk_diagnose_core::seam::{ExecContext, ExecOutcome, ToolRunOutput, ToolSeam, WaitOutcome};
@@ -195,6 +195,13 @@ fn slack_exact_form_readback(
     result.form_readback.len() == 1
         && exact_field_readback(result, &slack.composer, slack.body_plain_text.as_str())
             .is_some_and(|readback| readback.kind == BrowserFormReadbackKind::ControlValue)
+}
+
+fn communication_surface_kind(engine: BrowserEngineKind) -> CommunicationSurfaceKind {
+    match engine {
+        BrowserEngineKind::ChromeExtension => CommunicationSurfaceKind::ChromeExtension,
+        BrowserEngineKind::ChromeDevtoolsMcp => CommunicationSurfaceKind::ChromeDevtoolsMcp,
+    }
 }
 
 fn decode_output(bytes: &[u8]) -> Result<RemoteToolOutput, AgentError> {
@@ -720,14 +727,15 @@ impl SignalDeviceAssistantTools {
                 true,
             )
         })?;
-        let canonical = canonical_permission_input_json(value).map_err(|encode_error| {
-            error(
-                AgentErrorKind::Internal,
-                format!("failed to canonicalize Provider tool input: {encode_error}"),
-                false,
-                false,
-            )
-        })?;
+        let canonical =
+            canonical_tool_permission_input_json(&call.name, value).map_err(|encode_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to canonicalize Provider tool input: {encode_error}"),
+                    false,
+                    false,
+                )
+            })?;
         let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
         Ok((canonical, digest))
     }
@@ -2448,6 +2456,10 @@ impl SignalDeviceAssistantTools {
             preview_id: String,
             file_name: String,
             title: String,
+            #[serde(default)]
+            web_search_call_id: Option<String>,
+            #[serde(default)]
+            web_sources: Vec<desk_agent_protocol::computer_use::WordReportWebSource>,
         }
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -2570,21 +2582,33 @@ impl SignalDeviceAssistantTools {
                     desk_diagnose_core::device_assistant::SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID,
                 )
             }
-            "create_word_report_from_merge_preview" => (
-                ArtifactRequest::Word(serde_json::from_str(&call.arguments_json).map_err(
-                    |decode_error| {
+            "create_word_report_from_merge_preview" => {
+                let args: WordArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
                         error(
                             AgentErrorKind::InvalidInput,
                             format!("invalid Word report artifact Provider input: {decode_error}"),
                             false,
                             true,
                         )
-                    },
-                )?),
-                desk_agent_protocol::Capability::WordDocumentCreateConfirmed,
-                "create_new_artifact",
-                desk_diagnose_core::device_assistant::WORD_DOCUMENT_CREATE_CAPABILITY_ID,
-            ),
+                    })?;
+                if args.web_search_call_id.is_some() != !args.web_sources.is_empty()
+                    || args.web_sources.len() > 8
+                {
+                    return Err(error(
+                        AgentErrorKind::InvalidInput,
+                        "Word report Web sources require one prior Web Search call id and 1 to 8 exact source entries",
+                        false,
+                        true,
+                    ));
+                }
+                (
+                    ArtifactRequest::Word(args),
+                    desk_agent_protocol::Capability::WordDocumentCreateConfirmed,
+                    "create_new_artifact",
+                    desk_diagnose_core::device_assistant::WORD_DOCUMENT_CREATE_CAPABILITY_ID,
+                )
+            }
             _ => {
                 return Err(error(
                     AgentErrorKind::UnsupportedCapability,
@@ -2849,6 +2873,7 @@ impl SignalDeviceAssistantTools {
                     preview_id: args.preview_id,
                     file_name: args.file_name,
                     title: args.title,
+                    web_sources: args.web_sources,
                 }),
                 "new Word report does not exist in the selected directory".into(),
                 "materialize the retained merge preview as one new deterministic macro-free DOCX without overwrite".into(),
@@ -3999,7 +4024,7 @@ impl SignalDeviceAssistantTools {
                                 run_id: self.run_id.clone(),
                                 surface: CommunicationSurfaceRef {
                                     channel: CommunicationChannel::Email,
-                                    kind: CommunicationSurfaceKind::ChromeDevtoolsMcp,
+                                    kind: communication_surface_kind(result.page.adapter.engine),
                                     scope: CommunicationSurfaceScope::WebOrigin {
                                         origin: result.page.origin.clone(),
                                     },
@@ -4073,7 +4098,7 @@ impl SignalDeviceAssistantTools {
                                 run_id: self.run_id.clone(),
                                 surface: CommunicationSurfaceRef {
                                     channel: CommunicationChannel::Chat,
-                                    kind: CommunicationSurfaceKind::ChromeDevtoolsMcp,
+                                    kind: communication_surface_kind(result.page.adapter.engine),
                                     scope: CommunicationSurfaceScope::WebOrigin {
                                         origin: result.page.origin.clone(),
                                     },
@@ -4880,7 +4905,7 @@ impl SignalDeviceAssistantTools {
         }
         if call.name == WEB_SEARCH_TOOL_NAME {
             let validated = validate_search_call(call, &self.current_user_message)?;
-            return search_public_web(validated).await;
+            return search_public_web(validated, &call.id).await;
         }
         let (capability, mut input) = build_read_operation(call)?;
         if capability == desk_agent_protocol::Capability::OfficeDocumentInspect {
@@ -5747,6 +5772,27 @@ mod tests {
         assert_eq!(first_json, r#"{"a":true,"z":{"a":1,"b":2}}"#);
         assert_eq!(first_json, second_json);
         assert_eq!(first_digest, second_digest);
+    }
+
+    #[test]
+    fn web_search_exact_input_canonicalization_expands_default_result_count() {
+        let omitted = ToolCall {
+            id: "search-omitted".into(),
+            name: WEB_SEARCH_TOOL_NAME.into(),
+            arguments_json: r#"{"query":"Rust language"}"#.into(),
+        };
+        let explicit = ToolCall {
+            id: "search-explicit".into(),
+            name: WEB_SEARCH_TOOL_NAME.into(),
+            arguments_json: r#"{"max_results":5,"query":"Rust language"}"#.into(),
+        };
+        let (omitted_json, omitted_digest) =
+            SignalDeviceAssistantTools::canonical_call_input(&omitted).unwrap();
+        let (explicit_json, explicit_digest) =
+            SignalDeviceAssistantTools::canonical_call_input(&explicit).unwrap();
+        assert_eq!(omitted_json, r#"{"max_results":5,"query":"Rust language"}"#);
+        assert_eq!(omitted_json, explicit_json);
+        assert_eq!(omitted_digest, explicit_digest);
     }
 
     #[test]

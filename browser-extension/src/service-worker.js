@@ -1,10 +1,17 @@
 import { SCHEMA_VERSION, parseHostCommand, response } from "./protocol.js";
+import { assertHostPermissionForUrl, assertTabHostPermission } from "./host-permissions.js";
 
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8091/browser-extension/v1";
 const RECONNECT_ALARM = "lcxl-browser-extension-reconnect";
 const RECONNECT_MAX_MS = 30000;
 const KEEPALIVE_INTERVAL_MS = 20000;
 const NAVIGATION_SETTLE_TIMEOUT_MS = 15000;
+const TAB_MESSAGE_TIMEOUT_MS = 4000;
+const TAB_DESCRIBE_RETRY_TIMEOUT_MS = 12000;
+const TAB_DESCRIBE_RETRY_INTERVAL_MS = 250;
+const TAB_QUERY_TIMEOUT_MS = 3000;
+const TARGET_TAB_CACHE_KEY = "openedTargetTabs";
+const MAX_REMEMBERED_TARGET_TABS = 16;
 let socket = null;
 let reconnectDelayMs = 1000;
 let reconnectTimer = null;
@@ -65,17 +72,34 @@ function scheduleReconnect() {
     reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_MAX_MS);
 }
 
-async function sendToTab(tabId, action) {
+function withTimeout(promise, timeoutMs, errorCode) {
+    let timeout;
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error(errorCode)), timeoutMs);
+        })
+    ]).finally(() => clearTimeout(timeout));
+}
+
+async function sendTabMessage(tabId, action, timeoutMs = null) {
+    const request = chrome.tabs.sendMessage(tabId, { type: "lcxl_browser_action", action });
+    return timeoutMs === null
+        ? request
+        : withTimeout(request, timeoutMs, "content_script_timeout");
+}
+
+async function sendToTab(tabId, action, messageTimeoutMs = null) {
     let reply;
     try {
-        reply = await chrome.tabs.sendMessage(tabId, { type: "lcxl_browser_action", action });
+        reply = await sendTabMessage(tabId, action, messageTimeoutMs);
     } catch (error) {
         const tab = await chrome.tabs.get(tabId);
         if (!tab.url) {
             throw error;
         }
         await chrome.scripting.executeScript({ target: { tabId }, files: ["src/content-script.js"] });
-        reply = await chrome.tabs.sendMessage(tabId, { type: "lcxl_browser_action", action });
+        reply = await sendTabMessage(tabId, action, messageTimeoutMs);
     }
     if (!reply?.ok) {
         throw new Error(reply?.error_code || "content_script_error");
@@ -89,6 +113,34 @@ async function sendToTab(tabId, action) {
     return result;
 }
 
+export async function describeTabWithRetry(
+    tabId,
+    retryTimeoutMs = TAB_DESCRIBE_RETRY_TIMEOUT_MS,
+    retryIntervalMs = TAB_DESCRIBE_RETRY_INTERVAL_MS
+) {
+    const deadline = Date.now() + retryTimeoutMs;
+    let lastError = new Error("content_script_unavailable");
+    do {
+        try {
+            // A Gmail or Slack tab can cross transient documents while its SPA
+            // boots. Retrying only this read-only descriptor on the same tab is
+            // safe; never repeat tab creation or a mutating browser action. The
+            // timeout wraps the complete message -> optional injection -> retry
+            // path so one attempt cannot consume the remaining budget twice.
+            return await withTimeout(
+                sendToTab(tabId, { action: "describe_page" }),
+                Math.min(TAB_MESSAGE_TIMEOUT_MS, Math.max(1, deadline - Date.now())),
+                "content_script_timeout"
+            );
+        } catch (error) {
+            lastError = error;
+        }
+        if (Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, retryIntervalMs));
+    } while (Date.now() < deadline);
+    throw lastError;
+}
+
 function tabIdFromPage(page) {
     const match = /^tab-(\d+)$/u.exec(page?.page_id || "");
     if (!match) {
@@ -97,12 +149,21 @@ function tabIdFromPage(page) {
     return Number(match[1]);
 }
 
-async function waitForComplete(tabId) {
-    const current = await chrome.tabs.get(tabId);
-    if (current.status === "complete") {
-        return current;
+export function samePageObservation(expected, current) {
+    return expected?.page_id === current?.page_id
+        && expected.page_incarnation === current.page_incarnation
+        && expected.document_revision === current.document_revision
+        && expected.url_sha256 === current.url_sha256
+        && expected.origin?.kind === current.origin?.kind
+        && expected.origin?.host_ascii === current.origin?.host_ascii
+        && expected.origin?.port === current.origin?.port;
+}
+
+export async function waitForComplete(tab, settleTimeoutMs = NAVIGATION_SETTLE_TIMEOUT_MS) {
+    if (tab.status === "complete") {
+        return tab.id;
     }
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         const timeout = setTimeout(() => {
             chrome.tabs.onUpdated.removeListener(listener);
             // Gmail and Slack are long-lived applications: their tab can stay
@@ -110,31 +171,118 @@ async function waitForComplete(tabId) {
             // already available. Return the current tab so sendToTab can make
             // a bounded semantic probe. If the document is not actionable,
             // scripting/message delivery still fails with a known error well
-            // before the host's 35-second OutcomeUnknown boundary.
-            void chrome.tabs.get(tabId).then(resolve, reject);
-        }, NAVIGATION_SETTLE_TIMEOUT_MS);
-        const listener = (updatedId, info, tab) => {
-            if (updatedId === tabId && info.status === "complete") {
+            // before the host's 35-second OutcomeUnknown boundary. Do not issue
+            // another unbounded chrome.tabs.get() here: the tab identity was
+            // already returned by create/update, and only that stable id is
+            // needed for the bounded descriptor probe.
+            resolve(tab.id);
+        }, settleTimeoutMs);
+        const listener = (updatedId, info) => {
+            if (updatedId === tab.id && info.status === "complete") {
                 clearTimeout(timeout);
                 chrome.tabs.onUpdated.removeListener(listener);
-                resolve(tab);
+                resolve(tab.id);
             }
         };
         chrome.tabs.onUpdated.addListener(listener);
     });
 }
 
-async function execute(action) {
+function navigationUrlWithoutFragment(value) {
+    const parsed = new URL(value);
+    parsed.hash = "";
+    return parsed.href;
+}
+
+export async function findExistingTabForTarget(targetUrl, queryTimeoutMs = TAB_QUERY_TIMEOUT_MS) {
+    const target = new URL(targetUrl);
+    let tabs;
+    try {
+        // Querying is read-only and bounded. Reusing an already-open exact
+        // navigation target avoids duplicate Gmail/Slack tabs after the host
+        // conservatively records an earlier open as OutcomeUnknown. Host
+        // permission for the exact origin is checked before this function.
+        tabs = await withTimeout(
+            chrome.tabs.query({ url: `${target.origin}/*` }),
+            queryTimeoutMs,
+            "tab_query_timeout"
+        );
+    } catch {
+        return null;
+    }
+    const expected = navigationUrlWithoutFragment(targetUrl);
+    return tabs.find((tab) => tab.id !== undefined
+        && typeof tab.url === "string"
+        && navigationUrlWithoutFragment(tab.url) === expected) || null;
+}
+
+async function rememberedTabForTarget(targetUrl, queryTimeoutMs = TAB_QUERY_TIMEOUT_MS) {
+    try {
+        const stored = await withTimeout(
+            storageGet("session", [TARGET_TAB_CACHE_KEY]),
+            queryTimeoutMs,
+            "target_tab_cache_timeout"
+        );
+        const tabId = stored?.[TARGET_TAB_CACHE_KEY]?.[targetUrl];
+        if (!Number.isInteger(tabId)) return null;
+        const tab = await withTimeout(
+            chrome.tabs.get(tabId),
+            queryTimeoutMs,
+            "target_tab_lookup_timeout"
+        );
+        return tab?.id === tabId ? tab : null;
+    } catch {
+        return null;
+    }
+}
+
+async function rememberTargetTab(targetUrl, tabId) {
+    try {
+        const stored = await withTimeout(
+            storageGet("session", [TARGET_TAB_CACHE_KEY]),
+            1000,
+            "target_tab_cache_timeout"
+        );
+        const entries = Object.entries(stored?.[TARGET_TAB_CACHE_KEY] || {})
+            .filter(([, value]) => Number.isInteger(value) && value !== tabId)
+            .slice(-(MAX_REMEMBERED_TARGET_TABS - 1));
+        const next = Object.fromEntries(entries);
+        next[targetUrl] = tabId;
+        await withTimeout(
+            chrome.storage.session.set({ [TARGET_TAB_CACHE_KEY]: next }),
+            1000,
+            "target_tab_cache_timeout"
+        );
+    } catch {
+        // Recovery metadata is best-effort. Failing to remember a created tab
+        // must not turn a completed create into an automatic second create.
+    }
+}
+
+export async function execute(action) {
     if (action.action === "open_page") {
+        await assertHostPermissionForUrl(chrome, action.target.url);
+        const existing = await findExistingTabForTarget(action.target.url)
+            || await rememberedTabForTarget(action.target.url);
+        if (existing) {
+            return describeTabWithRetry(existing.id);
+        }
         const tab = await chrome.tabs.create({ url: action.target.url, active: true });
-        const complete = await waitForComplete(tab.id);
-        return sendToTab(complete.id, { action: "describe_page" });
+        await rememberTargetTab(action.target.url, tab.id);
+        const tabId = await waitForComplete(tab);
+        return describeTabWithRetry(tabId);
     }
     const tabId = tabIdFromPage(action.page);
+    await assertTabHostPermission(chrome, tabId, action.page.origin);
     if (action.action === "navigate_page") {
-        await chrome.tabs.update(tabId, { url: action.target.url, active: true });
-        await waitForComplete(tabId);
-        return sendToTab(tabId, { action: "describe_page" });
+        const current = await sendToTab(tabId, { action: "describe_page" });
+        if (!samePageObservation(action.page, current.page)) {
+            throw new Error("stale_page_ref");
+        }
+        await assertHostPermissionForUrl(chrome, action.target.url);
+        const updated = await chrome.tabs.update(tabId, { url: action.target.url, active: true });
+        await waitForComplete(updated);
+        return describeTabWithRetry(tabId);
     }
     return sendToTab(tabId, action);
 }

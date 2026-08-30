@@ -553,7 +553,9 @@ pub struct GrantRequestItem {
     /// Explicit model/web/mail/chat destinations requested for ExportData.
     #[serde(default)]
     pub export_destinations: Vec<DestinationIdentity>,
-    /// Server-canonicalized exact call input for one-shot high-risk grants.
+    /// Server-canonicalized exact call input whenever the Provider contract
+    /// binds authority to immutable arguments. This includes one-shot
+    /// high-risk calls and lower-risk browser navigation to an exact URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_input_json: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

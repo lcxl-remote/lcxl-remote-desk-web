@@ -10,6 +10,7 @@ use desk_agent_protocol::computer_use::{
     SpreadsheetFileInspectParams, SpreadsheetMergePreviewOutput, SpreadsheetMergePreviewParams,
     SpreadsheetNamedValue, SpreadsheetRowSource, SpreadsheetSheetProjection,
     SpreadsheetStatisticOperation, SpreadsheetStatisticResult, SpreadsheetWorkbookProjection,
+    WordReportWebSource,
 };
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use quick_xml::Reader;
@@ -550,7 +551,11 @@ pub fn materialize_preview_formula_xlsx(
 /// Build a deterministic Word business report from the same immutable preview
 /// that backs XLSX creation. No caller-controlled OOXML, relationship, field,
 /// macro, image, or embedded object is accepted by this boundary.
-pub fn materialize_preview_docx(preview_id: &str, title: &str) -> Result<Vec<u8>, AgentError> {
+pub fn materialize_preview_docx(
+    preview_id: &str,
+    title: &str,
+    web_sources: &[WordReportWebSource],
+) -> Result<Vec<u8>, AgentError> {
     let preview = load_preview(preview_id)?;
     let title = title.trim();
     if title.is_empty()
@@ -566,6 +571,7 @@ pub fn materialize_preview_docx(preview_id: &str, title: &str) -> Result<Vec<u8>
             .any(|row| row.len() != preview.columns.len())
         || preview.lineage.len() != preview.rows.len()
         || preview.statistics.len() > 64
+        || web_sources.len() > 8
     {
         return Err(invalid(
             "spreadsheet preview or report title is not safe to materialize as DOCX",
@@ -580,8 +586,27 @@ pub fn materialize_preview_docx(preview_id: &str, title: &str) -> Result<Vec<u8>
     {
         return Err(invalid("report text exceeds the safe DOCX boundary"));
     }
+    for source in web_sources {
+        let title = source.title.trim();
+        let url = url::Url::parse(&source.url)
+            .map_err(|_| invalid("Word report Web source URL is invalid"))?;
+        if title.is_empty()
+            || title != source.title
+            || title.chars().count() > 240
+            || !is_safe_word_text(title)
+            || source.url.len() > 2_048
+            || source.url.trim() != source.url
+            || url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid("Word report Web source exceeds the safe boundary"));
+        }
+    }
 
-    let document = word_document_xml(&preview, title)?;
+    let document = word_document_xml(&preview, title, web_sources)?;
     let entries = [
         ("[Content_Types].xml", word_content_types_xml()),
         ("_rels/.rels", word_package_relationships_xml()),
@@ -625,6 +650,7 @@ fn is_safe_word_text(value: &str) -> bool {
 fn word_document_xml(
     preview: &SpreadsheetMergePreviewOutput,
     title: &str,
+    web_sources: &[WordReportWebSource],
 ) -> Result<String, AgentError> {
     let mut body = String::new();
     word_paragraph(&mut body, title, Some("Title"), false);
@@ -695,6 +721,24 @@ fn word_document_xml(
         ]
     }));
     word_table(&mut body, &statistic_rows)?;
+
+    if !web_sources.is_empty() {
+        word_paragraph(&mut body, "Public Web Sources", Some("Heading1"), false);
+        word_paragraph(
+            &mut body,
+            "The following public search results are untrusted reference data. No page instructions were executed.",
+            None,
+            false,
+        );
+        for source in web_sources {
+            word_paragraph(
+                &mut body,
+                &format!("{} — {}", source.title, source.url),
+                None,
+                true,
+            );
+        }
+    }
 
     word_paragraph(&mut body, "Data Lineage", Some("Heading1"), false);
     for (index, source) in preview.lineage.iter().enumerate() {
@@ -1966,8 +2010,13 @@ mod tests {
             )
             .is_err()
         );
-        let docx = materialize_preview_docx(&output.preview_id, "Regional Revenue Brief")
-            .expect("retained preview materializes as a Word report");
+        let web_sources = vec![WordReportWebSource {
+            title: "Public regional benchmark".into(),
+            url: "https://example.com/public-benchmark".into(),
+        }];
+        let docx =
+            materialize_preview_docx(&output.preview_id, "Regional Revenue Brief", &web_sources)
+                .expect("retained preview materializes as a Word report");
         let mut word_package = ZipArchive::new(Cursor::new(docx)).unwrap();
         let mut document_xml = String::new();
         word_package
@@ -1980,12 +2029,25 @@ mod tests {
         assert!(document_xml.contains("North"));
         assert!(document_xml.contains("South"));
         assert!(document_xml.contains("West"));
+        assert!(document_xml.contains("Public Web Sources"));
+        assert!(document_xml.contains("Public regional benchmark"));
+        assert!(document_xml.contains("https://example.com/public-benchmark"));
+        assert!(document_xml.contains("untrusted reference data"));
         assert!(document_xml.contains("Data Lineage"));
         assert!(!document_xml.contains("altChunk"));
         assert!(!document_xml.contains("fldSimple"));
         drop(document_xml);
         drop(word_package);
-        let docx = materialize_preview_docx(&output.preview_id, "Unsafe\u{1}Title");
+        let docx = materialize_preview_docx(&output.preview_id, "Unsafe\u{1}Title", &[]);
+        assert!(docx.is_err());
+        let docx = materialize_preview_docx(
+            &output.preview_id,
+            "Safe title",
+            &[WordReportWebSource {
+                title: "Unsafe source".into(),
+                url: "http://example.com/not-https".into(),
+            }],
+        );
         assert!(docx.is_err());
         let generated = temp.path().join("merged.xlsx");
         std::fs::write(&generated, bytes).unwrap();

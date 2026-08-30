@@ -1,5 +1,5 @@
 use super::*;
-use crate::chat::{ChatRole, ModelTurn, StopReason, ToolCall, ToolSpec};
+use crate::chat::{ChatRole, ModelTurn, StopReason, ToolCall, ToolCallRef, ToolSpec};
 use crate::model_profile::WireProtocol;
 use crate::prompt::ResponseFormatSpec;
 use crate::replay::{ProviderResponseMeta, ReplayDisposition, SourceContextKey};
@@ -492,6 +492,165 @@ async fn device_assistant_request_ends_with_server_input_watermark() {
 }
 
 #[tokio::test]
+async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
+    use desk_agent_protocol::browser_control::{
+        BROWSER_CONTROL_SCHEMA_VERSION, BrowserActionOutcome, BrowserActionResult,
+        BrowserAdapterRef, BrowserEngineKind, BrowserOrigin, BrowserOriginKind, BrowserPageRef,
+    };
+    use desk_agent_protocol::data_lineage::{
+        DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, RetentionBoundary, Sensitivity,
+    };
+
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    let page = BrowserPageRef {
+        schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+        adapter: BrowserAdapterRef {
+            engine: BrowserEngineKind::ChromeExtension,
+            device_id: "device".into(),
+            os_session_id: "session-1".into(),
+            browser_major_version: 151,
+            browser_version: "151.0.0.0".into(),
+            adapter_id: "lcxl-browser-extension".into(),
+            adapter_version: "0.1.0".into(),
+            profile_incarnation: "profile-1".into(),
+            connection_revision: 3,
+        },
+        page_id: "gmail-page-after-compression".into(),
+        page_incarnation: "gmail-document-1".into(),
+        origin: BrowserOrigin {
+            kind: BrowserOriginKind::Https,
+            host_ascii: "mail.google.com".into(),
+            port: 443,
+        },
+        document_revision: 1,
+        url_sha256: "b".repeat(64),
+        observed_at_unix_ms: 100,
+    };
+    let result = BrowserActionResult {
+        schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+        call_id: "browser-call-followup".into(),
+        outcome: BrowserActionOutcome::PageOpened,
+        page: page.clone(),
+        snapshot: None,
+        form_readback: Vec::new(),
+        completed_at_unix_ms: 101,
+    };
+    let result_text = serde_json::to_string(&result).unwrap();
+    let mut tool_result = ChatMessage::tool_result(
+        "browser-result-followup",
+        "browser-call-followup",
+        result_text.clone(),
+    );
+    tool_result.data_envelope = Some(DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "browser-result-envelope-followup".into(),
+        content: ContentRef::ImmutableBlob {
+            blob_id: "browser-result-blob-followup".into(),
+            sha256: format!("{:x}", Sha256::digest(result_text.as_bytes())),
+            size_bytes: result_text.len() as u64,
+            media_type: "application/json".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: "browser.page.open".into(),
+            source_tool_name: "browser_open_page".into(),
+            source_object_id: Some("browser-call-followup".into()),
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256: format!("{:x}", Sha256::digest(result_text.as_bytes())),
+        sensitivity: Sensitivity::Sensitive,
+        allowed_destinations: Vec::new(),
+        retention: RetentionBoundary {
+            expires_at_unix_ms: None,
+            delete_with_run: true,
+        },
+    });
+    seeded.conversation.push(ChatMessage::assistant_tool_calls(
+        "browser-request-followup",
+        "",
+        vec![ToolCallRef {
+            id: "browser-call-followup".into(),
+            name: "browser_open_page".into(),
+            arguments_json: r#"{"target":{"url":"https://mail.google.com/mail/u/0/"}}"#.into(),
+        }],
+    ));
+    seeded.conversation.push(tool_result);
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([answer("done")].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let mut followup = ChatMessage::text("u", ChatRole::User, "continue the Gmail task");
+    let followup_digest = format!("{:x}", Sha256::digest(followup.text.as_bytes()));
+    followup.data_envelope = Some(DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "followup-envelope".into(),
+        content: ContentRef::ImmutableBlob {
+            blob_id: "followup-content".into(),
+            sha256: followup_digest.clone(),
+            size_bytes: followup.text.len() as u64,
+            media_type: "text/plain".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: "test-user".into(),
+            source_tool_name: "send-message".into(),
+            source_object_id: Some("u".into()),
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256: followup_digest,
+        sensitivity: Sensitivity::UserContent,
+        allowed_destinations: Vec::new(),
+        retention: RetentionBoundary {
+            expires_at_unix_ms: None,
+            delete_with_run: false,
+        },
+    });
+
+    run_agent_turn(
+        &deps(&sess, &model, &tools, &[], &clock),
+        claim(),
+        followup,
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    let requests = requests.borrow();
+    let projection = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.text.contains("CURRENT REUSABLE PROVIDER RESULTS"))
+        .expect("ordinary user follow-up must receive the bounded provider result registry");
+    assert!(projection.text.contains("gmail-page-after-compression"));
+    assert!(!projection.text.contains("raw page title"));
+    assert!(
+        projection
+            .data_envelope
+            .as_ref()
+            .unwrap()
+            .provenance
+            .source_envelope_ids
+            .contains(&"browser-result-envelope-followup".to_string())
+    );
+}
+
+#[tokio::test]
 async fn device_assistant_followup_batch_repeats_exact_latest_input_at_recency_edge() {
     let mut seeded = PersistedAgentSession::new(
         "conv",
@@ -809,6 +968,102 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
     let encoded = serde_json::to_string(&stored.permission_requests[0]).unwrap();
     assert!(!encoded.contains("grant_id"));
     assert!(!encoded.contains("dispatch"));
+}
+
+#[tokio::test]
+async fn permission_planning_reuses_settled_equivalent_request_without_new_pending_item() {
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let prior_call = ToolCall {
+        id: "prior-call".into(),
+        name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+        arguments_json: r#"{"items":[{"item_id":"inspect-a","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"first wording"}]}"#.into(),
+    };
+    let mut prior = crate::permission_tools::build_permission_request(
+        &prior_call,
+        &providers,
+        "permission-prior".into(),
+        1,
+        "2026-06-20T00:00:00Z".into(),
+    )
+    .unwrap();
+    prior.state = crate::dynamic_run::PermissionRequestState::Denied;
+
+    let sess = MemSession::default();
+    let mut initial = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    initial.latest_input_seq = 1;
+    initial.input_revision = 1;
+    initial.add_permission_request(prior).unwrap();
+    *sess.inner.borrow_mut() = Some(initial);
+
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args(
+                    "duplicate-permission-call",
+                    crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                    r#"{"items":[{"item_id":"inspect-b","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"reworded duplicate"}]}"#,
+                ),
+                answer("I will adapt to the recorded denial."),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "must not run".into(),
+    };
+    let mut registry = vec![
+        providers
+            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .unwrap()
+            .registered_tool(),
+    ];
+    registry.extend(crate::permission_tools::permission_planning_tool_registry());
+    let inventory = vec![crate::capability_availability::CapabilityAvailability {
+        provider_id: "desktop.session".into(),
+        capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
+        tool_name: "inspect_desktop_session".into(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.provider_registry = Some(&providers);
+    loop_deps.capability_inventory = Some(&inventory);
+
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "continue after the decision"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        LoopOutcome::Answered("I will adapt to the recorded denial.".into())
+    );
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.permission_requests.len(), 1);
+    assert_eq!(stored.last_event_seq, 0);
+    assert!(stored.conversation.iter().any(|message| {
+        message.role == ChatRole::Tool
+            && message.text.contains("existing_permission_request")
+            && message.text.contains("denied")
+    }));
 }
 
 #[tokio::test]
@@ -3110,18 +3365,18 @@ async fn streams_awaiting_approval_event() {
     );
 }
 
-/// A truncated turn signals discard (no answer committed).
+/// A repeatedly truncated turn is discarded and stops after one bounded retry.
 #[tokio::test]
 async fn streams_discarded_on_truncated_turn() {
     let sess = MemSession::default();
-    let truncated = ModelTurn {
+    let truncated = || ModelTurn {
         text: "half".into(),
         stop_reason: StopReason::MaxTokens,
         provider_meta: ProviderResponseMeta::without_reasoning(StopReason::MaxTokens),
         ..Default::default()
     };
     let model = ScriptModel {
-        turns: RefCell::new([truncated].into()),
+        turns: RefCell::new([truncated(), truncated()].into()),
         requests: Rc::new(RefCell::new(vec![])),
     };
     let tools = RecordingTools {
@@ -3142,7 +3397,64 @@ async fn streams_discarded_on_truncated_turn() {
     .await
     .unwrap();
     assert_eq!(outcome, LoopOutcome::Truncated);
-    assert_eq!(*log.borrow(), vec!["discarded".to_string()]);
+    assert_eq!(
+        *log.borrow(),
+        vec!["discarded".to_string(), "discarded".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn truncated_turn_retries_once_with_server_recovery_notice() {
+    let sess = MemSession::default();
+    let truncated = ModelTurn {
+        text: "partial planning that must not be committed".into(),
+        stop_reason: StopReason::MaxTokens,
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::MaxTokens),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([truncated, answer("recovered concisely")].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "x".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "t".to_string();
+    let log = Rc::new(RefCell::new(vec![]));
+    let mut sink = EventLog(log.clone());
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &reg, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "q"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("recovered concisely".into()));
+    assert_eq!(requests.borrow().len(), 2);
+    assert!(
+        requests.borrow()[1]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("output-token limit"))
+    );
+    assert!(
+        requests.borrow()[1]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("minimum valid exposed tool call"))
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![
+            "discarded".to_string(),
+            "answer:recovered concisely".to_string()
+        ]
+    );
 }
 
 #[tokio::test]
@@ -4209,6 +4521,32 @@ fn artifact_consumer_lineage_resolves_a_prior_typed_artifact_result() {
         })
         .to_string(),
     };
+    let mut model_turn = ChatMessage::text("model-1", ChatRole::Assistant, "");
+    model_turn.tool_calls.push(call.to_ref());
+    model_turn.data_envelope = Some(DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "model-envelope-1".into(),
+        content: ContentRef::ImmutableBlob {
+            blob_id: "model-output-1".into(),
+            sha256: "d".repeat(64),
+            size_bytes: 1,
+            media_type: "application/json".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: "model.provider".into(),
+            source_tool_name: "model_turn".into(),
+            source_object_id: None,
+            source_envelope_ids: vec!["artifact-envelope-1".into()],
+        },
+        digest_sha256: "d".repeat(64),
+        sensitivity: Sensitivity::Sensitive,
+        allowed_destinations: Vec::new(),
+        retention: RetentionBoundary {
+            expires_at_unix_ms: None,
+            delete_with_run: true,
+        },
+    });
+    session.conversation.push(model_turn);
     let mut result = Some(DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: "gmail-envelope-1".into(),
@@ -4234,7 +4572,7 @@ fn artifact_consumer_lineage_resolves_a_prior_typed_artifact_result() {
     bind_tool_input_envelopes(&session, &call, &mut result).unwrap();
     assert_eq!(
         result.unwrap().provenance.source_envelope_ids,
-        vec!["artifact-envelope-1"]
+        vec!["artifact-envelope-1", "model-envelope-1"]
     );
 }
 
@@ -4291,16 +4629,56 @@ fn artifact_producer_lineage_resolves_preview_and_current_requirement() {
         'b',
     ));
     session.conversation.push(preview);
+    session.conversation.push(ChatMessage::assistant_tool_calls(
+        "search-turn-1",
+        "",
+        vec![ToolCallRef {
+            id: "search-call-1".into(),
+            name: "search_public_web".into(),
+            arguments_json: r#"{"query":"public benchmark"}"#.into(),
+        }],
+    ));
+    let mut search = ChatMessage::tool_result(
+        "search-result-1",
+        "search-call-1",
+        serde_json::json!({
+            "schema_version": 1,
+            "results": [{
+                "title": "Public benchmark",
+                "url": "https://example.com/benchmark",
+                "snippet": "untrusted"
+            }]
+        })
+        .to_string(),
+    );
+    search.data_envelope = Some(envelope(
+        "search-envelope-1",
+        "web.search",
+        "search_public_web",
+        'd',
+    ));
+    session.conversation.push(search);
 
     let call = ToolCall {
         id: "docx-1".into(),
         name: "create_word_report_from_merge_preview".into(),
         arguments_json: serde_json::json!({
             "preview_id": "preview-1",
-            "file_name": "report.docx"
+            "file_name": "report.docx",
+            "title": "Report",
+            "web_search_call_id": "search-call-1",
+            "web_sources": [{
+                "title": "Public benchmark",
+                "url": "https://example.com/benchmark"
+            }]
         })
         .to_string(),
     };
+    assert!(
+        resolve_word_report_web_source_envelope(&session, &call)
+            .unwrap()
+            .is_some()
+    );
     let mut result = Some(envelope(
         "docx-envelope-1",
         "word.document",
@@ -4311,8 +4689,24 @@ fn artifact_producer_lineage_resolves_preview_and_current_requirement() {
 
     assert_eq!(
         result.unwrap().provenance.source_envelope_ids,
-        vec!["preview-envelope-1", "user-envelope-1"]
+        vec!["preview-envelope-1", "search-envelope-1", "user-envelope-1"]
     );
+
+    let fabricated = ToolCall {
+        arguments_json: serde_json::json!({
+            "preview_id": "preview-1",
+            "file_name": "report.docx",
+            "title": "Report",
+            "web_search_call_id": "search-call-1",
+            "web_sources": [{
+                "title": "Invented source",
+                "url": "https://example.com/invented"
+            }]
+        })
+        .to_string(),
+        ..call
+    };
+    assert!(resolve_word_report_web_source_envelope(&session, &fabricated).is_err());
 }
 
 #[test]
@@ -4427,6 +4821,396 @@ fn requested_artifact_projection_restores_only_verbatim_named_typed_artifact() {
         requested_artifact_registry_projection(&[artifact, user], "projection-2")
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn permission_resume_projection_restores_only_bounded_reusable_references() {
+    use desk_agent_protocol::browser_control::{
+        BROWSER_CONTROL_SCHEMA_VERSION, BrowserActionOutcome, BrowserActionResult,
+        BrowserAdapterRef, BrowserElementRef, BrowserElementRole, BrowserEngineKind, BrowserOrigin,
+        BrowserOriginKind, BrowserPageRef, BrowserSemanticSnapshot,
+    };
+    use desk_agent_protocol::data_lineage::{
+        DATA_ENVELOPE_SCHEMA_VERSION, DataProvenance, DestinationIdentity, RetentionBoundary,
+        Sensitivity,
+    };
+
+    fn envelope(id: &str, tool: &str, sensitivity: Sensitivity) -> DataEnvelope {
+        DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: id.into(),
+            content: ContentRef::ImmutableBlob {
+                blob_id: format!("{id}-blob"),
+                sha256: "a".repeat(64),
+                size_bytes: 10,
+                media_type: "application/json".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: "test".into(),
+                source_tool_name: tool.into(),
+                source_object_id: None,
+                source_envelope_ids: Vec::new(),
+            },
+            digest_sha256: "a".repeat(64),
+            sensitivity,
+            allowed_destinations: vec![DestinationIdentity::Model {
+                connection_id: "gateway:1".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            }],
+            retention: RetentionBoundary {
+                expires_at_unix_ms: None,
+                delete_with_run: true,
+            },
+        }
+    }
+
+    let mut preview = ChatMessage::tool_result(
+        "preview-result",
+        "preview-call",
+        serde_json::json!({
+            "ReadContext": {"SpreadsheetMergePreview": {
+                "preview_id": "spreadsheet-merge-preview-1",
+                "rows": [["must", "not", "be", "replayed"]]
+            }}
+        })
+        .to_string(),
+    );
+    preview.data_envelope = Some(envelope(
+        "preview-envelope",
+        "preview_spreadsheet_merge",
+        Sensitivity::Sensitive,
+    ));
+    let search_call = ChatMessage::assistant_tool_calls(
+        "search-turn",
+        "",
+        vec![ToolCallRef {
+            id: "search-call-1".into(),
+            name: "search_public_web".into(),
+            arguments_json: r#"{"query":"public benchmark"}"#.into(),
+        }],
+    );
+    let mut search = ChatMessage::tool_result(
+        "search-result",
+        "search-call-1",
+        serde_json::json!({
+            "schema_version": 1,
+            "web_search_call_id": "search-call-1",
+            "results": [{
+                "title": "Public benchmark",
+                "url": "https://example.com/benchmark",
+                "snippet": "must not be replayed"
+            }]
+        })
+        .to_string(),
+    );
+    search.data_envelope = Some(envelope(
+        "search-envelope",
+        "search_public_web",
+        Sensitivity::Sensitive,
+    ));
+    let page = BrowserPageRef {
+        schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+        adapter: BrowserAdapterRef {
+            engine: BrowserEngineKind::ChromeExtension,
+            device_id: "device-1".into(),
+            os_session_id: "session-1".into(),
+            browser_major_version: 144,
+            browser_version: "144.0.0.0".into(),
+            adapter_id: "chrome-extension".into(),
+            adapter_version: "1.0.0".into(),
+            profile_incarnation: "profile-incarnation-1".into(),
+            connection_revision: 7,
+        },
+        page_id: "page-slack-1".into(),
+        page_incarnation: "page-incarnation-1".into(),
+        origin: BrowserOrigin {
+            kind: BrowserOriginKind::Https,
+            host_ascii: "app.slack.com".into(),
+            port: 443,
+        },
+        document_revision: 4,
+        url_sha256: "b".repeat(64),
+        observed_at_unix_ms: 42,
+    };
+    let browser_result = BrowserActionResult {
+        schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+        call_id: "browser-call-1".into(),
+        outcome: BrowserActionOutcome::PageOpened,
+        page: page.clone(),
+        snapshot: None,
+        form_readback: Vec::new(),
+        completed_at_unix_ms: 43,
+    };
+    let mut browser = ChatMessage::tool_result(
+        "browser-result",
+        "browser-call-1",
+        serde_json::to_string(&browser_result).unwrap(),
+    );
+    let mut browser_result_envelope = envelope(
+        "browser-envelope",
+        "browser_open_page",
+        Sensitivity::Sensitive,
+    );
+    browser_result_envelope.retention.expires_at_unix_ms = Some(9_999);
+    browser.data_envelope = Some(browser_result_envelope);
+    let gmail_page = BrowserPageRef {
+        page_id: "page-gmail-1".into(),
+        page_incarnation: "gmail-incarnation-1".into(),
+        origin: BrowserOrigin {
+            kind: BrowserOriginKind::Https,
+            host_ascii: "mail.google.com".into(),
+            port: 443,
+        },
+        document_revision: 5,
+        url_sha256: "c".repeat(64),
+        observed_at_unix_ms: 44,
+        ..page
+    };
+    let gmail_elements = [
+        ("gmail-to", BrowserElementRole::Combobox, "To recipients"),
+        ("gmail-subject", BrowserElementRole::Textbox, "Subject"),
+        ("gmail-body", BrowserElementRole::Textbox, "Message Body"),
+    ]
+    .into_iter()
+    .map(|(element_id, role, accessible_name)| BrowserElementRef {
+        page_id: gmail_page.page_id.clone(),
+        page_incarnation: gmail_page.page_incarnation.clone(),
+        document_revision: gmail_page.document_revision,
+        element_id: element_id.into(),
+        role,
+        accessible_name: accessible_name.into(),
+        value: None,
+        element_revision: 1,
+    })
+    .collect::<Vec<_>>();
+    let gmail_result = BrowserActionResult {
+        schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+        call_id: "browser-call-gmail".into(),
+        outcome: BrowserActionOutcome::SnapshotCaptured,
+        page: gmail_page.clone(),
+        snapshot: Some(BrowserSemanticSnapshot {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            page: gmail_page,
+            elements: gmail_elements,
+            truncated: false,
+            captured_at_unix_ms: 45,
+        }),
+        form_readback: Vec::new(),
+        completed_at_unix_ms: 46,
+    };
+    let mut gmail = ChatMessage::tool_result(
+        "gmail-browser-result",
+        "browser-call-gmail",
+        serde_json::to_string(&gmail_result).unwrap(),
+    );
+    let mut gmail_envelope = envelope(
+        "gmail-browser-envelope",
+        "browser_take_snapshot",
+        Sensitivity::Sensitive,
+    );
+    gmail_envelope.retention.expires_at_unix_ms = Some(9_999);
+    gmail.data_envelope = Some(gmail_envelope);
+    let mut resume = ChatMessage::text(
+        "resume",
+        ChatRole::User,
+        "permission decision for the existing report requirement",
+    );
+    resume.data_envelope = Some(envelope(
+        "resume-envelope",
+        "permission-decision-resume",
+        Sensitivity::UserContent,
+    ));
+
+    let conversation = vec![preview, search_call, search, browser, gmail, resume];
+    let projection = reusable_provider_result_projection(&conversation, "projection", 9_000)
+        .unwrap()
+        .unwrap();
+    assert!(projection.text.contains("spreadsheet-merge-preview-1"));
+    assert!(projection.text.contains("search-call-1"));
+    assert!(projection.text.contains("Public benchmark"));
+    assert!(projection.text.contains("https://example.com/benchmark"));
+    assert!(projection.text.contains("page-slack-1"));
+    assert!(projection.text.contains("page-incarnation-1"));
+    assert!(projection.text.contains("app.slack.com"));
+    assert!(projection.text.contains("page-gmail-1"));
+    assert!(projection.text.contains("To recipients"));
+    assert!(projection.text.contains("Message Body"));
+    assert!(!projection.text.contains("must not be replayed"));
+    assert!(!projection.text.contains("raw page title"));
+    let projected = projection.data_envelope.unwrap();
+    assert_eq!(projected.sensitivity, Sensitivity::Sensitive);
+    assert!(
+        projected
+            .provenance
+            .source_envelope_ids
+            .contains(&"preview-envelope".to_string())
+    );
+    assert!(
+        projected
+            .provenance
+            .source_envelope_ids
+            .contains(&"search-envelope".to_string())
+    );
+    assert!(
+        projected
+            .provenance
+            .source_envelope_ids
+            .contains(&"browser-envelope".to_string())
+    );
+    assert!(
+        projected
+            .provenance
+            .source_envelope_ids
+            .contains(&"gmail-browser-envelope".to_string())
+    );
+    assert_eq!(projected.retention.expires_at_unix_ms, Some(9_999));
+
+    let after_expiry =
+        reusable_provider_result_projection(&conversation, "projection-after-expiry", 9_999)
+            .unwrap()
+            .unwrap();
+    assert!(!after_expiry.text.contains("page-slack-1"));
+    assert!(after_expiry.text.contains("spreadsheet-merge-preview-1"));
+}
+
+#[test]
+fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
+    use crate::dynamic_run::{
+        GrantRequestItem, PERMISSION_REQUEST_SCHEMA_VERSION, PermissionRequest,
+        PermissionRequestState,
+    };
+    use desk_agent_protocol::browser_control::{
+        BROWSER_CONTROL_SCHEMA_VERSION, BrowserActionOutcome, BrowserActionResult,
+        BrowserAdapterRef, BrowserElementRef, BrowserElementRole, BrowserEngineKind, BrowserOrigin,
+        BrowserOriginKind, BrowserPageRef, BrowserSemanticSnapshot,
+    };
+    use desk_agent_protocol::capability_provider::CapabilityEffect;
+    use desk_agent_protocol::data_lineage::{
+        DATA_ENVELOPE_SCHEMA_VERSION, DataProvenance, RetentionBoundary, Sensitivity,
+    };
+
+    let page = BrowserPageRef {
+        schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+        adapter: BrowserAdapterRef {
+            engine: BrowserEngineKind::ChromeExtension,
+            device_id: "device-1".into(),
+            os_session_id: "session-1".into(),
+            browser_major_version: 151,
+            browser_version: "151.0.0.0".into(),
+            adapter_id: "lcxl-browser-extension".into(),
+            adapter_version: "0.1.0".into(),
+            profile_incarnation: "profile-1".into(),
+            connection_revision: 1,
+        },
+        page_id: "gmail-page-1".into(),
+        page_incarnation: "document-1".into(),
+        origin: BrowserOrigin {
+            kind: BrowserOriginKind::Https,
+            host_ascii: "mail.google.com".into(),
+            port: 443,
+        },
+        document_revision: 2,
+        url_sha256: "a".repeat(64),
+        observed_at_unix_ms: 900,
+    };
+    let element = BrowserElementRef {
+        page_id: page.page_id.clone(),
+        page_incarnation: page.page_incarnation.clone(),
+        document_revision: page.document_revision,
+        element_id: "compose-button".into(),
+        role: BrowserElementRole::Button,
+        accessible_name: "Compose".into(),
+        value: None,
+        element_revision: 2,
+    };
+    let completion = BrowserActionResult {
+        schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+        call_id: "browser-call".into(),
+        outcome: BrowserActionOutcome::PageOpened,
+        page: page.clone(),
+        snapshot: Some(BrowserSemanticSnapshot {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            page: page.clone(),
+            elements: vec![element.clone()],
+            truncated: false,
+            captured_at_unix_ms: 950,
+        }),
+        form_readback: Vec::new(),
+        completed_at_unix_ms: 975,
+    };
+    let mut browser_result = ChatMessage::tool_result(
+        "browser-result",
+        "browser-call",
+        serde_json::to_string(&completion).unwrap(),
+    );
+    browser_result.data_envelope = Some(DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "browser-envelope".into(),
+        content: ContentRef::ImmutableBlob {
+            blob_id: "browser-result-blob".into(),
+            sha256: "b".repeat(64),
+            size_bytes: 10,
+            media_type: "application/json".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: "browser.extension".into(),
+            source_tool_name: "browser_open_page".into(),
+            source_object_id: None,
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256: "b".repeat(64),
+        sensitivity: Sensitivity::UserContent,
+        allowed_destinations: Vec::new(),
+        retention: RetentionBoundary {
+            expires_at_unix_ms: Some(5_000),
+            delete_with_run: true,
+        },
+    });
+
+    let request_for = |canonical_input_json: String| PermissionRequest {
+        schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
+        request_id: "permission-request".into(),
+        input_revision: 1,
+        state: PermissionRequestState::Pending,
+        items: vec![GrantRequestItem {
+            item_id: "activate-compose".into(),
+            provider_id: "browser.element.activate".into(),
+            tool_name: "browser_activate_element".into(),
+            expected_effect: CapabilityEffect::InputFallback,
+            resource_scope: Vec::new(),
+            operation_scope: Vec::new(),
+            export_destinations: Vec::new(),
+            canonical_input_digest_sha256: None,
+            canonical_input_json: Some(canonical_input_json),
+            suggested_ttl_seconds: 300,
+            suggested_max_uses: 1,
+            reason: "Activate Compose".into(),
+        }],
+        created_at: "1970-01-01T00:00:01Z".into(),
+    };
+    let exact = serde_json::json!({"page": page, "element": element});
+    assert!(
+        validate_browser_permission_references(
+            std::slice::from_ref(&browser_result),
+            &request_for(serde_json::to_string(&exact).unwrap()),
+        )
+        .is_ok()
+    );
+
+    let mut rewritten = exact;
+    rewritten["page"]["adapter"]["engine"] = serde_json::json!("chrome_devtools_mcp");
+    let error = validate_browser_permission_references(
+        &[browser_result],
+        &request_for(serde_json::to_string(&rewritten).unwrap()),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("must copy its exact page and element references")
     );
 }
 

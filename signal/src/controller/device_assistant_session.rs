@@ -6,6 +6,7 @@
 //! select an arbitrary SQLite row.
 
 use actix_web::{HttpResponse, get, post, web};
+use desk_agent_protocol::communication::CommunicationDraftHandoff;
 use desk_agent_protocol::computer_use::{ComputerActionCompleted, ComputerActionOutput};
 use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope};
 use desk_agent_protocol::device_assistant::DeviceAssistantAsk;
@@ -515,15 +516,13 @@ fn build_evidence_summary(
         else {
             continue;
         };
-        let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text) else {
-            continue;
-        };
-        match completion.output {
+        let completion = serde_json::from_str::<ComputerActionCompleted>(&message.text).ok();
+        match completion.and_then(|completion| completion.output) {
             Some(ComputerActionOutput::FileArtifact(artifact))
                 if artifact.validate().is_ok() && artifacts.len() < MAX_EVIDENCE_RECEIPTS =>
             {
                 artifacts.push(EvidenceArtifactDto {
-                    source_envelope_id,
+                    source_envelope_id: source_envelope_id.clone(),
                     artifact_id: artifact.file.token,
                     file_name: artifact.file_name,
                     media_type: artifact.media_type,
@@ -535,7 +534,7 @@ fn build_evidence_summary(
                 if handoff.validate().is_ok() && handoff_receipts.len() < MAX_EVIDENCE_RECEIPTS =>
             {
                 handoff_receipts.push(EvidenceHandoffReceiptDto {
-                    source_envelope_id,
+                    source_envelope_id: source_envelope_id.clone(),
                     handoff_id: handoff.handoff_id,
                     run_id: handoff.run_id,
                     surface_kind: enum_wire_name(&handoff.surface.kind),
@@ -547,6 +546,22 @@ fn build_evidence_summary(
                 });
             }
             _ => {}
+        }
+        if let Ok(handoff) = serde_json::from_str::<CommunicationDraftHandoff>(&message.text)
+            && handoff.validate().is_ok()
+            && handoff_receipts.len() < MAX_EVIDENCE_RECEIPTS
+        {
+            handoff_receipts.push(EvidenceHandoffReceiptDto {
+                source_envelope_id,
+                handoff_id: handoff.handoff_id,
+                run_id: handoff.run_id,
+                surface_kind: enum_wire_name(&handoff.surface.kind),
+                prepared_payload_sha256: handoff.prepared_payload_sha256,
+                readback_payload_sha256: handoff.readback_payload_sha256,
+                verification: enum_wire_name(&handoff.verification),
+                send_authority: enum_wire_name(&handoff.send_authority),
+                handed_off_at_unix_ms: handoff.handed_off_at_unix_ms,
+            });
         }
     }
     let missing_source_envelope_ids = missing.into_iter().collect::<Vec<_>>();
@@ -1462,6 +1477,12 @@ pub async fn list_device_assistant_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desk_agent_protocol::browser_control::{BrowserOrigin, BrowserOriginKind};
+    use desk_agent_protocol::communication::{
+        COMMUNICATION_SCHEMA_VERSION, CommunicationChannel, CommunicationPrepareVerification,
+        CommunicationSendAuthority, CommunicationSurfaceKind, CommunicationSurfaceRef,
+        CommunicationSurfaceScope,
+    };
     use desk_agent_protocol::data_lineage::{
         ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance,
         DestinationIdentity, RetentionBoundary, Sensitivity,
@@ -1539,7 +1560,7 @@ mod tests {
             'b',
         ));
 
-        let summary = build_evidence_summary(&[user, result], &[]);
+        let summary = build_evidence_summary(&[user.clone(), result.clone()], &[]);
         assert!(summary.graph_complete);
         assert!(!summary.truncated);
         assert_eq!(summary.nodes.len(), 2);
@@ -1547,6 +1568,58 @@ mod tests {
         let json = serde_json::to_string(&summary).unwrap();
         assert!(!json.contains("SECRET"));
         assert!(!json.contains("private"));
+
+        let handoff = CommunicationDraftHandoff {
+            schema_version: COMMUNICATION_SCHEMA_VERSION,
+            handoff_id: "gmail-handoff-1".into(),
+            run_id: "run-1".into(),
+            surface: CommunicationSurfaceRef {
+                channel: CommunicationChannel::Email,
+                kind: CommunicationSurfaceKind::ChromeExtension,
+                scope: CommunicationSurfaceScope::WebOrigin {
+                    origin: BrowserOrigin {
+                        kind: BrowserOriginKind::Https,
+                        host_ascii: "mail.google.com".into(),
+                        port: 443,
+                    },
+                },
+                device_id: "device-1".into(),
+                os_session_id: "session-1".into(),
+                adapter_id: "lcxl-browser-extension".into(),
+                adapter_version: "0.1.0".into(),
+                profile_id: "profile-1".into(),
+                account_id: "gmail-web-current-profile".into(),
+                revision: 1,
+            },
+            compose_id: "compose-1".into(),
+            prepared_payload_sha256: "d".repeat(64),
+            verification: CommunicationPrepareVerification::SemanticExact,
+            readback_payload_sha256: Some("d".repeat(64)),
+            send_authority: CommunicationSendAuthority::ManualOnly,
+            handed_off_at_unix_ms: 42,
+        };
+        handoff.validate().unwrap();
+        let mut handoff_message = ChatMessage::tool_result(
+            "handoff-result",
+            "gmail-call",
+            serde_json::to_string(&handoff).unwrap(),
+        );
+        handoff_message.data_envelope = Some(envelope(
+            "handoff-envelope",
+            vec!["result-envelope".into()],
+            'd',
+        ));
+        let with_handoff = build_evidence_summary(&[user, result, handoff_message], &[]);
+        assert!(with_handoff.graph_complete);
+        assert_eq!(with_handoff.handoff_receipts.len(), 1);
+        assert_eq!(
+            with_handoff.handoff_receipts[0].surface_kind,
+            "chrome_extension"
+        );
+        assert_eq!(
+            with_handoff.handoff_receipts[0].source_envelope_id,
+            "handoff-envelope"
+        );
 
         let orphan = ChatMessage {
             data_envelope: Some(envelope(

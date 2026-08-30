@@ -877,6 +877,7 @@ struct MeteredModel {
     destination: DestinationIdentity,
     selected_source_tools: std::collections::BTreeSet<String>,
     export_authorization_id: String,
+    permission_resume: bool,
     model_call_ordinal: std::sync::atomic::AtomicU64,
 }
 
@@ -902,6 +903,7 @@ impl ModelSeam for MeteredModel {
             export_authorization_id: self.export_authorization_id.clone(),
             now_unix_ms,
             byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
+            omit_finite_retention_historical_turns: self.permission_resume,
         };
         let authorized = policy.authorize_request(request).map_err(|error| {
             log::warn!("[device-assistant] model egress denied: {error}");
@@ -1656,6 +1658,7 @@ async fn run_turn_inner(
         destination: destination.clone(),
         selected_source_tools,
         export_authorization_id,
+        permission_resume: resume_conversation_id.is_some(),
         model_call_ordinal: std::sync::atomic::AtomicU64::new(0),
     };
     let callable = callable_tools(&provider_registry, &inventory)
@@ -1822,6 +1825,7 @@ async fn run_turn_inner(
             &capability_grants,
             permission_requests,
             now_unix_ms,
+            readiness_revision,
         );
     // Internal run projection is not a Provider capability and grants no device
     // authority. It is always callable so the model can keep the user-visible
@@ -2538,6 +2542,7 @@ mod tests {
             destination: destination.clone(),
             selected_source_tools: ["inspect_desktop_ui".to_string()].into_iter().collect(),
             export_authorization_id: "fake-http-export".into(),
+            permission_resume: false,
             model_call_ordinal: std::sync::atomic::AtomicU64::new(0),
         };
 
@@ -2621,6 +2626,7 @@ mod tests {
             destination: destination.clone(),
             selected_source_tools: Default::default(),
             export_authorization_id: "empty-http-export".into(),
+            permission_resume: false,
             model_call_ordinal: std::sync::atomic::AtomicU64::new(0),
         };
         let request = ModelRequest::text_only(

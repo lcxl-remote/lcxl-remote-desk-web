@@ -179,6 +179,9 @@ impl CommunicationSurfaceRef {
                 CommunicationSurfaceKind::OutlookNewDesktop,
                 CommunicationSurfaceScope::DesktopApplication { .. }
             ) | (
+                CommunicationSurfaceKind::ChromeExtension,
+                CommunicationSurfaceScope::WebOrigin { .. }
+            ) | (
                 CommunicationSurfaceKind::ChromeDevtoolsMcp,
                 CommunicationSurfaceScope::WebOrigin { .. }
             ) | (CommunicationSurfaceKind::AssistiveUi, _)
@@ -1414,6 +1417,29 @@ mod tests {
             payload.validate(),
             Err(CommunicationContractError::InvalidContentRef)
         );
+    }
+
+    #[test]
+    fn chrome_extension_surface_is_a_valid_web_origin_surface() {
+        let surface = CommunicationSurfaceRef {
+            channel: CommunicationChannel::Email,
+            kind: CommunicationSurfaceKind::ChromeExtension,
+            scope: CommunicationSurfaceScope::WebOrigin {
+                origin: BrowserOrigin {
+                    kind: BrowserOriginKind::Https,
+                    host_ascii: GMAIL_WEB_HOST.into(),
+                    port: GMAIL_WEB_PORT,
+                },
+            },
+            device_id: "device-1".into(),
+            os_session_id: "session-1".into(),
+            adapter_id: "lcxl-browser-extension".into(),
+            adapter_version: "0.1.0".into(),
+            profile_id: "profile-1".into(),
+            account_id: "gmail-web-current-profile".into(),
+            revision: 1,
+        };
+        surface.validate().unwrap();
     }
 
     #[test]

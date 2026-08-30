@@ -2135,6 +2135,7 @@ impl WorkerSession {
                                                     preview_id,
                                                     file_name,
                                                     title,
+                                                    web_sources,
                                                 },
                                             ) => {
                                                 let allowed_roots = ceiling.allowed_file_roots.clone();
@@ -2155,6 +2156,7 @@ impl WorkerSession {
                                                     let bytes = crate::worker::agent::spreadsheet_file::materialize_preview_docx(
                                                         &preview_id,
                                                         &title,
+                                                        &web_sources,
                                                     )?;
                                                     crate::worker::agent::file_reference_store::create_binary_artifact(
                                                         &target,
