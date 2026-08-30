@@ -36,6 +36,51 @@ const EVIDENCE_SUMMARY_SCHEMA_VERSION: u16 = 1;
 const MAX_EVIDENCE_NODES: usize = 128;
 const MAX_EVIDENCE_RECEIPTS: usize = 32;
 
+fn permission_resume_context_selection(
+    context_attachments: &[ContextAttachment],
+    scope_snapshot: &desk_agent_protocol::AgentScope,
+    now_unix_ms: u64,
+) -> (Vec<String>, Vec<String>) {
+    let active_attachments = context_attachments
+        .iter()
+        .filter(|attachment| attachment.is_active_at(now_unix_ms))
+        .collect::<Vec<_>>();
+    let selected_attachment_ids = active_attachments
+        .iter()
+        .map(|attachment| attachment.attachment_id.clone())
+        .collect::<Vec<_>>();
+    let mut selected_capability_ids = active_attachments
+        .iter()
+        .map(|attachment| attachment.object_ref.source_capability_id.clone())
+        .filter(|capability_id| {
+            matches!(
+                capability_id.as_str(),
+                desk_diagnose_core::device_assistant::DESKTOP_SESSION_CAPABILITY_ID
+                    | desk_diagnose_core::device_assistant::DESKTOP_UI_CAPABILITY_ID
+                    | desk_diagnose_core::device_assistant::OFFICE_DOCUMENT_CAPABILITY_ID
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // CurrentScreen deliberately has no durable ContextAttachment because its
+    // pixels and selection are one-turn sensitive. A permission decision is an
+    // automatic continuation of that same owner-authored turn, not a new user
+    // turn, so recover the selection from the persisted effective turn scope.
+    // A newer user message would first force the pending request through
+    // revalidation, preventing this path from reviving a stale selection.
+    if scope_snapshot
+        .granted
+        .contains(&desk_agent_protocol::Capability::ScreenCaptureCurrent)
+    {
+        selected_capability_ids
+            .push(desk_diagnose_core::device_assistant::CURRENT_SCREEN_CAPABILITY_ID.into());
+    }
+
+    selected_capability_ids.sort();
+    selected_capability_ids.dedup();
+    (selected_capability_ids, selected_attachment_ids)
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DeviceAssistantSessionQuery {
     pub connection: String,
@@ -1284,30 +1329,12 @@ pub async fn decide_device_assistant_permission(
             })
             .map(|message| message.text.clone())
     {
-        let active_attachments = snapshot
-            .context_attachments
-            .iter()
-            .filter(|attachment| attachment.is_active_at(now_unix_ms))
-            .collect::<Vec<_>>();
-        let selected_attachment_ids = active_attachments
-            .iter()
-            .map(|attachment| attachment.attachment_id.clone())
-            .collect::<Vec<_>>();
-        let mut selected_capability_ids = active_attachments
-            .iter()
-            .map(|attachment| attachment.object_ref.source_capability_id.clone())
-            .filter(|capability_id| {
-                matches!(
-                    capability_id.as_str(),
-                    desk_diagnose_core::device_assistant::DESKTOP_SESSION_CAPABILITY_ID
-                        | desk_diagnose_core::device_assistant::DESKTOP_UI_CAPABILITY_ID
-                        | desk_diagnose_core::device_assistant::OFFICE_DOCUMENT_CAPABILITY_ID
-                        | desk_diagnose_core::device_assistant::CURRENT_SCREEN_CAPABILITY_ID
-                )
-            })
-            .collect::<Vec<_>>();
-        selected_capability_ids.sort();
-        selected_capability_ids.dedup();
+        let (selected_capability_ids, selected_attachment_ids) =
+            permission_resume_context_selection(
+                &snapshot.context_attachments,
+                &snapshot.scope_snapshot,
+                now_unix_ms,
+            );
         let resume_request_id = format!("permission-resume-{}", body.request_id);
         let resume_ask = DeviceAssistantAsk {
             question,
@@ -1487,11 +1514,30 @@ mod tests {
         ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance,
         DestinationIdentity, RetentionBoundary, Sensitivity,
     };
+    use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
     use desk_diagnose_core::chat::{ChatMessage, ChatRole, ToolCallRef};
     use desk_diagnose_core::context_attachment::{
         AttachmentBounds, AttachmentObjectRef, CONTEXT_ATTACHMENT_SCHEMA_VERSION,
     };
     use desk_diagnose_core::session::AgentSessionSurface;
+
+    #[test]
+    fn permission_resume_preserves_ephemeral_current_screen_from_turn_scope() {
+        let scope = AgentScope {
+            granted: vec![Capability::ScreenCaptureCurrent],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: Some("test".into()),
+        };
+        let (capabilities, attachment_ids) =
+            permission_resume_context_selection(&[], &scope, 1_000);
+
+        assert_eq!(
+            capabilities,
+            vec![desk_diagnose_core::device_assistant::CURRENT_SCREEN_CAPABILITY_ID]
+        );
+        assert!(attachment_ids.is_empty());
+    }
 
     #[test]
     fn snapshot_message_uses_the_manager_compatible_camel_case_shape() {

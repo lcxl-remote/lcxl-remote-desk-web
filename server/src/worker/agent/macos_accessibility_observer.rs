@@ -1065,4 +1065,106 @@ mod tests {
         assert!(result.changed);
         assert!(result.verified);
     }
+
+    #[test]
+    #[ignore = "requires Calculator to be frontmost, an Accessibility grant, and an external Calculator restart after the ready marker is written"]
+    fn live_calculator_restart_rejects_the_stale_element_reference() {
+        let observed = observe_interactive_desktop().expect("interactive macOS session");
+        let application = observed
+            .foreground_application
+            .expect("frontmost Calculator application");
+        assert!(
+            application.image_path.contains("/Calculator.app/"),
+            "Calculator must be frontmost, got {}",
+            application.image_path
+        );
+        let tree = collect_foreground(
+            application.process_id,
+            &application.image_path,
+            8,
+            512,
+            256 * 1024,
+        )
+        .expect("bounded Calculator Accessibility tree");
+        let original_started_at =
+            process_start(application.process_id).expect("Calculator process incarnation");
+        let button = tree
+            .nodes
+            .iter()
+            .find(|node| {
+                node.name.as_deref() == Some("1")
+                    && node
+                        .supported_actions
+                        .contains(&UiSemanticActionKind::Invoke)
+            })
+            .expect("Calculator digit 1 button");
+        let stale_fingerprint = button.fingerprint.clone();
+
+        let marker = std::env::var_os("LRD_AX_RESTART_READY_FILE")
+            .expect("LRD_AX_RESTART_READY_FILE must name an external-harness marker");
+        std::fs::write(&marker, application.process_id.to_string())
+            .expect("write Calculator restart ready marker");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (restarted_process_id, restarted_at) = 'restart: loop {
+            assert!(
+                Instant::now() < deadline,
+                "Calculator was not restarted in time"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+            let process_ids = libproc::processes::pids_by_type(libproc::processes::ProcFilter::All)
+                .expect("enumerate processes after Calculator restart");
+            for process_id in process_ids {
+                if process_id == 0 || process_id == application.process_id {
+                    continue;
+                }
+                let Ok(image_path) = libproc::proc_pid::pidpath(process_id as i32) else {
+                    continue;
+                };
+                if image_path == application.image_path
+                    && let Ok(started_at) = process_start(process_id)
+                {
+                    break 'restart (process_id, started_at);
+                }
+            }
+        };
+        assert_ne!(restarted_at, original_started_at);
+
+        let root = unsafe { AXUIElementCreateApplication(restarted_process_id as libc::pid_t) };
+        assert!(!root.is_null(), "restarted Calculator Accessibility root");
+        let root = OwnedCf(root);
+        set_messaging_timeout(root.0).expect("bound restarted Calculator AX messaging");
+        let config = WalkConfig {
+            process_id: restarted_process_id,
+            process_started_at: restarted_at,
+            max_depth: 16,
+            max_nodes: 1_024,
+            max_bytes: usize::MAX,
+            deadline: Instant::now() + HARD_DEADLINE,
+        };
+        let mut visited = 0;
+        assert!(
+            find_element(
+                root.0,
+                None,
+                0,
+                0,
+                &stale_fingerprint,
+                &config,
+                &mut visited,
+            )
+            .is_none(),
+            "an AX reference fingerprint from the old process must not resolve in the restarted process"
+        );
+
+        let error = preflight_action(
+            application.process_id,
+            &application.image_path,
+            &stale_fingerprint,
+            &UiSemanticAction::Invoke,
+        )
+        .expect_err("an action bound to the old Calculator process must fail closed");
+        assert_eq!(error.kind, AgentErrorKind::SessionUnavailable);
+        let _ = std::fs::remove_file(marker);
+    }
 }
