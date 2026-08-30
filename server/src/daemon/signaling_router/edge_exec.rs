@@ -174,6 +174,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
         EdgeExecRequestPayload::Agentic {
             plan,
             validation_input,
+            ..
         } => {
             let mut validation_input = validation_input.clone();
             desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(
@@ -204,9 +205,18 @@ pub(super) async fn handle_edge_exec_request_inbound(
         return Ok(());
     }
 
-    // Drop the daemon-only `validation_input`: only the frozen `ExecPlan` argv
-    // reaches the worker (the "worker never sees the command string" invariant).
-    dispatch_fleet_exec_plan(ctx, &request_id, payload.into_plan()).await;
+    // Preserve only the opaque control-connection anchor before dropping the
+    // daemon-only validation envelope. The host resolves that connection through
+    // its own immutable connection→session binding; no central component sees a
+    // platform session key.
+    let session_connection_id = payload.session_connection_id().map(str::to_string);
+    dispatch_fleet_exec_plan(
+        ctx,
+        &request_id,
+        payload.into_plan(),
+        session_connection_id.as_deref(),
+    )
+    .await;
     Ok(())
 }
 
@@ -219,15 +229,16 @@ pub(super) async fn dispatch_fleet_exec_plan(
     ctx: &RouterContext,
     request_id: &str,
     plan: ExecPlan,
+    session_connection_id: Option<&str>,
 ) {
     // A ServiceDaemon can host several independently ready desktop sessions.
     // Resolve the execution anchor before claiming the at-most-once ledger: an
     // ambiguous target is definitely not dispatched and must not consume or
     // poison this execution generation. Portable/DeskServer keep returning
     // `None` here and use their anonymous single-worker adapter.
-    let selected_session = match ctx.worker_mgr.resolve_session_target(
+    let selected_session = match ctx.worker_mgr.resolve_session_target_for_connection(
         crate::daemon::session_target::SessionCapability::Assistant,
-        None,
+        session_connection_id,
     ) {
         Ok(session) => session,
         Err(error) => {

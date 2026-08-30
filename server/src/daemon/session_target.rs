@@ -262,6 +262,26 @@ impl SessionTargetCatalog {
         }
         Ok(first.candidate.session.clone())
     }
+
+    /// Revalidate a session previously frozen by the connection binding table.
+    /// The binding, not a caller-supplied target id, chooses the session; this
+    /// method only proves that the exact generation is still catalogued and
+    /// ready for the requested capability.
+    pub fn validate_bound_session(
+        &self,
+        capability: SessionCapability,
+        session: &SessionKey,
+    ) -> Result<SessionKey, SessionTargetSelectionError> {
+        let inner = self.inner.read().unwrap();
+        let entry = inner
+            .by_session
+            .get(session)
+            .ok_or(SessionTargetSelectionError::Stale)?;
+        if !entry.candidate.supports(capability) {
+            return Err(SessionTargetSelectionError::Unavailable);
+        }
+        Ok(session.clone())
+    }
 }
 
 #[cfg(test)]
@@ -425,6 +445,31 @@ mod tests {
         assert_eq!(
             catalog.select(SessionCapability::RemoteDesktop, Some(&terminal_target)),
             Err(SessionTargetSelectionError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn frozen_connection_session_is_revalidated_without_reselection() {
+        let catalog = SessionTargetCatalog::default();
+        let mut first = candidate("session-a", 1);
+        first.assistant_ready = true;
+        let first_session = first.session.clone();
+        catalog.upsert(first);
+        catalog.upsert(candidate("session-b", 1));
+
+        assert_eq!(
+            catalog.validate_bound_session(SessionCapability::Assistant, &first_session),
+            Ok(first_session.clone())
+        );
+        catalog.set_readiness(&first_session, true, true, true, false);
+        assert_eq!(
+            catalog.validate_bound_session(SessionCapability::Assistant, &first_session),
+            Err(SessionTargetSelectionError::Unavailable)
+        );
+        catalog.remove(&first_session);
+        assert_eq!(
+            catalog.validate_bound_session(SessionCapability::Assistant, &first_session),
+            Err(SessionTargetSelectionError::Stale)
         );
     }
 

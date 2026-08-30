@@ -56,6 +56,12 @@ pub enum EdgeExecRequestPayload {
     Agentic {
         plan: ExecPlan,
         validation_input: ExecInput,
+        /// Control-end connection whose immutable host-side session binding
+        /// anchors this Assistant task. The central brain treats this as opaque;
+        /// only the edge daemon resolves it through its own connection-to-session
+        /// table. Missing keeps the 0/1/N behavior for older callers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_connection_id: Option<String>,
     },
 }
 
@@ -76,6 +82,16 @@ impl EdgeExecRequestPayload {
         match self {
             EdgeExecRequestPayload::Fleet { plan } => plan,
             EdgeExecRequestPayload::Agentic { plan, .. } => plan,
+        }
+    }
+
+    pub fn session_connection_id(&self) -> Option<&str> {
+        match self {
+            EdgeExecRequestPayload::Fleet { .. } => None,
+            EdgeExecRequestPayload::Agentic {
+                session_connection_id,
+                ..
+            } => session_connection_id.as_deref(),
         }
     }
 }
@@ -492,6 +508,7 @@ mod tests {
         let agentic = EdgeExecRequestPayload::Agentic {
             plan: sample_plan(),
             validation_input: sample_input(),
+            session_connection_id: Some("controller-1".into()),
         };
         for payload in [fleet.clone(), agentic.clone()] {
             let json = serde_json::to_string(&payload).expect("encode");

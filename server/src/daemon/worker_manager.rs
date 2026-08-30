@@ -823,6 +823,32 @@ impl WorkerManager {
             .map(Some)
     }
 
+    /// Resolve an Assistant operation against an already-frozen interactive
+    /// connection when one is supplied; otherwise apply the normal 0/1/N target
+    /// rule. The host owns both maps, so a central brain never interprets opaque
+    /// session ids or silently moves a task to a different login session.
+    pub fn resolve_session_target_for_connection(
+        &self,
+        capability: crate::daemon::session_target::SessionCapability,
+        session_connection_id: Option<&str>,
+    ) -> Result<
+        Option<desk_ipc_protocol::message::SessionKey>,
+        crate::daemon::session_target::SessionTargetSelectionError,
+    > {
+        if !self.session_targeting_enabled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let Some(connection_id) = session_connection_id else {
+            return self.resolve_session_target(capability, None);
+        };
+        let session = self
+            .connection_target(connection_id)
+            .ok_or(crate::daemon::session_target::SessionTargetSelectionError::Stale)?;
+        self.session_targets
+            .validate_bound_session(capability, &session)
+            .map(Some)
+    }
+
     pub fn bind_connection_target(
         &self,
         connection_id: &str,

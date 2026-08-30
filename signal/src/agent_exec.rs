@@ -511,6 +511,7 @@ impl SignalAgentTools {
         let inner = serde_json::to_value(EdgeExecRequestPayload::Agentic {
             plan: plan.clone(),
             validation_input,
+            session_connection_id: ctx.connection_id.clone(),
         })
         .map_err(|e| {
             safe(
