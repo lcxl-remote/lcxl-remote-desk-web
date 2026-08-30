@@ -178,6 +178,10 @@ pub struct ExecPreview {
     /// The server-authoritative basis used to classify this preview.
     #[serde(default)]
     pub execution_basis: ExecExecutionBasis,
+    /// Identity class the approved command will run as. The UI must make an
+    /// Administrator preview visibly distinct before collecting approval.
+    #[serde(default)]
+    pub principal: ExecutionPrincipal,
     pub requires_confirmation: bool,
     /// Whether this command can be executed through the AI path at all.
     pub executable: bool,
@@ -411,6 +415,33 @@ pub enum ExecExecutionBasis {
     OwnerBlocklistOnly,
 }
 
+/// OS identity under which the sealed command is allowed to execute.
+///
+/// `SessionUser` is the compatibility default for every existing template and
+/// wire payload. `Administrator` is a distinct, fail-closed route: it must be
+/// consumed by the privileged daemon supervisor and must never be forwarded to
+/// a session worker.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPrincipal {
+    #[default]
+    SessionUser,
+    Administrator,
+}
+
 /// The OS-level containment tier a template demands. The edge fails closed
 /// **before spawn** if it cannot meet the tier — it is never a silent downgrade.
 #[derive(
@@ -506,11 +537,15 @@ pub struct ExecPlanDraft {
     /// reject drift by comparing the complete draft.
     #[serde(default)]
     pub execution_basis: ExecExecutionBasis,
+    /// The exact OS identity class approved for this command. This is part of
+    /// the fingerprint; changing it after preview invalidates the plan.
+    #[serde(default)]
+    pub principal: ExecutionPrincipal,
     /// Identifier of the whitelist template this was rendered from.
     pub template_id: String,
-    /// Stable hash over `program + argv + cwd + limits` (PowerShell templates
-    /// fold their fixed `-Command` render in). Detects any tampering between
-    /// preview and execution.
+    /// Stable hash over `program + argv + cwd + limits + principal + containment`
+    /// (PowerShell templates fold their fixed `-Command` render in). Detects any
+    /// tampering between preview and execution, including an authority change.
     pub fingerprint: String,
     pub timeout_ms: u32,
     pub max_stdout_bytes: u32,
@@ -559,6 +594,10 @@ pub struct ExecPlan {
     /// Copied verbatim from the approved draft.
     #[serde(default)]
     pub execution_basis: ExecExecutionBasis,
+    /// Copied verbatim from the approved draft. Administrator plans are
+    /// daemon-only and are rejected by the ordinary worker executor.
+    #[serde(default)]
+    pub principal: ExecutionPrincipal,
     pub template_id: String,
     /// Minted at approval time; proves the execution was user-approved.
     pub approval_id: ApprovalId,
@@ -596,6 +635,7 @@ impl ExecPlan {
             shell: draft.shell,
             risk: draft.risk,
             execution_basis: draft.execution_basis,
+            principal: draft.principal,
             template_id: draft.template_id,
             approval_id,
             fingerprint: draft.fingerprint,
@@ -650,6 +690,7 @@ mod tests {
             shell: ExecShellKind::Powershell,
             risk: RiskLevel::Low,
             execution_basis: ExecExecutionBasis::Template,
+            principal: ExecutionPrincipal::SessionUser,
             template_id: "get_service".into(),
             fingerprint: "abc123".into(),
             timeout_ms: 10_000,
@@ -809,6 +850,7 @@ mod tests {
             timeout_ms: 10_000,
             risk: RiskLevel::Low,
             execution_basis: ExecExecutionBasis::Template,
+            principal: ExecutionPrincipal::SessionUser,
             requires_confirmation: true,
             executable: true,
             blocked_reason: None,

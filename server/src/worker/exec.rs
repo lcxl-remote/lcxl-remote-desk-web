@@ -138,6 +138,13 @@ pub async fn execute_plan_cancellable(
     on_spawn: impl FnOnce(ExecSpawnReport),
     cancel: Option<watch::Receiver<bool>>,
 ) -> AgentOutcome {
+    if plan.principal != desk_agent_protocol::exec::ExecutionPrincipal::SessionUser {
+        let message = "administrator execution plans are daemon-only".to_string();
+        on_spawn(ExecSpawnReport::Failed {
+            reason: message.clone(),
+        });
+        return AgentOutcome::Err(err(AgentErrorKind::PermissionDenied, message));
+    }
     // Establish the container before the spawn. Failing here refuses the command:
     // an execution that cannot be reclaimed is precisely what containment exists
     // to prevent, so running it anyway would defeat the purpose.
@@ -451,6 +458,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn worker_rejects_administrator_plan_before_containment_or_spawn() {
+        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = reports.clone();
+        let mut administrator = plan("echo must-not-run", 5_000, 4096);
+        administrator.principal = desk_agent_protocol::exec::ExecutionPrincipal::Administrator;
+
+        let outcome = execute_plan_reporting(&administrator, move |report| {
+            sink.lock().unwrap().push(report)
+        })
+        .await;
+
+        assert!(matches!(
+            outcome,
+            AgentOutcome::Err(AgentError {
+                kind: AgentErrorKind::PermissionDenied,
+                ..
+            })
+        ));
+        assert!(matches!(
+            reports.lock().unwrap().as_slice(),
+            [ExecSpawnReport::Failed { .. }]
+        ));
+    }
+
     /// The point of containment: a command that backgrounds a helper and then
     /// hangs must not leave that helper running once the command is reclaimed.
     /// Killing only the direct child — the behaviour before containment — left the
@@ -653,6 +685,7 @@ mod tests {
             shell: ExecShellKind::Native,
             risk: RiskLevel::Low,
             execution_basis: desk_agent_protocol::exec::ExecExecutionBasis::Template,
+            principal: desk_agent_protocol::exec::ExecutionPrincipal::SessionUser,
             template_id: "test".into(),
             approval_id: desk_agent_protocol::exec::ApprovalId("appr_t".into()),
             fingerprint: "fp".into(),

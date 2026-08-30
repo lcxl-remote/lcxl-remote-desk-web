@@ -293,6 +293,7 @@ pub(super) async fn handle_confirm_exec_inbound(
         let capability = OperationInput::required_capability(&classification).map(|c| c.as_str());
         let risk = classification.risk;
         let execution_basis = draft.execution_basis;
+        let principal = draft.principal;
 
         // On a manager link the ConfirmExec frame request_id is the PDP's
         // authorization-ledger key; carry it through the whole exec lifecycle so
@@ -360,6 +361,7 @@ pub(super) async fn handle_confirm_exec_inbound(
                 timeout_ms: limits.timeout_ms,
                 risk: classification.risk,
                 execution_basis,
+                principal,
                 requires_confirmation: false,
                 executable: true,
                 blocked_reason: None,
@@ -404,6 +406,7 @@ pub(super) async fn handle_confirm_exec_inbound(
             timeout_ms: limits.timeout_ms,
             risk: classification.risk,
             execution_basis,
+            principal,
             requires_confirmation: true,
             executable: true,
             blocked_reason: None,
@@ -905,6 +908,7 @@ pub(super) fn plan_matches_draft(
         && expected.argv == plan.argv
         && expected.risk == plan.risk
         && expected.execution_basis == plan.execution_basis
+        && expected.principal == plan.principal
         && expected.shell == plan.shell
         && expected.cwd == plan.cwd
         && expected.template_id == plan.template_id
@@ -924,13 +928,16 @@ pub(super) fn pep_common_checks(
     max_risk: desk_agent_protocol::RiskLevel,
     blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
 ) -> Option<String> {
+    let full_argv: Vec<String> = std::iter::once(plan.program.clone())
+        .chain(plan.argv.iter().cloned())
+        .collect();
+    if desk_agent_protocol::exec_policy::privilege_trampoline(&full_argv.join(" ")) {
+        return Some("pep_rejected:privilege_trampoline".to_string());
+    }
     // The blocklist operates over the full argv (program is `argv[0]`), matched
     // against the effective set (built-in floor on an unsynced link, the manager's
     // built-in-minus-disabled ∪ custom set on a fleet link) — never a second
     // compiled-in pass, so an admin-disabled rule is genuinely gone here too.
-    let full_argv: Vec<String> = std::iter::once(plan.program.clone())
-        .chain(plan.argv.iter().cloned())
-        .collect();
     let lc = full_argv.join(" ").to_ascii_lowercase();
     if let Some(rule) = desk_agent_protocol::command_blocklist::blocklist_match(blocklist, &lc) {
         return Some(format!("pep_rejected:blocklist:{rule}"));

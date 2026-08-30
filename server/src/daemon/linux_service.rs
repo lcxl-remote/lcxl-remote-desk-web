@@ -48,6 +48,8 @@ struct InstallArtifacts<'a> {
     system_config: &'a Path,
     unit: &'a [u8],
     system_unit: &'a Path,
+    polkit_policy: &'a [u8],
+    polkit_policy_path: &'a Path,
 }
 
 pub fn install_service(
@@ -94,6 +96,8 @@ pub fn install_service(
             system_config,
             unit: unit.as_bytes(),
             system_unit: Path::new(SYSTEM_UNIT_PATH),
+            polkit_policy: crate::daemon::linux_privileged_exec::POLKIT_POLICY_XML.as_bytes(),
+            polkit_policy_path: Path::new(crate::daemon::linux_privileged_exec::POLKIT_POLICY_PATH),
         },
         &RealSystemctl,
     )
@@ -101,7 +105,11 @@ pub fn install_service(
 
 pub fn uninstall_service() -> ServiceResult<()> {
     require_root()?;
-    uninstall_service_transactionally(Path::new(SYSTEM_UNIT_PATH), &RealSystemctl)
+    uninstall_service_transactionally(
+        Path::new(SYSTEM_UNIT_PATH),
+        Path::new(crate::daemon::linux_privileged_exec::POLKIT_POLICY_PATH),
+        &RealSystemctl,
+    )
 }
 
 fn require_root() -> ServiceResult<()> {
@@ -210,6 +218,11 @@ fn install_artifacts_transactionally(
             transaction.replace_file_from(source_config, artifacts.system_config, 0o600)?;
         }
         transaction.replace_file_bytes(artifacts.unit, artifacts.system_unit, 0o644)?;
+        transaction.replace_file_bytes(
+            artifacts.polkit_policy,
+            artifacts.polkit_policy_path,
+            0o644,
+        )?;
         Ok(())
     })();
     if let Err(error) = staged {
@@ -275,33 +288,27 @@ fn install_artifacts_transactionally(
 
 fn uninstall_service_transactionally(
     system_unit: &Path,
+    polkit_policy: &Path,
     systemctl: &dyn SystemctlOps,
 ) -> ServiceResult<()> {
-    let unit_metadata = match fs::symlink_metadata(system_unit) {
-        Ok(metadata) => Some(metadata),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-    let Some(unit_metadata) = unit_metadata else {
-        systemctl.run(&["daemon-reload"])?;
-        return Ok(());
-    };
-    if !unit_metadata.file_type().is_file() || unit_metadata.file_type().is_symlink() {
-        return Err(format!(
-            "refusing to uninstall non-regular systemd unit {}",
-            system_unit.display()
-        )
-        .into());
-    }
+    let unit_exists = validate_optional_regular_file(system_unit, "systemd unit")?;
+    let policy_exists = validate_optional_regular_file(polkit_policy, "polkit policy")?;
 
-    let was_enabled = systemctl.succeeds(&["is-enabled", "--quiet", SERVICE_UNIT_NAME]);
-    let was_active = systemctl.succeeds(&["is-active", "--quiet", SERVICE_UNIT_NAME]);
+    let was_enabled =
+        unit_exists && systemctl.succeeds(&["is-enabled", "--quiet", SERVICE_UNIT_NAME]);
+    let was_active =
+        unit_exists && systemctl.succeeds(&["is-active", "--quiet", SERVICE_UNIT_NAME]);
     let mut transaction = ArtifactTransaction::default();
     let removal = (|| -> ServiceResult<()> {
         // Do not unlink a unit whose process we failed to stop: that would
         // leave an unmanageable root daemon running until reboot.
-        systemctl.run(&["disable", "--now", SERVICE_UNIT_NAME])?;
-        transaction.remove_file(system_unit)?;
+        if unit_exists {
+            systemctl.run(&["disable", "--now", SERVICE_UNIT_NAME])?;
+            transaction.remove_file(system_unit)?;
+        }
+        if policy_exists {
+            transaction.remove_file(polkit_policy)?;
+        }
         systemctl.run(&["daemon-reload"])?;
         Ok(())
     })();
@@ -335,6 +342,17 @@ fn uninstall_service_transactionally(
         log::warn!("Linux service uninstalled but unit backup cleanup failed: {error}");
     }
     Ok(())
+}
+
+fn validate_optional_regular_file(path: &Path, label: &str) -> ServiceResult<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            Ok(true)
+        }
+        Ok(_) => Err(format!("refusing to remove non-regular {label} {}", path.display()).into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn with_rollback_detail(
@@ -703,16 +721,19 @@ mod tests {
         let source_config = source_root.join("config.toml");
         let system_config = root.path().join("etc/config.toml");
         let system_unit = root.path().join("systemd/service.service");
+        let polkit_policy = root.path().join("polkit/action.policy");
 
         fs::create_dir_all(&source_static).unwrap();
         fs::create_dir_all(&installed_static).unwrap();
         fs::create_dir_all(system_unit.parent().unwrap()).unwrap();
+        fs::create_dir_all(polkit_policy.parent().unwrap()).unwrap();
         fs::write(&source_executable, b"new executable").unwrap();
         fs::write(source_static.join("index.html"), b"new static").unwrap();
         fs::write(&source_config, b"new config").unwrap();
         fs::write(&installed_executable, b"old executable").unwrap();
         fs::write(installed_static.join("index.html"), b"old static").unwrap();
         fs::write(&system_unit, b"old unit").unwrap();
+        fs::write(&polkit_policy, b"old policy").unwrap();
 
         let systemctl = FailingRestartSystemctl {
             enabled: true,
@@ -730,6 +751,8 @@ mod tests {
                 system_config: &system_config,
                 unit: b"new unit",
                 system_unit: &system_unit,
+                polkit_policy: b"new policy",
+                polkit_policy_path: &polkit_policy,
             },
             &systemctl,
         )
@@ -742,6 +765,7 @@ mod tests {
             b"old static"
         );
         assert_eq!(fs::read(&system_unit).unwrap(), b"old unit");
+        assert_eq!(fs::read(&polkit_policy).unwrap(), b"old policy");
         assert!(!system_config.exists());
         assert_eq!(
             systemctl.calls.lock().unwrap().as_slice(),
@@ -768,6 +792,7 @@ mod tests {
         let source_config = source_root.join("config.toml");
         let system_config = root.path().join("etc/config.toml");
         let system_unit = root.path().join("systemd/service.service");
+        let polkit_policy = root.path().join("polkit/action.policy");
 
         fs::create_dir_all(&source_static).unwrap();
         fs::write(&source_executable, b"new executable").unwrap();
@@ -790,6 +815,8 @@ mod tests {
                 system_config: &system_config,
                 unit: b"new unit",
                 system_unit: &system_unit,
+                polkit_policy: b"new policy",
+                polkit_policy_path: &polkit_policy,
             },
             &systemctl,
         )
@@ -800,6 +827,7 @@ mod tests {
         assert!(!installed_static.exists());
         assert!(!system_config.exists());
         assert!(!system_unit.exists());
+        assert!(!polkit_policy.exists());
         assert_eq!(
             systemctl.calls.lock().unwrap().as_slice(),
             [
@@ -817,17 +845,22 @@ mod tests {
     fn failed_uninstall_reload_restores_the_unit_and_previous_runtime_state() {
         let root = tempfile::tempdir().unwrap();
         let system_unit = root.path().join("systemd/service.service");
+        let polkit_policy = root.path().join("polkit/action.policy");
         fs::create_dir_all(system_unit.parent().unwrap()).unwrap();
+        fs::create_dir_all(polkit_policy.parent().unwrap()).unwrap();
         fs::write(&system_unit, b"old unit").unwrap();
+        fs::write(&polkit_policy, b"old policy").unwrap();
         let systemctl = FailingReloadSystemctl {
             fail_reload_once: AtomicBool::new(true),
             calls: Mutex::new(Vec::new()),
         };
 
-        let error = uninstall_service_transactionally(&system_unit, &systemctl).unwrap_err();
+        let error = uninstall_service_transactionally(&system_unit, &polkit_policy, &systemctl)
+            .unwrap_err();
 
         assert!(error.to_string().contains("previous installation restored"));
         assert_eq!(fs::read(&system_unit).unwrap(), b"old unit");
+        assert_eq!(fs::read(&polkit_policy).unwrap(), b"old policy");
         assert_eq!(
             systemctl.calls.lock().unwrap().as_slice(),
             [

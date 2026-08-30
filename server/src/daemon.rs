@@ -6,6 +6,8 @@ pub mod exec_approval;
 pub mod exec_capacity;
 pub mod exec_ledger;
 #[cfg(target_os = "linux")]
+pub mod linux_privileged_exec;
+#[cfg(target_os = "linux")]
 pub mod linux_service;
 pub mod local_access_control;
 pub mod local_access_control_transport;

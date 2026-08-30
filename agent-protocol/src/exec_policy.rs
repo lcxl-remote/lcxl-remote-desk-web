@@ -21,7 +21,9 @@ use std::sync::LazyLock;
 use crate::ExecInput;
 use crate::command_blocklist::{BlocklistMatcher, BlocklistRule, blocklist_match};
 use crate::command_template::SyncedCommandTemplate;
-use crate::exec::{ExecContainmentSnapshot, ExecExecutionBasis, ExecPlanDraft, ExecShellKind};
+use crate::exec::{
+    ExecContainmentSnapshot, ExecExecutionBasis, ExecPlanDraft, ExecShellKind, ExecutionPrincipal,
+};
 
 // ============================ Execution limits ============================
 
@@ -185,7 +187,15 @@ pub fn build_exact_argv_draft(
         max_stdout_bytes,
         max_stderr_bytes,
     };
-    let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits, &containment);
+    let principal = ExecutionPrincipal::SessionUser;
+    let fingerprint = fingerprint_for_principal(
+        &program,
+        &argv,
+        cwd.as_deref(),
+        &limits,
+        &containment,
+        principal,
+    );
     ExecPlanDraft {
         program,
         argv,
@@ -194,6 +204,7 @@ pub fn build_exact_argv_draft(
         shell: ExecShellKind::Native,
         risk: template.risk(),
         execution_basis: ExecExecutionBasis::Template,
+        principal,
         template_id: template.template_id.clone(),
         fingerprint,
         timeout_ms,
@@ -209,14 +220,15 @@ pub fn build_exact_argv_draft(
 /// only a tamper check. Shared so the manager (preview) and the daemon (PEP)
 /// compute the identical value.
 ///
-/// It deliberately covers only what the worker *runs* — program, argv, cwd, the
-/// execution limits, and the containment envelope — not the *classification*
-/// fields (`risk` / effect / `shell`), which are derived from the template and can
-/// change without the argv changing (an `effect` edited read_only → mutating lifts
-/// the risk but leaves the argv, and so this fingerprint, identical). Callers that
-/// must reject classification drift — the single-device PEP and the fleet approval
-/// / dispatch re-checks — compare the **whole rebuilt [`ExecPlanDraft`]** (which
-/// carries `risk` / `shell` / `template_id` / `containment`), not just this hash.
+/// It covers what the execution authority enforces — program, argv, cwd, execution
+/// limits, principal, and containment envelope — but not the remaining
+/// *classification* fields (`risk` / effect / `shell`). Those fields are derived
+/// from the template and can change without argv or authority changing (an `effect`
+/// edited read_only → mutating lifts the risk but leaves this fingerprint identical).
+/// Callers that must reject classification drift — the single-device PEP and the
+/// fleet approval / dispatch re-checks — compare the **whole rebuilt
+/// [`ExecPlanDraft`]** (which also carries `risk` / `shell` / `template_id`), not
+/// just this hash.
 ///
 /// Wall time is fed via `limits.timeout_ms` (its single source); the containment
 /// snapshot contributes only its resource / governance fields, so a change to any
@@ -227,6 +239,26 @@ pub fn fingerprint(
     cwd: Option<&str>,
     limits: &ExecLimits,
     containment: &ExecContainmentSnapshot,
+) -> String {
+    fingerprint_for_principal(
+        program,
+        argv,
+        cwd,
+        limits,
+        containment,
+        ExecutionPrincipal::SessionUser,
+    )
+}
+
+/// Principal-bound variant used when constructing an explicitly privileged
+/// draft. Existing callers remain SessionUser through [`fingerprint`].
+pub fn fingerprint_for_principal(
+    program: &str,
+    argv: &[String],
+    cwd: Option<&str>,
+    limits: &ExecLimits,
+    containment: &ExecContainmentSnapshot,
+    principal: ExecutionPrincipal,
 ) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut feed = |bytes: &[u8]| {
@@ -246,6 +278,13 @@ pub fn fingerprint(
     feed(&limits.timeout_ms.to_le_bytes());
     feed(&limits.max_stdout_bytes.to_le_bytes());
     feed(&limits.max_stderr_bytes.to_le_bytes());
+    // Principal is an authority boundary, not merely display metadata. A
+    // SessionUser approval can therefore never be relabelled Administrator
+    // while retaining the same fingerprint.
+    feed(&[match principal {
+        ExecutionPrincipal::SessionUser => 0,
+        ExecutionPrincipal::Administrator => 1,
+    }]);
     // Containment (wall time excluded — it is limits.timeout_ms above). Each
     // Option feeds a presence byte so `None` and `Some(0)` never collide.
     feed(&[containment.allow_background as u8]);
@@ -470,10 +509,35 @@ pub fn builtin_blocklist() -> &'static [BlocklistRule] {
     &BUILTIN_BLOCKLIST
 }
 
+/// Hard, non-configurable rejection for attempts to cross the SessionUser →
+/// Administrator boundary through a command-line helper. Unlike ordinary
+/// blocklist rules this cannot be disabled by a manager override: privileged
+/// execution has its own sealed daemon route, so `sudo`/`su`/`doas`/`pkexec`
+/// are never valid inside an ordinary or free-form plan.
+///
+/// Splitting on every non ASCII-alphanumeric character intentionally catches
+/// absolute paths (`/usr/bin/sudo`), shell punctuation (`|sudo`) and wrapper
+/// arguments. False positives are safe here: the user can still run such text
+/// manually, but the AI execution path remains unable to smuggle an elevation
+/// trampoline through a shell string.
+pub fn privilege_trampoline(command: &str) -> bool {
+    command
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "sudo" | "su" | "doas" | "pkexec"
+            )
+        })
+}
+
 /// Returns the prohibited category a **raw command string** matches, or `None`.
 /// Used on the single-device confirm path, where the input is a free-form
 /// command before tokenization (so metacharacter-bearing payloads are seen).
 pub fn blocked_raw_command(command: &str) -> Option<&'static str> {
+    if privilege_trampoline(command) {
+        return Some("privilege trampoline");
+    }
     blocklist_match(builtin_blocklist(), &command.to_ascii_lowercase())
 }
 
@@ -490,6 +554,9 @@ pub fn blocked_raw_command(command: &str) -> Option<&'static str> {
 /// no ambiguous "join" semantics to exploit.
 pub fn blocked_argv(argv: &[String]) -> Option<&'static str> {
     let lc = argv.join(" ").to_ascii_lowercase();
+    if privilege_trampoline(&lc) {
+        return Some("privilege trampoline");
+    }
     blocklist_match(builtin_blocklist(), &lc)
 }
 
@@ -641,6 +708,29 @@ mod tests {
         let b = fingerprint("docker", &["logs".into(), "web2".into()], None, &limits, &c);
         assert_eq!(a, a2);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_is_principal_sensitive() {
+        let limits = ExecLimits::defaults();
+        let containment = ExecContainmentSnapshot::default();
+        let session = fingerprint_for_principal(
+            "/usr/bin/systemctl",
+            &["restart".into(), "lcxl-remote-desk.service".into()],
+            None,
+            &limits,
+            &containment,
+            ExecutionPrincipal::SessionUser,
+        );
+        let administrator = fingerprint_for_principal(
+            "/usr/bin/systemctl",
+            &["restart".into(), "lcxl-remote-desk.service".into()],
+            None,
+            &limits,
+            &containment,
+            ExecutionPrincipal::Administrator,
+        );
+        assert_ne!(session, administrator);
     }
 
     #[test]
@@ -821,6 +911,21 @@ mod tests {
             Some("audit/log tampering")
         );
         assert_eq!(blocked_raw_command("Get-Service -Name Spooler"), None);
+    }
+
+    #[test]
+    fn privilege_trampolines_are_a_non_configurable_hard_deny() {
+        for command in [
+            "sudo systemctl restart nginx",
+            "/usr/bin/pkexec systemctl restart nginx",
+            "command doas reboot",
+            "printf x | su - root",
+        ] {
+            assert!(privilege_trampoline(command), "missed {command:?}");
+            assert_eq!(blocked_raw_command(command), Some("privilege trampoline"));
+        }
+        assert!(!privilege_trampoline("systemctl status nginx"));
+        assert!(!privilege_trampoline("echo assume"));
     }
 
     #[test]

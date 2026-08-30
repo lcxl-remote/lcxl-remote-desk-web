@@ -459,6 +459,7 @@ mod tests {
                 shell: ExecShellKind::Powershell,
                 risk: RiskLevel::Low,
                 execution_basis: ExecExecutionBasis::Template,
+                principal: crate::exec::ExecutionPrincipal::SessionUser,
                 template_id: "get_service".into(),
                 fingerprint: "fp-1".into(),
                 timeout_ms: 10_000,

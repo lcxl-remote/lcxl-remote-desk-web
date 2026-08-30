@@ -805,6 +805,7 @@ impl ToolSeam for SignalAgentTools {
             timeout_ms: draft.timeout_ms,
             risk: draft.risk,
             execution_basis: draft.execution_basis,
+            principal: draft.principal,
             requires_confirmation: true,
             executable: true,
             blocked_reason: None,

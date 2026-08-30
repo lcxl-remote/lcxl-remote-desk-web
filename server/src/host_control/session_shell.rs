@@ -266,6 +266,21 @@ impl SessionShellRegistry {
         values.sort_by_key(|registration| registration.registration_generation);
         values
     }
+
+    /// Whether this exact daemon-issued registration generation is still the
+    /// leader on its original WebSocket. Used after a blocking polkit prompt so
+    /// an approval cannot survive logout, reconnect, or registration replacement.
+    pub fn is_current(&self, registration: &RegisteredSessionShell) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .by_websocket
+            .get(&registration.websocket_session_id)
+            .is_some_and(|current| {
+                current.registration_id == registration.registration_id
+                    && current.registration_generation == registration.registration_generation
+            })
+    }
 }
 
 struct DecodedSessionShellInfo {

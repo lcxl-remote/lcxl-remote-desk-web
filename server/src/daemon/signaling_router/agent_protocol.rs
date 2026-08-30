@@ -288,6 +288,7 @@ pub(super) fn non_executable_preview(
         timeout_ms,
         risk,
         execution_basis: desk_agent_protocol::exec::ExecExecutionBasis::Template,
+        principal: desk_agent_protocol::exec::ExecutionPrincipal::SessionUser,
         requires_confirmation: false,
         executable: false,
         blocked_reason,

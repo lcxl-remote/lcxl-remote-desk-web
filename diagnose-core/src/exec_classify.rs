@@ -29,9 +29,11 @@ use desk_agent_protocol::command_blocklist::{BlocklistRule, blocklist_match};
 use desk_agent_protocol::command_template::SyncedCommandTemplate;
 use desk_agent_protocol::exec::{
     CommandClassification, ExecContainmentSnapshot, ExecDecision, ExecEffect, ExecExecutionBasis,
-    ExecPlanDraft, ExecShellKind,
+    ExecPlanDraft, ExecShellKind, ExecutionPrincipal,
 };
-use desk_agent_protocol::exec_policy::{build_exact_argv_draft, builtin_blocklist, fingerprint};
+use desk_agent_protocol::exec_policy::{
+    build_exact_argv_draft, builtin_blocklist, fingerprint_for_principal,
+};
 use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
 
 pub use desk_agent_protocol::exec_policy::ExecLimits;
@@ -134,6 +136,19 @@ fn classify_command_core_with_policy(
     let command = input.command.as_str();
 
     // Step 0: blocklist (hard deny) against the effective set, on the raw command.
+    if desk_agent_protocol::exec_policy::privilege_trampoline(command) {
+        return ClassifyOutcome {
+            classification: CommandClassification {
+                risk: RiskLevel::Blocked,
+                matched_template: None,
+                impact: "Blocked: privilege-escalation trampolines are never executable"
+                    .to_string(),
+                decision: ExecDecision::Blocked,
+                effect: None,
+            },
+            draft: None,
+        };
+    }
     if let Some(category) = blocklist_match(effective_blocklist, &command.to_ascii_lowercase()) {
         return ClassifyOutcome {
             classification: CommandClassification {
@@ -166,7 +181,15 @@ fn classify_command_core_with_policy(
         let cwd = input.cwd.clone();
         // Built-in slot templates run foreground under the baseline envelope.
         let containment = ExecContainmentSnapshot::default();
-        let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits, &containment);
+        let principal = ExecutionPrincipal::SessionUser;
+        let fingerprint = fingerprint_for_principal(
+            &program,
+            &argv,
+            cwd.as_deref(),
+            &limits,
+            &containment,
+            principal,
+        );
 
         let impact = if m.bound.is_empty() {
             m.template.impact.to_string()
@@ -181,6 +204,7 @@ fn classify_command_core_with_policy(
             shell: m.template.shell,
             risk: m.template.risk,
             execution_basis: ExecExecutionBasis::Template,
+            principal,
             template_id: m.template.id.to_string(),
             fingerprint,
             timeout_ms: limits.timeout_ms,
@@ -282,7 +306,15 @@ fn freeform_draft(input: &ExecInput, shell: &str) -> ClassifyOutcome {
     let limits = ExecLimits::clamped(input);
     let cwd = input.cwd.clone();
     let containment = ExecContainmentSnapshot::default();
-    let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits, &containment);
+    let principal = ExecutionPrincipal::SessionUser;
+    let fingerprint = fingerprint_for_principal(
+        &program,
+        &argv,
+        cwd.as_deref(),
+        &limits,
+        &containment,
+        principal,
+    );
     let draft = ExecPlanDraft {
         program,
         argv,
@@ -290,6 +322,7 @@ fn freeform_draft(input: &ExecInput, shell: &str) -> ClassifyOutcome {
         shell: shell_kind,
         risk: RiskLevel::Critical,
         execution_basis: ExecExecutionBasis::OwnerBlocklistOnly,
+        principal,
         template_id: String::new(),
         fingerprint,
         timeout_ms: limits.timeout_ms,
@@ -405,6 +438,29 @@ mod tests {
         assert_eq!(out.classification.risk, RiskLevel::Blocked);
         assert!(out.draft.is_none());
         assert!(out.classification.impact.contains("download-and-execute"));
+    }
+
+    #[test]
+    fn privilege_trampoline_stays_blocked_with_an_empty_effective_blocklist() {
+        for command in [
+            "sudo systemctl restart nginx",
+            "/usr/bin/pkexec systemctl restart nginx",
+            "doas reboot",
+            "su - root",
+        ] {
+            let out = classify_command_with_policy(
+                &shell_input(command),
+                &[],
+                &[],
+                ExecAdmissionPolicy::OwnerInteractive,
+            );
+            assert_eq!(
+                out.classification.decision,
+                ExecDecision::Blocked,
+                "{command}"
+            );
+            assert!(out.draft.is_none());
+        }
     }
 
     #[test]

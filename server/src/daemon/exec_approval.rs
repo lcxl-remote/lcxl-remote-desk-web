@@ -222,6 +222,7 @@ mod tests {
             shell: ExecShellKind::Native,
             risk: RiskLevel::High,
             execution_basis: ExecExecutionBasis::Template,
+            principal: desk_agent_protocol::exec::ExecutionPrincipal::SessionUser,
             template_id: "docker_restart".into(),
             fingerprint: "fp".into(),
             timeout_ms: 30_000,
