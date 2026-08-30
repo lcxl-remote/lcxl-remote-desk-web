@@ -10,7 +10,6 @@ use std::{
 
 use chrono::{DateTime, Duration, Utc};
 use desk_agent_protocol::computer_use::ComputerUseReadiness;
-use desk_server_version::supports_computer_use;
 use desk_signal_facade::{
     model::{
         connection::ConnectionState,
@@ -191,10 +190,8 @@ impl ComputerUseReadinessObserver for SignalComputerUseReadinessObserver {
                     return;
                 }
             };
-            if !supports_computer_use(source.model.version_info.api_version)
-                || readiness.server_api_version != source.model.version_info.api_version
-            {
-                log::warn!("dropping Computer Use readiness with incompatible server API version");
+            if readiness.server_api_version != source.model.version_info.api_version {
+                log::warn!("dropping Computer Use readiness with mismatched server API version");
                 return;
             }
             match self

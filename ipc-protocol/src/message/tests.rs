@@ -2227,7 +2227,7 @@ fn sample_computer_use_readiness() -> desk_agent_protocol::computer_use::Compute
         revision: 1,
         observed_at: "2026-08-23T11:00:00Z".to_string(),
         expires_at: "2026-08-23T11:01:00Z".to_string(),
-        server_api_version: 2,
+        server_api_version: 1,
         os: "windows".to_string(),
         interactive_session_incarnation: "session-1".to_string(),
         local_ceiling_revision: 1,

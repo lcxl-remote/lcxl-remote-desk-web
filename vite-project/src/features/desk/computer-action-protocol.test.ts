@@ -14,7 +14,7 @@ import { matchesComputerActionResponse } from './computer-action-protocol';
 
 describe('Computer Action signaling protocol', () => {
     it('keeps the shared discriminants stable', () => {
-        expect(SIGNALING_API_VERSION).toBe(2);
+        expect(SIGNALING_API_VERSION).toBe(1);
         expect([
             SIGNALING_TYPE_CODE_DISPATCH_COMPUTER_ACTION,
             SIGNALING_TYPE_CODE_CANCEL_COMPUTER_ACTION,
