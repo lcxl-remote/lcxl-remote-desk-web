@@ -32,6 +32,12 @@ struct ServerArgs {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[arg(long)]
     install_idd_driver: bool,
+
+    /// Internal propagation of the Linux development opt-in across pkexec,
+    /// whose sanitized environment does not preserve the parent LRD_* flag.
+    #[cfg(target_os = "linux")]
+    #[arg(long, hide = true)]
+    experimental_linux_service_daemon: bool,
 }
 
 /// Offline OpenAPI dump command. Parsed only when `argv[1]` is exactly
@@ -216,7 +222,17 @@ fn main() {
                 eprintln!("--install-idd-driver is unsupported on Linux");
                 std::process::exit(2);
             }
-            if let Err(error) = install_service(dir, server_args.config_file_path.as_deref()) {
+            let experimental_opt_in = server_args.experimental_linux_service_daemon
+                || std::env::var(
+                    lcxl_remote_desk_server::daemon::linux_service::EXPERIMENTAL_INSTALL_ENV,
+                )
+                .as_deref()
+                    == Ok("1");
+            if let Err(error) = install_service(
+                dir,
+                server_args.config_file_path.as_deref(),
+                experimental_opt_in,
+            ) {
                 eprintln!("Failed to install service: {error}");
                 std::process::exit(1);
             }
@@ -290,6 +306,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::ServerArgs;
     use super::{AccessCli, AccessCommand, DumpOpenapiCli};
     use clap::Parser as _;
 
@@ -329,6 +347,19 @@ mod tests {
         ]));
         assert!(!is_dump_invocation(&["server", "--install-service"]));
         assert!(is_dump_invocation(&["server", "dump-openapi"]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_service_install_accepts_explicit_experimental_opt_in() {
+        let cli = ServerArgs::try_parse_from([
+            "server",
+            "--install-service",
+            "--experimental-linux-service-daemon",
+        ])
+        .unwrap();
+        assert!(cli.install_service);
+        assert!(cli.experimental_linux_service_daemon);
     }
 
     #[test]

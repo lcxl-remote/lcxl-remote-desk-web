@@ -586,6 +586,19 @@ fn handle_service_op(
                 cmd.arg("--install-service")
                     .arg("--install-path")
                     .arg(install_path);
+                // pkexec intentionally replaces the caller environment with a
+                // minimal safe set, so explicitly carry the already-checked
+                // development opt-in as a sidecar argument. The Tauri process
+                // must itself have been launched with the flag; normal users
+                // still cannot enter the experimental install path by default.
+                if std::env::var(
+                    lcxl_remote_desk_server::daemon::linux_service::EXPERIMENTAL_INSTALL_ENV,
+                )
+                .as_deref()
+                    == Ok("1")
+                {
+                    cmd.arg("--experimental-linux-service-daemon");
+                }
                 if *install_idd_driver {
                     cmd.arg("--install-idd-driver");
                 }
