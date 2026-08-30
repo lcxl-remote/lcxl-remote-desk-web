@@ -53,10 +53,14 @@ const PKCHECK_PATH: &str = "/usr/bin/pkcheck";
 pub const SYSTEMD_RUN_PATH: &str = "/usr/bin/systemd-run";
 pub const SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
 pub const MANAGED_SERVICE_UNIT: &str = "lcxl-remote-desk.service";
+pub const PRIVILEGED_OUTPUT_DIR: &str = "/run/lcxl-remote-desk/privileged-exec";
 const PRIVILEGED_TEMPLATE_PROFILE: &str = "linux.privileged.systemd.v1";
 const PRIVILEGED_TEMPLATE_REVISION: i64 = 1;
 const PRIVILEGED_TIMEOUT_MS: u32 = 30_000;
 const PRIVILEGED_OUTPUT_BYTES: u32 = 64 * 1024;
+// Match the worker redaction look-ahead margin. RLIMIT_FSIZE bounds each raw
+// root-owned output file before the daemon reads and redacts it.
+const PRIVILEGED_RAW_OUTPUT_BYTES: u32 = PRIVILEGED_OUTPUT_BYTES + 8 * 1024;
 const PRIVILEGED_MAX_PROCESSES: u32 = 16;
 const PRIVILEGED_MAX_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
 const PRIVILEGED_CPU_MAX_PERCENT: u16 = 50;
@@ -421,6 +425,8 @@ fn validate_privileged_plan(plan: &ExecPlan) -> Result<(), PrivilegedPlanError> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemdTransientSpec {
     pub unit_name: String,
+    pub stdout_path: String,
+    pub stderr_path: String,
     pub program: &'static str,
     pub argv: Vec<String>,
 }
@@ -429,17 +435,22 @@ impl SystemdTransientSpec {
     fn from_plan(plan: &ExecPlan) -> Result<Self, PrivilegedPlanError> {
         validate_privileged_plan(plan)?;
         let unit_name = transient_unit_name(&plan.execution_generation);
+        let digest = execution_digest_hex(&plan.execution_generation);
+        let stdout_path = format!("{PRIVILEGED_OUTPUT_DIR}/{digest}.stdout");
+        let stderr_path = format!("{PRIVILEGED_OUTPUT_DIR}/{digest}.stderr");
         let mut argv = vec![
             format!("--unit={unit_name}"),
             "--collect".to_string(),
             "--wait".to_string(),
-            "--pipe".to_string(),
             "--quiet".to_string(),
             "--property=Type=exec".to_string(),
             "--property=User=root".to_string(),
             "--property=WorkingDirectory=/".to_string(),
             "--property=UMask=0077".to_string(),
             "--property=StandardInput=null".to_string(),
+            format!("--property=StandardOutput=file:{stdout_path}"),
+            format!("--property=StandardError=file:{stderr_path}"),
+            format!("--property=LimitFSIZE={PRIVILEGED_RAW_OUTPUT_BYTES}"),
             "--property=KillMode=control-group".to_string(),
             "--property=SendSIGKILL=yes".to_string(),
             "--property=TimeoutStopSec=5s".to_string(),
@@ -465,6 +476,7 @@ impl SystemdTransientSpec {
             "--property=PrivateDevices=yes".to_string(),
             "--property=ProtectHome=yes".to_string(),
             "--property=ProtectSystem=strict".to_string(),
+            format!("--property=ReadWritePaths={PRIVILEGED_OUTPUT_DIR}"),
             "--property=ProtectKernelTunables=yes".to_string(),
             "--property=ProtectKernelModules=yes".to_string(),
             "--property=ProtectControlGroups=yes".to_string(),
@@ -481,6 +493,8 @@ impl SystemdTransientSpec {
         argv.extend(plan.argv.iter().cloned());
         Ok(Self {
             unit_name,
+            stdout_path,
+            stderr_path,
             program: SYSTEMD_RUN_PATH,
             argv,
         })
@@ -490,13 +504,20 @@ impl SystemdTransientSpec {
 /// Unit identity contains no caller-controlled text. The full digest keeps the
 /// collision domain at SHA-256 while remaining well under systemd's name limit.
 pub fn transient_unit_name(execution_generation: &str) -> String {
+    format!(
+        "lcxl-ai-exec-{}.service",
+        execution_digest_hex(execution_generation)
+    )
+}
+
+fn execution_digest_hex(execution_generation: &str) -> String {
     let digest = Sha256::digest(execution_generation.as_bytes());
     let mut hex = String::with_capacity(digest.len() * 2);
     use std::fmt::Write as _;
     for byte in digest {
         write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
     }
-    format!("lcxl-ai-exec-{hex}.service")
+    hex
 }
 
 #[derive(Debug)]
@@ -791,19 +812,29 @@ mod tests {
         for required in [
             "--collect",
             "--wait",
-            "--pipe",
             "--property=Type=exec",
             "--property=User=root",
             "--property=KillMode=control-group",
             "--property=TasksMax=16",
             "--property=MemoryMax=134217728",
             "--property=CPUQuota=50%",
+            "--property=LimitFSIZE=73728",
             "--property=NoNewPrivileges=yes",
             "--property=ProtectSystem=strict",
             "--property=RestrictAddressFamilies=AF_UNIX",
         ] {
             assert!(spec.argv.iter().any(|argument| argument == required));
         }
+        assert!(!spec.argv.iter().any(|argument| argument == "--pipe"));
+        assert!(spec.stdout_path.starts_with(PRIVILEGED_OUTPUT_DIR));
+        assert!(spec.stderr_path.starts_with(PRIVILEGED_OUTPUT_DIR));
+        assert!(!spec.stdout_path.contains("generation"));
+        assert!(spec.argv.iter().any(|argument| {
+            argument == &format!("--property=StandardOutput=file:{}", spec.stdout_path)
+        }));
+        assert!(spec.argv.iter().any(|argument| {
+            argument == &format!("--property=StandardError=file:{}", spec.stderr_path)
+        }));
         let separator = spec
             .argv
             .iter()
