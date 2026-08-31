@@ -39,6 +39,7 @@ pub struct SignalAgentSessionStore {
     client_conversation_id: Option<String>,
     surface: AgentSessionSurface,
     context_selection: Option<ContextSelectionClaim>,
+    expected_input_revision: Option<u64>,
 }
 
 /// Server-authoritative context selection frozen for one Device Assistant
@@ -61,6 +62,7 @@ impl SignalAgentSessionStore {
             client_conversation_id: None,
             surface: AgentSessionSurface::Unknown,
             context_selection: None,
+            expected_input_revision: None,
         }
     }
 
@@ -76,6 +78,13 @@ impl SignalAgentSessionStore {
 
     pub fn with_context_selection(mut self, selection: ContextSelectionClaim) -> Self {
         self.context_selection = Some(selection);
+        self
+    }
+
+    /// Bind the prepared tools to the input they were built for, not a later
+    /// follow-up that happens to win the session before the claim CAS.
+    pub fn with_expected_input_revision(mut self, revision: u64) -> Self {
+        self.expected_input_revision = Some(revision);
         self
     }
 
@@ -1077,6 +1086,14 @@ impl SessionSeam for SignalAgentSessionStore {
                     session
                         .check_surface(self.surface)
                         .map_err(ClaimError::Subject)?;
+                    if self
+                        .expected_input_revision
+                        .is_some_and(|revision| revision != session.input_revision)
+                    {
+                        return Err(ClaimError::Backend(internal(
+                            "prepared input was superseded before the turn claim",
+                        )));
+                    }
                     desk_diagnose_core::assistant_policy::validate_claim(
                         self.surface,
                         Some(session.policy_revision),
@@ -1199,6 +1216,11 @@ impl SessionSeam for SignalAgentSessionStore {
                         &params,
                     )
                     .map_err(ClaimError::Backend)?;
+                    if self.expected_input_revision.is_some() {
+                        return Err(ClaimError::Backend(internal(
+                            "prepared input session is missing",
+                        )));
+                    }
                     let mut session = PersistedAgentSession::new(
                         params.conversation_id.clone(),
                         params.actor_id.clone(),
@@ -1881,6 +1903,7 @@ mod tests {
             surface: AgentSessionSurface::DeviceAssistant,
             policy_revision: 0,
             current_scope: claim("scope").current_pdp_scope,
+            read_context: None,
             message,
             created_at: Utc::now().to_rfc3339(),
         }

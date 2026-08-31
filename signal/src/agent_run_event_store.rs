@@ -1,5 +1,9 @@
 //! SQLite append-only event ledger for the OSS dynamic Device Assistant run.
 
+mod input_context;
+pub use desk_diagnose_core::input_read_context::ReadContextSelection;
+pub use input_context::InputSubject;
+
 use chrono::{DateTime, Utc};
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
@@ -26,6 +30,7 @@ pub struct AppendUserFollowupParams {
     pub surface: AgentSessionSurface,
     pub policy_revision: i64,
     pub current_scope: AgentScope,
+    pub read_context: Option<ReadContextSelection>,
     pub message: ChatMessage,
     pub created_at: String,
 }
@@ -78,9 +83,8 @@ impl SignalAgentRunEventStore {
                         internal(format!("load idempotent user follow-up run: {error}"))
                     })?
                     .ok_or_else(|| internal("user follow-up event has no run"))?;
-                let session = PersistedAgentSession::decode_json(&session_row.state_json).map_err(
-                    |error| internal(format!("decode idempotent user follow-up run: {error}")),
-                )?;
+                let session =
+                    input_context::decode_session(&session_row, InputSubject::from(&params))?;
                 let ack = ack_from_existing(&existing, &params, &session)?;
                 txn.commit().await.map_err(|error| {
                     internal(format!("commit idempotent user follow-up: {error}"))
@@ -96,8 +100,8 @@ impl SignalAgentRunEventStore {
             let now = parse_time(&params.created_at)?;
             let (mut session, old_version, existing_row_id) = match row {
                 Some(row) => {
-                    let mut session = PersistedAgentSession::decode_json(&row.state_json)
-                        .map_err(|error| internal(format!("decode user follow-up run: {error}")))?;
+                    let mut session =
+                        input_context::decode_session(&row, InputSubject::from(&params))?;
                     session.version = row.version;
                     session
                         .check_subject(&params.actor_id, &params.device_id)
@@ -128,6 +132,9 @@ impl SignalAgentRunEventStore {
                 }
             };
 
+            if let Some(selection) = &params.read_context {
+                input_context::validate_selection(&session, selection, &params.message, now)?;
+            }
             session.latest_input_seq = session
                 .latest_input_seq
                 .checked_add(1)
@@ -175,11 +182,18 @@ impl SignalAgentRunEventStore {
                 .validate()
                 .map_err(|error| internal(format!("validate user follow-up event: {error}")))?;
 
+            session.version = if existing_row_id.is_some() {
+                old_version
+                    .checked_add(1)
+                    .ok_or_else(|| internal("input session version exhausted"))?
+            } else {
+                0
+            };
             let state_json = session
                 .encode_json_for_storage()
                 .map_err(|error| internal(format!("encode user follow-up run: {error}")))?;
             if let Some(row_id) = existing_row_id {
-                let new_version = old_version + 1;
+                let new_version = session.version;
                 let result = agent_session::Entity::update_many()
                     .col_expr(
                         agent_session::Column::StateJson,
@@ -223,8 +237,8 @@ impl SignalAgentRunEventStore {
                 }
             }
 
-            let payload_json = serde_json::to_string(&followup)
-                .map_err(|error| internal(format!("encode user follow-up event: {error}")))?;
+            let payload_json =
+                input_context::encode_event(&followup, params.read_context.as_ref())?;
             let event_row = agent_run_event::ActiveModel {
                 event_id: Set(event.event_id.clone()),
                 run_id: Set(event.run_id.clone()),
@@ -238,7 +252,9 @@ impl SignalAgentRunEventStore {
                     .map_err(|error| internal(format!("encode source envelope ids: {error}")))?),
                 result_envelope_ids_json: Set("[]".into()),
                 payload_json: Set(payload_json),
-                payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
+                payload_schema_version: Set(input_context::payload_version(
+                    params.read_context.as_ref(),
+                )),
                 created_at: Set(now),
                 ..Default::default()
             };
@@ -280,11 +296,7 @@ impl SignalAgentRunEventStore {
             .map_err(|error| internal(format!("load user follow-up events: {error}")))?;
         rows.into_iter()
             .map(|row| {
-                let event: UserFollowupEvent = serde_json::from_str(&row.payload_json)
-                    .map_err(|error| internal(format!("decode user follow-up event: {error}")))?;
-                event.validate().map_err(|error| {
-                    internal(format!("validate persisted user follow-up event: {error}"))
-                })?;
+                let (event, _) = input_context::decode_event(&row)?;
                 Ok(event)
             })
             .collect()
@@ -292,6 +304,9 @@ impl SignalAgentRunEventStore {
 }
 
 fn validate_append_params(params: &AppendUserFollowupParams) -> Result<(), AgentError> {
+    if let Some(selection) = &params.read_context {
+        selection.validate()?;
+    }
     if params.surface != AgentSessionSurface::DeviceAssistant {
         return Err(internal("user follow-up ledger is Device Assistant only"));
     }
@@ -330,6 +345,7 @@ fn ack_from_existing(
     params: &AppendUserFollowupParams,
     session: &PersistedAgentSession,
 ) -> Result<UserFollowupAck, AgentError> {
+    input_context::validate_replay(row, params, session)?;
     if row.run_id != params.run_id
         || row.actor_id.as_deref() != Some(params.actor_id.as_str())
         || row.kind != AgentRunEventKind::UserFollowup.as_str()
@@ -443,6 +459,7 @@ mod tests {
             surface: AgentSessionSurface::DeviceAssistant,
             policy_revision: 0,
             current_scope: scope(),
+            read_context: None,
             message,
             created_at: "2026-08-25T00:00:00Z".into(),
         }

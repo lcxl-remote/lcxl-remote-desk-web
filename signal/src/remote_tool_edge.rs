@@ -4,6 +4,9 @@
 //! local reads and confirmed mutations. Reads use server-stamped remote-tool
 //! frames; writes use exact durable grants and sealed Computer Action plans.
 
+mod object_read;
+use desk_diagnose_core::input_read_context::object_read::requires_objects;
+
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -685,6 +688,7 @@ pub struct SignalDeviceAssistantTools {
     max_command_runtime_ms: u32,
     exec_tools: crate::agent_exec::SignalAgentTools,
     model_egress_policy: Option<desk_diagnose_core::model_egress::ModelEgressPolicy>,
+    original_input: OnceLock<object_read::OriginalInput>,
 }
 
 fn exact_selected_batch_file(roots: &[ObjectRef]) -> Result<ObjectRef, AgentError> {
@@ -807,6 +811,7 @@ impl SignalDeviceAssistantTools {
             max_command_runtime_ms,
             exec_tools,
             model_egress_policy: None,
+            original_input: OnceLock::new(),
         }
     }
 
@@ -4407,6 +4412,9 @@ impl SignalDeviceAssistantTools {
                 | desk_agent_protocol::Capability::ServiceStatus
                 | desk_agent_protocol::Capability::LogRecent
                 | desk_agent_protocol::Capability::ContainerList
+                | desk_agent_protocol::Capability::SpreadsheetLiveInspect
+                | desk_agent_protocol::Capability::DocumentLiveInspect
+                | desk_agent_protocol::Capability::PresentationLiveInspect
         ) {
             return Err(error(
                 AgentErrorKind::UnsupportedCapability,
@@ -4415,6 +4423,29 @@ impl SignalDeviceAssistantTools {
                 true,
             ));
         }
+        let object_expiry = if requires_objects(&call.name) {
+            self.validate_original_objects().await?;
+            // Rebind from the model's original bounded request; legacy defaults
+            // above cannot widen either the owner's or model's read limit.
+            let (_, mut bounded) = build_read_operation(call)?;
+            let binding = self.object_binding()?;
+            binding.bind(call, &mut bounded)?;
+            input = bounded;
+            Some(
+                chrono::DateTime::from_timestamp_millis(binding.expiry(call)? as i64)
+                    .ok_or_else(|| {
+                        error(
+                            AgentErrorKind::Internal,
+                            "invalid object expiry",
+                            false,
+                            false,
+                        )
+                    })?
+                    .to_rfc3339(),
+            )
+        } else {
+            None
+        };
         let request_id = uuid::Uuid::new_v4().to_string();
         let envelope: desk_agent_protocol::ReadonlyAgentEnvelope = AgentEnvelope {
             protocol_version: ProtocolVersion::default(),
@@ -4438,7 +4469,7 @@ impl SignalDeviceAssistantTools {
             scope: AgentScope {
                 granted: vec![capability],
                 mode: ExecutionMode::ReadOnly,
-                expires_at: None,
+                expires_at: object_expiry,
                 policy_name: Some("oss-device-assistant-read-only".into()),
             },
             operation: AgentOperation {
@@ -4536,6 +4567,9 @@ impl SignalDeviceAssistantTools {
                 ));
             }
         };
+        if requires_objects(&call.name) {
+            self.validate_original_objects().await?;
+        }
         match output.outcome {
             AgentOutcome::Ok(value) => Ok(ToolRunOutput {
                 content: serde_json::to_string(&value).unwrap_or_else(|_| "{}".into()),
@@ -4760,7 +4794,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
                     false,
                 )
             })?;
-        desk_diagnose_core::model_message_labels::read_result_envelope(
+        let envelope = desk_diagnose_core::model_message_labels::read_result_envelope(
             &registry,
             call,
             output,
@@ -4770,8 +4804,14 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 source_object_id,
                 observed_at_unix_ms,
             },
-        )
-        .map(Some)
+        )?;
+        if requires_objects(&call.name) {
+            self.object_binding()?
+                .label(call, output, envelope)
+                .map(Some)
+        } else {
+            Ok(Some(envelope))
+        }
     }
 
     fn mutating_data_envelope(

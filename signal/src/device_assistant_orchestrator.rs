@@ -813,90 +813,108 @@ async fn run_turn_inner(
             return;
         }
     };
-    let mut selected_file_roots = Vec::new();
-    let mut selected_spreadsheet_roots = Vec::new();
-    let mut selected_terminal_roots = Vec::new();
-    if !ask.selected_attachment_ids.is_empty() {
-        let Some(snapshot) = snapshot.as_ref() else {
+    let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
+    let subject = crate::agent_run_event_store::InputSubject {
+        run_id: &conversation_id,
+        actor_id: &actor_id,
+        device_id: &target_device_id,
+        client_conversation_id: client_conversation_id.as_deref(),
+    };
+    let selection = async {
+        let original = if resume_conversation_id.is_some() {
+            let revision = snapshot
+                .as_ref()
+                .ok_or_else(|| transport_error("original input session is missing"))?
+                .input_revision;
+            event_store.original_read_context(subject, revision).await?
+        } else {
+            None
+        };
+        let objects = if resume_conversation_id.is_some() {
+            original
+                .as_ref()
+                .map(|selection| selection.object_attachments.clone())
+                .unwrap_or_default()
+        } else {
+            event_store
+                .select_objects(
+                    subject,
+                    &ask.client_message_id,
+                    &ask.selected_attachment_ids,
+                    now_unix_ms,
+                )
+                .await?
+        };
+        Ok::<_, AgentError>((objects, original))
+    }
+    .await;
+    let (selected_objects, original_read_context) = match selection {
+        Ok(selection) => selection,
+        Err(error) => {
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
-                &AgentEvent::error(
-                    &request_id,
-                    1,
-                    transport_error("selected Device Assistant attachment does not exist"),
-                ),
+                &AgentEvent::error(&request_id, 1, error),
             )
             .await;
             return;
-        };
-        for attachment_id in &ask.selected_attachment_ids {
-            let Some(attachment) = snapshot.context_attachments.iter().find(|attachment| {
-                attachment.attachment_id == *attachment_id && attachment.is_active_at(now_unix_ms)
-            }) else {
+        }
+    };
+    let mut ask = ask;
+    if resume_conversation_id.is_some() {
+        let providers = device_assistant_provider_registry();
+        ask.selected_capability_ids = original_read_context
+            .as_ref()
+            .map(|selection| {
+                selection
+                    .tool_names
+                    .iter()
+                    .filter_map(|name| providers.capability_for_tool(name))
+                    .map(|capability| capability.wire.capability_id.clone())
+                    .filter(|id| {
+                        desk_diagnose_core::device_assistant::is_selectable_context_capability_id(
+                            id,
+                        )
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
+        ask.selected_attachment_ids = selected_objects
+            .iter()
+            .map(|object| object.attachment_id.clone())
+            .collect();
+    }
+    let mut selected_file_roots = Vec::new();
+    let mut selected_spreadsheet_roots = Vec::new();
+    let mut selected_terminal_roots = Vec::new();
+    for attachment in &selected_objects {
+        let reference = match serde_json::from_str::<desk_agent_protocol::computer_use::ObjectRef>(
+            &attachment.object_ref.opaque_token,
+        ) {
+            Ok(reference) => reference,
+            Err(_) => {
                 stream_event(
                     connections.as_ref(),
                     &browser_connection_id,
                     &AgentEvent::error(
                         &request_id,
                         1,
-                        transport_error(format!(
-                            "selected Device Assistant attachment is stale or missing: {attachment_id}"
-                        )),
+                        transport_error("original object reference is invalid"),
                     ),
                 )
                 .await;
                 return;
-            };
-            if matches!(
-                attachment.kind,
-                ContextAttachmentKind::File | ContextAttachmentKind::DirectorySelection
-            ) {
-                let object_ref = match serde_json::from_str::<
-                    desk_agent_protocol::computer_use::ObjectRef,
-                >(&attachment.object_ref.opaque_token)
-                {
-                    Ok(object_ref) => object_ref,
-                    Err(_) => {
-                        stream_event(
-                            connections.as_ref(),
-                            &browser_connection_id,
-                            &AgentEvent::error(
-                                &request_id,
-                                1,
-                                transport_error("selected file attachment is invalid"),
-                            ),
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                if is_spreadsheet_input_attachment(attachment.kind, &attachment.display_summary) {
-                    selected_spreadsheet_roots.push(object_ref.clone());
-                }
-                selected_file_roots.push(object_ref);
-            } else if attachment.kind == ContextAttachmentKind::TerminalSessionRef {
-                let object_ref = match serde_json::from_str::<
-                    desk_agent_protocol::computer_use::ObjectRef,
-                >(&attachment.object_ref.opaque_token)
-                {
-                    Ok(object_ref) => object_ref,
-                    Err(_) => {
-                        stream_event(
-                            connections.as_ref(),
-                            &browser_connection_id,
-                            &AgentEvent::error(
-                                &request_id,
-                                1,
-                                transport_error("selected terminal attachment is invalid"),
-                            ),
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                selected_terminal_roots.push(object_ref);
             }
+        };
+        if attachment.kind == ContextAttachmentKind::TerminalSessionRef {
+            selected_terminal_roots.push(reference);
+        } else {
+            // Display labels do not determine file type or grant read authority.
+            // The original device validates the selected object and its format.
+            selected_spreadsheet_roots.push(reference.clone());
+            selected_file_roots.push(reference);
         }
     }
     let model_name = config.model.clone().unwrap_or_default();
@@ -1285,6 +1303,14 @@ async fn run_turn_inner(
         &mut registry,
         &selected_tool_capability_ids,
     );
+    if let Some(original) = original_read_context.as_ref() {
+        // Readiness or a shared coarse capability must not add new read tools
+        // to a permission continuation of an already accepted input.
+        registry.retain(|tool| {
+            tool.effect != desk_diagnose_core::registry::ToolEffect::ReadOnly
+                || original.tool_names.iter().any(|name| name == tool.name())
+        });
+    }
     let capability_catalog = desk_diagnose_core::permission_tools::discoverable_catalog_prompt(
         &provider_registry,
         &inventory,
@@ -1343,6 +1369,16 @@ async fn run_turn_inner(
             AgentSessionSurface::DeviceAssistant,
         )
         .with_context_selection(context_selection);
+    let sessions = if resume_conversation_id.is_some() {
+        sessions.with_expected_input_revision(
+            snapshot
+                .as_ref()
+                .expect("validated resume snapshot")
+                .input_revision,
+        )
+    } else {
+        sessions
+    };
     let heartbeat = SignalStoreHeartbeat {
         store: sessions.clone(),
     };
@@ -1432,9 +1468,27 @@ async fn run_turn_inner(
         } else {
             ExecutionMode::ReadOnly
         },
-        expires_at: None,
+        expires_at: original_read_context
+            .as_ref()
+            .and_then(|selection| selection.expires_at.clone()),
         policy_name: Some("oss-device-assistant-provider".into()),
     };
+    let read_context =
+        match crate::agent_run_event_store::ReadContextSelection::capture(&registry, &scope) {
+            Ok(mut selection) => {
+                selection.object_attachments = selected_objects;
+                selection
+            }
+            Err(error) => {
+                stream_event(
+                    connections.as_ref(),
+                    &browser_connection_id,
+                    &AgentEvent::error(&request_id, 1, error),
+                )
+                .await;
+                return;
+            }
+        };
     let clock = || chrono::Utc::now().to_rfc3339();
     let turn_id = uuid::Uuid::new_v4().to_string();
     let (available_exec_shells, max_command_runtime_ms) = {
@@ -1481,6 +1535,35 @@ async fn run_turn_inner(
         max_command_runtime_ms,
     )
     .with_model_egress_policy(model.model_egress_policy().expect("validated model policy"));
+    if resume_conversation_id.is_some()
+        && let Some(original) = original_read_context
+    {
+        let result = async {
+            tools.bind_original_input(
+                snapshot
+                    .as_ref()
+                    .expect("validated resume snapshot")
+                    .input_revision,
+                original.clone(),
+                destination.clone(),
+                client_conversation_id.clone(),
+            )?;
+            if !original.object_attachments.is_empty() {
+                tools.validate_original_objects().await?;
+            }
+            Ok::<_, AgentError>(())
+        }
+        .await;
+        if let Err(error) = result {
+            stream_event(
+                connections.as_ref(),
+                &browser_connection_id,
+                &AgentEvent::error(&request_id, 1, error),
+            )
+            .await;
+            return;
+        }
+    }
     let mut system_prompt = build_device_assistant_system_message_with_catalog(
         ask.locale.as_deref(),
         &format!("{capability_catalog}\n\n{}", capability_authorization.text),
@@ -1576,19 +1659,22 @@ async fn run_turn_inner(
         }
         return;
     }
-    let user =
-        match model_bound_user_message(ask.client_message_id.clone(), ask.question, destination) {
-            Ok(user) => user,
-            Err(error) => {
-                stream_event(
-                    connections.as_ref(),
-                    &browser_connection_id,
-                    &AgentEvent::error(&request_id, 1, error),
-                )
-                .await;
-                return;
-            }
-        };
+    let user = match model_bound_user_message(
+        ask.client_message_id.clone(),
+        ask.question,
+        destination.clone(),
+    ) {
+        Ok(user) => user,
+        Err(error) => {
+            stream_event(
+                connections.as_ref(),
+                &browser_connection_id,
+                &AgentEvent::error(&request_id, 1, error),
+            )
+            .await;
+            return;
+        }
+    };
     let ack = match crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone())
         .append_user_followup(crate::agent_run_event_store::AppendUserFollowupParams {
             event_id: ask.client_message_id,
@@ -1599,6 +1685,7 @@ async fn run_turn_inner(
             surface: AgentSessionSurface::DeviceAssistant,
             policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
             current_scope: scope.clone(),
+            read_context: Some(read_context.clone()),
             message: user.clone(),
             created_at: accepted_at.clone(),
         })
@@ -1621,6 +1708,27 @@ async fn run_turn_inner(
         &AgentEvent::status(&request_id, 1, "accepted"),
     )
     .await;
+    if let Err(error) = tools.bind_original_input(
+        ack.input_revision,
+        read_context,
+        destination,
+        client_conversation_id.clone(),
+    ) {
+        stream_event(
+            connections.as_ref(),
+            &browser_connection_id,
+            &AgentEvent::error(&request_id, 2, error),
+        )
+        .await;
+        return;
+    }
+    let input_sessions = sessions
+        .clone()
+        .with_expected_input_revision(ack.input_revision);
+    let deps = LoopDeps {
+        session_seam: &input_sessions,
+        ..deps
+    };
     if ack.already_handled {
         match sessions.read_snapshot(&conversation_id).await {
             Ok(Some(snapshot)) if snapshot.handled_input_seq >= ack.input_seq => {
@@ -1725,43 +1833,15 @@ async fn run_turn_inner(
     let _ = forwarder.await;
 }
 
-fn is_supported_spreadsheet_attachment(display_summary: &str) -> bool {
-    let display_summary = display_summary.to_ascii_lowercase();
-    [".xlsx", ".csv", ".tsv"]
-        .iter()
-        .any(|extension| display_summary.ends_with(extension))
-}
-
-fn is_spreadsheet_input_attachment(kind: ContextAttachmentKind, display_summary: &str) -> bool {
-    kind == ContextAttachmentKind::DirectorySelection
-        || (kind == ContextAttachmentKind::File
-            && is_supported_spreadsheet_attachment(display_summary))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod original_input;
     use desk_agent_protocol::data_lineage::Sensitivity;
     use desk_diagnose_core::seam::NullTurnSink;
     use sea_orm::{Database, EntityTrait};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-
-    #[test]
-    fn spreadsheet_tools_accept_explicit_directories_and_supported_files_only() {
-        assert!(is_spreadsheet_input_attachment(
-            ContextAttachmentKind::DirectorySelection,
-            "Quarterly reports"
-        ));
-        assert!(is_spreadsheet_input_attachment(
-            ContextAttachmentKind::File,
-            "report.XLSX"
-        ));
-        assert!(!is_spreadsheet_input_attachment(
-            ContextAttachmentKind::File,
-            "notes.txt"
-        ));
-    }
 
     #[test]
     fn permission_resume_bridge_replays_original_requirement_with_user_sensitivity() {
