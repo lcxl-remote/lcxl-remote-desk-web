@@ -524,6 +524,7 @@ pub(super) async fn resolve_exec_from_other_connection_is_denied_and_keeps_pendi
             serde_json::to_value(ResolveExecData {
                 exec_request_id: exec_request_id.clone(),
                 decision: ApprovalDecision::Approve,
+                carrier_id: None,
             })
             .unwrap(),
         ),
@@ -648,6 +649,7 @@ pub(super) async fn invoke_agent_capability_plane_permanently_rejects_exec() {
         },
         command: "Get-Service -Name Spooler".to_string(),
         cwd: None,
+        io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
         timeout_ms: 0,
         max_stdout_bytes: 0,
         max_stderr_bytes: 0,
@@ -730,6 +732,7 @@ pub(super) async fn confirm_exec_local_mode_caps_manager_authorization() {
                 // under ConfirmEachAction).
                 command: "Get-Service -Name Spooler".to_string(),
                 cwd: None,
+                io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
                 timeout_ms: 0,
                 max_stdout_bytes: 0,
                 max_stderr_bytes: 0,

@@ -38,7 +38,7 @@ use desk_agent_protocol::exec_lifecycle::{ExecState, ExecStateReplyPayload};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
-    DbErr, EntityTrait, QueryFilter, Schema, Set, Statement, TransactionTrait,
+    DbErr, EntityTrait, QueryFilter, Schema, Set, TransactionTrait,
 };
 
 pub mod entity;
@@ -130,34 +130,8 @@ impl ExecLedger {
         plan_fingerprint: &str,
         containment_identity: Option<&str>,
     ) -> Result<Reservation, DbErr> {
-        self.reserve_inner(
-            task_id,
-            generation,
-            plan_fingerprint,
-            containment_identity,
-            None,
-        )
-        .await
-    }
-
-    /// Privileged variant that durably stores the full sealed plan needed to
-    /// validate output and reconcile a systemd transient unit after restart.
-    pub async fn reserve_with_sealed_plan(
-        &self,
-        task_id: &str,
-        generation: &str,
-        plan_fingerprint: &str,
-        containment_identity: &str,
-        plan_json: &str,
-    ) -> Result<Reservation, DbErr> {
-        self.reserve_inner(
-            task_id,
-            generation,
-            plan_fingerprint,
-            Some(containment_identity),
-            Some(plan_json),
-        )
-        .await
+        self.reserve_inner(task_id, generation, plan_fingerprint, containment_identity)
+            .await
     }
 
     async fn reserve_inner(
@@ -166,7 +140,6 @@ impl ExecLedger {
         generation: &str,
         plan_fingerprint: &str,
         containment_identity: Option<&str>,
-        plan_json: Option<&str>,
     ) -> Result<Reservation, DbErr> {
         let now = chrono::Utc::now().naive_utc();
         let insert = exec_ledger_entry::Entity::insert(exec_ledger_entry::ActiveModel {
@@ -174,7 +147,6 @@ impl ExecLedger {
             task_id: Set(task_id.to_string()),
             state: Set(State::Reserved.as_str().to_string()),
             plan_fingerprint: Set(plan_fingerprint.to_string()),
-            plan_json: Set(plan_json.map(str::to_string)),
             containment_identity: Set(containment_identity.map(str::to_string)),
             result_json: Set(None),
             created_at: Set(now),
@@ -195,9 +167,7 @@ impl ExecLedger {
                     // permanent-tombstone rule forbids. Refuse rather than spawn.
                     return Ok(Reservation::FingerprintMismatch);
                 };
-                if existing.plan_fingerprint != plan_fingerprint
-                    || plan_json.is_some() && existing.plan_json.as_deref() != plan_json
-                {
+                if existing.plan_fingerprint != plan_fingerprint {
                     return Ok(Reservation::FingerprintMismatch);
                 }
                 Ok(Reservation::Duplicate(Box::new(existing)))
@@ -391,22 +361,9 @@ impl ExecLedger {
     /// Returns what it settled, so the host can log which executions it lost track
     /// of across the restart.
     pub async fn abandon_in_flight(&self) -> Result<Vec<exec_ledger_entry::Model>, DbErr> {
-        self.abandon_in_flight_except(|_| false).await
-    }
-
-    /// Settle in-flight rows except those claimed by a platform recovery
-    /// supervisor. The predicate only defers a row; that supervisor must then
-    /// query and settle it before the daemon advertises the capability.
-    pub async fn abandon_in_flight_except(
-        &self,
-        defer: impl Fn(&exec_ledger_entry::Model) -> bool,
-    ) -> Result<Vec<exec_ledger_entry::Model>, DbErr> {
         let lost = self.in_flight().await?;
         let mut settled = Vec::new();
         for row in lost {
-            if defer(&row) {
-                continue;
-            }
             self.mark_terminal(&row.execution_generation, Terminal::Indeterminate)
                 .await?;
             settled.push(row);
@@ -445,24 +402,6 @@ async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbErr> {
     let mut table = schema.create_table_from_entity(exec_ledger_entry::Entity);
     table.if_not_exists();
     db.execute(&table).await?;
-
-    // The ledger predates privileged restart reconciliation. It is not yet a
-    // released schema, but developer machines can already have the old file;
-    // upgrade it in place instead of turning a safe daemon restart into a boot
-    // failure. New databases already include the column through the entity.
-    let table_info = Statement::from_string(
-        db.get_database_backend(),
-        "PRAGMA table_info(exec_ledger_entry)".to_string(),
-    );
-    let columns = db.query_all_raw(table_info).await?;
-    let has_plan_json = columns.iter().any(|row| {
-        row.try_get::<String>("", "name")
-            .is_ok_and(|name| name == "plan_json")
-    });
-    if !has_plan_json {
-        db.execute_unprepared("ALTER TABLE exec_ledger_entry ADD COLUMN plan_json TEXT")
-            .await?;
-    }
 
     for mut index in schema.create_index_from_entity(exec_ledger_entry::Entity) {
         index.if_not_exists();
@@ -605,71 +544,6 @@ mod tests {
             }
             other => panic!("expected Duplicate, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn privileged_reservation_persists_sealed_plan_and_rejects_plan_drift() {
-        let l = ledger().await;
-        assert_eq!(
-            l.reserve_with_sealed_plan(
-                "task-root",
-                "gen-root",
-                "fp-root",
-                "lcxl-ai-exec-deadbeef.service",
-                r#"{"principal":"administrator"}"#,
-            )
-            .await
-            .unwrap(),
-            Reservation::Granted
-        );
-        let row = l.get("gen-root").await.unwrap().unwrap();
-        assert_eq!(
-            row.plan_json.as_deref(),
-            Some(r#"{"principal":"administrator"}"#)
-        );
-        assert_eq!(
-            l.reserve_with_sealed_plan(
-                "task-root",
-                "gen-root",
-                "fp-root",
-                "lcxl-ai-exec-deadbeef.service",
-                r#"{"principal":"session_user"}"#,
-            )
-            .await
-            .unwrap(),
-            Reservation::FingerprintMismatch
-        );
-    }
-
-    #[tokio::test]
-    async fn restart_recovery_can_defer_only_claimed_rows() {
-        let l = ledger().await;
-        l.reserve("ordinary", "gen-user", "fp-user", Some("pgid:7"))
-            .await
-            .unwrap();
-        l.reserve_with_sealed_plan(
-            "root",
-            "gen-root",
-            "fp-root",
-            "lcxl-ai-exec-deadbeef.service",
-            "{}",
-        )
-        .await
-        .unwrap();
-        let settled = l
-            .abandon_in_flight_except(|row| row.plan_json.is_some())
-            .await
-            .unwrap();
-        assert_eq!(settled.len(), 1);
-        assert_eq!(settled[0].execution_generation, "gen-user");
-        assert_eq!(
-            l.get("gen-user").await.unwrap().unwrap().state,
-            State::Indeterminate.as_str()
-        );
-        assert_eq!(
-            l.get("gen-root").await.unwrap().unwrap().state,
-            State::Reserved.as_str()
-        );
     }
 
     /// Retrying a task is legitimate: a new generation of the same task reserves

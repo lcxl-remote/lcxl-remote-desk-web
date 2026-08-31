@@ -1,6 +1,7 @@
 use super::exec_confirm::*;
 use super::exec_lifecycle::RecordingAuditSink;
 use super::*;
+use desk_agent_protocol::exec_policy::build_exact_argv_draft;
 
 use desk_agent_protocol::command_template::SyncedCommandTemplate;
 use desk_agent_protocol::exec::{ApprovalDecision, ApprovalId, ExecRequestId, ExecResultPayload};
@@ -65,44 +66,11 @@ pub(super) fn agentic_exec_model_for_session(
     validation_input: &desk_agent_protocol::ExecInput,
     session_connection_id: Option<&str>,
 ) -> SignalingModel {
-    agentic_exec_model_for_session_phase(
-        request_id,
-        plan,
-        validation_input,
-        session_connection_id,
-        None,
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn privileged_agentic_exec_model(
-    request_id: &str,
-    plan: &ExecPlan,
-    validation_input: &desk_agent_protocol::ExecInput,
-    session_connection_id: Option<&str>,
-    privileged: PrivilegedExecRequest,
-) -> SignalingModel {
-    agentic_exec_model_for_session_phase(
-        request_id,
-        plan,
-        validation_input,
-        session_connection_id,
-        Some(privileged),
-    )
-}
-
-fn agentic_exec_model_for_session_phase(
-    request_id: &str,
-    plan: &ExecPlan,
-    validation_input: &desk_agent_protocol::ExecInput,
-    session_connection_id: Option<&str>,
-    privileged: Option<PrivilegedExecRequest>,
-) -> SignalingModel {
     let payload = EdgeExecRequestPayload::Agentic {
         plan: plan.clone(),
         validation_input: validation_input.clone(),
         session_connection_id: session_connection_id.map(str::to_string),
-        privileged,
+        carrier_id: None,
     };
     SignalingModel::new(
         request_id,
@@ -751,246 +719,6 @@ pub(super) async fn agentic_exec_with_a_stale_connection_never_falls_back_to_ano
             .is_none()
     );
 }
-
-#[tokio::test]
-pub(super) async fn session_user_plan_rejects_a_privileged_phase() {
-    let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
-    ctx.inbound_authz = Some(authz_block(
-        vec![Capability::ShellExecConfirmed],
-        vec![],
-        ExecutionMode::ConfirmEachAction,
-        desk_agent_protocol::RiskLevel::High,
-    ));
-    let input = agentic_input("Get-Service -Name Spooler", None, 5_000);
-    let plan = agentic_plan_from_input(&input, &[], "session-user-with-privileged-phase");
-    handle_edge_exec_request_inbound(
-        &ctx,
-        &agentic_exec_model_for_session_phase(
-            "session-user-with-privileged-phase",
-            &plan,
-            &input,
-            None,
-            Some(PrivilegedExecRequest::Authorize),
-        ),
-    )
-    .await
-    .unwrap();
-
-    match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { error } => assert!(
-            error.message.contains("privileged_phase_binding"),
-            "{error:?}"
-        ),
-        other => panic!("expected phase-binding rejection, got {other:?}"),
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-pub(super) async fn administrator_agentic_exec_uses_registration_bound_root_supervisor() {
-    use crate::host_control::protocol::{SESSION_SHELL_PROTOCOL_VERSION, SessionShellInfo};
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-
-    let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
-    ctx.inbound_authz = Some(authz_block(
-        vec![Capability::ShellExecConfirmed],
-        vec![],
-        ExecutionMode::ConfirmEachAction,
-        desk_agent_protocol::RiskLevel::Critical,
-    ));
-    let identity =
-        crate::host_control::session_shell::read_process_identity(std::process::id()).unwrap();
-    let registry = crate::host_control::session_shell::SessionShellRegistry::default();
-    let registration = registry
-        .register(
-            91,
-            SessionShellInfo {
-                app_version: env!("CARGO_PKG_VERSION").to_string(),
-                protocol_version: SESSION_SHELL_PROTOCOL_VERSION,
-                pid: std::process::id(),
-                process_start_ticks: identity.start_ticks,
-                reported_uid: identity.uid,
-                session_id: Some("privileged-test".to_string()),
-                seat: Some("seat-test".to_string()),
-                session_type: Some("wayland".to_string()),
-                cwd_base64: STANDARD.encode(b"/tmp"),
-                umask: 0o022,
-                environment: Vec::new(),
-            },
-        )
-        .unwrap();
-    ctx.worker_mgr
-        .bind_session_shell_registry_for_test(registry.clone());
-    let session = desk_ipc_protocol::message::SessionKey {
-        platform_session_id: format!(
-            "linux:{}",
-            serde_json::to_string(&(
-                registration.logical_session.uid,
-                &registration.logical_session.session_id,
-                &registration.logical_session.seat,
-            ))
-            .unwrap()
-        ),
-        session_generation: registration.registration_generation,
-    };
-    ctx.worker_mgr
-        .session_targets()
-        .upsert(crate::daemon::session_target::SessionCandidate {
-            session: session.clone(),
-            display_name: "Privileged test session".to_string(),
-            session_type: Some("wayland".to_string()),
-            seat: Some("seat-test".to_string()),
-            foreground: true,
-            remote_desktop_ready: true,
-            terminal_ready: true,
-            file_ready: true,
-            assistant_ready: true,
-        });
-    ctx.worker_mgr
-        .bind_connection_target("privileged-controller", &session)
-        .unwrap();
-    ctx.privileged_exec = Some(Arc::new(
-        crate::daemon::linux_privileged_exec::LinuxPrivilegedExecSupervisor::test_authorized_spawn_failure(
-            ctx.exec_ledger.clone(),
-        ),
-    ));
-
-    let input = desk_agent_protocol::ExecInput {
-        target: desk_agent_protocol::ExecTarget::Shell {
-            shell: "bash".to_string(),
-        },
-        command: "systemctl restart lcxl-remote-desk.service".to_string(),
-        cwd: None,
-        timeout_ms: 0,
-        max_stdout_bytes: 0,
-        max_stderr_bytes: 0,
-    };
-    let draft = desk_diagnose_core::exec_classify::classify_command(&input)
-        .draft
-        .expect("privileged draft");
-    let plan = ExecPlan::from_draft(
-        ExecRequestId("privileged-task".to_string()),
-        "privileged-generation",
-        ApprovalId("privileged-approval".to_string()),
-        draft,
-    );
-
-    ctx.settings
-        .write()
-        .await
-        .ai_policy
-        .max_command_runtime_seconds = 10;
-    let mut over_runtime_ceiling = plan.clone();
-    over_runtime_ceiling.execution_generation = "privileged-over-runtime".to_string();
-    handle_edge_exec_request_inbound(
-        &ctx,
-        &privileged_agentic_exec_model(
-            "privileged-over-runtime",
-            &over_runtime_ceiling,
-            &input,
-            Some("privileged-controller"),
-            PrivilegedExecRequest::Authorize,
-        ),
-    )
-    .await
-    .unwrap();
-    match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { error } => assert!(
-            error.message.contains("runtime_exceeds_local_ceiling"),
-            "{error:?}"
-        ),
-        other => panic!("expected runtime-ceiling rejection, got {other:?}"),
-    }
-    assert!(
-        ctx.exec_ledger
-            .get("privileged-over-runtime")
-            .await
-            .unwrap()
-            .is_none()
-    );
-    ctx.settings
-        .write()
-        .await
-        .ai_policy
-        .max_command_runtime_seconds = 600;
-
-    let mut missing_phase = plan.clone();
-    missing_phase.execution_generation = "privileged-missing-phase".to_string();
-    handle_edge_exec_request_inbound(
-        &ctx,
-        &agentic_exec_model_for_session_phase(
-            "privileged-missing-phase",
-            &missing_phase,
-            &input,
-            Some("privileged-controller"),
-            None,
-        ),
-    )
-    .await
-    .unwrap();
-    match read_fleet_result(&mut rx).disposition {
-        EdgeExecDisposition::RejectedBeforeDispatch { error } => assert!(
-            error.message.contains("privileged_phase_binding"),
-            "{error:?}"
-        ),
-        other => panic!("expected missing-phase rejection, got {other:?}"),
-    }
-
-    handle_edge_exec_request_inbound(
-        &ctx,
-        &privileged_agentic_exec_model(
-            "privileged-generation",
-            &plan,
-            &input,
-            Some("privileged-controller"),
-            PrivilegedExecRequest::Authorize,
-        ),
-    )
-    .await
-    .unwrap();
-
-    let ready = read_fleet_result(&mut rx).disposition;
-    let EdgeExecDisposition::PrivilegedAuthorizationReady { permit_id } = ready else {
-        panic!("expected privileged authorization, got {ready:?}");
-    };
-    handle_edge_exec_request_inbound(
-        &ctx,
-        &privileged_agentic_exec_model(
-            "privileged-generation",
-            &plan,
-            &input,
-            Some("privileged-controller"),
-            PrivilegedExecRequest::Dispatch { permit_id },
-        ),
-    )
-    .await
-    .unwrap();
-
-    let text = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-        .await
-        .expect("privileged result timeout")
-        .expect("privileged result channel");
-    let result = serde_json::from_str::<SignalingModel>(&text)
-        .unwrap()
-        .get_data::<EdgeExecResultPayload>()
-        .unwrap();
-    assert!(matches!(
-        result.disposition,
-        EdgeExecDisposition::DispatchFailedBeforeWorker { .. }
-    ));
-    let row = ctx
-        .exec_ledger
-        .get("privileged-generation")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        row.state,
-        crate::daemon::exec_ledger::State::SpawnFailed.as_str()
-    );
-    assert!(row.plan_json.is_some());
-}
-
 #[tokio::test]
 pub(super) async fn fleet_exec_valid_plan_without_worker_reports_dispatch_failed() {
     let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
@@ -1037,6 +765,7 @@ pub(super) fn agentic_input(
         },
         command: command.into(),
         cwd: cwd.map(str::to_string),
+        io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
         timeout_ms,
         max_stdout_bytes: 0,
         max_stderr_bytes: 0,
@@ -2021,7 +1750,7 @@ pub(super) async fn confirm_exec_suggest_only_mode_blocks_even_a_template() {
 }
 
 #[tokio::test]
-pub(super) async fn browser_confirm_exec_cannot_approve_an_administrator_template() {
+pub(super) async fn removed_administrator_template_stays_non_executable() {
     let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
     handle_confirm_exec_inbound(
         &ctx,
@@ -2040,8 +1769,9 @@ pub(super) async fn browser_confirm_exec_cannot_approve_an_administrator_templat
         preview
             .blocked_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("Device Assistant privileged flow"))
+            .is_some_and(|reason| !reason.is_empty())
     );
+    assert_eq!(ctx.exec_approvals.len(), 0);
 }
 
 #[tokio::test]

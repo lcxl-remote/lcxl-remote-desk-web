@@ -114,6 +114,72 @@ pub enum ExecDecision {
     Blocked,
 }
 
+/// How a confirmed command is attached to standard input/output.
+///
+/// This is an explicit, sealed part of the execution authority. A caller may
+/// not upgrade a non-interactive plan to a PTY after preview or approval.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExecIoMode {
+    NonInteractive,
+    Pty {
+        initial_rows: u16,
+        initial_cols: u16,
+    },
+}
+
+impl ExecIoMode {
+    pub const DEFAULT_PTY_ROWS: u16 = 24;
+    pub const DEFAULT_PTY_COLS: u16 = 80;
+    pub const MAX_PTY_ROWS: u16 = 500;
+    pub const MAX_PTY_COLS: u16 = 500;
+
+    pub fn validate(self) -> Result<(), &'static str> {
+        match self {
+            Self::NonInteractive => Ok(()),
+            Self::Pty {
+                initial_rows,
+                initial_cols,
+            } if (1..=Self::MAX_PTY_ROWS).contains(&initial_rows)
+                && (1..=Self::MAX_PTY_COLS).contains(&initial_cols) =>
+            {
+                Ok(())
+            }
+            Self::Pty { .. } => Err("PTY rows and columns must be within 1..=500"),
+        }
+    }
+
+    pub fn is_pty(self) -> bool {
+        matches!(self, Self::Pty { .. })
+    }
+
+    pub(crate) fn fingerprint_bytes(self) -> [u8; 5] {
+        match self {
+            Self::NonInteractive => [0, 0, 0, 0, 0],
+            Self::Pty {
+                initial_rows,
+                initial_cols,
+            } => {
+                let rows = initial_rows.to_le_bytes();
+                let cols = initial_cols.to_le_bytes();
+                [1, rows[0], rows[1], cols[0], cols[1]]
+            }
+        }
+    }
+}
+
 /// The result of classifying a command. Server-internal (produced by the risk
 /// classifier, consumed by the confirm flow), but a wire type so it can be
 /// recorded / round-tripped consistently.
@@ -175,13 +241,13 @@ pub struct ExecPreview {
     pub approval_timeout_ms: u64,
     pub timeout_ms: u32,
     pub risk: RiskLevel,
+    pub io_mode: ExecIoMode,
+    /// A PTY approval is valid only while a dedicated carrier prepared by the
+    /// same operator is live. Non-interactive previews set this to false.
+    pub requires_live_carrier: bool,
     /// The server-authoritative basis used to classify this preview.
     #[serde(default)]
     pub execution_basis: ExecExecutionBasis,
-    /// Identity class the approved command will run as. The UI must make an
-    /// Administrator preview visibly distinct before collecting approval.
-    #[serde(default)]
-    pub principal: ExecutionPrincipal,
     pub requires_confirmation: bool,
     /// Whether this command can be executed through the AI path at all.
     pub executable: bool,
@@ -215,6 +281,10 @@ pub enum ApprovalDecision {
 pub struct ResolveExecData {
     pub exec_request_id: ExecRequestId,
     pub decision: ApprovalDecision,
+    /// Opaque id of the already-ready, actor-bound PTY carrier. Required for an
+    /// approved PTY preview and ignored for rejection/non-interactive exec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier_id: Option<String>,
 }
 
 /// Server → control end (`ExecResult`) **and** worker → daemon
@@ -415,33 +485,6 @@ pub enum ExecExecutionBasis {
     OwnerBlocklistOnly,
 }
 
-/// OS identity under which the sealed command is allowed to execute.
-///
-/// `SessionUser` is the compatibility default for every existing template and
-/// wire payload. `Administrator` is a distinct, fail-closed route: it must be
-/// consumed by the privileged daemon supervisor and must never be forwarded to
-/// a session worker.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    SchemaWrite,
-    SchemaRead,
-    ToSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionPrincipal {
-    #[default]
-    SessionUser,
-    Administrator,
-}
-
 /// The OS-level containment tier a template demands. The edge fails closed
 /// **before spawn** if it cannot meet the tier — it is never a silent downgrade.
 #[derive(
@@ -533,19 +576,16 @@ pub struct ExecPlanDraft {
     pub cwd: Option<String>,
     pub shell: ExecShellKind,
     pub risk: RiskLevel,
+    pub io_mode: ExecIoMode,
     /// The classification basis. This is not part of `fingerprint`; callers
     /// reject drift by comparing the complete draft.
     #[serde(default)]
     pub execution_basis: ExecExecutionBasis,
-    /// The exact OS identity class approved for this command. This is part of
-    /// the fingerprint; changing it after preview invalidates the plan.
-    #[serde(default)]
-    pub principal: ExecutionPrincipal,
     /// Identifier of the whitelist template this was rendered from.
     pub template_id: String,
-    /// Stable hash over `program + argv + cwd + limits + principal + containment`
+    /// Stable hash over `program + argv + cwd + limits + containment`
     /// (PowerShell templates fold their fixed `-Command` render in). Detects any
-    /// tampering between preview and execution, including an authority change.
+    /// tampering between preview and execution.
     pub fingerprint: String,
     pub timeout_ms: u32,
     pub max_stdout_bytes: u32,
@@ -554,6 +594,15 @@ pub struct ExecPlanDraft {
     /// that is `timeout_ms`). Bound at seal time and fingerprinted.
     #[serde(default)]
     pub containment: ExecContainmentSnapshot,
+}
+
+impl ExecPlanDraft {
+    /// Whether this sealed argv delegates the exact inner command through an
+    /// interactive elevation wrapper. Such a plan requires root-daemon-owned
+    /// containment; a session worker process group is not sufficient.
+    pub fn requires_root_pty_containment(&self) -> bool {
+        self.io_mode.is_pty() && is_interactive_elevation_program(&self.program)
+    }
 }
 
 /// The sealed, approved execution plan sent to the worker
@@ -591,13 +640,10 @@ pub struct ExecPlan {
     pub cwd: Option<String>,
     pub shell: ExecShellKind,
     pub risk: RiskLevel,
+    pub io_mode: ExecIoMode,
     /// Copied verbatim from the approved draft.
     #[serde(default)]
     pub execution_basis: ExecExecutionBasis,
-    /// Copied verbatim from the approved draft. Administrator plans are
-    /// daemon-only and are rejected by the ordinary worker executor.
-    #[serde(default)]
-    pub principal: ExecutionPrincipal,
     pub template_id: String,
     /// Minted at approval time; proves the execution was user-approved.
     pub approval_id: ApprovalId,
@@ -609,6 +655,17 @@ pub struct ExecPlan {
     /// that is `timeout_ms`). Copied verbatim from the sealed draft.
     #[serde(default)]
     pub containment: ExecContainmentSnapshot,
+}
+
+impl ExecPlan {
+    pub fn requires_root_pty_containment(&self) -> bool {
+        self.io_mode.is_pty() && is_interactive_elevation_program(&self.program)
+    }
+}
+
+fn is_interactive_elevation_program(program: &str) -> bool {
+    let leaf = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    matches!(leaf.to_ascii_lowercase().as_str(), "sudo" | "doas")
 }
 
 impl ExecPlan {
@@ -634,8 +691,8 @@ impl ExecPlan {
             cwd: draft.cwd,
             shell: draft.shell,
             risk: draft.risk,
+            io_mode: draft.io_mode,
             execution_basis: draft.execution_basis,
-            principal: draft.principal,
             template_id: draft.template_id,
             approval_id,
             fingerprint: draft.fingerprint,
@@ -650,7 +707,9 @@ impl ExecPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentError, AgentErrorKind, ExecOutput, OperationInput, OperationOutput};
+    use crate::{
+        AgentError, AgentErrorKind, ExecOutput, ExecOutputStreams, OperationInput, OperationOutput,
+    };
     use wincode::config::{Configuration, PREALLOCATION_SIZE_LIMIT_DISABLED};
 
     fn unbounded_config() -> Configuration<true, PREALLOCATION_SIZE_LIMIT_DISABLED> {
@@ -689,8 +748,8 @@ mod tests {
             cwd: None,
             shell: ExecShellKind::Powershell,
             risk: RiskLevel::Low,
+            io_mode: ExecIoMode::NonInteractive,
             execution_basis: ExecExecutionBasis::Template,
-            principal: ExecutionPrincipal::SessionUser,
             template_id: "get_service".into(),
             fingerprint: "abc123".into(),
             timeout_ms: 10_000,
@@ -698,6 +757,22 @@ mod tests {
             max_stderr_bytes: 65_536,
             containment: ExecContainmentSnapshot::default(),
         }
+    }
+
+    #[test]
+    fn root_pty_containment_is_explicitly_derived_from_sealed_program_and_mode() {
+        let mut draft = sample_draft();
+        draft.program = "/usr/bin/sudo".into();
+        assert!(!draft.requires_root_pty_containment());
+        draft.io_mode = ExecIoMode::Pty {
+            initial_rows: 24,
+            initial_cols: 80,
+        };
+        assert!(draft.requires_root_pty_containment());
+        draft.program = "doas".into();
+        assert!(draft.requires_root_pty_containment());
+        draft.program = "printf".into();
+        assert!(!draft.requires_root_pty_containment());
     }
 
     #[test]
@@ -849,8 +924,9 @@ mod tests {
             approval_timeout_ms: 120_000,
             timeout_ms: 10_000,
             risk: RiskLevel::Low,
+            io_mode: ExecIoMode::NonInteractive,
+            requires_live_carrier: false,
             execution_basis: ExecExecutionBasis::Template,
-            principal: ExecutionPrincipal::SessionUser,
             requires_confirmation: true,
             executable: true,
             blocked_reason: None,
@@ -858,15 +934,18 @@ mod tests {
         let resolve = ResolveExecData {
             exec_request_id: ExecRequestId("exec_1".into()),
             decision: ApprovalDecision::Approve,
+            carrier_id: None,
         };
         let result_ok = ExecResultPayload {
             exec_request_id: ExecRequestId("exec_1".into()),
             outcome: AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
                 exit_code: 0,
-                stdout: "Running".into(),
-                stderr: String::new(),
-                stdout_truncated: false,
-                stderr_truncated: false,
+                streams: ExecOutputStreams::Split {
+                    stdout: "Running".into(),
+                    stderr: String::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                },
                 duration_ms: 12,
                 redactions: vec![],
             })),

@@ -17,6 +17,7 @@ pub mod db;
 pub mod device_assistant_orchestrator;
 pub mod entity;
 pub mod error;
+pub mod exec_pty_carrier;
 pub mod model;
 pub mod model_dial;
 pub mod model_egress_store;

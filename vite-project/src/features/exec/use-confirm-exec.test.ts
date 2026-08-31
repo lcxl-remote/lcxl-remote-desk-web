@@ -32,6 +32,7 @@ const input: ExecRequestInput = {
     command: 'Get-Service -Name Spooler',
     cwd: null,
     reason: 'Check the spooler',
+    ioMode: { type: 'non_interactive' },
 };
 
 function previewFrame(requestId: string, preview: ExecPreview): SignalingMessage {
@@ -72,15 +73,19 @@ function executablePreview(): ExecPreview {
         shell: 'powershell',
         command: input.command,
         cwd: null,
+        approval_timeout_ms: 30_000,
         timeout_ms: 30000,
         risk: 'low',
+        io_mode: { type: 'non_interactive' },
+        requires_live_carrier: false,
+        execution_basis: 'template',
         requires_confirmation: true,
         executable: true,
         blocked_reason: null,
     };
 }
 
-function render(orgId?: number) {
+function render(orgId?: number, acceptUnsolicitedPreviews = false) {
     // Controllable signaling subscription: `feed` synchronously delivers a
     // message to the hook's registered handler, mirroring the real lossless
     // fan-out. Call sites already wrap `feed` in `act(...)`.
@@ -91,7 +96,13 @@ function render(orgId?: number) {
             handlers.delete(h);
         };
     };
-    const props = { deskId: 'desk-1', subscribe, sendMessage, orgId };
+    const props = {
+        deskId: 'desk-1',
+        subscribe,
+        sendMessage,
+        orgId,
+        acceptUnsolicitedPreviews,
+    };
     const hook = renderHook((p: typeof props) => useConfirmExec(p), { initialProps: props });
     const feed = (msg: SignalingMessage) => {
         handlers.forEach((h) => h(msg));
@@ -100,6 +111,22 @@ function render(orgId?: number) {
 }
 
 describe('useConfirmExec', () => {
+    it('adopts a server-originated Device Assistant preview only when enabled', () => {
+        const disabled = render();
+        act(() => disabled.feed(previewFrame('agent-preview', executablePreview())));
+        expect(disabled.hook.result.current.entries).toEqual({});
+
+        const enabled = render(undefined, true);
+        act(() => enabled.feed({
+            ...previewFrame('agent-preview', executablePreview()),
+            to_connection_id: 'browser-connection-1',
+        }));
+        expect(enabled.hook.result.current.entries[-1].phase).toBe('awaiting');
+        expect(enabled.hook.result.current.entries[-1].execRequestId).toBe('exec-1');
+        expect(enabled.hook.result.current.entries[-1].browserConnectionId)
+            .toBe('browser-connection-1');
+    });
+
     it('sends ConfirmExec and tracks an executable preview', () => {
         const { hook, feed } = render();
         act(() => hook.result.current.requestPreview(0, input));
@@ -150,8 +177,12 @@ describe('useConfirmExec', () => {
             shell: 'powershell',
             command: input.command,
             cwd: null,
+            approval_timeout_ms: 30_000,
             timeout_ms: 30000,
             risk: 'blocked',
+            io_mode: { type: 'non_interactive' },
+            requires_live_carrier: false,
+            execution_basis: 'template',
             requires_confirmation: false,
             executable: false,
             blocked_reason: 'Blocked: matches a prohibited pattern (download-and-execute)',
@@ -169,8 +200,12 @@ describe('useConfirmExec', () => {
             shell: 'powershell',
             command: input.command,
             cwd: null,
+            approval_timeout_ms: 30_000,
             timeout_ms: 0,
             risk: 'low',
+            io_mode: { type: 'non_interactive' },
+            requires_live_carrier: false,
+            execution_basis: 'template',
             requires_confirmation: false,
             executable: false,
             blocked_reason: 'AI command execution is disabled (suggest-only mode)',
@@ -205,10 +240,13 @@ describe('useConfirmExec', () => {
                             kind: 'exec',
                             params: {
                                 exit_code: 0,
-                                stdout: 'Running',
-                                stderr: '',
-                                stdout_truncated: false,
-                                stderr_truncated: false,
+                                streams: {
+                                    type: 'split',
+                                    stdout: 'Running',
+                                    stderr: '',
+                                    stdout_truncated: false,
+                                    stderr_truncated: false,
+                                },
                                 duration_ms: 12,
                                 redactions: [],
                             },
@@ -219,7 +257,8 @@ describe('useConfirmExec', () => {
         );
         expect(hook.result.current.entries[0].phase).toBe('done');
         expect(hook.result.current.entries[0].output?.exit_code).toBe(0);
-        expect(hook.result.current.entries[0].output?.stdout).toBe('Running');
+        const streams = hook.result.current.entries[0].output?.streams;
+        expect(streams?.type === 'split' ? streams.stdout : null).toBe('Running');
     });
 
     it('reject sends a reject decision and clears the entry', () => {
@@ -329,10 +368,13 @@ describe('useConfirmExec', () => {
                             kind: 'exec',
                             params: {
                                 exit_code: 0,
-                                stdout: 'ok',
-                                stderr: '',
-                                stdout_truncated: false,
-                                stderr_truncated: false,
+                                streams: {
+                                    type: 'split',
+                                    stdout: 'ok',
+                                    stderr: '',
+                                    stdout_truncated: false,
+                                    stderr_truncated: false,
+                                },
                                 duration_ms: 1,
                                 redactions: [],
                             },

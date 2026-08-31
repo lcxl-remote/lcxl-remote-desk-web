@@ -192,6 +192,8 @@ pub async fn run_signaling_proxy(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
     let host_activity = host_control_hub.host_activity();
+    let exec_pty_carriers =
+        Arc::new(crate::daemon::exec_pty_carrier::ExecPtyCarrierRegistry::new());
 
     let (outbound_tx, _seed_rx) = broadcast::channel::<String>(128);
     pc_registry.set_outbound_tx(outbound_tx.clone());
@@ -204,39 +206,6 @@ pub async fn run_signaling_proxy(
     let command_templates = Arc::new(crate::daemon::command_templates::CommandTemplateCache::new());
     let command_blocklist =
         Arc::new(crate::daemon::command_blocklist::CommandBlocklistCache::new());
-    #[cfg(target_os = "linux")]
-    let linux_service_daemon = matches!(
-        settings.read().await.args.startup_mode,
-        StartupMode::ServiceDaemon
-    );
-    #[cfg(target_os = "linux")]
-    let privileged_exec = {
-        if !linux_service_daemon {
-            None
-        } else if !crate::daemon::linux_privileged_exec::experimental_privileged_exec_enabled() {
-            log::info!(
-                "Linux privileged AI execution remains disabled; set {}=1 only for explicit development validation",
-                crate::daemon::linux_privileged_exec::EXPERIMENTAL_PRIVILEGED_EXEC_ENV
-            );
-            None
-        } else if let Some(registry) = worker_mgr.session_shell_registry() {
-            let permits = crate::daemon::linux_privileged_exec::PrivilegedPermitStore::default();
-            crate::daemon::linux_privileged_exec::spawn_permit_revocation_watcher(
-                permits.clone(),
-                registry,
-            );
-            Some(Arc::new(
-                crate::daemon::linux_privileged_exec::LinuxPrivilegedExecSupervisor::new(
-                    permits,
-                    exec_ledger.clone(),
-                ),
-            ))
-        } else {
-            log::error!("Linux privileged execution disabled: session-shell registry is not bound");
-            None
-        }
-    };
-
     // The shared Provider read adapter is available wherever an in-process worker
     // can read locally (Default / DeskServer); ServiceDaemon leaves it `None`.
     let (diagnose_orchestrator, remote_read) = match settings.read().await.args.startup_mode {
@@ -292,12 +261,11 @@ pub async fn run_signaling_proxy(
     // regardless of which WS surfaced them.
     let router_ctx = RouterContext {
         exec_ledger: exec_ledger.clone(),
-        #[cfg(target_os = "linux")]
-        privileged_exec,
         exec_capacity: Arc::new(crate::daemon::exec_capacity::ExecCapacity::new()),
         pc_registry: pc_registry.clone(),
         admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,
         manager_credential_link: None,
+        exec_pty_link: None,
         outbound_tx: outbound_tx.clone(),
         settings: settings.clone(),
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
@@ -366,6 +334,7 @@ pub async fn run_signaling_proxy(
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
         let credential_scopes = credential_scopes.clone();
+        let exec_pty_carriers = Arc::clone(&exec_pty_carriers);
         actix_web::rt::spawn(async move {
             loop {
                 let (port, enable_ipv6, local_token, startup_mode) = {
@@ -419,6 +388,7 @@ pub async fn run_signaling_proxy(
                     None,
                     RemoteAccessCentralLink::Local,
                     &credential_scopes,
+                    exec_pty_carriers.clone(),
                 )
                 .await
                 {
@@ -435,6 +405,7 @@ pub async fn run_signaling_proxy(
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
         let credential_scopes = credential_scopes.clone();
+        let exec_pty_carriers = Arc::clone(&exec_pty_carriers);
         actix_web::rt::spawn(async move {
             loop {
                 let (signaling_url, signaling_token) = {
@@ -464,6 +435,7 @@ pub async fn run_signaling_proxy(
                         None,
                         RemoteAccessCentralLink::RemoteSignal,
                         &credential_scopes,
+                        exec_pty_carriers.clone(),
                     )
                     .await;
                 }
@@ -480,6 +452,7 @@ pub async fn run_signaling_proxy(
         let manager_link_state = manager_link_state.clone();
         let manager_link_gate = manager_link_gate.clone();
         let credential_scopes = credential_scopes.clone();
+        let exec_pty_carriers = Arc::clone(&exec_pty_carriers);
         actix_web::rt::spawn(async move {
             let mut manager_reconnect_attempt = 0_u32;
             let mut suspended_recovery_attempt = 0_u32;
@@ -515,6 +488,7 @@ pub async fn run_signaling_proxy(
                         Some(manager_link_gate.subscribe()),
                         RemoteAccessCentralLink::Manager,
                         &credential_scopes,
+                        exec_pty_carriers.clone(),
                     )
                     .await;
 
@@ -705,6 +679,7 @@ pub async fn run_signaling_proxy(
         }
 
         let resident_worker_key = worker_message.worker_key.clone();
+        let worker_incarnation = worker_message.incarnation;
         if let Some(key) = resident_worker_key.as_ref() {
             let interactive_output = matches!(
                 &worker_message.message,
@@ -741,7 +716,13 @@ pub async fn run_signaling_proxy(
                     .is_some_and(|connection_id| {
                         worker_mgr.resident_worker_owns_connection(key, connection_id)
                     });
-            if !global_control && !connection_owned {
+            let pty_output = matches!(
+                &worker_message.message,
+                WorkerToService::ExecPtyOpened(_)
+                    | WorkerToService::ExecPtyOutput(_)
+                    | WorkerToService::ExecPtyClosed(_)
+            );
+            if !global_control && !connection_owned && !pty_output {
                 warn!(
                     "[SignalingProxy] dropping unbound or cross-session output from resident worker {:?}",
                     key
@@ -1492,6 +1473,59 @@ pub async fn run_signaling_proxy(
                 );
                 continue;
             }
+            WorkerToService::ExecPtyOpened(opened) => {
+                let generation = opened.execution_generation.clone();
+                let stream_id = opened.stream_id.clone();
+                if let Err(error) = exec_pty_carriers.route_worker_opened(
+                    resident_worker_key.as_ref(),
+                    worker_incarnation,
+                    opened,
+                ) {
+                    warn!(
+                        "[exec-pty] refusing opened frame generation={} stream={} error={}",
+                        generation, stream_id, error
+                    );
+                    if let Some(cancel) =
+                        exec_pty_carriers.remove_stream(&stream_id, error.close_reason())
+                    {
+                        cancel_pty_worker(&worker_mgr, cancel).await;
+                    }
+                }
+            }
+            WorkerToService::ExecPtyOutput(output) => {
+                let generation = output.execution_generation.clone();
+                let stream_id = output.stream_id.clone();
+                let output_bytes = output.data.len();
+                if let Err(error) = exec_pty_carriers.route_worker_output(
+                    resident_worker_key.as_ref(),
+                    worker_incarnation,
+                    output,
+                ) {
+                    warn!(
+                        "[exec-pty] refusing output frame generation={} stream={} output_bytes={} error={}",
+                        generation, stream_id, output_bytes, error
+                    );
+                    if let Some(cancel) =
+                        exec_pty_carriers.remove_stream(&stream_id, error.close_reason())
+                    {
+                        cancel_pty_worker(&worker_mgr, cancel).await;
+                    }
+                }
+            }
+            WorkerToService::ExecPtyClosed(closed) => {
+                let generation = closed.execution_generation.clone();
+                let stream_id = closed.stream_id.clone();
+                if let Err(error) = exec_pty_carriers.route_worker_closed(
+                    resident_worker_key.as_ref(),
+                    worker_incarnation,
+                    closed,
+                ) {
+                    warn!(
+                        "[exec-pty] refusing closed frame generation={} stream={} error={}",
+                        generation, stream_id, error
+                    );
+                }
+            }
             WorkerToService::ExecutionCompleted(payload) => {
                 // Close out the ledger entry first, so the host's own record is
                 // settled before the answer leaves the machine. The generation is
@@ -1656,6 +1690,36 @@ pub async fn run_signaling_proxy(
 
     info!("Signaling proxy stopped");
     Ok(())
+}
+
+async fn cancel_pty_worker(
+    worker_mgr: &WorkerManager,
+    cancel: crate::daemon::exec_pty_carrier::CarrierCancellation,
+) {
+    let command = desk_ipc_protocol::message::ServiceToWorker::ExecPtyCancel(
+        desk_agent_protocol::exec_pty::PtyCancelFrame {
+            stream_id: cancel.stream_id.clone(),
+            execution_generation: cancel.execution_generation.clone(),
+            session_target_id: cancel.session_target_id,
+            registration_generation: cancel.registration_generation,
+            worker_incarnation: cancel.worker_incarnation,
+            reason: cancel.reason,
+        },
+    );
+    let result = match cancel.worker_key.as_ref() {
+        Some(key) => {
+            worker_mgr
+                .send_to_session_worker(&key.session, command)
+                .await
+        }
+        None => worker_mgr.send_to_worker(command).await,
+    };
+    if let Err(error) = result {
+        warn!(
+            "[exec-pty] failed to cancel generation={} stream={} after carrier rejection: {}",
+            cancel.execution_generation, cancel.stream_id, error
+        );
+    }
 }
 
 mod responses;

@@ -101,6 +101,26 @@ pub struct ExecPlanPayload {
     pub audit_source_request_id: Option<String>,
 }
 
+/// Start one sealed, one-shot PTY execution. This is deliberately distinct
+/// from [`ExecPlanPayload`]: a worker must never infer an interactive stream or
+/// accept later input for a plan that was approved as non-interactive.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ExecPtyStartPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    /// Authoritative machine-wide capability snapshot taken by the daemon at
+    /// dispatch. The worker must not consult its startup-time settings copy.
+    pub exec_pty: bool,
+    /// Whether this exact dispatch may use the root-contained sudo/doas path.
+    pub exec_pty_elevation: bool,
+    pub stream_id: String,
+    pub session_target_id: String,
+    pub registration_generation: u64,
+    pub worker_incarnation: u64,
+    pub plan: desk_agent_protocol::exec::ExecPlan,
+    pub audit_source_request_id: Option<String>,
+}
+
 /// Payload for [`ServiceToWorker::ExecCancel`].
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ExecCancelPayload {

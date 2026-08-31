@@ -22,7 +22,7 @@ use crate::ExecInput;
 use crate::command_blocklist::{BlocklistMatcher, BlocklistRule, blocklist_match};
 use crate::command_template::SyncedCommandTemplate;
 use crate::exec::{
-    ExecContainmentSnapshot, ExecExecutionBasis, ExecPlanDraft, ExecShellKind, ExecutionPrincipal,
+    ExecContainmentSnapshot, ExecExecutionBasis, ExecIoMode, ExecPlanDraft, ExecShellKind,
 };
 
 // ============================ Execution limits ============================
@@ -178,6 +178,26 @@ pub fn build_exact_argv_draft(
     max_stderr_bytes: u32,
     cwd: Option<String>,
 ) -> ExecPlanDraft {
+    build_exact_argv_draft_with_io_mode(
+        template,
+        request_wall_ms,
+        max_stdout_bytes,
+        max_stderr_bytes,
+        cwd,
+        ExecIoMode::NonInteractive,
+    )
+}
+
+/// As [`build_exact_argv_draft`], with an explicit sealed I/O mode for an
+/// interactive Device Assistant execution.
+pub fn build_exact_argv_draft_with_io_mode(
+    template: &SyncedCommandTemplate,
+    request_wall_ms: Option<u32>,
+    max_stdout_bytes: u32,
+    max_stderr_bytes: u32,
+    cwd: Option<String>,
+    io_mode: ExecIoMode,
+) -> ExecPlanDraft {
     let program = template.argv[0].clone();
     let argv = template.argv[1..].to_vec();
     let (timeout_ms, containment) =
@@ -187,14 +207,13 @@ pub fn build_exact_argv_draft(
         max_stdout_bytes,
         max_stderr_bytes,
     };
-    let principal = ExecutionPrincipal::SessionUser;
-    let fingerprint = fingerprint_for_principal(
+    let fingerprint = fingerprint_with_io_mode(
         &program,
         &argv,
         cwd.as_deref(),
         &limits,
         &containment,
-        principal,
+        io_mode,
     );
     ExecPlanDraft {
         program,
@@ -203,8 +222,8 @@ pub fn build_exact_argv_draft(
         // Operator argv is executed as a direct spawn (no shell wrapping).
         shell: ExecShellKind::Native,
         risk: template.risk(),
+        io_mode,
         execution_basis: ExecExecutionBasis::Template,
-        principal,
         template_id: template.template_id.clone(),
         fingerprint,
         timeout_ms,
@@ -221,7 +240,7 @@ pub fn build_exact_argv_draft(
 /// compute the identical value.
 ///
 /// It covers what the execution authority enforces — program, argv, cwd, execution
-/// limits, principal, and containment envelope — but not the remaining
+/// limits and containment envelope — but not the remaining
 /// *classification* fields (`risk` / effect / `shell`). Those fields are derived
 /// from the template and can change without argv or authority changing (an `effect`
 /// edited read_only → mutating lifts the risk but leaves this fingerprint identical).
@@ -240,25 +259,24 @@ pub fn fingerprint(
     limits: &ExecLimits,
     containment: &ExecContainmentSnapshot,
 ) -> String {
-    fingerprint_for_principal(
+    fingerprint_with_io_mode(
         program,
         argv,
         cwd,
         limits,
         containment,
-        ExecutionPrincipal::SessionUser,
+        ExecIoMode::NonInteractive,
     )
 }
 
-/// Principal-bound variant used when constructing an explicitly privileged
-/// draft. Existing callers remain SessionUser through [`fingerprint`].
-pub fn fingerprint_for_principal(
+/// Fingerprint a plan including its sealed standard-I/O contract.
+pub fn fingerprint_with_io_mode(
     program: &str,
     argv: &[String],
     cwd: Option<&str>,
     limits: &ExecLimits,
     containment: &ExecContainmentSnapshot,
-    principal: ExecutionPrincipal,
+    io_mode: ExecIoMode,
 ) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut feed = |bytes: &[u8]| {
@@ -278,13 +296,7 @@ pub fn fingerprint_for_principal(
     feed(&limits.timeout_ms.to_le_bytes());
     feed(&limits.max_stdout_bytes.to_le_bytes());
     feed(&limits.max_stderr_bytes.to_le_bytes());
-    // Principal is an authority boundary, not merely display metadata. A
-    // SessionUser approval can therefore never be relabelled Administrator
-    // while retaining the same fingerprint.
-    feed(&[match principal {
-        ExecutionPrincipal::SessionUser => 0,
-        ExecutionPrincipal::Administrator => 1,
-    }]);
+    feed(&io_mode.fingerprint_bytes());
     // Containment (wall time excluded — it is limits.timeout_ms above). Each
     // Option feeds a presence byte so `None` and `Some(0)` never collide.
     feed(&[containment.allow_background as u8]);
@@ -573,6 +585,7 @@ mod tests {
             },
             command: command.to_string(),
             cwd: None,
+            io_mode: ExecIoMode::NonInteractive,
             timeout_ms: 0,
             max_stdout_bytes: 0,
             max_stderr_bytes: 0,
@@ -708,29 +721,6 @@ mod tests {
         let b = fingerprint("docker", &["logs".into(), "web2".into()], None, &limits, &c);
         assert_eq!(a, a2);
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn fingerprint_is_principal_sensitive() {
-        let limits = ExecLimits::defaults();
-        let containment = ExecContainmentSnapshot::default();
-        let session = fingerprint_for_principal(
-            "/usr/bin/systemctl",
-            &["restart".into(), "lcxl-remote-desk.service".into()],
-            None,
-            &limits,
-            &containment,
-            ExecutionPrincipal::SessionUser,
-        );
-        let administrator = fingerprint_for_principal(
-            "/usr/bin/systemctl",
-            &["restart".into(), "lcxl-remote-desk.service".into()],
-            None,
-            &limits,
-            &containment,
-            ExecutionPrincipal::Administrator,
-        );
-        assert_ne!(session, administrator);
     }
 
     #[test]

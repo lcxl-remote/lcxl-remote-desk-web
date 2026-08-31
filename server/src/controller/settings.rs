@@ -158,7 +158,10 @@ pub async fn query_ai_policy_settings(
     settings: web::Data<SharedSettings>,
 ) -> Result<HttpResponse, AWError> {
     let settings = settings.read().await;
-    let public = settings.ai_policy.public_view();
+    let support = crate::worker::exec_pty::runtime_support();
+    let public = settings
+        .ai_policy
+        .public_view(support.exec_pty, support.exec_pty_elevation);
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(public)))
 }
 
@@ -173,12 +176,19 @@ pub async fn query_ai_policy_settings(
 #[post("/settings/ai-policy")]
 pub async fn update_ai_policy_settings(
     request_json: web::Json<AiExecutionPolicyUpdate>,
-    settings: web::Data<SharedSettings>,
+    coordinator: web::Data<SettingsCoordinator>,
 ) -> Result<HttpResponse, AWError> {
-    let params = request_json.into_inner();
-    let mut settings = settings.write().await;
-    settings.ai_policy.apply_update(params);
-    settings.save()?;
+    let mut params = request_json.into_inner();
+    let support = crate::worker::exec_pty::runtime_support();
+    if !support.exec_pty_elevation && params.interactive_elevation_enabled == Some(true) {
+        params.interactive_elevation_enabled = Some(false);
+    }
+    coordinator
+        .commit(move |settings| {
+            settings.ai_policy.apply_update(params);
+            Ok(())
+        })
+        .await?;
     info!("Update AI execution policy successfully");
     Ok(HttpResponse::Ok().finish())
 }
@@ -615,22 +625,35 @@ mod tests {
             body["data"]["execution_mode"].as_str(),
             Some("confirm_each_action")
         );
+        assert_eq!(body["data"]["exec_pty_enabled"].as_bool(), Some(true));
+        assert_eq!(
+            body["data"]["interactive_elevation_enabled"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            body["data"]["interactive_elevation_supported"].as_bool(),
+            Some(false)
+        );
         // The policy has no credential fields to leak.
         assert!(body["data"].get("api_key").is_none());
         assert!(body["data"].get("base_url").is_none());
     }
 
-    /// `POST /settings/ai-policy` applies the execution-mode update and persists
-    /// it; a not-yet-selectable mode is ignored.
+    /// `POST /settings/ai-policy` applies and persists the execution-mode update.
+    /// Unsupported elevation cannot be staged for a future runtime.
     #[actix_web::test]
     async fn update_ai_policy_settings_applies_update() {
         let tmp = std::env::temp_dir().join(format!("lrd-pr0-{}.toml", uuid::Uuid::new_v4()));
         let settings = Settings::for_test_config(&tmp);
-        let shared = web::Data::new(SharedSettings::from(settings));
+        let shared = Arc::new(SharedSettings::from(settings));
+        let coordinator = web::Data::from(Arc::new(
+            SettingsCoordinator::from_settings(Arc::clone(&shared)).await,
+        ));
 
         let app = test::init_service(
             App::new()
-                .app_data(shared.clone())
+                .app_data(web::Data::from(Arc::clone(&shared)))
+                .app_data(coordinator)
                 .service(update_ai_policy_settings),
         )
         .await;
@@ -641,6 +664,8 @@ mod tests {
                 execution_mode: Some(desk_agent_protocol::ExecutionMode::ConfirmEachAction),
                 max_concurrent_executions: None,
                 max_command_runtime_seconds: None,
+                exec_pty_enabled: Some(true),
+                interactive_elevation_enabled: Some(true),
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -651,6 +676,8 @@ mod tests {
             stored.ai_policy.execution_mode,
             desk_agent_protocol::ExecutionMode::ConfirmEachAction
         );
+        assert!(stored.ai_policy.exec_pty_enabled);
+        assert!(!stored.ai_policy.interactive_elevation_enabled);
         let _ = std::fs::remove_file(&tmp);
     }
 

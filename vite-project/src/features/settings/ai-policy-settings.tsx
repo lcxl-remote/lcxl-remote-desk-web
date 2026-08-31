@@ -37,6 +37,8 @@ const policySchema = z.object({
         .int()
         .min(MIN_COMMAND_RUNTIME_SECONDS)
         .max(MAX_COMMAND_RUNTIME_SECONDS),
+    exec_pty_enabled: z.boolean(),
+    interactive_elevation_enabled: z.boolean(),
 })
 
 type PolicyFormValues = z.infer<typeof policySchema>
@@ -82,6 +84,8 @@ export function AiPolicySettings() {
             execution_mode: "suggest_only",
             max_concurrent_executions: 4,
             max_command_runtime_seconds: 600,
+            exec_pty_enabled: true,
+            interactive_elevation_enabled: false,
         },
     })
     const collectionForm = useForm<CollectionPolicyFormValues>({
@@ -99,6 +103,9 @@ export function AiPolicySettings() {
                     policyResponse.data.max_concurrent_executions ?? 4,
                 max_command_runtime_seconds:
                     policyResponse.data.max_command_runtime_seconds ?? 600,
+                exec_pty_enabled: policyResponse.data.exec_pty_enabled ?? true,
+                interactive_elevation_enabled:
+                    policyResponse.data.interactive_elevation_enabled ?? false,
             })
         }
     }, [policyResponse?.data, isPolicyLoading, policyForm])
@@ -119,6 +126,8 @@ export function AiPolicySettings() {
             execution_mode: values.execution_mode,
             max_concurrent_executions: values.max_concurrent_executions,
             max_command_runtime_seconds: values.max_command_runtime_seconds,
+            exec_pty_enabled: values.exec_pty_enabled,
+            interactive_elevation_enabled: values.interactive_elevation_enabled,
         }
         try {
             await updatePolicy({ data: payload })
@@ -162,6 +171,11 @@ export function AiPolicySettings() {
             </div>
         )
     }
+
+    const execPtySupported = policyResponse?.data?.exec_pty_supported ?? false
+    const interactiveElevationSupported =
+        policyResponse?.data?.interactive_elevation_supported ?? false
+    const execPtyEnabled = policyForm.watch("exec_pty_enabled")
 
     return (
         <div className="container mx-auto max-w-4xl py-8">
@@ -266,6 +280,63 @@ export function AiPolicySettings() {
                                             {t("pages.aiPolicy.maxCommandRuntime.description")}
                                         </FormDescription>
                                         <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+                            <FormField
+                                control={policyForm.control}
+                                name="exec_pty_enabled"
+                                render={({ field }) => (
+                                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                                        <div className="space-y-0.5">
+                                            <FormLabel>{t("pages.aiPolicy.execPty")}</FormLabel>
+                                            <FormDescription>
+                                                {execPtySupported
+                                                    ? t("pages.aiPolicy.execPty.description")
+                                                    : t("pages.aiPolicy.execPty.unsupported")}
+                                            </FormDescription>
+                                        </div>
+                                        <FormControl>
+                                            <Switch
+                                                aria-label={t("pages.aiPolicy.execPty")}
+                                                checked={field.value}
+                                                disabled={!execPtySupported}
+                                                onCheckedChange={(checked) => {
+                                                    field.onChange(checked)
+                                                    if (!checked) {
+                                                        policyForm.setValue(
+                                                            "interactive_elevation_enabled",
+                                                            false,
+                                                            { shouldDirty: true, shouldValidate: true },
+                                                        )
+                                                    }
+                                                }}
+                                            />
+                                        </FormControl>
+                                    </FormItem>
+                                )}
+                            />
+                            <FormField
+                                control={policyForm.control}
+                                name="interactive_elevation_enabled"
+                                render={({ field }) => (
+                                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                                        <div className="space-y-0.5">
+                                            <FormLabel>{t("pages.aiPolicy.interactiveElevation")}</FormLabel>
+                                            <FormDescription>
+                                                {interactiveElevationSupported
+                                                    ? t("pages.aiPolicy.interactiveElevation.description")
+                                                    : t("pages.aiPolicy.interactiveElevation.unsupported")}
+                                            </FormDescription>
+                                        </div>
+                                        <FormControl>
+                                            <Switch
+                                                aria-label={t("pages.aiPolicy.interactiveElevation")}
+                                                checked={field.value}
+                                                disabled={!execPtyEnabled || !interactiveElevationSupported}
+                                                onCheckedChange={field.onChange}
+                                            />
+                                        </FormControl>
                                     </FormItem>
                                 )}
                             />

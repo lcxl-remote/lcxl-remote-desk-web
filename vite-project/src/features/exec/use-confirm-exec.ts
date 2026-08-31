@@ -9,6 +9,10 @@ import {
     SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
 } from '../desk/constants';
 import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-signaling';
+import {
+    ExecPtyClient,
+    type PtyCarrierPhase,
+} from './exec-pty-client';
 
 // Wire types — mirror `desk_agent_protocol::exec`. These ride the ConfirmExec /
 // ExecPreview / ResolveExec / ExecResult signaling types as `signaling_data`;
@@ -20,6 +24,10 @@ import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-sig
 // neutral `ExecRequestInput`.
 
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical' | 'blocked';
+
+export type ExecIoMode =
+    | { type: 'non_interactive' }
+    | { type: 'pty'; initial_rows: number; initial_cols: number };
 
 export type AgentError = {
     kind: string;
@@ -38,8 +46,9 @@ export type ExecPreview = {
     approval_timeout_ms: number;
     timeout_ms: number;
     risk: RiskLevel;
-    /** Server-authoritative admission basis; absent on an older server. */
-    execution_basis?: "template" | "owner_blocklist_only";
+    io_mode: ExecIoMode;
+    requires_live_carrier: boolean;
+    execution_basis: 'template' | 'owner_blocklist_only';
     requires_confirmation: boolean;
     executable: boolean;
     blocked_reason: string | null;
@@ -47,10 +56,19 @@ export type ExecPreview = {
 
 export type ExecOutput = {
     exit_code: number;
-    stdout: string;
-    stderr: string;
-    stdout_truncated: boolean;
-    stderr_truncated: boolean;
+    streams:
+        | {
+              type: 'split';
+              stdout: string;
+              stderr: string;
+              stdout_truncated: boolean;
+              stderr_truncated: boolean;
+          }
+        | {
+              type: 'pty_combined';
+              terminal: string;
+              truncated: boolean;
+          };
     duration_ms: number;
     redactions: string[];
 };
@@ -117,6 +135,7 @@ function isSettled(state: ExecState): boolean {
 export type ExecPhase =
     | 'previewing'
     | 'awaiting'
+    | 'preparing_carrier'
     | 'dispatching'
     | 'running'
     | 'done'
@@ -136,6 +155,11 @@ export type ExecEntry = {
     /** Set once a stop has been asked for; the command is not over until the host
      *  says so, so this is shown alongside the phase rather than replacing it. */
     cancelRequested: boolean;
+    /** Authenticated browser connection named by the server's preview frame. */
+    browserConnectionId: string | null;
+    /** Volatile PTY transport state. Contains metadata only, never input. */
+    carrierPhase: PtyCarrierPhase | null;
+    carrierError: string | null;
     /** Result output on success. */
     output: ExecOutput | null;
     /** Human-readable error (preview-blocked, or execution failure). */
@@ -153,6 +177,7 @@ export type ExecRequestInput = {
     command: string;
     cwd: string | null;
     reason: string;
+    ioMode: ExecIoMode;
 };
 
 /** Decoded exec output from an outcome, or null if it was an error / non-exec. */
@@ -179,6 +204,11 @@ type UseConfirmExecProps = {
      *  grant) before adjudicating the exec against that single org, and a non-owner
      *  must carry it — the server otherwise denies with a generic permission error. */
     orgId?: number;
+    /** Stable manager device handle used only to route the short-lived carrier. */
+    deviceId?: string;
+    /** Accept server-originated previews that were not initiated by requestPreview.
+     * Device Assistant uses this for model-selected confirmed execution. */
+    acceptUnsolicitedPreviews?: boolean;
 };
 
 /**
@@ -190,7 +220,14 @@ type UseConfirmExecProps = {
  * re-runs classification on the relayed command, so a control-end-reported
  * decision is never trusted.
  */
-export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseConfirmExecProps) {
+export function useConfirmExec({
+    deskId,
+    subscribe,
+    sendMessage,
+    orgId,
+    deviceId,
+    acceptUnsolicitedPreviews = false,
+}: UseConfirmExecProps) {
     // Keyed by the caller's row index.
     const [entries, setEntries] = useState<Record<number, ExecEntry>>({});
     // Map an in-flight ConfirmExec signaling request_id -> row index, so the
@@ -201,6 +238,8 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
     // Map execution generation -> row index, so the host's lifecycle frames and
     // state replies land on the row that asked for that one dispatch.
     const generationToRow = useRef<Record<string, number>>({});
+    const ptyClients = useRef(new Map<number, ExecPtyClient>());
+    const nextServerRow = useRef(-1);
 
     const requestPreview = useCallback(
         (rowIndex: number, input: ExecRequestInput) => {
@@ -214,6 +253,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                             target: { type: 'shell', shell: input.shell },
                             command: input.command,
                             cwd: input.cwd,
+                            io_mode: input.ioMode,
                             timeout_ms: 0,
                             max_stdout_bytes: 0,
                             max_stderr_bytes: 0,
@@ -237,6 +277,9 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                     executionGeneration: null,
                     runningMs: null,
                     cancelRequested: false,
+                    browserConnectionId: null,
+                    carrierPhase: null,
+                    carrierError: null,
                     output: null,
                     error: null,
                 },
@@ -249,26 +292,100 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
         (rowIndex: number) => {
             const entry = entries[rowIndex];
             if (!deskId || !entry?.execRequestId) return;
-            // The frame that approves is the one that triggers the dispatch, so
-            // its id is the execution generation the host will report against.
-            const generation = sendMessage(
-                SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
-                { exec_request_id: entry.execRequestId, decision: 'approve' },
-                deskId,
-            );
-            generationToRow.current[generation] = rowIndex;
-            setEntries((prev) => ({
-                ...prev,
-                [rowIndex]: {
-                    ...prev[rowIndex],
-                    // Not `running`: approving is a request, and only the host can
-                    // say whether the command actually started.
-                    phase: 'dispatching',
-                    executionGeneration: generation,
-                },
-            }));
+            const sendApproval = (carrierId?: string) => {
+                const generation = sendMessage(
+                    SIGNALING_TYPE_CODE_RESOLVE_EXECUTION,
+                    {
+                        exec_request_id: entry.execRequestId,
+                        decision: 'approve',
+                        ...(carrierId ? { carrier_id: carrierId } : {}),
+                    },
+                    deskId,
+                );
+                generationToRow.current[generation] = rowIndex;
+                setEntries((prev) => ({
+                    ...prev,
+                    [rowIndex]: {
+                        ...prev[rowIndex],
+                        phase: 'dispatching',
+                        executionGeneration: generation,
+                    },
+                }));
+            };
+            if (entry.preview?.requires_live_carrier) {
+                if (entry.preview.io_mode.type !== 'pty' || !entry.browserConnectionId) {
+                    setEntries((prev) => ({
+                        ...prev,
+                        [rowIndex]: {
+                            ...prev[rowIndex],
+                            phase: 'error',
+                            carrierPhase: 'error',
+                            carrierError: 'The interactive carrier cannot identify this browser session.',
+                            error: 'The interactive carrier cannot identify this browser session.',
+                        },
+                    }));
+                    return;
+                }
+                if (ptyClients.current.has(rowIndex)) return;
+                setEntries((prev) => ({
+                    ...prev,
+                    [rowIndex]: {
+                        ...prev[rowIndex],
+                        phase: 'preparing_carrier',
+                        carrierPhase: 'connecting',
+                        carrierError: null,
+                    },
+                }));
+                const client = new ExecPtyClient({
+                    onPhase: (phase, message) => {
+                        setEntries((prev) => {
+                            const current = prev[rowIndex];
+                            if (!current) return prev;
+                            return {
+                                ...prev,
+                                [rowIndex]: {
+                                    ...current,
+                                    carrierPhase: phase,
+                                    carrierError: message ?? current.carrierError,
+                                    phase:
+                                        phase === 'opened'
+                                            && current.phase !== 'done'
+                                            && current.phase !== 'error'
+                                            ? 'running'
+                                            : phase === 'error' && current.phase === 'preparing_carrier'
+                                                ? 'error'
+                                                : current.phase,
+                                    error:
+                                        phase === 'error' && current.phase === 'preparing_carrier'
+                                            ? message ?? 'Interactive carrier failed.'
+                                            : current.error,
+                                },
+                            };
+                        });
+                    },
+                    onOpened: (binding) => {
+                        generationToRow.current[binding.execution_generation] = rowIndex;
+                    },
+                    onClosed: () => {
+                        ptyClients.current.delete(rowIndex);
+                    },
+                });
+                ptyClients.current.set(rowIndex, client);
+                void client.prepare({
+                        browserConnectionId: entry.browserConnectionId,
+                        targetConnectionId: deskId,
+                        execRequestId: entry.execRequestId,
+                        deviceId,
+                    })
+                    .then((carrierId) => sendApproval(carrierId))
+                    .catch(() => {
+                        ptyClients.current.delete(rowIndex);
+                    });
+                return;
+            }
+            sendApproval();
         },
-        [deskId, entries, sendMessage],
+        [deskId, deviceId, entries, sendMessage],
     );
 
     const reject = useCallback(
@@ -281,6 +398,8 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                     deskId,
                 );
             }
+            ptyClients.current.get(rowIndex)?.dispose();
+            ptyClients.current.delete(rowIndex);
             setEntries((prev) => {
                 const next = { ...prev };
                 delete next[rowIndex];
@@ -295,6 +414,16 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
         (rowIndex: number) => {
             const entry = entries[rowIndex];
             if (!deskId || !entry?.executionGeneration) return;
+            const pty = ptyClients.current.get(rowIndex);
+            if (pty) {
+                pty.cancel('cancelled');
+                ptyClients.current.delete(rowIndex);
+                setEntries((prev) => ({
+                    ...prev,
+                    [rowIndex]: { ...prev[rowIndex], cancelRequested: true },
+                }));
+                return;
+            }
             const payload: ExecControlPayload = {
                 execution_generation: entry.executionGeneration,
                 action: 'cancel',
@@ -327,11 +456,20 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
     );
 
     const dismiss = useCallback((rowIndex: number) => {
+        ptyClients.current.get(rowIndex)?.dispose();
+        ptyClients.current.delete(rowIndex);
         setEntries((prev) => {
             const next = { ...prev };
             delete next[rowIndex];
             return next;
         });
+    }, []);
+
+    const ptyClient = useCallback((rowIndex: number) => ptyClients.current.get(rowIndex) ?? null, []);
+
+    useEffect(() => () => {
+        for (const client of ptyClients.current.values()) client.dispose();
+        ptyClients.current.clear();
     }, []);
 
     useEffect(() => {
@@ -343,9 +481,14 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 const preview = message.signaling_data as ExecPreview | null;
                 const reqId = message.request_id;
                 if (!preview || !reqId) return;
-                const rowIndex = previewReqToRow.current[reqId];
-                if (rowIndex === undefined) return;
-                delete previewReqToRow.current[reqId];
+                let rowIndex = previewReqToRow.current[reqId];
+                if (rowIndex === undefined) {
+                    if (!acceptUnsolicitedPreviews || !preview.exec_request_id) return;
+                    const existing = execIdToRow.current[preview.exec_request_id];
+                    rowIndex = existing ?? nextServerRow.current--;
+                } else {
+                    delete previewReqToRow.current[reqId];
+                }
                 if (preview.exec_request_id) {
                     execIdToRow.current[preview.exec_request_id] = rowIndex;
                 }
@@ -359,6 +502,9 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                         executionGeneration: null,
                         runningMs: null,
                         cancelRequested: false,
+                        browserConnectionId: message.to_connection_id ?? null,
+                        carrierPhase: null,
+                        carrierError: null,
                         output: null,
                         error: preview.executable
                             ? null
@@ -438,6 +584,8 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
                 if (rowIndex === undefined) return;
                 delete execIdToRow.current[payload.exec_request_id];
                 const output = execOutputFromOutcome(payload.outcome);
+                ptyClients.current.get(rowIndex)?.dispose();
+                ptyClients.current.delete(rowIndex);
                 // The dispatch is over, so stop routing its lifecycle frames.
                 for (const [generation, row] of Object.entries(generationToRow.current)) {
                     if (row === rowIndex) delete generationToRow.current[generation];
@@ -457,7 +605,7 @@ export function useConfirmExec({ deskId, subscribe, sendMessage, orgId }: UseCon
             }
         };
         return subscribe(handle);
-    }, [subscribe]);
+    }, [acceptUnsolicitedPreviews, subscribe]);
 
-    return { entries, requestPreview, approve, reject, cancel, queryState, dismiss };
+    return { entries, requestPreview, approve, reject, cancel, queryState, dismiss, ptyClient };
 }

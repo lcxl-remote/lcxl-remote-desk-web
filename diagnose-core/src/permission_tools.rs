@@ -675,6 +675,7 @@ pub fn build_permission_request(
                 },
                 command: draft.command,
                 cwd: draft.cwd,
+                io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
                 timeout_ms: draft.timeout_ms,
                 max_stdout_bytes: 65_536,
                 max_stderr_bytes: 65_536,

@@ -20,8 +20,10 @@
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use desk_agent_protocol::exec::ExecPlan;
-use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome, ExecOutput, OperationOutput};
+use desk_agent_protocol::exec::{ExecIoMode, ExecPlan};
+use desk_agent_protocol::{
+    AgentError, AgentErrorKind, AgentOutcome, ExecOutput, ExecOutputStreams, OperationOutput,
+};
 use log::warn;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
@@ -138,13 +140,16 @@ pub async fn execute_plan_cancellable(
     on_spawn: impl FnOnce(ExecSpawnReport),
     cancel: Option<watch::Receiver<bool>>,
 ) -> AgentOutcome {
-    if plan.principal != desk_agent_protocol::exec::ExecutionPrincipal::SessionUser {
-        let message = "administrator execution plans are daemon-only".to_string();
+    if !matches!(plan.io_mode, ExecIoMode::NonInteractive) {
         on_spawn(ExecSpawnReport::Failed {
-            reason: message.clone(),
+            reason: "interactive plans require the dedicated PTY executor".to_string(),
         });
-        return AgentOutcome::Err(err(AgentErrorKind::PermissionDenied, message));
+        return AgentOutcome::Err(err(
+            AgentErrorKind::InvalidInput,
+            "interactive plans require the dedicated PTY executor".to_string(),
+        ));
     }
+
     // Establish the container before the spawn. Failing here refuses the command:
     // an execution that cannot be reclaimed is precisely what containment exists
     // to prevent, so running it anyway would defeat the purpose.
@@ -316,10 +321,12 @@ pub async fn execute_plan_cancellable(
     AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
         // `None` (terminated by a signal on Unix) maps to -1.
         exit_code: status.code().unwrap_or(-1),
-        stdout: stdout_text,
-        stderr: stderr_text,
-        stdout_truncated,
-        stderr_truncated,
+        streams: ExecOutputStreams::Split {
+            stdout: stdout_text,
+            stderr: stderr_text,
+            stdout_truncated,
+            stderr_truncated,
+        },
         duration_ms,
         redactions,
     }))
@@ -456,31 +463,6 @@ mod tests {
             matches!(reports.as_slice(), [ExecSpawnReport::Failed { .. }]),
             "expected a single Failed report, got {reports:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn worker_rejects_administrator_plan_before_containment_or_spawn() {
-        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = reports.clone();
-        let mut administrator = plan("echo must-not-run", 5_000, 4096);
-        administrator.principal = desk_agent_protocol::exec::ExecutionPrincipal::Administrator;
-
-        let outcome = execute_plan_reporting(&administrator, move |report| {
-            sink.lock().unwrap().push(report)
-        })
-        .await;
-
-        assert!(matches!(
-            outcome,
-            AgentOutcome::Err(AgentError {
-                kind: AgentErrorKind::PermissionDenied,
-                ..
-            })
-        ));
-        assert!(matches!(
-            reports.lock().unwrap().as_slice(),
-            [ExecSpawnReport::Failed { .. }]
-        ));
     }
 
     /// The point of containment: a command that backgrounds a helper and then
@@ -682,10 +664,10 @@ mod tests {
             program,
             argv,
             cwd: None,
+            io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
             shell: ExecShellKind::Native,
             risk: RiskLevel::Low,
             execution_basis: desk_agent_protocol::exec::ExecExecutionBasis::Template,
-            principal: desk_agent_protocol::exec::ExecutionPrincipal::SessionUser,
             template_id: "test".into(),
             approval_id: desk_agent_protocol::exec::ApprovalId("appr_t".into()),
             fingerprint: "fp".into(),
@@ -703,12 +685,27 @@ mod tests {
         }
     }
 
+    fn split_output(output: &ExecOutput) -> (&str, &str, bool, bool) {
+        match &output.streams {
+            ExecOutputStreams::Split {
+                stdout,
+                stderr,
+                stdout_truncated,
+                stderr_truncated,
+            } => (stdout, stderr, *stdout_truncated, *stderr_truncated),
+            ExecOutputStreams::PtyCombined { .. } => {
+                panic!("non-interactive executor returned PTY output")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn runs_and_captures_stdout() {
         let out = exec_output(execute_plan(&plan("echo hello", 10_000, 65_536)).await);
         assert_eq!(out.exit_code, 0);
-        assert!(out.stdout.contains("hello"), "stdout was {:?}", out.stdout);
-        assert!(!out.stdout_truncated);
+        let (stdout, _, stdout_truncated, _) = split_output(&out);
+        assert!(stdout.contains("hello"), "stdout was {stdout:?}");
+        assert!(!stdout_truncated);
     }
 
     #[tokio::test]
@@ -721,8 +718,9 @@ mod tests {
     async fn truncates_oversized_stdout() {
         // Emit far more than the 8-byte cap.
         let out = exec_output(execute_plan(&plan("echo abcdefghijklmnop", 10_000, 8)).await);
-        assert!(out.stdout_truncated);
-        assert!(out.stdout.len() <= 8);
+        let (stdout, _, stdout_truncated, _) = split_output(&out);
+        assert!(stdout_truncated);
+        assert!(stdout.len() <= 8);
     }
 
     #[tokio::test]
@@ -731,15 +729,14 @@ mod tests {
         // worker, and counted in `redactions`.
         let out =
             exec_output(execute_plan(&plan("echo AKIAIOSFODNN7EXAMPLE", 10_000, 65_536)).await);
+        let (stdout, _, _, _) = split_output(&out);
         assert!(
-            !out.stdout.contains("AKIAIOSFODNN7EXAMPLE"),
-            "raw secret leaked: {:?}",
-            out.stdout
+            !stdout.contains("AKIAIOSFODNN7EXAMPLE"),
+            "raw secret leaked: {stdout:?}"
         );
         assert!(
-            out.stdout.contains("<redacted"),
-            "no redaction marker: {:?}",
-            out.stdout
+            stdout.contains("<redacted"),
+            "no redaction marker: {stdout:?}"
         );
         assert!(!out.redactions.is_empty(), "redaction not counted");
     }
@@ -754,17 +751,17 @@ mod tests {
         let snippet = format!("echo head {secret}");
         // "head " = 5 chars; cap = 12 falls in the middle of the key.
         let out = exec_output(execute_plan(&plan(&snippet, 10_000, 12)).await);
+        let (stdout, _, stdout_truncated, _) = split_output(&out);
         assert!(
-            !out.stdout.contains("AKIA"),
-            "partial secret leaked across the cap: {:?}",
-            out.stdout
+            !stdout.contains("AKIA"),
+            "partial secret leaked across the cap: {stdout:?}"
         );
         assert!(
             out.redactions.iter().any(|k| k == "aws_access_key"),
             "straddling secret was not matched: {:?}",
             out.redactions
         );
-        assert!(out.stdout_truncated);
+        assert!(stdout_truncated);
     }
 
     #[tokio::test]
@@ -773,12 +770,9 @@ mod tests {
         // (the rest is drained), bounding worker memory regardless of volume.
         let big = "x".repeat(5000);
         let out = exec_output(execute_plan(&plan(&format!("echo {big}"), 10_000, 256)).await);
-        assert!(out.stdout_truncated);
-        assert!(
-            out.stdout.len() <= 256,
-            "retained {} bytes",
-            out.stdout.len()
-        );
+        let (stdout, _, stdout_truncated, _) = split_output(&out);
+        assert!(stdout_truncated);
+        assert!(stdout.len() <= 256, "retained {} bytes", stdout.len());
     }
 
     #[tokio::test]

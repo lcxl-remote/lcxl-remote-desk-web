@@ -41,6 +41,15 @@ pub struct VersionInfo {
     /// edge re-applies the current value at PEP time.
     #[serde(default)]
     pub max_ai_command_runtime_ms: Option<u32>,
+    /// Current host support for the one-shot exec-PTY transport. This is a
+    /// capability/readiness bit, not a protocol version.
+    #[serde(default)]
+    pub exec_pty: bool,
+    /// Current host support for root-contained interactive sudo/doas execution.
+    /// This is separately reported because ordinary PTY support does not imply
+    /// that a privileged command can be contained safely.
+    #[serde(default)]
+    pub exec_pty_elevation: bool,
 }
 
 impl VersionInfo {
@@ -67,6 +76,8 @@ impl VersionInfo {
             repository_url: None,
             available_exec_shells: None,
             max_ai_command_runtime_ms: None,
+            exec_pty: false,
+            exec_pty_elevation: false,
         }
     }
 
@@ -108,6 +119,8 @@ mod tests {
         info.repository_url = Some("https://example.test/repo.git".into());
         info.set_available_exec_shells(&["powershell".into(), "pwsh".into()]);
         info.max_ai_command_runtime_ms = Some(600_000);
+        info.exec_pty = true;
+        info.exec_pty_elevation = true;
 
         let query = serde_urlencoded::to_string(&info).unwrap();
         let decoded: VersionInfo = serde_urlencoded::from_str(&query).unwrap();
@@ -122,6 +135,8 @@ mod tests {
             vec!["powershell".to_string(), "pwsh".to_string()]
         );
         assert_eq!(decoded.max_ai_command_runtime_ms, Some(600_000));
+        assert!(decoded.exec_pty);
+        assert!(decoded.exec_pty_elevation);
     }
 
     #[test]
@@ -136,6 +151,8 @@ mod tests {
         assert_eq!(decoded.repository_url, None);
         assert!(decoded.available_exec_shell_list().is_empty());
         assert_eq!(decoded.max_ai_command_runtime_ms, None);
+        assert!(!decoded.exec_pty);
+        assert!(!decoded.exec_pty_elevation);
     }
 
     #[test]

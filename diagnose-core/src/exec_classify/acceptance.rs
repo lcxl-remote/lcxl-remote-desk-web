@@ -9,7 +9,7 @@
 //! named acceptance failure. It is pure and offline (no network, no worker
 //! process).
 
-use desk_agent_protocol::exec::{ExecDecision, ExecEffect};
+use desk_agent_protocol::exec::{ExecDecision, ExecEffect, ExecIoMode};
 use desk_agent_protocol::{Capability, ExecInput, ExecTarget, OperationInput, RiskLevel};
 
 use super::classify_command;
@@ -21,6 +21,7 @@ fn shell(command: &str) -> ExecInput {
         },
         command: command.to_string(),
         cwd: None,
+        io_mode: ExecIoMode::NonInteractive,
         timeout_ms: 0,
         max_stdout_bytes: 0,
         max_stderr_bytes: 0,

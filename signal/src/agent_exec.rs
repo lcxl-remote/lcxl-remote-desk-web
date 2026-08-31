@@ -10,12 +10,12 @@ use desk_agent_protocol::authz::{
     AuthzDevice, ExecAdmissionPolicy,
 };
 use desk_agent_protocol::edge_exec::{
-    EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload, PrivilegedExecRequest,
+    EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload,
 };
 use desk_agent_protocol::evidence::EvidenceSnapshot;
 use desk_agent_protocol::exec::{
     ApprovalDecision, ApprovalId, ExecDecision, ExecExecutionBasis, ExecPlan, ExecPreview,
-    ExecRequestId, ExecutionPrincipal, ResolveExecData,
+    ExecRequestId, ResolveExecData,
 };
 use desk_agent_protocol::exec_lifecycle::{
     ExecControlAction, ExecControlPayload, ExecState, ExecStateReplyPayload,
@@ -39,14 +39,15 @@ use tokio::sync::oneshot;
 
 const RESULT_SLACK: Duration = Duration::from_secs(30);
 const FOREGROUND_THRESHOLD: Duration = Duration::from_secs(8);
-const PRIVILEGED_AUTHORIZATION_WAIT: Duration = Duration::from_secs(130);
 const WAIT_FOR_TASK_TIMEOUT: Duration = Duration::from_secs(10);
 const WAIT_FOR_TASK_POLL: Duration = Duration::from_millis(250);
 
 struct ApprovalPending {
     browser_connection_id: String,
+    target_connection_id: String,
     diagnose_request_id: String,
-    tx: oneshot::Sender<ApprovalDecision>,
+    requires_live_carrier: bool,
+    tx: oneshot::Sender<ResolveExecData>,
 }
 
 struct ResultPending {
@@ -75,8 +76,10 @@ impl SignalAgentExecPending {
         &self,
         request_id: String,
         browser_connection_id: String,
+        target_connection_id: String,
         diagnose_request_id: String,
-    ) -> Option<oneshot::Receiver<ApprovalDecision>> {
+        requires_live_carrier: bool,
+    ) -> Option<oneshot::Receiver<ResolveExecData>> {
         let (tx, rx) = oneshot::channel();
         let mut pending = self.approvals.lock().expect("approval pending lock");
         if pending.contains_key(&request_id) {
@@ -86,7 +89,9 @@ impl SignalAgentExecPending {
             request_id,
             ApprovalPending {
                 browser_connection_id,
+                target_connection_id,
                 diagnose_request_id,
+                requires_live_carrier,
                 tx,
             },
         );
@@ -101,14 +106,54 @@ impl SignalAgentExecPending {
         if entry.browser_connection_id != browser_connection_id {
             return false;
         }
+        if data.decision == ApprovalDecision::Approve {
+            if entry.requires_live_carrier {
+                let Some(carrier_id) = data.carrier_id.as_deref() else {
+                    return false;
+                };
+                if !crate::exec_pty_carrier::global_exec_pty_carriers().consume_for_approval(
+                    carrier_id,
+                    browser_connection_id,
+                    &entry.target_connection_id,
+                    &data.exec_request_id.0,
+                ) {
+                    return false;
+                }
+            } else if data.carrier_id.is_some() {
+                return false;
+            }
+        }
         let entry = pending
             .remove(&data.exec_request_id.0)
             .expect("entry checked above");
-        let _ = entry.tx.send(data.decision);
+        if entry.tx.send(data.clone()).is_err() {
+            if let Some(carrier_id) = data.carrier_id.as_deref() {
+                crate::exec_pty_carrier::global_exec_pty_carriers()
+                    .release_failed_approval(carrier_id, &data.exec_request_id.0);
+            }
+            return false;
+        }
         true
     }
 
-    fn cancel_approval(&self, request_id: &str) {
+    pub(crate) fn can_prepare_carrier(
+        &self,
+        browser_connection_id: &str,
+        target_connection_id: &str,
+        exec_request_id: &str,
+    ) -> bool {
+        self.approvals
+            .lock()
+            .expect("approval pending lock")
+            .get(exec_request_id)
+            .is_some_and(|entry| {
+                entry.requires_live_carrier
+                    && entry.browser_connection_id == browser_connection_id
+                    && entry.target_connection_id == target_connection_id
+            })
+    }
+
+    pub(crate) fn cancel_approval(&self, request_id: &str) {
         self.approvals
             .lock()
             .expect("approval pending lock")
@@ -329,9 +374,9 @@ fn build_exec_frame(
     admission_policy: ExecAdmissionPolicy,
     max_risk: RiskLevel,
     session_connection_id: Option<String>,
+    carrier_id: Option<String>,
     plan: &ExecPlan,
     validation_input: &ExecInput,
-    privileged: Option<PrivilegedExecRequest>,
 ) -> Result<SignalingModel, AgentError> {
     let audience = target
         .model
@@ -370,7 +415,7 @@ fn build_exec_frame(
         plan: plan.clone(),
         validation_input: validation_input.clone(),
         session_connection_id,
-        privileged,
+        carrier_id,
     })
     .map_err(|error| {
         safe(
@@ -512,23 +557,15 @@ impl SignalAgentTools {
         scope: AgentScope,
         plan: ExecPlan,
         validation_input: ExecInput,
+        carrier_id: Option<String>,
         ctx: &ExecContext,
     ) -> Result<SignalDispatch, AgentError> {
         let target = self.connection(&self.target_connection_id).await?;
         let request_id = plan.execution_generation.clone();
         let exec_store = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone());
-        let privileged = plan.principal == ExecutionPrincipal::Administrator;
         let deadline = chrono::Utc::now()
             + chrono::Duration::milliseconds(plan.timeout_ms as i64)
-            + chrono::Duration::from_std(RESULT_SLACK).unwrap_or_default()
-            // An Administrator task has not been dispatched while polkit is open.
-            // Keep the durable task alive for that separate authorization phase so
-            // the sweeper cannot settle it unknown before phase two is even sent.
-            + if privileged {
-                chrono::Duration::from_std(PRIVILEGED_AUTHORIZATION_WAIT).unwrap_or_default()
-            } else {
-                chrono::Duration::zero()
-            };
+            + chrono::Duration::from_std(RESULT_SLACK).unwrap_or_default();
         let task = exec_store
             .create(
                 &plan.exec_request_id.0,
@@ -554,6 +591,7 @@ impl SignalAgentTools {
                 "an execution with this id is already pending",
             ));
         };
+        let dispatch_carrier_id = carrier_id.clone();
         let frame = build_exec_frame(
             &target,
             &self.target_connection_id,
@@ -562,11 +600,35 @@ impl SignalAgentTools {
             self.admission_policy,
             self.max_risk,
             ctx.connection_id.clone(),
+            carrier_id,
             &plan,
             &validation_input,
-            privileged.then_some(PrivilegedExecRequest::Authorize),
         )?;
+        if let Some(carrier_id) = dispatch_carrier_id.as_deref()
+            && !crate::exec_pty_carrier::global_exec_pty_carriers().bind_for_dispatch(
+                carrier_id,
+                &self.target_connection_id,
+                &plan.exec_request_id.0,
+                &request_id,
+            )
+        {
+            self.pending.cancel_result(&request_id);
+            if let Err(store_error) = exec_store.mark_unsent(&request_id).await {
+                log::warn!(
+                    "[agent-exec] could not settle an unbound PTY task: {}",
+                    store_error.message
+                );
+            }
+            return Err(safe(
+                AgentErrorKind::TransportError,
+                "the interactive carrier disconnected before dispatch",
+            ));
+        }
         if let Err(error) = send_frame(&target, &frame).await {
+            if let Some(carrier_id) = dispatch_carrier_id.as_deref() {
+                crate::exec_pty_carrier::global_exec_pty_carriers()
+                    .release_dispatch(carrier_id, &request_id);
+            }
             self.pending.cancel_result(&request_id);
             if let Err(store_error) = exec_store.mark_unsent(&request_id).await {
                 log::warn!(
@@ -575,109 +637,6 @@ impl SignalAgentTools {
                 );
             }
             return Err(error);
-        }
-        let mut rx = rx;
-        if privileged {
-            let permit_id = match tokio::time::timeout(PRIVILEGED_AUTHORIZATION_WAIT, rx).await {
-                Ok(Ok(EdgeExecDisposition::PrivilegedAuthorizationReady { permit_id })) => {
-                    permit_id
-                }
-                Ok(Ok(disposition)) => {
-                    return Ok(SignalDispatch::Settled { task, disposition });
-                }
-                Ok(Err(_)) => {
-                    let _ = exec_store.mark_unsent(&request_id).await;
-                    return Err(safe(
-                        AgentErrorKind::SessionUnavailable,
-                        "the host disconnected before administrator authorization completed",
-                    ));
-                }
-                Err(_) => {
-                    self.pending.cancel_result(&request_id);
-                    let _ = exec_store.mark_unsent(&request_id).await;
-                    return Err(safe(
-                        AgentErrorKind::Timeout,
-                        "administrator authorization timed out; the command was not executed",
-                    ));
-                }
-            };
-
-            // Local authorization grants no execution authority. Re-read every
-            // OSS central policy axis before minting the second authz block.
-            let current_mode = crate::model_provider::load(&self.db)
-                .await
-                .map_err(|error| {
-                    safe(
-                        AgentErrorKind::PermissionDenied,
-                        format!("execution policy could not be refreshed: {error}"),
-                    )
-                })?
-                .execution_mode;
-            let effective_mode = scope.mode.restrict_to(current_mode);
-            if !matches!(
-                effective_mode,
-                desk_agent_protocol::ExecutionMode::ConfirmEachAction
-                    | desk_agent_protocol::ExecutionMode::SessionApproved
-            ) {
-                let _ = exec_store.mark_unsent(&request_id).await;
-                return Err(safe(
-                    AgentErrorKind::PermissionDenied,
-                    "execution policy changed after administrator authorization; the command was not executed",
-                ));
-            }
-            let refreshed = classify_command_with_policy(
-                &validation_input,
-                &[],
-                desk_agent_protocol::exec_policy::builtin_blocklist(),
-                self.admission_policy,
-            );
-            let rebuilt = refreshed.draft.map(|draft| {
-                ExecPlan::from_draft(
-                    plan.exec_request_id.clone(),
-                    plan.execution_generation.clone(),
-                    plan.approval_id.clone(),
-                    draft,
-                )
-            });
-            if rebuilt.as_ref() != Some(&plan) || plan.risk > self.max_risk {
-                let _ = exec_store.mark_unsent(&request_id).await;
-                return Err(safe(
-                    AgentErrorKind::PermissionDenied,
-                    "execution policy changed after administrator authorization; the command was not executed",
-                ));
-            }
-
-            let target = self.connection(&self.target_connection_id).await?;
-            let Some(dispatch_rx) = self
-                .pending
-                .register_result(request_id.clone(), self.target_connection_id.clone())
-            else {
-                let _ = exec_store.mark_unsent(&request_id).await;
-                return Err(safe(
-                    AgentErrorKind::Internal,
-                    "administrator dispatch correlation is already in use",
-                ));
-            };
-            let mut fresh_scope = scope.clone();
-            fresh_scope.mode = effective_mode;
-            let dispatch_frame = build_exec_frame(
-                &target,
-                &self.target_connection_id,
-                actor_user_id,
-                fresh_scope,
-                self.admission_policy,
-                self.max_risk,
-                ctx.connection_id.clone(),
-                &plan,
-                &validation_input,
-                Some(PrivilegedExecRequest::Dispatch { permit_id }),
-            )?;
-            if let Err(error) = send_frame(&target, &dispatch_frame).await {
-                self.pending.cancel_result(&request_id);
-                let _ = exec_store.mark_unsent(&request_id).await;
-                return Err(error);
-            }
-            rx = dispatch_rx;
         }
         if let Err(error) = exec_store.mark_running(&request_id).await {
             // The frame may already be executing on the host. Never turn a
@@ -745,6 +704,14 @@ impl SignalAgentTools {
                 reason: Some(classified.classification.impact),
             });
         };
+        if draft.requires_root_pty_containment() {
+            return Ok(ExecOutcome::Rejected {
+                reason: Some(
+                    "interactive elevation is unavailable until the Linux ServiceDaemon containment supervisor is ready"
+                        .into(),
+                ),
+            });
+        }
         if classified.classification.decision != ExecDecision::ConfirmRequired
             || draft.execution_basis != ExecExecutionBasis::Template
             || draft.risk > self.max_risk
@@ -791,7 +758,14 @@ impl SignalAgentTools {
         let mut refreshed_scope = ctx.scope.clone();
         refreshed_scope.mode = effective_mode;
         match self
-            .dispatch(actor_user_id, refreshed_scope, plan, validation_input, ctx)
+            .dispatch(
+                actor_user_id,
+                refreshed_scope,
+                plan,
+                validation_input,
+                None,
+                ctx,
+            )
             .await?
         {
             SignalDispatch::Settled {
@@ -827,13 +801,6 @@ impl SignalAgentTools {
                     task.exec_request_id,
                     task.execution_generation,
                 ),
-            )),
-            SignalDispatch::Settled {
-                disposition: EdgeExecDisposition::PrivilegedAuthorizationReady { .. },
-                ..
-            } => Err(safe(
-                AgentErrorKind::Internal,
-                "administrator authorization escaped the two-phase dispatcher",
             )),
             SignalDispatch::Dispatched(task) => Ok(ExecOutcome::Dispatched(
                 desk_diagnose_core::session::ActionIdentity::agent_exec(
@@ -954,8 +921,9 @@ impl ToolSeam for SignalAgentTools {
             approval_timeout_ms: approval_timeout.as_millis() as u64,
             timeout_ms: draft.timeout_ms,
             risk: draft.risk,
+            io_mode: draft.io_mode,
+            requires_live_carrier: draft.io_mode.is_pty(),
             execution_basis: draft.execution_basis,
-            principal: draft.principal,
             requires_confirmation: true,
             executable: true,
             blocked_reason: None,
@@ -963,7 +931,9 @@ impl ToolSeam for SignalAgentTools {
         let Some(approval_rx) = self.pending.register_approval(
             exec_request_id.0.clone(),
             browser_connection_id.to_string(),
+            self.target_connection_id.clone(),
             self.diagnose_request_id.clone(),
+            draft.io_mode.is_pty(),
         ) else {
             return Err(safe(
                 AgentErrorKind::Internal,
@@ -974,9 +944,8 @@ impl ToolSeam for SignalAgentTools {
             self.pending.cancel_approval(&exec_request_id.0);
             return Err(error);
         }
-        let approved = match tokio::time::timeout(approval_timeout, approval_rx).await {
-            Ok(Ok(ApprovalDecision::Approve)) => true,
-            Ok(Ok(ApprovalDecision::Reject)) => false,
+        let approval = match tokio::time::timeout(approval_timeout, approval_rx).await {
+            Ok(Ok(data)) => data,
             Ok(Err(_)) => {
                 return Ok(ExecOutcome::Cancelled {
                     reason: Some("the approval session was cancelled".into()),
@@ -987,9 +956,26 @@ impl ToolSeam for SignalAgentTools {
                 return Ok(ExecOutcome::ApprovalTimeout);
             }
         };
-        if !approved {
+        if approval.decision != ApprovalDecision::Approve {
             return Ok(ExecOutcome::Rejected { reason: None });
         }
+        let carrier_id = if draft.io_mode.is_pty() {
+            match approval.carrier_id.filter(|value| !value.is_empty()) {
+                Some(value) => Some(value),
+                None => {
+                    return Ok(ExecOutcome::Cancelled {
+                        reason: Some("the interactive carrier was not ready at approval".into()),
+                    });
+                }
+            }
+        } else {
+            if approval.carrier_id.is_some() {
+                return Ok(ExecOutcome::Rejected {
+                    reason: Some("a carrier was supplied for a non-interactive command".into()),
+                });
+            }
+            None
+        };
 
         // The provider execution mode is the OSS signal's central emergency
         // switch. Re-read it after approval so a preview cannot outlive a
@@ -1041,7 +1027,14 @@ impl ToolSeam for SignalAgentTools {
         let mut refreshed_scope = ctx.scope.clone();
         refreshed_scope.mode = effective_mode;
         match self
-            .dispatch(actor_user_id, refreshed_scope, plan, validation_input, ctx)
+            .dispatch(
+                actor_user_id,
+                refreshed_scope,
+                plan,
+                validation_input,
+                carrier_id,
+                ctx,
+            )
             .await?
         {
             SignalDispatch::Settled {
@@ -1077,13 +1070,6 @@ impl ToolSeam for SignalAgentTools {
                     task.exec_request_id,
                     task.execution_generation,
                 ),
-            )),
-            SignalDispatch::Settled {
-                disposition: EdgeExecDisposition::PrivilegedAuthorizationReady { .. },
-                ..
-            } => Err(safe(
-                AgentErrorKind::Internal,
-                "administrator authorization escaped the two-phase dispatcher",
             )),
             SignalDispatch::Dispatched(task) => Ok(ExecOutcome::Dispatched(
                 desk_diagnose_core::session::ActionIdentity::agent_exec(
@@ -1268,6 +1254,7 @@ mod tests {
         ResolveExecData {
             exec_request_id: ExecRequestId(id.into()),
             decision,
+            carrier_id: None,
         }
     }
 
@@ -1275,11 +1262,17 @@ mod tests {
     async fn approval_is_bound_to_the_originating_browser_and_one_shot() {
         let pending = SignalAgentExecPending::new();
         let rx = pending
-            .register_approval("e1".into(), "browser-a".into(), "diagnose-a".into())
+            .register_approval(
+                "e1".into(),
+                "browser-a".into(),
+                "target-a".into(),
+                "diagnose-a".into(),
+                false,
+            )
             .unwrap();
         assert!(!pending.resolve("browser-b", &resolve("e1", ApprovalDecision::Approve)));
         assert!(pending.resolve("browser-a", &resolve("e1", ApprovalDecision::Approve)));
-        assert_eq!(rx.await.unwrap(), ApprovalDecision::Approve);
+        assert_eq!(rx.await.unwrap().decision, ApprovalDecision::Approve);
         assert!(!pending.resolve("browser-a", &resolve("e1", ApprovalDecision::Approve)));
     }
 
@@ -1287,29 +1280,49 @@ mod tests {
     async fn browser_disconnect_cancels_only_its_pending_approvals() {
         let pending = SignalAgentExecPending::new();
         let a = pending
-            .register_approval("a".into(), "browser-a".into(), "diagnose-a".into())
+            .register_approval(
+                "a".into(),
+                "browser-a".into(),
+                "target-a".into(),
+                "diagnose-a".into(),
+                false,
+            )
             .unwrap();
         let b = pending
-            .register_approval("b".into(), "browser-b".into(), "diagnose-b".into())
+            .register_approval(
+                "b".into(),
+                "browser-b".into(),
+                "target-b".into(),
+                "diagnose-b".into(),
+                false,
+            )
             .unwrap();
 
         assert_eq!(pending.cancel_approvals_for_browser("browser-a"), 1);
         assert!(a.await.is_err());
         assert!(pending.resolve("browser-b", &resolve("b", ApprovalDecision::Approve),));
-        assert_eq!(b.await.unwrap(), ApprovalDecision::Approve);
+        assert_eq!(b.await.unwrap().decision, ApprovalDecision::Approve);
     }
 
     #[tokio::test]
     async fn diagnose_cancel_is_request_scoped_on_the_same_browser() {
         let pending = SignalAgentExecPending::new();
         let old = pending
-            .register_approval("old".into(), "browser-a".into(), "diagnose-old".into())
+            .register_approval(
+                "old".into(),
+                "browser-a".into(),
+                "target-a".into(),
+                "diagnose-old".into(),
+                false,
+            )
             .unwrap();
         let current = pending
             .register_approval(
                 "current".into(),
                 "browser-a".into(),
+                "target-a".into(),
                 "diagnose-current".into(),
+                false,
             )
             .unwrap();
 
@@ -1319,7 +1332,7 @@ mod tests {
         );
         assert!(old.await.is_err());
         assert!(pending.resolve("browser-a", &resolve("current", ApprovalDecision::Approve)));
-        assert_eq!(current.await.unwrap(), ApprovalDecision::Approve);
+        assert_eq!(current.await.unwrap().decision, ApprovalDecision::Approve);
     }
 
     #[tokio::test]

@@ -501,6 +501,22 @@ pub trait EdgeExecObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
+// ====== Opaque binary signaling observer ======
+
+/// Consumes a bounded binary frame received on a normal signaling connection.
+/// The generic signaling facade never interprets or logs its payload. Central
+/// implementations use this only for the volatile exec-PTY carrier relay; text
+/// signaling and durable routing remain separate.
+pub trait BinaryFrameObserver: Send + Sync {
+    fn on_binary_frame<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        frame: bytes::Bytes,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send + 'a>,
+    >;
+}
+
 // ====== ExecStateReplyObserver trait ======
 
 /// Consumes inbound `ExecStateReply` frames that answer a query the central brain

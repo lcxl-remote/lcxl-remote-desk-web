@@ -82,7 +82,13 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
     // -> ExecPreview -> ResolveExec -> ExecResult, keyed by suggestion index. The
     // host re-classifies the command and gates it on the device execution ceiling;
     // the browser only relays and renders.
-    const exec = useConfirmExec({ deskId: connectionId, subscribe, sendMessage, orgId })
+    const exec = useConfirmExec({
+        deskId: connectionId,
+        deviceId,
+        subscribe,
+        sendMessage,
+        orgId,
+    })
     // The manager-selected completion model, or null when the selector is hidden
     // (open-source signal) — then no `model_id` rides the completion ask.
     const [completionModelId, setCompletionModelId] = useState<number | null>(null)

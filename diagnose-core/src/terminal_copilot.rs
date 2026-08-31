@@ -309,6 +309,7 @@ fn finalize_suggestion(raw: RawSuggestion, default_shell: &str) -> CommandSugges
         },
         command: raw.command.clone(),
         cwd: raw.cwd.clone(),
+        io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
         timeout_ms: 0,
         max_stdout_bytes: 0,
         max_stderr_bytes: 0,

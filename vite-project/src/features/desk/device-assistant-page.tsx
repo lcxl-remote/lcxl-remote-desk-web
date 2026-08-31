@@ -22,6 +22,8 @@ import {
 } from './use-device-assistant-observation';
 import { useDeviceAssistantChat } from './use-device-assistant-chat';
 import { useDeviceAssistantCapabilities } from './use-device-assistant-capabilities';
+import { useConfirmExec } from '../exec/use-confirm-exec';
+import { ExecLifecycle } from '../exec/exec-lifecycle';
 
 const CURRENT_SCREEN_CAPABILITY_ID = 'screen.capture.current';
 
@@ -114,6 +116,13 @@ function DeviceAssistantWorkspace({
         sendMessage,
     });
     const capabilities = useDeviceAssistantCapabilities({ deskId, subscribe, sendMessage });
+    const exec = useConfirmExec({
+        deskId,
+        deviceId: stableDeviceId,
+        subscribe,
+        sendMessage,
+        acceptUnsolicitedPreviews: true,
+    });
     const provider = useGetModelProvider();
     const browserPairing = useGetBrowserExtensionPairing({
         query: { enabled: false, retry: false },
@@ -811,6 +820,21 @@ function DeviceAssistantWorkspace({
                             })}
                         </div>
                     )}
+                    {Object.entries(exec.entries).map(([row, entry]) => {
+                        const rowIndex = Number(row);
+                        return (
+                            <div key={row} data-testid="device-assistant-exec">
+                                <ExecLifecycle
+                                    entry={entry}
+                                    onApprove={() => exec.approve(rowIndex)}
+                                    onReject={() => exec.reject(rowIndex)}
+                                    onCancel={() => exec.cancel(rowIndex)}
+                                    onDismiss={() => exec.dismiss(rowIndex)}
+                                    ptyClient={exec.ptyClient(rowIndex)}
+                                />
+                            </div>
+                        );
+                    })}
                     <div data-testid="device-assistant-transcript" className="max-h-[28rem] space-y-3 overflow-auto rounded-md border p-3">
                         {chat.hydrating && <Skeleton className="h-20 w-full" />}
                         {!chat.hydrating && chat.messages.length === 0 && !chat.partial && (

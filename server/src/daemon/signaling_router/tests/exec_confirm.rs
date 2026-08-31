@@ -12,6 +12,7 @@ pub(super) fn confirm_exec_model(request_id: &str, command: &str) -> SignalingMo
         },
         command: command.to_string(),
         cwd: None,
+        io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
         timeout_ms: 0,
         max_stdout_bytes: 0,
         max_stderr_bytes: 0,
@@ -42,6 +43,7 @@ pub(super) fn resolve_exec_model(
     let data = ResolveExecData {
         exec_request_id,
         decision,
+        carrier_id: None,
     };
     SignalingModel::new(
         request_id,

@@ -21,10 +21,6 @@ pub struct Model {
     /// Fingerprint of the command that was authorized, so a replayed generation
     /// carrying different content is refused instead of silently accepted.
     pub plan_fingerprint: String,
-    /// Optional full sealed plan for an execution whose platform supervisor must
-    /// be able to reconcile it after a daemon restart. Ordinary worker commands
-    /// keep this `None`; Linux root transient units store the exact `ExecPlan`.
-    pub plan_json: Option<String>,
     /// How to find and reclaim the process tree: a logical identity (job name,
     /// cgroup path) written before the spawn, replaced by the pid-derived one
     /// afterwards. `None` where the platform offers nothing to register up front.

@@ -67,6 +67,7 @@ pub(super) async fn maintain_proxy_connection(
     // manager > configured remote signal > embedded local signal.
     remote_access_central_link: RemoteAccessCentralLink,
     credential_scopes: &crate::daemon::manager_credential_scope::ManagerCredentialScopeRegistry,
+    exec_pty_carriers: Arc<crate::daemon::exec_pty_carrier::ExecPtyCarrierRegistry>,
 ) -> Result<ProxyConnectionOutcome, Box<dyn std::error::Error>> {
     let display_name = {
         let s = settings.read().await;
@@ -104,14 +105,19 @@ pub(super) async fn maintain_proxy_connection(
     );
     version_info.token = Some(auth_token.clone());
     version_info.set_available_exec_shells(&crate::exec_shells::available_exec_shells());
-    let advertised_ai_command_runtime_ms = {
+    let (advertised_ai_command_runtime_ms, advertised_exec_pty_capabilities) = {
         let settings = settings.read().await;
-        settings
-            .ai_policy
-            .max_command_runtime_seconds
-            .saturating_mul(1_000)
+        (
+            settings
+                .ai_policy
+                .max_command_runtime_seconds
+                .saturating_mul(1_000),
+            crate::worker::exec_pty::effective_capabilities(&settings.ai_policy),
+        )
     };
     version_info.max_ai_command_runtime_ms = Some(advertised_ai_command_runtime_ms);
+    version_info.exec_pty = advertised_exec_pty_capabilities.exec_pty;
+    version_info.exec_pty_elevation = advertised_exec_pty_capabilities.exec_pty_elevation;
     log::info!(
         "[agent-exec] verified available shells: {:?}",
         version_info.available_exec_shell_list()
@@ -187,6 +193,9 @@ pub(super) async fn maintain_proxy_connection(
         None
     };
     let mut credential_expiry_rx = credential_scopes.subscribe_expirations();
+    let pty_link_id = crate::daemon::exec_pty_carrier::PtyCarrierLinkId::new();
+    let (pty_binary_tx, mut pty_binary_rx) =
+        tokio::sync::mpsc::channel(crate::daemon::exec_pty_carrier::CARRIER_OUTPUT_QUEUE_CAP);
     let effective_router_ctx = RouterContext {
         admission_origin: match remote_access_central_link {
             RemoteAccessCentralLink::Manager => {
@@ -205,6 +214,11 @@ pub(super) async fn maintain_proxy_connection(
             }
         },
         manager_credential_link: manager_credential_link.clone(),
+        exec_pty_link: Some(crate::daemon::exec_pty_carrier::ExecPtyLinkContext {
+            registry: exec_pty_carriers.as_ref().clone(),
+            link_id: pty_link_id,
+            outbound: pty_binary_tx,
+        }),
         ..router_ctx.clone()
     };
     let router_ctx = &effective_router_ctx;
@@ -399,6 +413,62 @@ pub(super) async fn maintain_proxy_connection(
                                     }
                                 }
                             }
+                            awc::ws::Frame::Binary(bytes) => {
+                                let frame = match desk_agent_protocol::exec_pty_wire::decode(&bytes) {
+                                    Ok(frame) => frame,
+                                    Err(error) => {
+                                        warn!(
+                                            "[exec-pty] invalid binary frame on upstream link; closing link: {error}"
+                                        );
+                                        break;
+                                    }
+                                };
+                                let stream_id = frame.stream_id().to_string();
+                                let generation = frame.execution_generation().to_string();
+                                match exec_pty_carriers.accept_upstream_frame(pty_link_id, frame) {
+                                    Ok((worker_key, command)) => {
+                                        let dispatch = match worker_key.as_ref() {
+                                            Some(key) => router_ctx
+                                                .worker_mgr
+                                                .send_to_session_worker(&key.session, command)
+                                                .await,
+                                            None => router_ctx.worker_mgr.send_to_worker(command).await,
+                                        };
+                                        if let Err(error) = dispatch {
+                                            warn!(
+                                                "[exec-pty] input dispatch failed generation={} stream={} error={}",
+                                                generation, stream_id, error
+                                            );
+                                            if let Some(cancel) = exec_pty_carriers.remove_stream(
+                                                &stream_id,
+                                                desk_agent_protocol::exec_pty::PtyCloseReason::SessionStale,
+                                            ) {
+                                                super::cancel_pty_worker(
+                                                    &router_ctx.worker_mgr,
+                                                    cancel,
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        warn!(
+                                            "[exec-pty] upstream frame rejected generation={} stream={} error={}",
+                                            generation, stream_id, error
+                                        );
+                                        if let Some(cancel) = exec_pty_carriers.remove_stream(
+                                            &stream_id,
+                                            error.close_reason(),
+                                        ) {
+                                            super::cancel_pty_worker(
+                                                &router_ctx.worker_mgr,
+                                                cancel,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                            }
                             awc::ws::Frame::Ping(data) => {
                                 let _ = sink.send(awc::ws::Message::Pong(data)).await;
                             }
@@ -435,6 +505,16 @@ pub(super) async fn maintain_proxy_connection(
                         info!("[Proxy] Outbound broadcast channel closed");
                         break;
                     }
+                }
+            }
+
+            pty_binary = pty_binary_rx.recv() => {
+                let Some(frame) = pty_binary else {
+                    break;
+                };
+                if let Err(error) = sink.send(awc::ws::Message::Binary(frame.into())).await {
+                    warn!("[exec-pty] upstream binary send failed: {error}");
+                    break;
                 }
             }
 
@@ -538,23 +618,30 @@ pub(super) async fn maintain_proxy_connection(
                 }
             }
 
-            // The runtime ceiling is registration metadata used by the central
-            // model schema and plan sealer. Reconnect all upstreams when the
-            // locally authoritative value changes so a newly started diagnosis
-            // observes the saved setting instead of a stale connection-time cap.
+            // These values are registration metadata used by the central model
+            // schema and plan sealer. Reconnect all upstreams when the locally
+            // authoritative settings change so new work never observes stale
+            // connection-time capabilities.
             _ = agent_capability_reconcile.tick() => {
-                let current = {
+                let (current_runtime_ms, current_pty_capabilities) = {
                     let settings = settings.read().await;
-                    settings
-                        .ai_policy
-                        .max_command_runtime_seconds
-                        .saturating_mul(1_000)
+                    (
+                        settings
+                            .ai_policy
+                            .max_command_runtime_seconds
+                            .saturating_mul(1_000),
+                        crate::worker::exec_pty::effective_capabilities(&settings.ai_policy),
+                    )
                 };
-                if current != advertised_ai_command_runtime_ms {
+                if current_runtime_ms != advertised_ai_command_runtime_ms
+                    || current_pty_capabilities != advertised_exec_pty_capabilities
+                {
                     info!(
-                        "[agent-exec] command runtime ceiling changed from {}ms to {}ms; reconnecting {}",
+                        "[agent-exec] runtime/capabilities changed from {}ms/{:?} to {}ms/{:?}; reconnecting {}",
                         advertised_ai_command_runtime_ms,
-                        current,
+                        advertised_exec_pty_capabilities,
+                        current_runtime_ms,
+                        current_pty_capabilities,
                         redact_token_in_url(&signaling_url)
                     );
                     let _ = sink.send(awc::ws::Message::Close(None)).await;
@@ -574,6 +661,10 @@ pub(super) async fn maintain_proxy_connection(
                 break;
             }
         }
+    }
+
+    for cancel in exec_pty_carriers.remove_link(pty_link_id) {
+        super::cancel_pty_worker(&router_ctx.worker_mgr, cancel).await;
     }
 
     info!(

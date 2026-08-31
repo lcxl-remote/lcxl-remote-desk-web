@@ -96,6 +96,7 @@ use desk_signal::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
             update_device_code,
         },
+        exec_pty::open_exec_pty_carrier,
         model_provider::{get_model_provider, test_model_provider, update_model_provider},
         signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
@@ -229,7 +230,9 @@ pub fn configure_api_surface(
     // exact `/api/desk/redeem-code` path, registered before the `/api` scope, is
     // matched here rather than by the guarded scope.
     if opts.include_signaling {
-        cfg.service(open_signaling_handle).service(redeem_code);
+        cfg.service(open_signaling_handle)
+            .service(open_exec_pty_carrier)
+            .service(redeem_code);
     }
 
     cfg.service(
@@ -1513,6 +1516,8 @@ mod tests {
             repository_url: None,
             available_exec_shells: None,
             max_ai_command_runtime_ms: None,
+            exec_pty: false,
+            exec_pty_elevation: false,
         };
         let query = serde_urlencoded::to_string(&version).unwrap();
         let uri = format!("/api/desk/signaling?{query}");

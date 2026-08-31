@@ -268,8 +268,8 @@ impl SessionShellRegistry {
     }
 
     /// Whether this exact daemon-issued registration generation is still the
-    /// leader on its original WebSocket. Used after a blocking polkit prompt so
-    /// an approval cannot survive logout, reconnect, or registration replacement.
+    /// leader on its original WebSocket. Callers use this to reject stale session
+    /// state after logout, reconnect, or registration replacement.
     pub fn is_current(&self, registration: &RegisteredSessionShell) -> bool {
         self.inner
             .lock()

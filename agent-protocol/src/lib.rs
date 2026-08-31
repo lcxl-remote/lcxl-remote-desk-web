@@ -47,13 +47,15 @@ pub mod evidence;
 pub mod exec;
 pub mod exec_lifecycle;
 pub mod exec_policy;
+pub mod exec_pty;
+pub mod exec_pty_wire;
 pub mod model_proxy;
 pub mod provenance;
 pub mod remote_tool;
 pub mod terminal_complete;
 pub mod terminal_copilot;
 
-use crate::exec::{CommandClassification, ExecDecision, ExecEffect};
+use crate::exec::{CommandClassification, ExecDecision, ExecEffect, ExecIoMode};
 
 // ============================ Envelope ============================
 
@@ -974,6 +976,7 @@ pub struct ExecInput {
     pub target: ExecTarget,
     pub command: String,
     pub cwd: Option<String>,
+    pub io_mode: ExecIoMode,
     pub timeout_ms: u32,
     pub max_stdout_bytes: u32,
     pub max_stderr_bytes: u32,
@@ -995,13 +998,30 @@ pub enum ExecTarget {
 )]
 pub struct ExecOutput {
     pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub stdout_truncated: bool,
-    pub stderr_truncated: bool,
+    pub streams: ExecOutputStreams,
     pub duration_ms: u32,
     #[serde(default)]
     pub redactions: Vec<String>,
+}
+
+/// Output shape follows the sealed I/O mode. A PTY has one combined terminal
+/// byte stream; projecting it into stdout with an empty stderr would create a
+/// false distinction and is intentionally not supported.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExecOutputStreams {
+    Split {
+        stdout: String,
+        stderr: String,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+    },
+    PtyCombined {
+        terminal: String,
+        truncated: bool,
+    },
 }
 
 // ============================ Error ============================
@@ -1468,6 +1488,7 @@ mod tests {
             },
             command: "Get-Service".into(),
             cwd: None,
+            io_mode: crate::exec::ExecIoMode::NonInteractive,
             timeout_ms: 10_000,
             max_stdout_bytes: 65_536,
             max_stderr_bytes: 65_536,

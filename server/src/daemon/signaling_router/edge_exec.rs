@@ -55,6 +55,29 @@ pub(super) async fn handle_edge_exec_request_inbound(
         }
     };
 
+    let carrier_id = payload.carrier_id().map(str::to_string);
+    let carrier_shape_valid = match &payload {
+        EdgeExecRequestPayload::Fleet { plan } => !plan.io_mode.is_pty(),
+        EdgeExecRequestPayload::Agentic {
+            plan, carrier_id, ..
+        } => plan.io_mode.is_pty() == carrier_id.as_ref().is_some_and(|id| !id.is_empty()),
+    };
+    if !carrier_shape_valid {
+        send_edge_execution_completed(
+            &ctx.outbound_tx,
+            &request_id,
+            EdgeExecDisposition::RejectedBeforeDispatch {
+                error: agent_error(
+                    AgentErrorKind::InvalidInput,
+                    "pep_rejected:interactive_carrier_mismatch",
+                    false,
+                    true,
+                ),
+            },
+        );
+        return Ok(());
+    }
+
     // Bind the plan's identifiers to the authz-validated frame. The authz block was
     // validated against `request_id` (the frame id) by the proxy gate, and the worker
     // is correlated on that same `request_id`; a plan whose own dispatch id names a
@@ -121,32 +144,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
     // Exec must be runnable in this startup mode. The manager's pre-claim version
     // gate normally prevents dispatch to a daemon that cannot execute, but a PEP
     // must never assume the PDP got it right.
-    let administrator =
-        payload.plan().principal == desk_agent_protocol::exec::ExecutionPrincipal::Administrator;
-    let privileged_request = payload.privileged_request().cloned();
-    if administrator != privileged_request.is_some() {
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            &request_id,
-            EdgeExecDisposition::RejectedBeforeDispatch {
-                error: agent_error(
-                    AgentErrorKind::InvalidInput,
-                    "pep_rejected:privileged_phase_binding",
-                    false,
-                    true,
-                ),
-            },
-        );
-        return Ok(());
-    }
-    #[cfg(target_os = "linux")]
-    let execution_available = if administrator {
-        ctx.privileged_exec.is_some()
-    } else {
-        ctx.exec_supported || ctx.worker_mgr.uses_session_targeting()
-    };
-    #[cfg(not(target_os = "linux"))]
-    let execution_available = ctx.exec_supported && !administrator;
+    let execution_available = ctx.exec_supported || ctx.worker_mgr.uses_session_targeting();
     if !execution_available {
         send_edge_execution_completed(
             &ctx.outbound_tx,
@@ -169,41 +167,6 @@ pub(super) async fn handle_edge_exec_request_inbound(
     // dispatch down before worker handoff.
     let local_policy = ctx.settings.read().await.ai_policy.clone();
     let effective_mode = { authz.scope.mode.restrict_to(local_policy.execution_mode) };
-    if administrator
-        && !matches!(
-            effective_mode,
-            ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved
-        )
-    {
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            &request_id,
-            EdgeExecDisposition::RejectedBeforeDispatch {
-                error: agent_error(
-                    AgentErrorKind::PermissionDenied,
-                    "pep_rejected:administrator_execution_mode_disabled",
-                    false,
-                    true,
-                ),
-            },
-        );
-        return Ok(());
-    }
-    if administrator && privileged_runtime_exceeds_local_ceiling(payload.plan(), &local_policy) {
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            &request_id,
-            EdgeExecDisposition::RejectedBeforeDispatch {
-                error: agent_error(
-                    AgentErrorKind::PermissionDenied,
-                    "pep_rejected:administrator_runtime_exceeds_local_ceiling",
-                    false,
-                    true,
-                ),
-            },
-        );
-        return Ok(());
-    }
     if payload.plan().execution_basis
         == desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
         && !matches!(
@@ -276,9 +239,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
         &request_id,
         payload.into_plan(),
         session_connection_id.as_deref(),
-        authz.scope.mode,
-        authz.max_risk,
-        privileged_request,
+        carrier_id,
     )
     .await;
     Ok(())
@@ -294,9 +255,7 @@ pub(super) async fn dispatch_fleet_exec_plan(
     request_id: &str,
     plan: ExecPlan,
     session_connection_id: Option<&str>,
-    authorized_mode: ExecutionMode,
-    authorized_max_risk: desk_agent_protocol::RiskLevel,
-    privileged_request: Option<PrivilegedExecRequest>,
+    carrier_id: Option<String>,
 ) {
     // A ServiceDaemon can host several independently ready desktop sessions.
     // Resolve the execution anchor before claiming the at-most-once ledger: an
@@ -325,19 +284,15 @@ pub(super) async fn dispatch_fleet_exec_plan(
         }
     };
 
-    #[cfg(target_os = "linux")]
-    if plan.principal == desk_agent_protocol::exec::ExecutionPrincipal::Administrator {
-        dispatch_linux_privileged_exec_plan(
-            ctx,
+    let pty_capabilities = current_exec_pty_capabilities(&ctx.settings).await;
+    if let Some(reason) = pty_dispatch_refusal(&plan, pty_capabilities) {
+        send_edge_execution_completed(
+            &ctx.outbound_tx,
             request_id,
-            plan,
-            session_connection_id,
-            selected_session,
-            authorized_mode,
-            authorized_max_risk,
-            privileged_request.expect("Administrator phase binding was checked"),
-        )
-        .await;
+            EdgeExecDisposition::RejectedBeforeDispatch {
+                error: agent_error(AgentErrorKind::UnsupportedCapability, reason, false, true),
+            },
+        );
         return;
     }
 
@@ -397,22 +352,83 @@ pub(super) async fn dispatch_fleet_exec_plan(
     if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
         pending.insert(request_id.to_string());
     }
-    let payload = ExecPlanPayload {
-        request_id: request_id.to_string(),
-        // No browser connection: a fleet result is routed by `request_id`, not a
-        // control-end connection id.
-        connection_id: None,
-        plan,
-        audit_source_request_id: Some(request_id.to_string()),
-    };
-    let dispatch = if let Some(session) = selected_session.as_ref() {
-        ctx.worker_mgr
-            .send_to_session_worker(session, ServiceToWorker::ExecPlan(payload))
-            .await
+    let dispatch = if plan.io_mode.is_pty() {
+        match (carrier_id, ctx.exec_pty_link.clone()) {
+            (Some(stream_id), Some(link)) => match ctx
+                .worker_mgr
+                .exec_worker_target_for_connection(session_connection_id)
+                .await
+            {
+                Ok(target) => {
+                    let payload = desk_ipc_protocol::message::ExecPtyStartPayload {
+                        request_id: request_id.to_string(),
+                        connection_id: None,
+                        exec_pty: pty_capabilities.exec_pty,
+                        exec_pty_elevation: pty_capabilities.exec_pty_elevation,
+                        stream_id: stream_id.clone(),
+                        session_target_id: target.session_target_id,
+                        registration_generation: target.registration_generation,
+                        worker_incarnation: target.wire_worker_incarnation,
+                        plan,
+                        audit_source_request_id: Some(request_id.to_string()),
+                    };
+                    match link.registry.bind(
+                        link.link_id,
+                        &payload,
+                        target.worker_key.clone(),
+                        target.source_incarnation,
+                        link.outbound,
+                    ) {
+                        Ok(()) => {
+                            let sent = match target.worker_key.as_ref() {
+                                Some(key) => {
+                                    ctx.worker_mgr
+                                        .send_to_session_worker(
+                                            &key.session,
+                                            ServiceToWorker::ExecPtyStart(payload),
+                                        )
+                                        .await
+                                }
+                                None => {
+                                    ctx.worker_mgr
+                                        .send_to_worker(ServiceToWorker::ExecPtyStart(payload))
+                                        .await
+                                }
+                            };
+                            if sent.is_err() {
+                                link.registry.remove_stream(
+                                    &stream_id,
+                                    desk_agent_protocol::exec_pty::PtyCloseReason::SessionStale,
+                                );
+                            }
+                            sent
+                        }
+                        Err(error) => Err(format!("PTY carrier binding failed: {error}")),
+                    }
+                }
+                Err(error) => Err(error),
+            },
+            (None, _) => Err("approved PTY execution has no live carrier".to_string()),
+            (_, None) => Err("trusted central link has no PTY binary carrier".to_string()),
+        }
     } else {
-        ctx.worker_mgr
-            .send_to_worker(ServiceToWorker::ExecPlan(payload))
-            .await
+        let payload = ExecPlanPayload {
+            request_id: request_id.to_string(),
+            // No browser connection: a fleet result is routed by `request_id`, not a
+            // control-end connection id.
+            connection_id: None,
+            plan,
+            audit_source_request_id: Some(request_id.to_string()),
+        };
+        if let Some(session) = selected_session.as_ref() {
+            ctx.worker_mgr
+                .send_to_session_worker(session, ServiceToWorker::ExecPlan(payload))
+                .await
+        } else {
+            ctx.worker_mgr
+                .send_to_worker(ServiceToWorker::ExecPlan(payload))
+                .await
+        }
     };
     if let Err(e) = dispatch {
         if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
@@ -432,359 +448,6 @@ pub(super) async fn dispatch_fleet_exec_plan(
                 ),
             },
         );
-    }
-}
-
-#[cfg(target_os = "linux")]
-async fn dispatch_linux_privileged_exec_plan(
-    ctx: &RouterContext,
-    request_id: &str,
-    plan: ExecPlan,
-    session_connection_id: Option<&str>,
-    selected_session: Option<desk_ipc_protocol::message::SessionKey>,
-    authorized_mode: ExecutionMode,
-    authorized_max_risk: desk_agent_protocol::RiskLevel,
-    privileged_request: PrivilegedExecRequest,
-) {
-    let Some(supervisor) = ctx.privileged_exec.as_ref().cloned() else {
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            request_id,
-            EdgeExecDisposition::RejectedBeforeDispatch {
-                error: agent_error(
-                    AgentErrorKind::UnsupportedCapability,
-                    "administrator execution is unavailable",
-                    false,
-                    true,
-                ),
-            },
-        );
-        return;
-    };
-    let Some(selected_session) = selected_session else {
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            request_id,
-            EdgeExecDisposition::RejectedBeforeDispatch {
-                error: agent_error(
-                    AgentErrorKind::SessionUnavailable,
-                    "administrator execution requires a registered Linux session",
-                    true,
-                    true,
-                ),
-            },
-        );
-        return;
-    };
-
-    // A sequential redelivery must never prompt again. The sealed privileged row
-    // is authoritative: replay its terminal result, or report that an accepted
-    // generation is still/indeterminately in flight.
-    match ctx.exec_ledger.get(&plan.execution_generation).await {
-        Ok(Some(row)) => {
-            let same_plan = row.plan_fingerprint == plan.fingerprint
-                && row
-                    .plan_json
-                    .as_deref()
-                    .and_then(|json| serde_json::from_str::<ExecPlan>(json).ok())
-                    .is_some_and(|stored| stored == plan);
-            if !same_plan {
-                send_edge_execution_completed(
-                    &ctx.outbound_tx,
-                    request_id,
-                    EdgeExecDisposition::RejectedBeforeDispatch {
-                        error: agent_error(
-                            AgentErrorKind::PermissionDenied,
-                            "this dispatch generation already belongs to a different execution",
-                            false,
-                            true,
-                        ),
-                    },
-                );
-            } else {
-                send_edge_execution_completed(
-                    &ctx.outbound_tx,
-                    request_id,
-                    privileged_disposition_for_row(&row, None),
-                );
-            }
-            return;
-        }
-        Ok(None) => {}
-        Err(error) => {
-            send_edge_execution_completed(
-                &ctx.outbound_tx,
-                request_id,
-                EdgeExecDisposition::RejectedBeforeDispatch {
-                    error: agent_error(
-                        AgentErrorKind::Internal,
-                        &format!("privileged execution ledger unavailable: {error}"),
-                        true,
-                        true,
-                    ),
-                },
-            );
-            return;
-        }
-    }
-
-    let Some(registry) = ctx.worker_mgr.session_shell_registry() else {
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            request_id,
-            EdgeExecDisposition::RejectedBeforeDispatch {
-                error: agent_error(
-                    AgentErrorKind::SessionUnavailable,
-                    "session-shell registry is unavailable",
-                    true,
-                    true,
-                ),
-            },
-        );
-        return;
-    };
-    let Some(registration) = ctx.worker_mgr.session_shell_registration(&selected_session) else {
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            request_id,
-            EdgeExecDisposition::RejectedBeforeDispatch {
-                error: agent_error(
-                    AgentErrorKind::SessionUnavailable,
-                    "the selected session registration is stale",
-                    true,
-                    true,
-                ),
-            },
-        );
-        return;
-    };
-
-    let permit_id = match privileged_request {
-        PrivilegedExecRequest::Authorize => {
-            match supervisor
-                .authorize_once(&plan, &registry, &registration)
-                .await
-            {
-                Ok(permit_id) => send_edge_execution_completed(
-                    &ctx.outbound_tx,
-                    request_id,
-                    EdgeExecDisposition::PrivilegedAuthorizationReady {
-                        permit_id: permit_id.to_string(),
-                    },
-                ),
-                Err(error) => {
-                    let kind = match error {
-                        crate::daemon::linux_privileged_exec::PrivilegedAuthorizationError::Authorization(
-                            crate::daemon::linux_privileged_exec::AuthorizationError::TimedOut,
-                        ) => AgentErrorKind::Timeout,
-                        crate::daemon::linux_privileged_exec::PrivilegedAuthorizationError::Plan(_) => {
-                            AgentErrorKind::RiskBlocked
-                        }
-                        _ => AgentErrorKind::PermissionDenied,
-                    };
-                    send_edge_execution_completed(
-                        &ctx.outbound_tx,
-                        request_id,
-                        EdgeExecDisposition::RejectedBeforeDispatch {
-                            error: agent_error(kind, &error.to_string(), false, true),
-                        },
-                    );
-                }
-            }
-            return;
-        }
-        PrivilegedExecRequest::Dispatch { permit_id } => match uuid::Uuid::parse_str(&permit_id) {
-            Ok(permit_id) => permit_id,
-            Err(_) => {
-                send_edge_execution_completed(
-                    &ctx.outbound_tx,
-                    request_id,
-                    EdgeExecDisposition::RejectedBeforeDispatch {
-                        error: agent_error(
-                            AgentErrorKind::InvalidInput,
-                            "administrator dispatch permit is malformed",
-                            false,
-                            true,
-                        ),
-                    },
-                );
-                return;
-            }
-        },
-    };
-
-    // The polkit prompt can outlive a logout, reconnect, target change, or local
-    // policy tightening. Revalidate every host-owned axis before consuming the
-    // one-shot permit and reserving durable launch authority.
-    let current_policy = ctx.settings.read().await.ai_policy.clone();
-    let current_mode = authorized_mode.restrict_to(current_policy.execution_mode);
-    let target_current = matches!(
-        ctx.worker_mgr.resolve_session_target_for_connection(
-            crate::daemon::session_target::SessionCapability::Assistant,
-            session_connection_id,
-        ),
-        Ok(Some(ref session)) if *session == selected_session
-    );
-    let policy_current = pep_policy_checks(
-        &plan,
-        authorized_max_risk,
-        &ctx.command_blocklist.snapshot(),
-    )
-    .is_none()
-        && !privileged_runtime_exceeds_local_ceiling(&plan, &current_policy);
-    if !target_current
-        || !registry.is_current(&registration)
-        || !policy_current
-        || !matches!(
-            current_mode,
-            ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved
-        )
-    {
-        supervisor.discard_permit(permit_id);
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            request_id,
-            EdgeExecDisposition::RejectedBeforeDispatch {
-                error: agent_error(
-                    AgentErrorKind::PermissionDenied,
-                    "administrator authorization became stale before dispatch",
-                    false,
-                    true,
-                ),
-            },
-        );
-        return;
-    }
-
-    let limit = current_policy.max_concurrent_executions as usize;
-    if let Err(full) = ctx.exec_capacity.try_admit(
-        &plan.execution_generation,
-        limit,
-        std::time::Duration::from_millis(u64::from(plan.timeout_ms)),
-    ) {
-        supervisor.discard_permit(permit_id);
-        send_edge_execution_completed(
-            &ctx.outbound_tx,
-            request_id,
-            EdgeExecDisposition::HostAtCapacity {
-                error: agent_error(
-                    AgentErrorKind::HostAtCapacity,
-                    &full.to_string(),
-                    true,
-                    true,
-                ),
-            },
-        );
-        return;
-    }
-
-    let spec = match supervisor
-        .prepare_dispatch(permit_id, &plan, &registry, &registration)
-        .await
-    {
-        Ok(spec) => spec,
-        Err(crate::daemon::linux_privileged_exec::PrivilegedPrepareError::Duplicate) => {
-            ctx.exec_capacity.release(&plan.execution_generation);
-            let disposition = match ctx.exec_ledger.get(&plan.execution_generation).await {
-                Ok(Some(row)) => privileged_disposition_for_row(&row, None),
-                Ok(None) | Err(_) => EdgeExecDisposition::ExecutionStateUnknown {
-                    reason: "the privileged dispatch was already reserved but its state could not be read"
-                        .to_string(),
-                },
-            };
-            send_edge_execution_completed(&ctx.outbound_tx, request_id, disposition);
-            return;
-        }
-        Err(error) => {
-            ctx.exec_capacity.release(&plan.execution_generation);
-            send_edge_execution_completed(
-                &ctx.outbound_tx,
-                request_id,
-                EdgeExecDisposition::RejectedBeforeDispatch {
-                    error: agent_error(
-                        AgentErrorKind::PermissionDenied,
-                        &format!("administrator dispatch was refused: {error}"),
-                        false,
-                        true,
-                    ),
-                },
-            );
-            return;
-        }
-    };
-
-    let outbound = ctx.outbound_tx.clone();
-    let capacity = ctx.exec_capacity.clone();
-    let ledger = ctx.exec_ledger.clone();
-    let request_id = request_id.to_string();
-    tokio::spawn(async move {
-        let generation = plan.execution_generation.clone();
-        let outcome = supervisor.execute_prepared(&plan, spec).await;
-        capacity.release(&generation);
-        let disposition = match ledger.get(&generation).await {
-            Ok(Some(row)) => privileged_disposition_for_row(&row, Some(outcome)),
-            Ok(None) | Err(_) => EdgeExecDisposition::ExecutionStateUnknown {
-                reason:
-                    "administrator execution finished locally but its durable state is unavailable"
-                        .to_string(),
-            },
-        };
-        send_edge_execution_completed(&outbound, &request_id, disposition);
-    });
-}
-
-fn privileged_runtime_exceeds_local_ceiling(
-    plan: &ExecPlan,
-    policy: &crate::model::settings::AiExecutionPolicy,
-) -> bool {
-    let ceiling_ms = policy
-        .max_command_runtime_seconds
-        .saturating_mul(1_000)
-        .clamp(
-            desk_agent_protocol::exec_policy::MIN_TIMEOUT_MS,
-            desk_agent_protocol::exec_policy::MAX_TIMEOUT_MS,
-        );
-    plan.timeout_ms > ceiling_ms
-}
-
-#[cfg(target_os = "linux")]
-fn privileged_disposition_for_row(
-    row: &crate::daemon::exec_ledger::exec_ledger_entry::Model,
-    fallback_outcome: Option<AgentOutcome>,
-) -> EdgeExecDisposition {
-    use crate::daemon::exec_ledger::State;
-
-    if row.state == State::Terminal.as_str() {
-        let outcome = row
-            .result_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str::<AgentOutcome>(json).ok())
-            .or(fallback_outcome)
-            .unwrap_or_else(|| {
-                AgentOutcome::Err(agent_error(
-                    AgentErrorKind::Internal,
-                    "administrator execution ended but its result is unavailable",
-                    false,
-                    true,
-                ))
-            });
-        EdgeExecDisposition::Executed { outcome }
-    } else if row.state == State::SpawnFailed.as_str() {
-        EdgeExecDisposition::DispatchFailedBeforeWorker {
-            error: agent_error(
-                AgentErrorKind::Internal,
-                "systemd failed before the administrator command started",
-                true,
-                true,
-            ),
-        }
-    } else {
-        EdgeExecDisposition::ExecutionStateUnknown {
-            reason: format!(
-                "this host accepted the administrator execution and its state is {}",
-                row.state
-            ),
-        }
     }
 }
 

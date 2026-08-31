@@ -142,10 +142,10 @@ async fn invoke_agent_capability_unknown_kind_emits_unsupported_outcome() {
     }
 }
 
-/// `exec` parses cleanly but derives no capability, so the
-/// handler rejects it as `UnsupportedCapability` without forwarding.
+/// `exec` parses cleanly but is not accepted by the generic capability route;
+/// confirmed execution uses its dedicated preview/approval lifecycle instead.
 #[tokio::test]
-async fn invoke_agent_capability_exec_is_unsupported_until_m2() {
+async fn invoke_agent_capability_exec_is_unsupported_on_the_generic_route() {
     let (ctx, mut rx) = make_ctx_with_rx().await;
     let raw = serde_json::json!({
         "operation": {
@@ -155,6 +155,7 @@ async fn invoke_agent_capability_exec_is_unsupported_until_m2() {
                     "target": { "type": "shell", "shell": "powershell" },
                     "command": "Get-Service",
                     "cwd": null,
+                    "io_mode": { "type": "non_interactive" },
                     "timeout_ms": 1000,
                     "max_stdout_bytes": 1024,
                     "max_stderr_bytes": 1024

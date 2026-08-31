@@ -606,6 +606,7 @@ mod tests {
                     },
                     command: "systemctl status nginx".to_string(),
                     cwd: Some("/srv".to_string()),
+                    io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
                     timeout_ms: 0,
                     max_stdout_bytes: 0,
                     max_stderr_bytes: 0,
