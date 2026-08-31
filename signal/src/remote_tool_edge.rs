@@ -3695,17 +3695,19 @@ impl SignalDeviceAssistantTools {
                 false,
             )
         }));
-        browser_pre_send!(
-            store
-                .bind_computer_transport(&self.target_connection_id, &plan, &session, call)
-                .await
-                .map_err(|_| error(
-                    AgentErrorKind::Internal,
-                    "failed to freeze original Computer Action transport",
-                    false,
-                    false
-                ))
-        );
+        if capability.wire.effect.is_side_effecting() {
+            browser_pre_send!(
+                store
+                    .bind_computer_transport(&self.target_connection_id, &plan, &session, call)
+                    .await
+                    .map_err(|_| error(
+                        AgentErrorKind::Internal,
+                        "failed to freeze original Computer Action transport",
+                        false,
+                        false
+                    ))
+            );
+        }
         let (completion_tx, completion_rx) = oneshot::channel();
         if !global_computer_action_pending().register(
             generation.clone(),

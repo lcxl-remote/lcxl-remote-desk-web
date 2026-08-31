@@ -14,6 +14,8 @@ use desk_signal_facade::{
 use futures_util::{SinkExt, StreamExt};
 use std::{sync::Arc, time::Duration};
 
+mod reads;
+
 #[actix_web::test]
 async fn real_socket_observer_rejects_wrong_subject_and_frame_then_commits_original_acceptance() {
     let directory = tempfile::tempdir().unwrap();

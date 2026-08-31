@@ -29,6 +29,7 @@ pub(crate) enum AcceptanceOutcome {
     Stored,
     Duplicate,
     Legacy,
+    InlineObservation,
     Stale,
 }
 
@@ -63,7 +64,6 @@ async fn original_on(
     if outbox.payload_schema_version != 1
         || work.payload_schema_version != 1
         || work.kind != CAPABILITY_WORK_KIND
-        || !work.is_side_effecting
         || outbox.dispatch_id != payload.dispatch_id
         || payload.dispatch_id != generation
         || outbox.work_id != payload.work_id
@@ -169,6 +169,9 @@ impl SignalCapabilityGrantStore {
         let txn = self.db.begin().await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, &plan.execution_generation).await?;
+            if !work.is_side_effecting {
+                return Err(invalid());
+            }
             if stable_id(
                 "capability-call",
                 &format!("{}:{}:{}", work.conversation_id, work.turn_id, call.id),
@@ -306,6 +309,22 @@ impl SignalCapabilityGrantStore {
         let txn = self.db.begin().await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, frame_request_id).await?;
+            if !work.is_side_effecting {
+                // Browser observation uses this transport but is still an
+                // inline read, not a background mutation or acceptance proof.
+                if !matches!(
+                    payload.tool_name.as_str(),
+                    "browser_take_snapshot" | "browser_wait_for"
+                ) || work.id.to_string() != started.work_id
+                    || payload.call_id != started.action_request_id
+                    || work.target_device_id != audience
+                    || outbox.computer_binding_json.is_some()
+                    || outbox.computer_acceptance_json.is_some()
+                {
+                    return Err(invalid());
+                }
+                return Ok(AcceptanceOutcome::InlineObservation);
+            }
             let json = outbox
                 .computer_binding_json
                 .as_deref()
