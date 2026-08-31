@@ -96,6 +96,8 @@ Tool-free automatic interpretation reuses the foreground's strict model sink and
 
 Idle-session retention removes the session and its action results, dispatch bindings, grant reservations, grants, run events and legacy command records in one transaction. Eligibility is rechecked inside that transaction, and a deletion failure rolls back the whole session batch. A late result cannot recreate a removed original work record. This is logical database cleanup, not a promise of forensic erasure from SQLite files, backups or storage media.
 
+Snapshot reads and background-task stops can recover an offline target using the original opaque `sessionId` returned by a snapshot or history. This only locates the original actor/device session; the store still validates that subject and its persisted state. A known non-host connection is rejected, and recovery never authorizes a new turn, grants permission or redirects a stop to a new connection. Native foreground polling and duplicate-stop guards do not imply process-recreation or real-device lifecycle acceptance.
+
 ## Redaction Fails Closed
 
 The pipeline runs **collect → redact → model → render**. Collection and redaction happen on the **edge device**; the model call happens **centrally**. If redaction fails, the edge returns an error and the central brain aborts **before** the model is called. Evidence (with raw screenshot bytes stripped) is always redacted before it leaves the host or reaches the model.

@@ -1947,6 +1947,11 @@ export type DeviceAssistantSessionSnapshotDto = {
      * @type integer, int64
     */
     seq: number;
+    /**
+     * @description Opaque recovery selector; ownership is rechecked on every read or stop.
+     * @type string
+    */
+    sessionId: string;
     taskStatusProjection?: (null | TaskStatusProjectionDto);
     unresolvedOutcome?: (null | UnknownOutcomeDto);
 };
@@ -4297,6 +4302,11 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
          * @type integer, int64
         */
         seq: number;
+        /**
+         * @description Opaque recovery selector; ownership is rechecked on every read or stop.
+         * @type string
+        */
+        sessionId: string;
         taskStatusProjection?: (null | TaskStatusProjectionDto);
         unresolvedOutcome?: (null | UnknownOutcomeDto);
     };

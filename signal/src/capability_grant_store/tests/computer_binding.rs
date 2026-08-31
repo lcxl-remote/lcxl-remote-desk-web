@@ -2,6 +2,7 @@ use super::*;
 mod background;
 mod cancellation;
 mod completion;
+mod recovery;
 mod wire;
 use crate::capability_grant_store::computer_binding::{
     AcceptanceOutcome, ComputerAcceptance, ComputerBinding,
@@ -42,6 +43,7 @@ impl Fixture {
             .unwrap();
         let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
         session.actor_id = actor.into();
+        session.version = row.version;
         row.actor_id = actor.into();
         session.policy_revision =
             desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;

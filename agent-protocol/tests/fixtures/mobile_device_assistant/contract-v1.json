@@ -112,6 +112,7 @@
     }
   },
   "snapshot": {
+    "sessionId": "session-1",
     "seq": 42,
     "active": true,
     "requestId": "request-2",

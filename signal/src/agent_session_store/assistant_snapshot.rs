@@ -16,6 +16,34 @@ pub(crate) struct AssistantSnapshot {
 }
 
 impl SignalAgentSessionStore {
+    /// Resolve an opaque recovery selector, not an execution authorization.
+    /// The caller still reads/stops through the exact actor/device store path.
+    pub(crate) async fn recovery_device(
+        &self,
+        run: &str,
+        actor: &str,
+    ) -> Result<Option<String>, AgentError> {
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(run))
+            .filter(agent_session::Column::ActorId.eq(actor))
+            .one(&self.db)
+            .await
+            .map_err(|_| internal("recovery lookup failed"))?;
+        let Some(row) = row else { return Ok(None) };
+        let session = PersistedAgentSession::decode_json(&row.state_json)
+            .map_err(|_| internal("invalid recovery session"))?;
+        if session.surface != AgentSessionSurface::DeviceAssistant
+            || session.actor_id != actor
+            || session.device_id != row.device_id
+            || session.conversation_id != run
+            || session.version != row.version
+            || session.lease_token as i64 != row.lease_token
+        {
+            return Ok(None);
+        }
+        Ok(Some(session.device_id))
+    }
+
     pub(crate) async fn read_assistant_snapshot_for_subject(
         &self,
         run: &str,

@@ -2,8 +2,10 @@
 //!
 //! The browser supplies the same target connection and conversation intent used
 //! by the signaling turn. The server resolves the target's authenticated client
-//! id and re-derives the subject-namespaced conversation key, so a caller cannot
-//! select an arbitrary SQLite row.
+//! id and re-derives the subject-namespaced conversation key. Snapshot reads and
+//! background stops can also locate an offline target using an explicit original
+//! session id; the subsequent store operation still checks the original actor and
+//! device. This recovery selector is not authority to execute a new action.
 
 use actix_web::{HttpResponse, get, post, web};
 use desk_agent_protocol::communication::CommunicationDraftHandoff;
@@ -32,6 +34,7 @@ use crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
 use crate::error::DeskSignalError;
 
 pub const TAG: &str = "DeviceAssistantSession";
+pub(crate) mod recovery;
 const EVIDENCE_SUMMARY_SCHEMA_VERSION: u16 = 1;
 const MAX_EVIDENCE_NODES: usize = 128;
 const MAX_EVIDENCE_RECEIPTS: usize = 32;
@@ -382,6 +385,8 @@ fn stale_reason_name(reason: AttachmentStaleReason) -> &'static str {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAssistantSessionSnapshotDto {
+    /// Opaque recovery selector; ownership is rechecked on every read or stop.
+    pub session_id: String,
     pub seq: i64,
     /// Whether the persisted turn is still running or awaiting approval.
     pub active: bool,
@@ -893,33 +898,19 @@ pub async fn get_device_assistant_session(
     connection_map: web::Data<SharedConnectionMap>,
     query: web::Query<DeviceAssistantSessionQuery>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let target_audience = {
-        let map = connection_map.read().await;
-        let Some(target) = map.get(&query.connection) else {
-            return Ok(not_accessible());
-        };
-        if target.auth_context.auth_kind != AuthKind::TokenAuth
-            || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
-        {
-            return Ok(not_accessible());
-        }
-        match target.model.version_info.client_id.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => return Ok(not_accessible()),
-        }
-    };
-
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
     let store = SignalAgentSessionStore::new(crate::db::get_db().clone());
-    let session_id = match (
-        query.session.as_deref().filter(|value| !value.is_empty()),
+    let Some((session_id, target_audience)) = recovery::resolve(
+        &store,
+        &connection_map,
+        &actor_id,
+        &query.connection,
+        query.session.as_deref(),
         query.conversation.as_deref(),
-    ) {
-        (Some(session_id), _) => session_id.to_string(),
-        (None, Some(conversation)) => {
-            derive_conversation_key(&actor_id, &target_audience, Some(conversation), "")
-        }
-        (None, None) => return Ok(not_accessible()),
+    )
+    .await?
+    else {
+        return Ok(not_accessible());
     };
     let snapshot = store
         .read_assistant_snapshot_for_subject(&session_id, &actor_id, &target_audience)
@@ -936,6 +927,7 @@ pub async fn get_device_assistant_session(
                 build_evidence_summary(&snapshot.messages, &snapshot.context_attachments);
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
                 DeviceAssistantSessionSnapshotDto {
+                    session_id,
                     seq: snapshot.seq,
                     active: snapshot.active,
                     request_id: snapshot.request_id,
@@ -1353,31 +1345,18 @@ pub async fn cancel_device_assistant_background_task(
     connection_map: web::Data<SharedConnectionMap>,
     body: web::Json<BackgroundCancelBody>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let target_audience = {
-        let map = connection_map.read().await;
-        let Some(target) = map.get(&body.connection) else {
-            return Ok(not_accessible());
-        };
-        if target.auth_context.auth_kind != AuthKind::TokenAuth
-            || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
-        {
-            return Ok(not_accessible());
-        }
-        match target.model.version_info.client_id.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => return Ok(not_accessible()),
-        }
-    };
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
-    let session_id = match (
-        body.session.as_deref().filter(|value| !value.is_empty()),
+    let Some((session_id, target_audience)) = recovery::resolve(
+        &SignalAgentSessionStore::new(crate::db::get_db().clone()),
+        &connection_map,
+        &actor_id,
+        &body.connection,
+        body.session.as_deref(),
         body.conversation.as_deref(),
-    ) {
-        (Some(session_id), _) => session_id.to_string(),
-        (None, Some(conversation)) => {
-            derive_conversation_key(&actor_id, &target_audience, Some(conversation), "")
-        }
-        (None, None) => return Ok(not_accessible()),
+    )
+    .await?
+    else {
+        return Ok(not_accessible());
     };
     let original =
         crate::capability_grant_store::SignalCapabilityGrantStore::new(crate::db::get_db().clone())
