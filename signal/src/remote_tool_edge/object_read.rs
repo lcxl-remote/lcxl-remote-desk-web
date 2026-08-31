@@ -56,7 +56,18 @@ impl SignalDeviceAssistantTools {
                 &input.destination,
                 u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| denied())?,
             )
-            .await
+            .await?;
+        if !input.selection.live_targets.is_empty() {
+            let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                .ok_or_else(denied)?;
+            desk_diagnose_core::input_read_context::live_read::validate_current(
+                &input.selection,
+                Some(&readiness.readiness),
+                u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| denied())?,
+            )?;
+        }
+        Ok(())
     }
 }
 

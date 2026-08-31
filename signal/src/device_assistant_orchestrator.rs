@@ -186,6 +186,43 @@ async fn current_capability_projection(
     )
 }
 
+fn prepare_live_targets(
+    registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
+    selected_ids: &[String],
+    original: Option<&crate::agent_run_event_store::ReadContextSelection>,
+    readiness: Option<&ComputerUseReadiness>,
+    now: u64,
+) -> Result<Vec<desk_diagnose_core::input_read_context::live_read::LiveReadTarget>, AgentError> {
+    use desk_diagnose_core::input_read_context::{ReadContextSelection, live_read};
+    if let Some(original) = original {
+        live_read::validate_current(original, readiness, now)?;
+        for name in &original.tool_names {
+            if live_read::target_kind(name).is_some() {
+                live_read::target(original, name, now)?;
+            }
+        }
+        return Ok(original.live_targets.clone());
+    }
+    let mut names = selected_ids
+        .iter()
+        .filter_map(|id| registry.capability(id))
+        .map(|capability| capability.wire.tool_name.clone())
+        .filter(|name| live_read::target_kind(name).is_some())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    live_read::capture(
+        &ReadContextSelection {
+            tool_names: names,
+            expires_at: None,
+            object_attachments: vec![],
+            live_targets: vec![],
+        },
+        readiness,
+        now,
+    )
+}
+
 fn context_selection_claim(
     registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
     inventory: &[CapabilityAvailability],
@@ -879,42 +916,34 @@ async fn run_turn_inner(
     let office_selected = ask.selected_capability_ids.iter().any(|capability_id| {
         capability_id == desk_diagnose_core::device_assistant::OFFICE_DOCUMENT_CAPABILITY_ID
     });
-    let selected_office_document = readiness.as_ref().and_then(|readiness| {
-        readiness
-            .context_references
+    let live_targets = match prepare_live_targets(
+        &provider_registry,
+        &ask.selected_capability_ids,
+        original_read_context.as_ref(),
+        readiness.as_ref(),
+        now_unix_ms,
+    ) {
+        Ok(targets) => targets,
+        Err(error) => {
+            stream_event(
+                connections.as_ref(),
+                &browser_connection_id,
+                &AgentEvent::error(&request_id, 1, error),
+            )
+            .await;
+            return;
+        }
+    };
+    let live_ref = |name: &str| {
+        live_targets
             .iter()
-            .find(|reference| {
-                reference.capability == desk_agent_protocol::Capability::OfficeDocumentInspect
-            })
-            .map(|reference| reference.object_ref.clone())
-    });
-    let selected_live_spreadsheet = readiness.as_ref().and_then(|readiness| {
-        readiness
-            .context_references
-            .iter()
-            .find(|reference| {
-                reference.capability == desk_agent_protocol::Capability::SpreadsheetLiveInspect
-            })
-            .map(|reference| reference.object_ref.clone())
-    });
-    let selected_live_document = readiness.as_ref().and_then(|readiness| {
-        readiness
-            .context_references
-            .iter()
-            .find(|reference| {
-                reference.capability == desk_agent_protocol::Capability::DocumentLiveInspect
-            })
-            .map(|reference| reference.object_ref.clone())
-    });
-    let selected_live_presentation = readiness.as_ref().and_then(|readiness| {
-        readiness
-            .context_references
-            .iter()
-            .find(|reference| {
-                reference.capability == desk_agent_protocol::Capability::PresentationLiveInspect
-            })
-            .map(|reference| reference.object_ref.clone())
-    });
+            .find(|target| target.tool_name == name)
+            .map(|target| target.object_ref.clone())
+    };
+    let selected_office_document = live_ref("inspect_office_selection");
+    let selected_live_spreadsheet = live_ref("inspect_live_spreadsheet");
+    let selected_live_document = live_ref("inspect_live_document");
+    let selected_live_presentation = live_ref("inspect_live_presentation");
     let selected_browser_surface = readiness.as_ref().and_then(|readiness| {
         readiness
             .context_references
@@ -1425,6 +1454,7 @@ async fn run_turn_inner(
         match crate::agent_run_event_store::ReadContextSelection::capture(&registry, &scope) {
             Ok(mut selection) => {
                 selection.object_attachments = selected_objects;
+                selection.live_targets = live_targets;
                 selection
             }
             Err(error) => {
@@ -1504,7 +1534,7 @@ async fn run_turn_inner(
                 destination.clone(),
                 client_conversation_id.clone(),
             )?;
-            if !original.object_attachments.is_empty() {
+            if !original.object_attachments.is_empty() || !original.live_targets.is_empty() {
                 tools.validate_original_objects().await?;
             }
             Ok::<_, AgentError>(())

@@ -23,17 +23,18 @@ pub struct ObjectReadBinding<'a> {
 }
 
 pub fn requires_objects(name: &str) -> bool {
-    matches!(
-        name,
-        "inspect_selected_file_metadata"
-            | "read_selected_text_file"
-            | "inspect_selected_spreadsheets"
-            | "preview_spreadsheet_merge"
-            | "inspect_selected_terminal_output"
-            | "inspect_selected_numbers_with_iwork"
-            | "inspect_selected_pages_with_iwork"
-            | "inspect_selected_keynote_with_iwork"
-    )
+    super::live_read::target_kind(name).is_some()
+        || matches!(
+            name,
+            "inspect_selected_file_metadata"
+                | "read_selected_text_file"
+                | "inspect_selected_spreadsheets"
+                | "preview_spreadsheet_merge"
+                | "inspect_selected_terminal_output"
+                | "inspect_selected_numbers_with_iwork"
+                | "inspect_selected_pages_with_iwork"
+                | "inspect_selected_keynote_with_iwork"
+        )
 }
 
 /// Object selection enables only reads; live-document and batch tools still
@@ -103,6 +104,9 @@ impl ObjectReadBinding<'_> {
     }
 
     pub fn bind(&self, call: &ToolCall, input: &mut OperationInput) -> Result<(), AgentError> {
+        if super::live_read::target_kind(&call.name).is_some() {
+            return super::live_read::bind(self.original, call, input, self.now_unix_ms);
+        }
         let selected = self.selected(call)?;
         let refs = selected
             .iter()
@@ -173,6 +177,12 @@ impl ObjectReadBinding<'_> {
     }
 
     pub fn expiry(&self, call: &ToolCall) -> Result<u64, AgentError> {
+        if super::live_read::target_kind(&call.name).is_some() {
+            return super::live_read::expiry(
+                self.original,
+                super::live_read::target(self.original, &call.name, self.now_unix_ms)?,
+            );
+        }
         let expiry = self
             .selected(call)?
             .iter()
@@ -211,6 +221,9 @@ impl ObjectReadBinding<'_> {
         output: &ToolRunOutput,
         mut envelope: DataEnvelope,
     ) -> Result<DataEnvelope, AgentError> {
+        if super::live_read::target_kind(&call.name).is_some() {
+            return super::live_read::label(self, call, output, envelope);
+        }
         let selected = self.selected(call)?;
         let (_, mut input) = build_read_operation(call)?;
         self.bind(call, &mut input)?;

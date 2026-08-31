@@ -63,6 +63,24 @@ async fn periodic_executor_discovers_a_committed_decision_without_controller_wak
     run_case(None, ResumeMode::Loop).await;
 }
 
+#[actix_web::test]
+async fn live_document_permission_resume_reads_the_frozen_target_over_real_transport() {
+    run_case_with_live(None, ResumeMode::Direct, true).await;
+    run_case_with_live(None, ResumeMode::Scan, true).await;
+}
+
+#[actix_web::test]
+async fn changed_live_target_worker_or_model_cannot_be_reselected_on_resume() {
+    for change in ["live_target", "live_worker", "model", "new_input"] {
+        run_case_with_live(Some(change), ResumeMode::Direct, true).await;
+    }
+}
+
+#[actix_web::test]
+async fn a_live_target_change_during_read_prevents_content_from_reaching_the_model() {
+    run_case_with_live(Some("live_after"), ResumeMode::Direct, true).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ResumeMode {
     Direct,
@@ -71,6 +89,10 @@ enum ResumeMode {
 }
 
 async fn run_case(change: Option<&str>, mode: ResumeMode) {
+    run_case_with_live(change, mode, false).await;
+}
+
+async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) {
     let scanner = mode != ResumeMode::Direct;
     let directory = tempfile::tempdir().unwrap();
     let url = if scanner {
@@ -95,22 +117,25 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
     };
     crate::model_provider::save(&db, config).await.unwrap();
     let registry = device_assistant_provider_registry();
-    let capability = registry
-        .capability_for_tool("inspect_selected_file_metadata")
-        .unwrap();
+    let read_name = if live {
+        "inspect_live_document"
+    } else {
+        "inspect_selected_file_metadata"
+    };
+    let capability = registry.capability_for_tool(read_name).unwrap();
     let provider = registry
         .provider_for_capability(&capability.wire.capability_id)
         .unwrap();
     let mut replies = vec![
         tool_reply("request_capability_grants", serde_json::json!({"items":[{
             "item_id":"read", "provider_id":provider.wire.provider_id,
-            "tool_name":"inspect_selected_file_metadata", "expected_effect":"read_file",
+            "tool_name":read_name, "expected_effect":capability.wire.effect,
             "suggested_ttl_seconds":120, "suggested_max_uses":1, "reason":"Read the selected file metadata"
         }]})),
-        tool_reply("inspect_selected_file_metadata", serde_json::json!({})),
+        tool_reply(read_name, serde_json::json!({})),
         "data: {\"choices\":[{\"delta\":{\"content\":\"object-read-complete\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
     ];
-    if matches!(change, Some("readiness" | "legacy")) {
+    if matches!(change, Some("readiness" | "legacy" | "live_after")) {
         replies[2] = replies[2].replace("object-read-complete", "object-read-unavailable");
     }
     let capture = actix_web::rt::spawn(async move {
@@ -205,6 +230,12 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
         .unwrap();
 
     let now = Utc::now();
+    let live_reference = ObjectRef {
+        token: "original-live-document".into(),
+        snapshot_id: "live-snapshot".into(),
+        object_kind: ObjectKind::Document,
+        expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
+    };
     crate::computer_use_readiness::global_computer_use_readiness_cache()
         .update(
             &host,
@@ -214,20 +245,35 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
                 observed_at: now.to_rfc3339(),
                 expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
                 server_api_version: 1,
-                os: "fixture".into(),
+                os: if live { "macos" } else { "fixture" }.into(),
                 interactive_session_incarnation: "worker".into(),
                 local_ceiling_revision: 1,
                 capabilities: vec![ComputerUseCapabilityReadiness {
-                    capability: Capability::FileMetadataRead,
+                    capability: if live {
+                        Capability::DocumentLiveInspect
+                    } else {
+                        Capability::FileMetadataRead
+                    },
                     adapter: ComputerUseAdapterRef {
-                        kind: ComputerUseAdapterKind::FileSystem,
+                        kind: if live {
+                            ComputerUseAdapterKind::IworkPages
+                        } else {
+                            ComputerUseAdapterKind::FileSystem
+                        },
                         version: "1".into(),
                     },
                     supported: true,
                     ready: true,
                     reason: None,
                 }],
-                context_references: vec![],
+                context_references: if live {
+                    vec![ComputerUseContextReference {
+                        capability: Capability::DocumentLiveInspect,
+                        object_ref: live_reference.clone(),
+                    }]
+                } else {
+                    vec![]
+                },
             },
             now,
         )
@@ -279,7 +325,16 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
                 question: "Inspect only my selected file".into(),
                 client_message_id: "original-user".into(),
                 conversation_id: Some(client_id.into()),
-                selected_attachment_ids: vec![selected.attachment_id.clone()],
+                selected_attachment_ids: if live {
+                    vec![]
+                } else {
+                    vec![selected.attachment_id.clone()]
+                },
+                selected_capability_ids: if live {
+                    vec![capability.wire.capability_id.clone()]
+                } else {
+                    vec![]
+                },
                 ..Default::default()
             },
             None,
@@ -338,7 +393,11 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
                 inventory: &inventory,
                 readiness_revision: 1,
                 now_unix_ms: Utc::now().timestamp_millis() as u64,
-                implicit_fresh_object_refs: &[],
+                implicit_fresh_object_refs: if live {
+                    std::slice::from_ref(&live_reference)
+                } else {
+                    &[]
+                },
             },
             &Utc::now().to_rfc3339(),
         )
@@ -352,7 +411,7 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
     assert_eq!(
         grants[0].resource_scope,
         desk_diagnose_core::capability_grant::fresh_object_resource_scope(std::slice::from_ref(
-            &reference
+            if live { &live_reference } else { &reference }
         ))
     );
     let executor = crate::permission_resume_executor::SignalPermissionResumeExecutor::new(
@@ -491,8 +550,19 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
         db.close().await.unwrap();
         return;
     }
-    if let Some(change) = change {
+    if let Some(change) = change.filter(|change| *change != "live_after") {
         match change {
+            "live_target" | "live_worker" => {
+                let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
+                let mut current = cache.get_fresh(&host, Utc::now()).unwrap().readiness;
+                current.revision += 1;
+                if change == "live_target" {
+                    current.context_references[0].object_ref.token = "other-live-document".into();
+                } else {
+                    current.interactive_session_incarnation = "other-worker".into();
+                }
+                cache.update(&host, current, Utc::now()).unwrap();
+            }
             "model" => {
                 let mut config = crate::model_provider::load(&db).await.unwrap();
                 config.model = Some("different-model".into());
@@ -585,16 +655,43 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
         let frame: SignalingModel = serde_json::from_slice(&text).unwrap();
         assert_eq!(frame.signaling_type, SignalingType::InvokeRemoteTool);
         let request: RemoteToolRequest = frame.get_data().unwrap();
-        let ReadContextInput {
-            kind: ContextKind::FileMetadataInspect(read),
-        } = &request.envelope.operation.input
-        else {
-            panic!("wrong read")
-        };
-        assert_eq!(read.roots.as_slice(), std::slice::from_ref(&reference));
-        assert!(u64::from(read.max_bytes) <= selected.bounds.max_bytes);
+        if live {
+            let ReadContextInput {
+                kind: ContextKind::DocumentLiveInspect(read),
+            } = &request.envelope.operation.input
+            else {
+                panic!("wrong live read")
+            };
+            assert_eq!(read.target.as_ref(), Some(&live_reference));
+            assert!(read.batch_file.is_none());
+        } else {
+            let ReadContextInput {
+                kind: ContextKind::FileMetadataInspect(read),
+            } = &request.envelope.operation.input
+            else {
+                panic!("wrong read")
+            };
+            assert_eq!(read.roots.as_slice(), std::slice::from_ref(&reference));
+            assert!(u64::from(read.max_bytes) <= selected.bounds.max_bytes);
+        }
         let output = RemoteToolOutput {
-            outcome: AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(
+            outcome: AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(if live {
+                desk_agent_protocol::ReadContextOutput::DocumentLiveInspect(
+                    LiveDocumentInspectOutput {
+                        snapshot_id: live_reference.snapshot_id.clone(),
+                        adapter: ComputerUseAdapterRef {
+                            kind: ComputerUseAdapterKind::IworkPages,
+                            version: "1".into(),
+                        },
+                        projection: LiveDocumentProjection::Document {
+                            document: live_reference.clone(),
+                            body_text: "synthetic-original-marker".into(),
+                            body_sha256: "a".repeat(64),
+                        },
+                        batch_source: None,
+                    },
+                )
+            } else {
                 desk_agent_protocol::ReadContextOutput::FileMetadataInspect(
                     FileMetadataInspectOutput {
                         snapshot_id: "worker".into(),
@@ -608,10 +705,17 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
                         directory_entries: vec![],
                         truncated: false,
                     },
-                ),
-            )),
+                )
+            })),
             image: None,
         };
+        if change == Some("live_after") {
+            let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
+            let mut current = cache.get_fresh(&host, Utc::now()).unwrap().readiness;
+            current.revision += 1;
+            current.context_references[0].object_ref.token = "changed-during-read".into();
+            cache.update(&host, current, Utc::now()).unwrap();
+        }
         for chunk in chunk_bytes(
             &request.request_id,
             &serde_json::to_vec(&output).unwrap(),
@@ -633,17 +737,28 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
                 .unwrap();
         }
     };
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let completed = tokio::time::timeout(Duration::from_secs(15), async {
         tokio::join!(resume(), peer)
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        completed.is_ok(),
+        "resume/read timed out: {:?}",
+        sessions.read_snapshot(&run_id).await.unwrap().map(|s| s
+            .messages
+            .into_iter()
+            .map(|m| (m.role, m.text))
+            .collect::<Vec<_>>())
+    );
     let bodies = tokio::time::timeout(Duration::from_secs(5), capture)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(bodies.len(), 3);
-    assert!(String::from_utf8_lossy(&bodies[2]).contains("synthetic-original-marker"));
+    assert_eq!(
+        String::from_utf8_lossy(&bodies[2]).contains("synthetic-original-marker"),
+        change != Some("live_after")
+    );
     assert!(
         !bodies
             .iter()
@@ -653,7 +768,11 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
     assert_eq!(final_snapshot.input_revision, 1);
     assert_eq!(
         latest_committed_answer(&final_snapshot).as_deref(),
-        Some("object-read-complete")
+        Some(if change == Some("live_after") {
+            "object-read-unavailable"
+        } else {
+            "object-read-complete"
+        })
     );
     let bridge = final_snapshot
         .messages

@@ -195,3 +195,277 @@ fn accepted_clock_skew_is_preserved_but_original_targets_cannot_be_recaptured() 
     validate_current(&selection, Some(&current), now()).unwrap();
     assert!(capture(&selection, Some(&current), now()).is_err());
 }
+
+#[test]
+fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_deadline() {
+    use crate::{
+        chat::ToolCall,
+        input_read_context::object_read::{ObjectReadBinding, requires_objects},
+        seam::ToolRunOutput,
+    };
+    use desk_agent_protocol::{
+        ContextKind, OperationInput, ReadContextInput, data_lineage::DestinationIdentity,
+    };
+    let selection = captured();
+    let destination = DestinationIdentity::Model {
+        connection_id: "gateway".into(),
+        connection_revision: 1,
+        model_id: "model".into(),
+        profile_revision: 1,
+    };
+    let binding = ObjectReadBinding {
+        original: &selection,
+        destination: &destination,
+        now_unix_ms: now(),
+    };
+    for name in TOOLS {
+        assert!(requires_objects(name));
+        let mut forged = target(&selection, name, now()).unwrap().object_ref.clone();
+        forged.token = "model-supplied-other-target".into();
+        let mut arguments = serde_json::json!({"max_bytes":1024});
+        arguments[if name == "inspect_office_selection" {
+            "document"
+        } else {
+            "target"
+        }] = serde_json::to_value(forged).unwrap();
+        let call = ToolCall {
+            id: "read".into(),
+            name: name.into(),
+            arguments_json: arguments.to_string(),
+        };
+        let (_, mut operation) = crate::read_tools::build_read_operation(&call).unwrap();
+        binding.bind(&call, &mut operation).unwrap();
+        let reference = match operation {
+            OperationInput::ReadContext(ReadContextInput {
+                kind: ContextKind::OfficeDocumentInspect(p),
+            }) => {
+                assert!(p.selection_only);
+                assert_eq!(p.max_bytes, 1024);
+                p.document.unwrap()
+            }
+            OperationInput::ReadContext(ReadContextInput {
+                kind:
+                    ContextKind::SpreadsheetLiveInspect(p)
+                    | ContextKind::DocumentLiveInspect(p)
+                    | ContextKind::PresentationLiveInspect(p),
+            }) => {
+                assert_eq!(p.max_bytes, 1024);
+                assert!(p.batch_file.is_none());
+                p.target.unwrap()
+            }
+            _ => panic!("unexpected live operation"),
+        };
+        assert_eq!(
+            reference,
+            target(&selection, name, now()).unwrap().object_ref
+        );
+        let output = ToolRunOutput {
+            content: "synthetic document content".into(),
+            image_data_url: None,
+        };
+        let envelope = crate::model_message_labels::read_result_envelope(
+            &crate::device_assistant::device_assistant_provider_registry(),
+            &call,
+            &output,
+            crate::model_message_labels::ReadResultLabel {
+                envelope_id: "result".into(),
+                observation_id: "observation".into(),
+                source_object_id: None,
+                observed_at_unix_ms: now(),
+            },
+        )
+        .unwrap();
+        let labeled = binding.label(&call, &output, envelope.clone()).unwrap();
+        assert_eq!(labeled.allowed_destinations, [destination.clone()]);
+        assert_eq!(
+            labeled.retention.expires_at_unix_ms,
+            Some(binding.expiry(&call).unwrap())
+        );
+        assert!(
+            labeled
+                .provenance
+                .source_object_id
+                .as_ref()
+                .unwrap()
+                .starts_with("live-target:sha256:")
+        );
+        assert!(
+            !serde_json::to_string(&labeled)
+                .unwrap()
+                .contains(&reference.token)
+        );
+        let oversized = ToolRunOutput {
+            content: "x".repeat(1025),
+            image_data_url: None,
+        };
+        assert!(binding.label(&call, &oversized, envelope.clone()).is_err());
+        let image = ToolRunOutput {
+            content: "".into(),
+            image_data_url: Some("data:image/png;base64,x".into()),
+        };
+        assert!(binding.label(&call, &image, envelope.clone()).is_err());
+        let mut changed = selection.clone();
+        changed
+            .live_targets
+            .iter_mut()
+            .find(|t| t.tool_name == name)
+            .unwrap()
+            .object_ref
+            .token = "other".into();
+        let changed_binding = ObjectReadBinding {
+            original: &changed,
+            ..binding
+        };
+        assert_ne!(
+            changed_binding
+                .label(&call, &output, envelope)
+                .unwrap()
+                .provenance
+                .source_object_id,
+            labeled.provenance.source_object_id
+        );
+    }
+}
+
+#[test]
+fn legacy_live_reads_cannot_bypass_the_original_object_fence() {
+    use crate::{chat::ToolCall, input_read_context::object_read::ObjectReadBinding};
+    use desk_agent_protocol::data_lineage::DestinationIdentity;
+    let legacy = selection(&TOOLS);
+    let destination = DestinationIdentity::Model {
+        connection_id: "gateway".into(),
+        connection_revision: 1,
+        model_id: "model".into(),
+        profile_revision: 1,
+    };
+    let binding = ObjectReadBinding {
+        original: &legacy,
+        destination: &destination,
+        now_unix_ms: now(),
+    };
+    for name in TOOLS {
+        let call = ToolCall {
+            id: "read".into(),
+            name: name.into(),
+            arguments_json: "{}".into(),
+        };
+        let (_, mut operation) = crate::read_tools::build_read_operation(&call).unwrap();
+        assert!(binding.bind(&call, &mut operation).is_err());
+        assert!(binding.expiry(&call).is_err());
+    }
+}
+
+#[test]
+fn all_live_read_grants_use_original_references_and_deadlines_on_both_servers() {
+    use crate::{
+        capability_availability::CapabilityAvailability,
+        chat::ToolCall,
+        dynamic_run::{PermissionDecisionItem, PermissionItemDecision},
+        permission_grant::{PermissionGrantIssuanceContext, build_permission_grants},
+    };
+    use desk_agent_protocol::{
+        AgentScope, ExecutionMode, capability_provider::ProductSurface,
+        data_lineage::DestinationIdentity,
+    };
+    let original = captured();
+    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let destination = DestinationIdentity::Model {
+        connection_id: "gateway".into(),
+        connection_revision: 1,
+        model_id: "model".into(),
+        profile_revision: 1,
+    };
+    let mut session = crate::session::PersistedAgentSession::new(
+        "run",
+        "owner",
+        "device",
+        crate::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
+        AgentScope {
+            granted: vec![],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        "2026-08-31T00:00:00Z",
+    );
+    session.input_revision = 1;
+    session.conversation.push(
+        crate::model_message_labels::model_bound_user_message(
+            "input".into(),
+            "Read selected documents".into(),
+            destination,
+        )
+        .unwrap(),
+    );
+    for name in TOOLS {
+        let capability = registry.capability_for_tool(name).unwrap();
+        let provider = registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .unwrap();
+        let request = crate::permission_tools::build_permission_request(&ToolCall {
+            id:"request".into(),name:"request_capability_grants".into(),arguments_json:serde_json::json!({"items":[{
+                "item_id":"read","provider_id":provider.wire.provider_id,"tool_name":name,"expected_effect":capability.wire.effect,
+                "suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Read original document"}]}).to_string(),
+        },&registry,"request".into(),1,"2026-08-31T00:00:01Z".into()).unwrap();
+        let decisions = [PermissionDecisionItem {
+            item_id: "read".into(),
+            decision: PermissionItemDecision::Approve {
+                resource_scope: request.items[0].resource_scope.clone(),
+                operation_scope: request.items[0].operation_scope.clone(),
+                export_destinations: vec![],
+                ttl_seconds: 120,
+                max_uses: 1,
+            },
+        }];
+        let inventory = [CapabilityAvailability {
+            provider_id: provider.wire.provider_id.clone(),
+            capability_id: capability.wire.capability_id.clone(),
+            tool_name: name.into(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        }];
+        let reference = target(&original, name, now()).unwrap().object_ref.clone();
+        let mut ambient = reference.clone();
+        ambient.token = "later-unselected-document".into();
+        let refs = [reference.clone(), ambient.clone()];
+        for surface in [
+            ProductSurface::OssPersonalOwner,
+            ProductSurface::ManagerPersonalOwner,
+        ] {
+            let context = PermissionGrantIssuanceContext {
+                surface,
+                registry: &registry,
+                inventory: &inventory,
+                readiness_revision: 1,
+                now_unix_ms: now(),
+                implicit_fresh_object_refs: &refs,
+            };
+            let grants =
+                build_permission_grants(&session, &request, &decisions, &context, Some(&original))
+                    .unwrap();
+            assert_eq!(grants.len(), 1);
+            assert_eq!(
+                grants[0].resource_scope,
+                crate::capability_grant::fresh_object_resource_scope(std::slice::from_ref(
+                    &reference
+                )),
+                "{surface:?}/{name}"
+            );
+            assert_eq!(
+                grants[0].expires_at_unix_ms,
+                millis("2026-08-31T00:01:00Z").unwrap()
+            );
+            let absent = PermissionGrantIssuanceContext {
+                implicit_fresh_object_refs: std::slice::from_ref(&ambient),
+                ..context
+            };
+            assert!(
+                build_permission_grants(&session, &request, &decisions, &absent, Some(&original))
+                    .is_err()
+            );
+        }
+    }
+}

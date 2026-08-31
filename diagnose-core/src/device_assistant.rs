@@ -2181,7 +2181,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
         16,
         vec![ApplicationPrerequisite::MicrosoftExcel],
         vec![CapabilityDataCategory::OfficeSelection],
-        vec![AuthorizationResourceKind::TargetDevice],
+        vec![AuthorizationResourceKind::FreshObjectReference],
         reads
             .remove("inspect_office_selection")
             .expect("static Office selection tool exists"),

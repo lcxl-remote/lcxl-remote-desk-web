@@ -207,3 +207,85 @@ pub fn validate_input(
 
 #[cfg(test)]
 mod tests;
+
+pub fn bind(
+    selection: &ReadContextSelection,
+    call: &crate::chat::ToolCall,
+    input: &mut desk_agent_protocol::OperationInput,
+    now: u64,
+) -> Result<(), AgentError> {
+    use desk_agent_protocol::{ContextKind, OperationInput, ReadContextInput};
+    let original = target(selection, &call.name, now)?;
+    let OperationInput::ReadContext(ReadContextInput { kind }) = input else {
+        return Err(invalid("live read operation mismatch"));
+    };
+    match (call.name.as_str(), kind) {
+        ("inspect_office_selection", ContextKind::OfficeDocumentInspect(params)) => {
+            params.document = Some(original.object_ref.clone());
+            params.selection_only = true;
+            params.max_objects = params.max_objects.min(16);
+            params.max_bytes = params.max_bytes.min(256 * 1024);
+        }
+        ("inspect_live_spreadsheet", ContextKind::SpreadsheetLiveInspect(params))
+        | ("inspect_live_document", ContextKind::DocumentLiveInspect(params))
+        | ("inspect_live_presentation", ContextKind::PresentationLiveInspect(params)) => {
+            params.target = Some(original.object_ref.clone());
+            params.batch_file = None;
+            params.max_bytes = params.max_bytes.min(256 * 1024);
+        }
+        _ => return Err(invalid("live read operation mismatch")),
+    }
+    Ok(())
+}
+
+pub(super) fn label(
+    binding: &super::object_read::ObjectReadBinding<'_>,
+    call: &crate::chat::ToolCall,
+    output: &crate::seam::ToolRunOutput,
+    mut envelope: desk_agent_protocol::data_lineage::DataEnvelope,
+) -> Result<desk_agent_protocol::data_lineage::DataEnvelope, AgentError> {
+    use desk_agent_protocol::{
+        ContextKind, OperationInput, ReadContextInput,
+        data_lineage::{ContentRef, RetentionBoundary},
+    };
+    use sha2::{Digest, Sha256};
+    let original = target(binding.original, &call.name, binding.now_unix_ms)?;
+    let (_, mut input) = crate::read_tools::build_read_operation(call)?;
+    bind(binding.original, call, &mut input, binding.now_unix_ms)?;
+    let bytes = match input {
+        OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::OfficeDocumentInspect(p),
+        }) => p.max_bytes,
+        OperationInput::ReadContext(ReadContextInput {
+            kind:
+                ContextKind::SpreadsheetLiveInspect(p)
+                | ContextKind::DocumentLiveInspect(p)
+                | ContextKind::PresentationLiveInspect(p),
+        }) => p.max_bytes,
+        _ => return Err(invalid("live read operation mismatch")),
+    };
+    if output.image_data_url.is_some() || output.content.len() > bytes as usize {
+        return Err(invalid("live read output exceeds original bounds"));
+    }
+    // Identify the exact original target without exposing its executable token.
+    let digest = Sha256::digest(
+        serde_json::to_vec(original).map_err(|_| invalid("invalid live result source"))?,
+    );
+    envelope.provenance.source_object_id = Some(format!("live-target:sha256:{digest:x}"));
+    let deadline = expiry(binding.original, original)?;
+    envelope.allowed_destinations = vec![binding.destination.clone()];
+    envelope.retention = envelope.retention.most_restrictive(RetentionBoundary {
+        expires_at_unix_ms: Some(deadline),
+        delete_with_run: false,
+    });
+    if let ContentRef::EphemeralObservation {
+        expires_at_unix_ms, ..
+    } = &mut envelope.content
+    {
+        *expires_at_unix_ms = (*expires_at_unix_ms).min(deadline);
+    }
+    envelope
+        .validate()
+        .map_err(|_| invalid("invalid live result envelope"))?;
+    Ok(envelope)
+}

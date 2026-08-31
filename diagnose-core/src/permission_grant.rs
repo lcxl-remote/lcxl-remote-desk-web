@@ -123,44 +123,78 @@ pub fn build_permission_grants(
                 "approved permission capability is no longer ready; refresh and decide again",
             ));
         }
-        let original_read = if requires_objects(&requested.tool_name) {
-            let original = original_reads
-                .ok_or_else(|| internal("original object read selection is missing"))?;
-            original.validate()?;
-            let destination = original
-                .object_attachments
-                .first()
-                .and_then(|object| object.envelope.allowed_destinations.first())
-                .ok_or_else(|| internal("original object destination is missing"))?;
-            crate::input_read_context::validate_current_objects(
-                session,
-                &original.object_attachments,
-                destination,
-                context.now_unix_ms,
-            )?;
-            let binding = ObjectReadBinding {
-                original,
-                destination,
-                now_unix_ms: context.now_unix_ms,
+        let original_read =
+            if crate::input_read_context::live_read::target_kind(&requested.tool_name).is_some() {
+                let original = original_reads
+                    .ok_or_else(|| internal("original live read selection is missing"))?;
+                original.validate()?;
+                let message =
+                    crate::permission_resume::latest_user_requirement(&session.conversation)
+                        .ok_or_else(|| internal("original live input is missing"))?;
+                let destination = message
+                    .data_envelope
+                    .as_ref()
+                    .and_then(|envelope| envelope.allowed_destinations.first())
+                    .ok_or_else(|| internal("original live destination is missing"))?;
+                crate::input_read_context::live_read::validate_input(
+                    original,
+                    message,
+                    destination,
+                    context.now_unix_ms,
+                )?;
+                let target = crate::input_read_context::live_read::target(
+                    original,
+                    &requested.tool_name,
+                    context.now_unix_ms,
+                )?;
+                if !context
+                    .implicit_fresh_object_refs
+                    .contains(&target.object_ref)
+                {
+                    return Err(internal("original live target is no longer current"));
+                }
+                Some((
+                    vec![target.object_ref.clone()],
+                    crate::input_read_context::live_read::expiry(original, target)?,
+                ))
+            } else if requires_objects(&requested.tool_name) {
+                let original = original_reads
+                    .ok_or_else(|| internal("original object read selection is missing"))?;
+                original.validate()?;
+                let destination = original
+                    .object_attachments
+                    .first()
+                    .and_then(|object| object.envelope.allowed_destinations.first())
+                    .ok_or_else(|| internal("original object destination is missing"))?;
+                crate::input_read_context::validate_current_objects(
+                    session,
+                    &original.object_attachments,
+                    destination,
+                    context.now_unix_ms,
+                )?;
+                let binding = ObjectReadBinding {
+                    original,
+                    destination,
+                    now_unix_ms: context.now_unix_ms,
+                };
+                let call = crate::chat::ToolCall {
+                    id: requested.item_id.clone(),
+                    name: requested.tool_name.clone(),
+                    arguments_json: "{}".into(),
+                };
+                let expiry = binding.expiry(&call)?;
+                let references = binding
+                    .selected(&call)?
+                    .into_iter()
+                    .map(|object| {
+                        serde_json::from_str::<ObjectRef>(&object.object_ref.opaque_token)
+                            .map_err(|_| internal("invalid original object reference"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Some((references, expiry))
+            } else {
+                None
             };
-            let call = crate::chat::ToolCall {
-                id: requested.item_id.clone(),
-                name: requested.tool_name.clone(),
-                arguments_json: "{}".into(),
-            };
-            let expiry = binding.expiry(&call)?;
-            let references = binding
-                .selected(&call)?
-                .into_iter()
-                .map(|object| {
-                    serde_json::from_str::<ObjectRef>(&object.object_ref.opaque_token)
-                        .map_err(|_| internal("invalid original object reference"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Some((references, expiry))
-        } else {
-            None
-        };
         let sensitive_content = capability.wire.data_policy.reads.iter().any(|category| {
             !matches!(
                 category,
