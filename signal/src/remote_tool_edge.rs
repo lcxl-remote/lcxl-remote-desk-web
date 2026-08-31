@@ -1102,34 +1102,13 @@ impl SignalDeviceAssistantTools {
         if capability.wire.authorization_hint.resources
             == [desk_agent_protocol::capability_provider::AuthorizationResourceKind::FreshObjectReference]
         {
-            resource_scope = if desk_diagnose_core::input_read_context::live_read::target_kind(&call.name).is_some() {
-                self.validate_original_objects().await?;
-                let binding = self.object_binding()?;
-                let original = desk_diagnose_core::input_read_context::live_read::target(binding.original, &call.name, binding.now_unix_ms)?;
-                fresh_object_resource_scope(std::slice::from_ref(&original.object_ref))
-            } else if matches!(call.name.as_str(), "inspect_selected_numbers_with_iwork" | "inspect_selected_pages_with_iwork" | "inspect_selected_keynote_with_iwork") {
-                fresh_object_resource_scope(&[exact_selected_batch_file(&self.selected_file_roots)?])
-            } else { match capability.required_capability {
-                desk_agent_protocol::Capability::FileMetadataRead => {
-                    fresh_object_resource_scope(&self.selected_file_roots)
-                }
-                desk_agent_protocol::Capability::FileContentRead => fresh_object_resource_scope(
-                    &self
-                        .selected_file_roots
-                        .iter()
-                        .filter(|object_ref| object_ref.object_kind == ObjectKind::File)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                ),
-                desk_agent_protocol::Capability::SpreadsheetFileInspect
-                | desk_agent_protocol::Capability::SpreadsheetMergePreview => {
-                    fresh_object_resource_scope(&self.selected_spreadsheet_roots)
-                }
-                desk_agent_protocol::Capability::TerminalOutputRead => {
-                    fresh_object_resource_scope(&self.selected_terminal_roots)
-                }
-                _ => resource_scope,
-            }};
+            self.validate_original_objects().await?;
+            resource_scope = desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build(
+                &self.provider_registry,
+                ProductSurface::OssPersonalOwner,
+                call,
+                &self.object_binding()?,
+            )?.resource_scope().to_vec();
         }
         let operation_scope =
             compiled_scope.map_or_else(|| vec!["observe".to_string()], |scope| scope.operations);
