@@ -2533,6 +2533,40 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
     assert_eq!(*scripted.reads.borrow(), vec!["inspect"]);
 }
 
+#[tokio::test]
+async fn durable_dispatch_refusal_does_not_claim_owner_rejection_or_execution() {
+    let sess = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new([tool_use("c1", "exec_command"), answer("not run")].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let scripted = tools(vec![ExecOutcome::NotExecuted {
+        reason: "input changed".into(),
+    }]);
+    let registry = vec![mutating_tool(
+        "exec_command",
+        Capability::ShellExecConfirmed,
+    )];
+    run_agent_turn(
+        &exec_deps(&sess, &model, &scripted, &registry, &|| "now".into()),
+        exec_claim(),
+        ChatMessage::text("user", ChatRole::User, "do it"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    let snapshot = sess.inner.borrow();
+    let snapshot = snapshot.as_ref().unwrap();
+    let result = snapshot
+        .conversation
+        .iter()
+        .find(|message| message.role == ChatRole::Tool)
+        .unwrap();
+    assert_eq!(result.text, "not executed: input changed");
+    assert!(!result.text.contains("operator") && !result.text.contains("cancelled"));
+    assert_eq!(snapshot.execution_state, ExecutionState::None);
+}
+
 /// An automation turn ([`TriggerOrigin::ExecCompletion`]) never runs a mutating
 /// tool: the exec tool is not advertised (layer 1), and a model that names it
 /// anyway is answered with "not available" without the tool seam being called —

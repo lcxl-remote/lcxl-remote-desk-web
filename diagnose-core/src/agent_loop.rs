@@ -3136,6 +3136,16 @@ async fn run_mutating<F: FnMut() -> String>(
             finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command in this turn was not run".to_string());
         }
+        Ok(ExecOutcome::NotExecuted { reason }) => {
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(mint(), &call.id, format!("not executed: {reason}")),
+            )?;
+            finish_tool(session, &call.id, false, sink);
+            *halted = Some("not executed: a prior action did not pass dispatch validation".into());
+        }
         Ok(ExecOutcome::Cancelled { reason }) => {
             let text = match reason {
                 Some(r) => format!("the command was cancelled before it ran: {r}"),

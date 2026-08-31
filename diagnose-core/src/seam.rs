@@ -372,6 +372,9 @@ pub enum ExecOutcome {
     },
     /// The operator rejected the command; nothing ran.
     Rejected { reason: Option<String> },
+    /// The runtime durably refused dispatch before any execution generation was
+    /// recorded. This is not an operator rejection or a successful cancellation.
+    NotExecuted { reason: String },
     /// The command was cancelled before it dispatched; it provably never ran. Unlike
     /// [`Rejected`](Self::Rejected) (a decision at the approval gate) this is a cancel
     /// arriving while the command was still pending, and unlike

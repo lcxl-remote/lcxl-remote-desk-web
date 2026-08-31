@@ -44,6 +44,8 @@ reader's place unexpectedly.
 
 When Device Assistant accepts an in-flight follow-up, the shared loop rechecks the input revision at both the initial and final save boundaries so an old answer cannot become the result for a new requirement. Ordinary storage failures remain errors rather than being reported as supersession. Retracting an old answer does not confirm cancellation of a device action that already started.
 
+The shared execution interface distinguishes runtime-confirmed non-execution from operator rejection. If an execution backend confirms an action was closed before dispatch, the loop records why it was not executed and stops further mutations in that turn, without calling it user cancellation. This internal outcome grants no execution authority and does not imply identical durable recovery support in every backend.
+
 ### Linux capability boundary
 
 On Linux, the Assistant advertises each capability independently. System information, process and network inspection, container inspection, terminal-output reads, and owner-confirmed `bash`/`sh` execution use the same thin-edge and confirmation boundaries as Windows and macOS. On a booted systemd host, it also provides `systemd` service status and bounded `journald` JSON queries; those two capabilities remain visibly unavailable when `systemctl`/`journalctl` or the systemd runtime is absent, and journal visibility is limited by the Desk Server process permissions.
