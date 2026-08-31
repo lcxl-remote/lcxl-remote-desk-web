@@ -2243,6 +2243,7 @@ async fn trims_history_to_budget() {
 
 /// A tool seam that scripts mutating outcomes and records read + exec calls.
 struct ScriptedTools {
+    exec_fences: RefCell<Vec<Option<crate::action_turn_fence::AssistantTurnFence>>>,
     reads: Rc<RefCell<Vec<String>>>,
     execs: RefCell<std::collections::VecDeque<ExecOutcome>>,
     exec_calls: Rc<RefCell<Vec<String>>>,
@@ -2264,8 +2265,11 @@ impl ToolSeam for ScriptedTools {
     async fn confirm_and_exec(
         &self,
         call: &ToolCall,
-        _ctx: &ExecContext,
+        ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
+        self.exec_fences
+            .borrow_mut()
+            .push(ctx.assistant_turn_fence.clone());
         self.exec_calls.borrow_mut().push(call.id.clone());
         Ok(self
             .execs
@@ -2342,6 +2346,7 @@ fn tools(execs: Vec<ExecOutcome>) -> ScriptedTools {
 
 fn tools_with_waits(execs: Vec<ExecOutcome>, waits: Vec<WaitOutcome>) -> ScriptedTools {
     ScriptedTools {
+        exec_fences: RefCell::new(vec![]),
         reads: Rc::new(RefCell::new(vec![])),
         execs: RefCell::new(execs.into()),
         exec_calls: Rc::new(RefCell::new(vec![])),
@@ -2412,6 +2417,7 @@ async fn mutating_executes_then_answers() {
 
     assert_eq!(outcome, LoopOutcome::Answered("done".into()));
     assert_eq!(*scripted.exec_calls.borrow(), vec!["c1"]);
+    assert_eq!(scripted.exec_fences.borrow().as_slice(), &[None]);
     assert_eq!(
         scripted.mutation_envelope_inputs.borrow().as_slice(),
         ["exit_code=0"]
@@ -2464,6 +2470,8 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
 
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
     seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
     seeded.conversation.push(ChatMessage::text(
         "owner-requirement",
         ChatRole::User,
@@ -2488,6 +2496,26 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
     .await
     .unwrap();
     assert_eq!(outcome, LoopOutcome::Answered("verified".into()));
+    let fence = scripted.exec_fences.borrow()[0].clone().unwrap();
+    assert_eq!(fence.input_revision, 1);
+    assert_eq!(
+        fence.lease_token,
+        sess.inner.borrow().as_ref().unwrap().lease_token
+    );
+    assert_eq!(
+        (fence.actor_id.as_str(), fence.device_id.as_str()),
+        ("actor", "device")
+    );
+    assert_eq!(
+        fence.turn_id,
+        sess.inner
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .current_turn_id
+            .clone()
+            .unwrap()
+    );
 
     let requests = requests.borrow();
     assert_eq!(

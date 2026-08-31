@@ -431,6 +431,9 @@ pub enum WaitOutcome {
 /// so a control end can never influence the work item's subject.
 #[derive(Debug, Clone)]
 pub struct ExecContext {
+    /// Frozen by the loop for Device Assistant, never inferred by an executor
+    /// from newer input. Other surfaces retain their existing authorization path.
+    pub assistant_turn_fence: Option<crate::action_turn_fence::AssistantTurnFence>,
     pub conversation_id: String,
     pub turn_id: String,
     pub tool_call_id: String,

@@ -3058,6 +3058,7 @@ async fn run_mutating<F: FnMut() -> String>(
     }
 
     let ctx = ExecContext {
+        assistant_turn_fence: crate::action_turn_fence::AssistantTurnFence::from_session(session)?,
         conversation_id: session.conversation_id.clone(),
         turn_id: turn_id.to_string(),
         tool_call_id: call.id.clone(),
