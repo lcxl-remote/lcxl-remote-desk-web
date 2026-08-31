@@ -1,4 +1,5 @@
 use super::*;
+mod completion;
 mod wire;
 use crate::capability_grant_store::computer_binding::{
     AcceptanceOutcome, ComputerAcceptance, ComputerBinding,
@@ -590,13 +591,28 @@ fn computer_binding_crash_child() {
         let fixture = Fixture::new(file_db(Path::new(&path)).await).await;
         fixture.bind().await;
         fixture.accept().await.unwrap();
+        if std::env::var(CRASH_PHASE_ENV)
+            .unwrap()
+            .starts_with("computer_completion_")
+        {
+            fixture
+                .store
+                .accept_computer_completion(
+                    "host-original",
+                    "device-1",
+                    &fixture.plan.execution_generation,
+                    &completion::verified(&fixture.plan),
+                )
+                .await
+                .unwrap();
+        }
         std::fs::write(std::env::var(CRASH_MARKER_ENV).unwrap(), b"accepted").unwrap();
         std::future::pending::<()>().await;
     });
 }
 
 #[tokio::test]
-async fn abrupt_process_loss_preserves_only_committed_original_binding_and_acceptance() {
+async fn abrupt_process_loss_preserves_only_committed_original_binding_acceptance_and_completion() {
     struct Child(std::process::Child);
     impl Drop for Child {
         fn drop(&mut self) {
@@ -608,6 +624,8 @@ async fn abrupt_process_loss_preserves_only_committed_original_binding_and_accep
         "computer_binding_before_commit",
         "computer_acceptance_before_commit",
         "computer_acceptance_after_commit",
+        "computer_completion_before_commit",
+        "computer_completion_after_commit",
     ] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("crash.db");
@@ -655,8 +673,34 @@ async fn abrupt_process_loss_preserves_only_committed_original_binding_and_accep
         assert_eq!(
             row.computer_acceptance_json.is_some(),
             phase == "computer_acceptance_after_commit"
+                || phase.starts_with("computer_completion_")
         );
-        assert_eq!(row.state, DISPATCH_OUTBOX_SENDING);
+        assert_eq!(
+            row.state,
+            if phase == "computer_completion_after_commit" {
+                DISPATCH_OUTBOX_COMPLETED
+            } else {
+                DISPATCH_OUTBOX_SENDING
+            }
+        );
+        let work = agent_action_item::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            work.result_schema_version,
+            if phase == "computer_completion_after_commit" {
+                Some(2)
+            } else {
+                None
+            }
+        );
+        assert_eq!(
+            work.result_json.is_some(),
+            phase == "computer_completion_after_commit"
+        );
+        assert_eq!(work.completion_delivery_state, "pending");
         assert_eq!(
             agent_action_item::Entity::find().count(&db).await.unwrap(),
             1

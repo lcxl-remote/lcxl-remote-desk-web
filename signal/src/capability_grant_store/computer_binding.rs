@@ -37,7 +37,7 @@ fn invalid() -> DbErr {
     DbErr::Custom("invalid original Computer Action binding".into())
 }
 
-async fn original_on(
+pub(super) async fn original_on(
     txn: &DatabaseTransaction,
     generation: &str,
 ) -> Result<
@@ -115,7 +115,7 @@ async fn original_on(
     Ok((outbox, work, payload))
 }
 
-fn validate_binding(
+pub(super) fn validate_binding(
     binding: &ComputerBinding,
     outbox: &agent_capability_dispatch_outbox::Model,
     work: &agent_action_item::Model,

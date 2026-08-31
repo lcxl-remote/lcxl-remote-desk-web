@@ -22,6 +22,7 @@ use crate::entity::{
 };
 
 pub(crate) mod computer_binding;
+pub(crate) mod computer_completion;
 
 pub const GRANT_STATUS_ACTIVE: &str = "active";
 pub const GRANT_STATUS_REVOKED: &str = "revoked";
@@ -757,6 +758,39 @@ impl SignalCapabilityGrantStore {
         generation: u64,
         now_unix_ms: u64,
     ) -> Result<DispatchUnknownResult, DbErr> {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(SQLITE_COMPLETION_BUSY_BUDGET_MS);
+        let mut delay = SQLITE_COMPLETION_BUSY_INITIAL_DELAY_MS;
+        loop {
+            match self
+                .mark_dispatch_outcome_unknown_once(dispatch_id, call_id, generation, now_unix_ms)
+                .await
+            {
+                Err(error)
+                    if retryable_sqlite_write_contention(&error)
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(
+                        std::time::Duration::from_millis(delay)
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
+                    delay = delay
+                        .saturating_mul(2)
+                        .min(SQLITE_COMPLETION_BUSY_MAX_DELAY_MS);
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn mark_dispatch_outcome_unknown_once(
+        &self,
+        dispatch_id: &str,
+        call_id: &str,
+        generation: u64,
+        now_unix_ms: u64,
+    ) -> Result<DispatchUnknownResult, DbErr> {
         let txn = self.db.begin().await?;
         let outbox = agent_capability_dispatch_outbox::Entity::find()
             .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
@@ -786,6 +820,17 @@ impl SignalCapabilityGrantStore {
             txn.rollback().await.ok();
             return Ok(DispatchUnknownResult {
                 work_id: work.id,
+                idempotent_replay: true,
+            });
+        }
+        if outbox.state == DISPATCH_OUTBOX_COMPLETED && work.result_schema_version == Some(2) {
+            // A genuine completion may win the foreground timeout race. Keep
+            // that terminal receipt; the caller reads it after this transition.
+            let original = computer_completion::terminal_result(&outbox, work, &payload)?
+                .ok_or_else(|| DbErr::Custom("missing original terminal receipt".into()))?;
+            txn.rollback().await?;
+            return Ok(DispatchUnknownResult {
+                work_id: original.work.id,
                 idempotent_replay: true,
             });
         }

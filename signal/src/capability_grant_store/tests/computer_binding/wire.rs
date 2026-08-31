@@ -17,7 +17,8 @@ use std::{sync::Arc, time::Duration};
 mod reads;
 
 #[actix_web::test]
-async fn real_socket_observer_rejects_wrong_subject_and_frame_then_commits_original_acceptance() {
+async fn real_socket_observer_rejects_wrong_subject_and_frame_then_commits_original_acceptance_and_completion()
+ {
     let directory = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(file_db(&directory.path().join("wire.db")).await).await;
     fixture.bind().await;
@@ -149,6 +150,65 @@ async fn real_socket_observer_rejects_wrong_subject_and_frame_then_commits_origi
             } else {
                 assert_eq!(after, before);
                 assert!(after.computer_acceptance_json.is_none());
+            }
+        }
+        socket.send(awc::ws::Message::Close(None)).await.unwrap();
+    }
+    // There is deliberately no pending foreground waiter in this observer.
+    // Only the authenticated original host may persist a late completion.
+    for identity in ["cookie", "browser", "reconnected", "audience", "original"] {
+        let (_, mut socket) = awc::Client::default()
+            .ws(format!("http://{address}/{identity}"))
+            .connect()
+            .await
+            .unwrap();
+        let native = super::completion::failed(&fixture.plan);
+        let mut frame = SignalingModel::new_request(
+            SignalingType::ComputerActionCompleted,
+            None,
+            Some(&native),
+        )
+        .unwrap();
+        frame.request_id = fixture.plan.execution_generation.clone();
+        let mut wrong = frame.clone();
+        wrong.request_id = "wrong-frame".into();
+        let mut routed = frame.clone();
+        routed.to_connection_id = Some("browser".into());
+        for (index, message) in [wrong, routed, frame.clone(), frame]
+            .into_iter()
+            .enumerate()
+        {
+            let before = fixture.outbox().await;
+            socket
+                .send(awc::ws::Message::Text(
+                    serde_json::to_string(&message).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), observed.notified())
+                .await
+                .unwrap();
+            let after = fixture.outbox().await;
+            if identity == "original" && index >= 2 {
+                let result = fixture
+                    .store
+                    .read_computer_result(
+                        &fixture.plan.execution_generation,
+                        "run-1",
+                        "actor-1",
+                        "device-1",
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(result.outcome, CapabilityDispatchOutcome::Failed);
+                assert_eq!(result.original_call_id, fixture.call.id);
+                assert_eq!(result.work.completion_delivery_state, "pending");
+                if index == 3 {
+                    assert_eq!(after, before);
+                }
+            } else {
+                assert_eq!(after, before);
             }
         }
         socket.send(awc::ws::Message::Close(None)).await.unwrap();

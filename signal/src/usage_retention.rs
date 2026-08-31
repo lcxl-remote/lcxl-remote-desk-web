@@ -18,13 +18,16 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Statement, TransactionTrait, Value,
+    QuerySelect, QueryTrait, Statement, TransactionTrait, Value,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::entity::usage_retention::{self, SINGLETON_ID};
-use crate::entity::{agent_exec_task, agent_session};
+use crate::entity::{
+    agent_action_item, agent_capability_dispatch_outbox, agent_capability_grant, agent_exec_task,
+    agent_grant_reservation, agent_run_event, agent_session,
+};
 
 /// Default retention window (days) when no row has been written yet.
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
@@ -228,27 +231,86 @@ async fn cleanup_agent_sessions(
         if ids.is_empty() {
             break;
         }
-        let conversation_ids: Vec<String> = rows
-            .iter()
-            .filter(|row| ids.contains(&row.id))
-            .map(|row| row.conversation_id.clone())
-            .collect();
-        let txn = db.begin().await?;
-        agent_exec_task::Entity::delete_many()
-            .filter(agent_exec_task::Column::ConversationId.is_in(conversation_ids))
-            .exec(&txn)
-            .await?;
-        let result = agent_session::Entity::delete_many()
-            .filter(agent_session::Column::Id.is_in(ids))
-            .exec(&txn)
-            .await?;
-        txn.commit().await?;
-        deleted += result.rows_affected;
+        deleted += delete_expired_session_candidates(db, &ids, cutoff).await?;
         if rows.len() < AGENT_SESSION_BATCH_ROWS as usize {
             break;
         }
     }
     Ok((settled, deleted))
+}
+
+/// Recheck idle expiry in the same SQLite transaction that deletes all run data.
+/// A concurrent turn update cannot be overwritten by upgrading a stale snapshot:
+/// SQLite rejects that write, and the entire batch is rolled back.
+async fn delete_expired_session_candidates(
+    db: &DatabaseConnection,
+    ids: &[i64],
+    cutoff: DateTimeUtc,
+) -> Result<u64, DbErr> {
+    let txn = db.begin().await?;
+    let result = async {
+        let rows = agent_session::Entity::find()
+            .filter(agent_session::Column::Id.is_in(ids.iter().copied()))
+            .filter(agent_session::Column::UpdatedAt.lt(cutoff))
+            .all(&txn)
+            .await?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|row| {
+                desk_diagnose_core::session::PersistedAgentSession::decode_json(&row.state_json)
+                    .is_ok_and(|session| !session.turn_state.is_active())
+            })
+            .collect();
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let run_ids: Vec<_> = rows.iter().map(|row| row.conversation_id.clone()).collect();
+        let work_ids = agent_action_item::Entity::find()
+            .select_only()
+            .column(agent_action_item::Column::Id)
+            .filter(agent_action_item::Column::ConversationId.is_in(run_ids.clone()))
+            .into_query();
+        agent_capability_dispatch_outbox::Entity::delete_many()
+            .filter(agent_capability_dispatch_outbox::Column::WorkId.in_subquery(work_ids))
+            .exec(&txn)
+            .await?;
+        agent_grant_reservation::Entity::delete_many()
+            .filter(agent_grant_reservation::Column::RunId.is_in(run_ids.clone()))
+            .exec(&txn)
+            .await?;
+        agent_capability_grant::Entity::delete_many()
+            .filter(agent_capability_grant::Column::RunId.is_in(run_ids.clone()))
+            .exec(&txn)
+            .await?;
+        agent_run_event::Entity::delete_many()
+            .filter(agent_run_event::Column::RunId.is_in(run_ids.clone()))
+            .exec(&txn)
+            .await?;
+        agent_action_item::Entity::delete_many()
+            .filter(agent_action_item::Column::ConversationId.is_in(run_ids.clone()))
+            .exec(&txn)
+            .await?;
+        agent_exec_task::Entity::delete_many()
+            .filter(agent_exec_task::Column::ConversationId.is_in(run_ids))
+            .exec(&txn)
+            .await?;
+        let deleted = agent_session::Entity::delete_many()
+            .filter(agent_session::Column::Id.is_in(rows.iter().map(|row| row.id)))
+            .exec(&txn)
+            .await?;
+        Ok(deleted.rows_affected)
+    }
+    .await;
+    match result {
+        Ok(deleted) => {
+            txn.commit().await?;
+            Ok(deleted)
+        }
+        Err(error) => {
+            txn.rollback().await?;
+            Err(error)
+        }
+    }
 }
 
 /// Run one cleanup pass over both rollup tables using the current retention config.
@@ -416,6 +478,11 @@ mod tests {
             schema.create_table_from_entity(ai_usage::Entity),
             schema.create_table_from_entity(agent_session::Entity),
             schema.create_table_from_entity(agent_exec_task::Entity),
+            schema.create_table_from_entity(agent_action_item::Entity),
+            schema.create_table_from_entity(agent_capability_dispatch_outbox::Entity),
+            schema.create_table_from_entity(agent_capability_grant::Entity),
+            schema.create_table_from_entity(agent_grant_reservation::Entity),
+            schema.create_table_from_entity(agent_run_event::Entity),
         ] {
             db.execute(&stmt).await.unwrap();
         }
@@ -616,5 +683,52 @@ mod tests {
         assert_eq!(settled, 0);
         assert_eq!(sessions, 0);
         assert_eq!(turn_hours(&db).await, vec![days_ago(0)]);
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_candidates_cannot_delete_resumed_or_refreshed_sessions() {
+        let db = cleanup_db().await;
+        for run in ["resumed", "refreshed", "expired"] {
+            seed_session(&db, run, days_ago(40), false, None).await;
+        }
+        let candidates = agent_session::Entity::find().all(&db).await.unwrap();
+        for row in &candidates {
+            let mut updated: agent_session::ActiveModel = row.clone().into();
+            match row.conversation_id.as_str() {
+                "resumed" => {
+                    let mut session =
+                        desk_diagnose_core::session::PersistedAgentSession::decode_json(
+                            &row.state_json,
+                        )
+                        .unwrap();
+                    session
+                        .begin_turn(
+                            "new-turn",
+                            None,
+                            None,
+                            0,
+                            session.scope_snapshot.clone(),
+                            now().to_rfc3339(),
+                        )
+                        .unwrap();
+                    updated.state_json = Set(session.encode_json_for_storage().unwrap());
+                    updated.lease_token = Set(session.lease_token as i64);
+                    updated.lease_deadline = Set(Some(now() + chrono::Duration::hours(1)));
+                }
+                "refreshed" => updated.updated_at = Set(now()),
+                _ => continue,
+            }
+            updated.update(&db).await.unwrap();
+        }
+        let ids: Vec<_> = candidates.iter().map(|row| row.id).collect();
+        assert_eq!(
+            delete_expired_session_candidates(&db, &ids, days_ago(30))
+                .await
+                .unwrap(),
+            1
+        );
+        let remaining = agent_session::Entity::find().all(&db).await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.iter().all(|row| row.conversation_id != "expired"));
     }
 }

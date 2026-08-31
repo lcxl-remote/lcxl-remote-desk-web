@@ -96,6 +96,8 @@ use crate::web_research::{
     validate_fetch_call, validate_search_call,
 };
 
+pub(crate) mod completion;
+
 fn error(
     kind: AgentErrorKind,
     message: impl Into<String>,
@@ -551,7 +553,33 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                 }
                 SignalingType::ComputerActionCompleted => {
                     if let Ok(completed) = model.get_data::<ComputerActionCompleted>() {
-                        let _ = self.pending.complete(source_id, completed);
+                        let Some(audience) = source.model.version_info.client_id.as_deref() else {
+                            return;
+                        };
+                        use crate::capability_grant_store::computer_completion::CompletionObservation;
+                        match self
+                            .store
+                            .accept_computer_completion(
+                                source_id,
+                                audience,
+                                &model.request_id,
+                                &completed,
+                            )
+                            .await
+                        {
+                            Ok(
+                                CompletionObservation::Stored
+                                | CompletionObservation::Unknown
+                                | CompletionObservation::Duplicate
+                                | CompletionObservation::InlineOrLegacy,
+                            ) => {
+                                let _ = self.pending.complete(source_id, completed);
+                            }
+                            Ok(CompletionObservation::Stale) => {}
+                            Err(_) => {
+                                log::warn!("[computer-action] rejected inconsistent completion")
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -2275,10 +2303,10 @@ impl SignalDeviceAssistantTools {
             store.bind_computer_transport(&self.target_connection_id, &plan, &session, call)
                 .await.map_err(|_| error(AgentErrorKind::Internal,
                     "failed to freeze original Computer Action transport", false, false))?;
-            Ok::<_, AgentError>((target, generation, text))
+            Ok::<_, AgentError>((target, generation, text, plan))
         }
         .await;
-        let (target, generation, text) = match dispatch_material {
+        let (target, generation, text, plan) = match dispatch_material {
             Ok(material) => material,
             Err(dispatch_error) => {
                 record_computer_action_pre_send_failure(
@@ -2314,126 +2342,9 @@ impl SignalDeviceAssistantTools {
             .await?;
             return Err(dispatch_error);
         }
-        if target.session.write().await.text(text).await.is_err() {
-            global_computer_action_pending().cancel(&generation);
-            store
-                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to persist semantic UI unknown outcome: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?;
-            return Ok(ExecOutcome::Unknown(
-                desk_diagnose_core::session::ActionIdentity::new(
-                    prepared.work_id,
-                    server_call_id,
-                    generation,
-                    desk_diagnose_core::session::WorkKind::ComputerAction,
-                ),
-            ));
-        }
-        let completion = match tokio::time::timeout(self.timeout, completion_rx).await {
-            Ok(Ok(Ok(completion))) => completion,
-            _ => {
-                global_computer_action_pending().cancel(&generation);
-                store
-                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("failed to persist semantic UI unknown outcome: {db_error}"),
-                            false,
-                            false,
-                        )
-                    })?;
-                return Ok(ExecOutcome::Unknown(
-                    desk_diagnose_core::session::ActionIdentity::new(
-                        prepared.work_id,
-                        server_call_id,
-                        generation,
-                        desk_diagnose_core::session::WorkKind::ComputerAction,
-                    ),
-                ));
-            }
-        };
-        if semantic_ui_completion_is_unknown(completion.result) {
-            store
-                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to persist semantic UI unknown outcome: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?;
-            return Ok(ExecOutcome::Unknown(
-                desk_diagnose_core::session::ActionIdentity::new(
-                    prepared.work_id,
-                    server_call_id,
-                    generation,
-                    desk_diagnose_core::session::WorkKind::ComputerAction,
-                ),
-            ));
-        }
-        let verified = semantic_ui_completion_is_verified(&completion);
-        let output = serde_json::to_string(&completion).map_err(|encode_error| {
-            error(
-                AgentErrorKind::Internal,
-                format!("failed to encode semantic UI result: {encode_error}"),
-                false,
-                false,
-            )
-        })?;
-        store
-            .record_dispatch_completion(
-                &CapabilityDispatchCompletion {
-                    dispatch_id: dispatch_id.clone(),
-                    call_id: server_call_id.clone(),
-                    generation: 1,
-                    outcome: if verified {
-                        CapabilityDispatchOutcome::Succeeded
-                    } else {
-                        CapabilityDispatchOutcome::Failed
-                    },
-                    result_digest_sha256: format!("{:x}", Sha256::digest(output.as_bytes())),
-                },
-                now_unix_ms,
-            )
+        let sent = target.session.write().await.text(text).await.is_ok();
+        self.finish_computer_action(&store, call, &plan, completion_rx, sent, true)
             .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to persist semantic UI completion: {db_error}"),
-                    false,
-                    false,
-                )
-            })?;
-        if verified {
-            Ok(ExecOutcome::Executed {
-                data_envelope: None,
-                output: ToolRunOutput {
-                    content: output,
-                    image_data_url: None,
-                },
-                event_id: None,
-            })
-        } else {
-            Err(error(
-                AgentErrorKind::InvalidInput,
-                completion
-                    .message
-                    .unwrap_or_else(|| "semantic UI action was not independently verified".into()),
-                false,
-                true,
-            ))
-        }
     }
 
     async fn authorize_and_execute_artifact(
@@ -3062,107 +2973,9 @@ impl SignalDeviceAssistantTools {
             .await?;
             return Err(dispatch_error);
         }
-        if target.session.write().await.text(text).await.is_err() {
-            global_computer_action_pending().cancel(&generation);
-            store
-                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to persist artifact unknown outcome: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?;
-            return Ok(ExecOutcome::Unknown(
-                desk_diagnose_core::session::ActionIdentity::new(
-                    prepared.work_id,
-                    server_call_id,
-                    generation,
-                    desk_diagnose_core::session::WorkKind::ComputerAction,
-                ),
-            ));
-        }
-        let completion = match tokio::time::timeout(self.timeout, completion_rx).await {
-            Ok(Ok(Ok(completion))) => completion,
-            _ => {
-                global_computer_action_pending().cancel(&generation);
-                store
-                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("failed to persist artifact unknown outcome: {db_error}"),
-                            false,
-                            false,
-                        )
-                    })?;
-                return Ok(ExecOutcome::Unknown(
-                    desk_diagnose_core::session::ActionIdentity::new(
-                        prepared.work_id,
-                        server_call_id,
-                        generation,
-                        desk_diagnose_core::session::WorkKind::ComputerAction,
-                    ),
-                ));
-            }
-        };
-        let verified = completion.result == ComputerActionResultClass::Verified
-            && completion
-                .facts
-                .iter()
-                .all(|fact| fact.changed && fact.verified);
-        let output = serde_json::to_string(&completion).map_err(|encode_error| {
-            error(
-                AgentErrorKind::Internal,
-                format!("failed to encode artifact result: {encode_error}"),
-                false,
-                false,
-            )
-        })?;
-        let completion_record = CapabilityDispatchCompletion {
-            dispatch_id: dispatch_id.clone(),
-            call_id: server_call_id.clone(),
-            generation: 1,
-            outcome: if verified {
-                CapabilityDispatchOutcome::Succeeded
-            } else {
-                CapabilityDispatchOutcome::Failed
-            },
-            result_digest_sha256: format!("{:x}", Sha256::digest(output.as_bytes())),
-        };
-        store
-            .record_dispatch_completion(&completion_record, now_unix_ms)
+        let sent = target.session.write().await.text(text).await.is_ok();
+        self.finish_computer_action(&store, call, &plan, completion_rx, sent, true)
             .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to persist artifact completion: {db_error}"),
-                    false,
-                    false,
-                )
-            })?;
-        if verified {
-            Ok(ExecOutcome::Executed {
-                data_envelope: None,
-                output: ToolRunOutput {
-                    content: output,
-                    image_data_url: None,
-                },
-                event_id: None,
-            })
-        } else {
-            Err(error(
-                AgentErrorKind::InvalidInput,
-                completion
-                    .message
-                    .unwrap_or_else(|| "artifact Provider did not verify the change".into()),
-                false,
-                true,
-            ))
-        }
     }
 
     #[cfg(test)]
@@ -3730,307 +3543,16 @@ impl SignalDeviceAssistantTools {
             .await?;
             return Err(dispatch_error);
         }
-        if target.session.write().await.text(text).await.is_err() {
-            global_computer_action_pending().cancel(&generation);
-            store
-                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to persist browser unknown outcome: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?;
-            return Ok(ExecOutcome::Unknown(
-                desk_diagnose_core::session::ActionIdentity::new(
-                    prepared.work_id,
-                    server_call_id,
-                    generation,
-                    desk_diagnose_core::session::WorkKind::ComputerAction,
-                ),
-            ));
-        }
-        let completion = match tokio::time::timeout(self.timeout, completion_rx).await {
-            Ok(Ok(Ok(completion))) => completion,
-            _ => {
-                global_computer_action_pending().cancel(&generation);
-                store
-                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("failed to persist browser unknown outcome: {db_error}"),
-                            false,
-                            false,
-                        )
-                    })?;
-                return Ok(ExecOutcome::Unknown(
-                    desk_diagnose_core::session::ActionIdentity::new(
-                        prepared.work_id,
-                        server_call_id,
-                        generation,
-                        desk_diagnose_core::session::WorkKind::ComputerAction,
-                    ),
-                ));
-            }
-        };
-        if completion.result == ComputerActionResultClass::OutcomeUnknown {
-            store
-                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to persist browser unknown outcome: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?;
-            return Ok(ExecOutcome::Unknown(
-                desk_diagnose_core::session::ActionIdentity::new(
-                    prepared.work_id,
-                    server_call_id,
-                    generation,
-                    desk_diagnose_core::session::WorkKind::ComputerAction,
-                ),
-            ));
-        }
-        let browser_result = match completion.output.as_ref() {
-            Some(ComputerActionOutput::Browser(result))
-                if completion.result == ComputerActionResultClass::Verified
-                    && result.call_id == server_call_id =>
-            {
-                result.validate().map_err(|validation_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("invalid browser result from edge: {validation_error}"),
-                        false,
-                        false,
-                    )
-                })?;
-                Some(result.clone())
-            }
-            _ => None,
-        };
-        let output_json = if let Some(gmail) = gmail_input.as_ref() {
-            browser_result
-                .as_ref()
-                .and_then(|result| {
-                    (gmail_exact_attachment_readback(result, gmail)
-                        && result.page.adapter == gmail.page.adapter
-                        && result.page.page_id == gmail.page.page_id
-                        && result.page.page_incarnation == gmail.page.page_incarnation
-                        && result.page.origin == gmail.page.origin
-                        && result.page.document_revision > gmail.page.document_revision
-                        && gmail_exact_form_readback(result, gmail))
-                        .then(|| {
-                            let compose_digest = format!(
-                                "{:x}",
-                                Sha256::digest(
-                                    format!(
-                                        "{}:{}:{}:{}:{}",
-                                        result.page.page_incarnation,
-                                        gmail.to_field.element_id,
-                                        gmail.subject_field.element_id,
-                                        gmail.body_field.element_id,
-                                        server_call_id
-                                    )
-                                    .as_bytes(),
-                                )
-                            );
-                            CommunicationDraftHandoff {
-                                schema_version: COMMUNICATION_SCHEMA_VERSION,
-                                handoff_id: format!("gmail-handoff-{compose_digest}"),
-                                run_id: self.run_id.clone(),
-                                surface: CommunicationSurfaceRef {
-                                    channel: CommunicationChannel::Email,
-                                    kind: communication_surface_kind(result.page.adapter.engine),
-                                    scope: CommunicationSurfaceScope::WebOrigin {
-                                        origin: result.page.origin.clone(),
-                                    },
-                                    device_id: result.page.adapter.device_id.clone(),
-                                    os_session_id: result.page.adapter.os_session_id.clone(),
-                                    adapter_id: desk_diagnose_core::device_assistant::GMAIL_WEB_ADAPTER_ID.into(),
-                                    adapter_version: desk_diagnose_core::device_assistant::GMAIL_WEB_ADAPTER_VERSION.into(),
-                                    profile_id: result.page.adapter.profile_incarnation.clone(),
-                                    account_id: desk_diagnose_core::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
-                                    revision: result.page.adapter.connection_revision,
-                                },
-                                compose_id: format!("gmail-compose-{compose_digest}"),
-                                prepared_payload_sha256: canonical_input_digest_sha256.clone(),
-                                verification: CommunicationPrepareVerification::SemanticExact,
-                                readback_payload_sha256: Some(canonical_input_digest_sha256.clone()),
-                                send_authority: CommunicationSendAuthority::ManualOnly,
-                                handed_off_at_unix_ms: result.completed_at_unix_ms,
-                            }
-                        })
-                })
-                .map(|handoff| {
-                    handoff.validate().map(|_| handoff).map_err(|validation_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("invalid Gmail handoff result: {validation_error}"),
-                            false,
-                            false,
-                        )
-                    })
-                })
-                .transpose()?
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|encode_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to encode Gmail handoff result: {encode_error}"),
-                        false,
-                        false,
-                    )
-                })?
-        } else if let Some(slack) = slack_input.as_ref() {
-            browser_result
-                .as_ref()
-                .and_then(|result| {
-                    (result.outcome
-                        == desk_agent_protocol::browser_control::BrowserActionOutcome::FormFilled
-                        && result.page.adapter == slack.page.adapter
-                        && result.page.page_id == slack.page.page_id
-                        && result.page.page_incarnation == slack.page.page_incarnation
-                        && result.page.origin == slack.page.origin
-                        && result.page.document_revision > slack.page.document_revision
-                        && slack_exact_form_readback(result, slack))
-                        .then(|| {
-                            let compose_digest = format!(
-                                "{:x}",
-                                Sha256::digest(
-                                    format!(
-                                        "{}:{}:{}",
-                                        result.page.page_incarnation,
-                                        slack.composer.element_id,
-                                        server_call_id
-                                    )
-                                    .as_bytes(),
-                                )
-                            );
-                            CommunicationDraftHandoff {
-                                schema_version: COMMUNICATION_SCHEMA_VERSION,
-                                handoff_id: format!("slack-handoff-{compose_digest}"),
-                                run_id: self.run_id.clone(),
-                                surface: CommunicationSurfaceRef {
-                                    channel: CommunicationChannel::Chat,
-                                    kind: communication_surface_kind(result.page.adapter.engine),
-                                    scope: CommunicationSurfaceScope::WebOrigin {
-                                        origin: result.page.origin.clone(),
-                                    },
-                                    device_id: result.page.adapter.device_id.clone(),
-                                    os_session_id: result.page.adapter.os_session_id.clone(),
-                                    adapter_id: desk_diagnose_core::device_assistant::SLACK_WEB_ADAPTER_ID.into(),
-                                    adapter_version: desk_diagnose_core::device_assistant::SLACK_WEB_ADAPTER_VERSION.into(),
-                                    profile_id: result.page.adapter.profile_incarnation.clone(),
-                                    account_id: desk_diagnose_core::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
-                                    revision: result.page.adapter.connection_revision,
-                                },
-                                compose_id: format!("slack-compose-{compose_digest}"),
-                                prepared_payload_sha256: canonical_input_digest_sha256.clone(),
-                                verification: CommunicationPrepareVerification::SemanticExact,
-                                readback_payload_sha256: Some(canonical_input_digest_sha256.clone()),
-                                send_authority: CommunicationSendAuthority::ManualOnly,
-                                handed_off_at_unix_ms: result.completed_at_unix_ms,
-                            }
-                        })
-                })
-                .map(|handoff| {
-                    handoff.validate().map(|_| handoff).map_err(|validation_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("invalid Slack handoff result: {validation_error}"),
-                            false,
-                            false,
-                        )
-                    })
-                })
-                .transpose()?
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|encode_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to encode Slack handoff result: {encode_error}"),
-                        false,
-                        false,
-                    )
-                })?
-        } else {
-            browser_result
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|encode_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to encode browser result: {encode_error}"),
-                        false,
-                        false,
-                    )
-                })?
-        };
-        let succeeded = output_json.is_some();
-        let result_digest_sha256 = format!(
-            "{:x}",
-            Sha256::digest(
-                output_json
-                    .as_deref()
-                    .unwrap_or("browser action failed")
-                    .as_bytes()
-            )
-        );
-        store
-            .record_dispatch_completion(
-                &CapabilityDispatchCompletion {
-                    dispatch_id,
-                    call_id: server_call_id,
-                    generation: 1,
-                    outcome: if succeeded {
-                        CapabilityDispatchOutcome::Succeeded
-                    } else {
-                        CapabilityDispatchOutcome::Failed
-                    },
-                    result_digest_sha256,
-                },
-                now_unix_ms,
-            )
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to persist browser completion: {db_error}"),
-                    false,
-                    false,
-                )
-            })?;
-        if let Some(content) = output_json {
-            Ok(ExecOutcome::Executed {
-                data_envelope: None,
-                output: ToolRunOutput {
-                    content,
-                    image_data_url: None,
-                },
-                event_id: None,
-            })
-        } else {
-            Err(error(
-                AgentErrorKind::InvalidInput,
-                completion
-                    .message
-                    .unwrap_or_else(|| "browser Provider did not verify the action".into()),
-                false,
-                true,
-            ))
-        }
+        let sent = target.session.write().await.text(text).await.is_ok();
+        self.finish_computer_action(
+            &store,
+            call,
+            &plan,
+            completion_rx,
+            sent,
+            capability.wire.effect.is_side_effecting(),
+        )
+        .await
     }
 
     async fn authorize_and_execute_outlook_handoff(
@@ -4162,18 +3684,6 @@ impl SignalDeviceAssistantTools {
                 true,
             )
         })?;
-        let expected_surface = request.surface.clone();
-        let expected_handoff_digest_sha256 = format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&request).map_err(|encode_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to seal Outlook handoff payload: {encode_error}"),
-                    false,
-                    false,
-                )
-            })?)
-        );
         if ComputerActionKind::Communication(request.clone()).required_capability()
             != capability.required_capability
         {
@@ -4573,165 +4083,9 @@ impl SignalDeviceAssistantTools {
                 false,
             ));
         }
-        if target.session.write().await.text(text).await.is_err() {
-            global_computer_action_pending().cancel(&generation);
-            store
-                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to persist Outlook unknown outcome: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?;
-            return Ok(ExecOutcome::Unknown(
-                desk_diagnose_core::session::ActionIdentity::new(
-                    prepared.work_id,
-                    server_call_id,
-                    generation,
-                    desk_diagnose_core::session::WorkKind::ComputerAction,
-                ),
-            ));
-        }
-        let completion = match tokio::time::timeout(self.timeout, completion_rx).await {
-            Ok(Ok(Ok(completion))) => completion,
-            _ => {
-                global_computer_action_pending().cancel(&generation);
-                store
-                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("failed to persist Outlook unknown outcome: {db_error}"),
-                            false,
-                            false,
-                        )
-                    })?;
-                return Ok(ExecOutcome::Unknown(
-                    desk_diagnose_core::session::ActionIdentity::new(
-                        prepared.work_id,
-                        server_call_id,
-                        generation,
-                        desk_diagnose_core::session::WorkKind::ComputerAction,
-                    ),
-                ));
-            }
-        };
-        if completion.result == ComputerActionResultClass::OutcomeUnknown {
-            store
-                .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to persist Outlook unknown outcome: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?;
-            return Ok(ExecOutcome::Unknown(
-                desk_diagnose_core::session::ActionIdentity::new(
-                    prepared.work_id,
-                    server_call_id,
-                    generation,
-                    desk_diagnose_core::session::WorkKind::ComputerAction,
-                ),
-            ));
-        }
-        let handoff = match completion.output.as_ref() {
-            Some(ComputerActionOutput::CommunicationHandoff(handoff))
-                if completion.result == ComputerActionResultClass::ChangedButUnverified =>
-            {
-                handoff.validate().map_err(|validation_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("invalid Outlook handoff result from edge: {validation_error}"),
-                        false,
-                        false,
-                    )
-                })?;
-                if handoff.run_id == self.run_id
-                    && handoff.surface == expected_surface
-                    && handoff.prepared_payload_sha256 == expected_handoff_digest_sha256
-                    && handoff.verification == CommunicationPrepareVerification::AssistiveUnverified
-                    && handoff.readback_payload_sha256.is_none()
-                    && handoff.send_authority == CommunicationSendAuthority::ManualOnly
-                {
-                    Some(handoff.clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        let output_json = handoff
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|encode_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to encode Outlook handoff result: {encode_error}"),
-                    false,
-                    false,
-                )
-            })?;
-        let succeeded = output_json.is_some();
-        let result_digest_sha256 = format!(
-            "{:x}",
-            Sha256::digest(
-                output_json
-                    .as_deref()
-                    .unwrap_or("Outlook handoff failed")
-                    .as_bytes(),
-            )
-        );
-        store
-            .record_dispatch_completion(
-                &CapabilityDispatchCompletion {
-                    dispatch_id,
-                    call_id: server_call_id,
-                    generation: 1,
-                    outcome: if succeeded {
-                        CapabilityDispatchOutcome::Succeeded
-                    } else {
-                        CapabilityDispatchOutcome::Failed
-                    },
-                    result_digest_sha256,
-                },
-                now_unix_ms,
-            )
+        let sent = target.session.write().await.text(text).await.is_ok();
+        self.finish_computer_action(&store, call, &plan, completion_rx, sent, true)
             .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to persist Outlook completion: {db_error}"),
-                    false,
-                    false,
-                )
-            })?;
-        if let Some(content) = output_json {
-            Ok(ExecOutcome::Executed {
-                data_envelope: None,
-                output: ToolRunOutput {
-                    content,
-                    image_data_url: None,
-                },
-                event_id: None,
-            })
-        } else {
-            Err(error(
-                AgentErrorKind::InvalidInput,
-                completion
-                    .message
-                    .unwrap_or_else(|| "Outlook handoff was not completed".into()),
-                false,
-                true,
-            ))
-        }
     }
 
     async fn invoke(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
@@ -5221,6 +4575,18 @@ impl ToolSeam for SignalDeviceAssistantTools {
     }
 
     async fn ack_delivery(&self, event_id: &str) -> Result<(), AgentError> {
+        if SignalCapabilityGrantStore::new(self.db.clone())
+            .consume_computer_result(
+                event_id,
+                &self.run_id,
+                &self.actor_id,
+                &self.target_device_id,
+            )
+            .await
+            .map_err(|_| completion::invalid())?
+        {
+            return Ok(());
+        }
         <crate::agent_exec::SignalAgentTools as ToolSeam>::ack_delivery(&self.exec_tools, event_id)
             .await
     }
@@ -5230,6 +4596,19 @@ impl ToolSeam for SignalDeviceAssistantTools {
         action_request_id: &str,
         execution_id: &str,
     ) -> Result<WaitOutcome, AgentError> {
+        if let Some(outcome) = SignalCapabilityGrantStore::new(self.db.clone())
+            .wait_computer_result(
+                action_request_id,
+                execution_id,
+                &self.run_id,
+                &self.actor_id,
+                &self.target_device_id,
+            )
+            .await
+            .map_err(|_| completion::invalid())?
+        {
+            return Ok(outcome);
+        }
         let outcome = <crate::agent_exec::SignalAgentTools as ToolSeam>::wait_for_task(
             &self.exec_tools,
             action_request_id,
@@ -5474,19 +4853,6 @@ async fn record_computer_action_pre_send_failure(
         })
 }
 
-fn semantic_ui_completion_is_unknown(result: ComputerActionResultClass) -> bool {
-    matches!(
-        result,
-        ComputerActionResultClass::OutcomeUnknown | ComputerActionResultClass::ChangedButUnverified
-    )
-}
-
-fn semantic_ui_completion_is_verified(completion: &ComputerActionCompleted) -> bool {
-    completion.result == ComputerActionResultClass::Verified
-        && completion.facts.len() == 1
-        && completion.facts[0].verified
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5518,42 +4884,6 @@ mod tests {
             .is_err()
         );
         assert!(validate_selected_batch_destination(&roots, &source).is_err());
-    }
-
-    #[test]
-    fn unverified_semantic_ui_change_is_unknown_not_failed() {
-        assert!(semantic_ui_completion_is_unknown(
-            ComputerActionResultClass::OutcomeUnknown
-        ));
-        assert!(semantic_ui_completion_is_unknown(
-            ComputerActionResultClass::ChangedButUnverified
-        ));
-        assert!(!semantic_ui_completion_is_unknown(
-            ComputerActionResultClass::Verified
-        ));
-        assert!(!semantic_ui_completion_is_unknown(
-            ComputerActionResultClass::Failed
-        ));
-    }
-
-    #[test]
-    fn idempotent_semantic_ui_readback_is_verified_without_claiming_a_change() {
-        let completion = ComputerActionCompleted {
-            work_id: "work-1".into(),
-            action_request_id: "action-1".into(),
-            execution_generation: "generation-1".into(),
-            result: ComputerActionResultClass::Verified,
-            facts: vec![desk_agent_protocol::computer_use::ComputerActionStepFact {
-                index: 0,
-                changed: false,
-                verified: true,
-                summary: "target already had the requested state".into(),
-            }],
-            message: None,
-            output: None,
-        };
-
-        assert!(semantic_ui_completion_is_verified(&completion));
     }
 
     #[test]

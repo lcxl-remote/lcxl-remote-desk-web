@@ -173,8 +173,11 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
         "browser_take_snapshot",
         "browser_wait_for",
         "browser_open_page",
+        "browser_open_page_late",
     ] {
-        let mutating = name == "browser_open_page";
+        let mutating = name.starts_with("browser_open_page");
+        let late = name == "browser_open_page_late";
+        let foreground_closed = Arc::new(tokio::sync::Notify::new());
         let arguments = if name == "browser_take_snapshot" {
             json!({"page":page,"max_elements":10})
         } else if mutating {
@@ -184,7 +187,7 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
         };
         let call = ToolCall {
             id: name.into(),
-            name: name.into(),
+            name: if mutating { "browser_open_page" } else { name }.into(),
             arguments_json: arguments.to_string(),
         };
         if mutating {
@@ -198,7 +201,7 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                 .unwrap();
             let mut permission: CapabilityGrant =
                 serde_json::from_str(&original.payload_json).unwrap();
-            permission.grant_id = "grant-runtime-open".into();
+            permission.grant_id = format!("grant-runtime-{name}");
             permission.remaining_uses = 1;
             fixture.store.issue(&permission).await.unwrap();
             let row = agent_session::Entity::find()
@@ -278,6 +281,13 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                 )
                 .unwrap(),
             ] {
+                if late && reply.signaling_type == SignalingType::ComputerActionCompleted {
+                    // Losing the foreground waiter is not losing the action.
+                    // Wait until the actual runtime has returned Unknown before
+                    // sending the authentic original completion over the socket.
+                    global_computer_action_pending().cancel(&completion.execution_generation);
+                    foreground_closed.notified().await;
+                }
                 socket
                     .send(awc::ws::Message::Text(
                         serde_json::to_string(&reply).unwrap().into(),
@@ -306,7 +316,22 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                 connection_id: None,
             };
             match tools.confirm_and_exec(&call, &context).await? {
-                ExecOutcome::Executed { output, .. } => Ok(output),
+                ExecOutcome::Executed {
+                    output,
+                    event_id,
+                    data_envelope,
+                } => {
+                    assert!(!late);
+                    assert!(event_id.is_some() && data_envelope.is_some());
+                    Ok(output)
+                }
+                ExecOutcome::Unknown(_) if late => {
+                    foreground_closed.notify_one();
+                    Ok(desk_diagnose_core::seam::ToolRunOutput {
+                        content: "unknown".into(),
+                        image_data_url: None,
+                    })
+                }
                 other => panic!("unexpected mutation outcome: {other:?}"),
             }
         };
@@ -318,10 +343,62 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(
-            serde_json::from_str::<BrowserActionResult>(&result.content).unwrap(),
-            expected
-        );
+        if !late {
+            assert_eq!(
+                serde_json::from_str::<BrowserActionResult>(&result.content).unwrap(),
+                expected
+            );
+        }
+        if mutating {
+            let original = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let outbox = agent_capability_dispatch_outbox::Entity::find()
+                        .filter(
+                            agent_capability_dispatch_outbox::Column::CallId.eq(&expected.call_id),
+                        )
+                        .one(&fixture.store.db)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if let Some(original) = fixture
+                        .store
+                        .read_computer_result(&outbox.dispatch_id, "run-1", "actor-1", "device-1")
+                        .await
+                        .unwrap()
+                    {
+                        break original;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(original.original_call_id, call.id);
+            let event = original.work.completion_event_id.clone();
+            let outcome = tools
+                .wait_for_task(
+                    &original.receipt.action.action_request_id,
+                    &original.receipt.action.execution_id,
+                )
+                .await
+                .unwrap();
+            let desk_diagnose_core::seam::WaitOutcome::CompletedWithReceipt {
+                original_call_id,
+                output,
+                data_envelope,
+                ..
+            } = outcome
+            else {
+                panic!("original result required")
+            };
+            assert_eq!(original_call_id, call.id);
+            assert_eq!(
+                serde_json::from_str::<BrowserActionResult>(&output.content).unwrap(),
+                expected
+            );
+            assert_eq!(data_envelope, original.receipt.envelope);
+            tools.ack_delivery(&event).await.unwrap();
+        }
         let work = agent_action_item::Entity::find()
             .filter(agent_action_item::Column::ActionRequestId.eq(&expected.call_id))
             .one(&fixture.store.db)

@@ -86,6 +86,10 @@ The shared loop labels background/unknown/wait statuses as central-control infor
 
 OSS Signal freezes the original side-effecting Computer Action plan, connection and model-call provenance on its existing dispatch outbox before sending. Only an explicit acceptance from the token-authenticated host with matching audience, frame, action and generation is persisted. Duplicate acceptance does not renew its timestamp or authorize another send. Browser snapshots and element waits share the transport but remain inline reads: they do not require mutation-result provenance or gain background-mutation acceptance. SQLite schema 8 adds nullable binding/acceptance metadata in place; existing rows are not backfilled, reauthorized or turned into running tasks. Acceptance storage alone does not yet provide the complete generic background completion/cancellation workflow.
 
+For those bound mutations, the completion observer validates the original authenticated transport identity and sealed plan, then atomically saves the bounded typed native result, tool projection and original receipt on the existing work record before notifying a foreground waiter. Result format 2 needs no additional database columns. The first unknown observation is retained; a real terminal result may refine it, but duplicate delivery does not refresh timestamps and conflicting terminal reports cannot overwrite it. Recovery and active waiting retain the original model-call identity and labels, without another dispatch or implicit export permission. Outlook assistive handoffs remain unverified and manual-send-only; Gmail/Slack handoffs still require exact read-back. Generic background-task publication and cancellation remain a separate, incomplete integration.
+
+Idle-session retention removes the session and its action results, dispatch bindings, grant reservations, grants, run events and legacy command records in one transaction. Eligibility is rechecked inside that transaction, and a deletion failure rolls back the whole session batch. A late result cannot recreate a removed original work record. This is logical database cleanup, not a promise of forensic erasure from SQLite files, backups or storage media.
+
 ## Redaction Fails Closed
 
 The pipeline runs **collect → redact → model → render**. Collection and redaction happen on the **edge device**; the model call happens **centrally**. If redaction fails, the edge returns an error and the central brain aborts **before** the model is called. Evidence (with raw screenshot bytes stripped) is always redacted before it leaves the host or reaches the model.
@@ -96,7 +100,7 @@ AI model API keys live on the **central signaling server**, never on a thin edge
 
 ## Audit Records Metadata Only
 
-Audit trails log content-free summaries — counts, sizes, token usage, provider, adapter. Raw prompts, outputs, and screenshots are **never** persisted.
+Audit trails log content-free summaries — counts, sizes, token usage, provider, adapter. Raw prompts, outputs, and screenshots are **never stored in audit records**. This is distinct from access-controlled conversation and execution-result storage used for recovery and governed by retention.
 
 ## MCP Is Read-Only
 
