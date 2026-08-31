@@ -176,7 +176,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 7;
+const SIGNAL_SCHEMA_VERSION: i32 = 8;
 const MIGRATION_LOCK_TABLE: &str = "signal_schema_migration_lock";
 const LEGACY_TABLES: [&str; 8] = [
     "agent_exec_task",
@@ -241,6 +241,7 @@ pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbE
                 4 => migrate_v4_to_v5(&txn, &tables).await?,
                 5 => migrate_v5_to_v6(&txn, &tables).await?,
                 6 => migrate_v6_to_v7(&txn, &tables).await?,
+                7 => migrate_v7_to_v8(&txn, &tables).await?,
                 other => {
                     return Err(DbErr::Custom(format!(
                         "no signal database migration registered from version {other}"
@@ -635,6 +636,41 @@ async fn validate_v1_schema<C: ConnectionTrait>(
 }
 
 async fn validate_latest_schema<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v7_schema(db, tables).await?;
+    let columns = table_columns(db, "agent_capability_dispatch_outbox").await?;
+    for column in ["computer_binding_json", "computer_acceptance_json"] {
+        if !columns.contains(column) {
+            return Err(DbErr::Custom(format!(
+                "signal schema v8 is missing {column}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn migrate_v7_to_v8<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v7_schema(db, tables).await?;
+    // Earlier migration steps create current entities, so the columns may
+    // already exist when a database starts below v7. Never backfill old rows.
+    let columns = table_columns(db, "agent_capability_dispatch_outbox").await?;
+    for column in ["computer_binding_json", "computer_acceptance_json"] {
+        if !columns.contains(column) {
+            db.execute_unprepared(&format!(
+                "ALTER TABLE agent_capability_dispatch_outbox ADD COLUMN {column} TEXT NULL"
+            ))
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn validate_v7_schema<C: ConnectionTrait>(
     db: &C,
     tables: &HashSet<String>,
 ) -> Result<(), DbErr> {
@@ -1228,6 +1264,68 @@ mod tests {
             SIGNAL_SCHEMA_VERSION
         );
         initialize_schema(&db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v7_to_latest_keeps_original_outbox_and_does_not_invent_acceptance() {
+        use sea_orm::{ActiveModelTrait, Set};
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_latest_schema(&db).await.unwrap();
+        let original = agent_capability_dispatch_outbox::ActiveModel {
+            dispatch_id: Set("legacy-dispatch".into()),
+            call_id: Set("legacy-call".into()),
+            work_id: Set(7),
+            reservation_id: Set("legacy-reservation".into()),
+            generation: Set(1),
+            state: Set("outcome_unknown".into()),
+            payload_json: Set("{\"legacy\":true}".into()),
+            payload_schema_version: Set(1),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        db.execute_unprepared(
+            "ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_binding_json; \
+            ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_acceptance_json; \
+            PRAGMA user_version = 7",
+        )
+        .await
+        .unwrap();
+        initialize_schema(&db).await.unwrap();
+        initialize_schema(&db).await.unwrap();
+        assert_eq!(
+            query_user_version(&db).await.unwrap(),
+            SIGNAL_SCHEMA_VERSION
+        );
+        let migrated = agent_capability_dispatch_outbox::Entity::find_by_id(original.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated, original);
+        assert!(migrated.computer_binding_json.is_none());
+        assert!(migrated.computer_acceptance_json.is_none());
+    }
+
+    #[tokio::test]
+    async fn v8_missing_acceptance_column_fails_without_silent_repair() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        initialize_schema(&db).await.unwrap();
+        db.execute_unprepared(
+            "ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_acceptance_json",
+        )
+        .await
+        .unwrap();
+        let error = initialize_schema(&db).await.unwrap_err().to_string();
+        assert!(error.contains("computer_acceptance_json"), "{error}");
+        assert_eq!(
+            query_user_version(&db).await.unwrap(),
+            SIGNAL_SCHEMA_VERSION
+        );
     }
 
     #[tokio::test]

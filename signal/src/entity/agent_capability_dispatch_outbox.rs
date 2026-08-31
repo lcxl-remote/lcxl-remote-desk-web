@@ -18,6 +18,10 @@ pub struct Model {
     pub state: String,
     pub payload_json: String,
     pub payload_schema_version: i32,
+    /// Frozen original Computer Action transport/provenance; never a send permit.
+    pub computer_binding_json: Option<String>,
+    /// Explicit executor acceptance bound to the original transport generation.
+    pub computer_acceptance_json: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

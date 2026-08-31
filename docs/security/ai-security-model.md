@@ -84,6 +84,8 @@ A worker sets `executor_accepted=true` in `ComputerActionStarted` only after the
 
 The shared loop labels background/unknown/wait statuses as central-control information inheriting the original message boundary, not as native results. Receipt-bearing late completion preserves the original call, digest, label, and stable completion ID. The wait response is separate from that result, whose delivery is acknowledged only after a successful save. This protocol support alone does not connect actual OSS generic background-task creation and cancellation.
 
+OSS Signal freezes the original Computer Action plan, connection and model-call provenance on its existing dispatch outbox before sending. Only an explicit acceptance from the token-authenticated host with matching audience, frame, action and generation is persisted. Duplicate acceptance does not renew its timestamp or authorize another send. SQLite schema 8 adds nullable binding/acceptance metadata in place; existing rows are not backfilled, reauthorized or turned into running tasks. Acceptance storage alone does not yet provide the complete generic background completion/cancellation workflow.
+
 ## Redaction Fails Closed
 
 The pipeline runs **collect → redact → model → render**. Collection and redaction happen on the **edge device**; the model call happens **centrally**. If redaction fails, the edge returns an error and the central brain aborts **before** the model is called. Evidence (with raw screenshot bytes stripped) is always redacted before it leaves the host or reaches the model.

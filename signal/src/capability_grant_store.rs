@@ -21,6 +21,8 @@ use crate::entity::{
     agent_grant_reservation, agent_session,
 };
 
+pub(crate) mod computer_binding;
+
 pub const GRANT_STATUS_ACTIVE: &str = "active";
 pub const GRANT_STATUS_REVOKED: &str = "revoked";
 pub const RESERVATION_STATUS_RESERVED: &str = "reserved";
@@ -1379,6 +1381,8 @@ fn validate_completion(completion: &CapabilityDispatchCompletion) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+    mod computer_binding;
+
     use std::path::Path;
 
     use super::*;

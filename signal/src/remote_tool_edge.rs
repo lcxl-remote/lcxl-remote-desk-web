@@ -496,11 +496,15 @@ pub fn global_computer_action_pending() -> Arc<SignalComputerActionPendingStore>
 
 pub struct SignalComputerActionObserver {
     pending: Arc<SignalComputerActionPendingStore>,
+    store: SignalCapabilityGrantStore,
 }
 
 impl SignalComputerActionObserver {
-    pub fn new(pending: Arc<SignalComputerActionPendingStore>) -> Self {
-        Self { pending }
+    pub fn new(pending: Arc<SignalComputerActionPendingStore>, db: DatabaseConnection) -> Self {
+        Self {
+            pending,
+            store: SignalCapabilityGrantStore::new(db),
+        }
     }
 }
 
@@ -511,10 +515,37 @@ impl ComputerActionObserver for SignalComputerActionObserver {
         model: &'a SignalingModel,
     ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            if source.auth_context.auth_kind
+                != desk_signal_facade::model::auth_context::AuthKind::TokenAuth
+                || source.auth_context.remote_desk_type
+                    != desk_signal_facade::model::signal::RemoteDeskTypeEnum::Server
+                || model.to_connection_id.is_some()
+            {
+                return;
+            }
             let source_id = source.model.connection_id.as_str();
             match model.signaling_type {
                 SignalingType::ComputerActionStarted => {
                     if let Ok(started) = model.get_data::<ComputerActionStarted>() {
+                        let Some(audience) = source.model.version_info.client_id.as_deref() else {
+                            return;
+                        };
+                        if self
+                            .store
+                            .accept_computer_started(
+                                source_id,
+                                audience,
+                                &model.request_id,
+                                &started,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            log::warn!(
+                                "[computer-action] rejected inconsistent executor acceptance"
+                            );
+                            return;
+                        }
                         let _ = self.pending.note_started(source_id, &started);
                     }
                 }
@@ -2241,6 +2272,9 @@ impl SignalDeviceAssistantTools {
                     false,
                 )
             })?;
+            store.bind_computer_transport(&self.target_connection_id, &plan, &session, call)
+                .await.map_err(|_| error(AgentErrorKind::Internal,
+                    "failed to freeze original Computer Action transport", false, false))?;
             Ok::<_, AgentError>((target, generation, text))
         }
         .await;
@@ -2995,6 +3029,17 @@ impl SignalDeviceAssistantTools {
                 false,
             )
         }));
+        artifact_pre_send!(
+            store
+                .bind_computer_transport(&self.target_connection_id, &plan, &session, call)
+                .await
+                .map_err(|_| error(
+                    AgentErrorKind::Internal,
+                    "failed to freeze original Computer Action transport",
+                    false,
+                    false
+                ))
+        );
         let (completion_tx, completion_rx) = oneshot::channel();
         if !global_computer_action_pending().register(
             generation.clone(),
@@ -3650,6 +3695,17 @@ impl SignalDeviceAssistantTools {
                 false,
             )
         }));
+        browser_pre_send!(
+            store
+                .bind_computer_transport(&self.target_connection_id, &plan, &session, call)
+                .await
+                .map_err(|_| error(
+                    AgentErrorKind::Internal,
+                    "failed to freeze original Computer Action transport",
+                    false,
+                    false
+                ))
+        );
         let (completion_tx, completion_rx) = oneshot::channel();
         if !global_computer_action_pending().register(
             generation.clone(),
@@ -4491,6 +4547,17 @@ impl SignalDeviceAssistantTools {
                 false,
             )
         })?;
+        store
+            .bind_computer_transport(&self.target_connection_id, &plan, &session, call)
+            .await
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "failed to freeze original Computer Action transport",
+                    false,
+                    false,
+                )
+            })?;
         let (completion_tx, completion_rx) = oneshot::channel();
         if !global_computer_action_pending().register(
             generation.clone(),

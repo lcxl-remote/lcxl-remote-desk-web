@@ -240,6 +240,7 @@ pub async fn handle_signaling(
     let computer_action_observer =
         std::sync::Arc::new(crate::remote_tool_edge::SignalComputerActionObserver::new(
             crate::remote_tool_edge::global_computer_action_pending(),
+            crate::db::get_db().clone(),
         ));
     // The single-account owner is stamped with full control; a code-session
     // (anonymous redeemer) is stamped with the redeemed code's ceiling via the
