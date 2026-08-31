@@ -107,3 +107,43 @@ fn read_output_limits_count_wire_bytes_and_actual_projections() {
     let screen_call = call("read_system_info");
     assert!(validate_output(&registry, &screen_call, &screen, &limit(7, 1)).is_err());
 }
+
+#[test]
+fn desktop_ui_limits_narrow_request_and_count_returned_nodes() {
+    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let ui_call = call("inspect_desktop_ui");
+    let (_, mut input) = build_read_operation(&ui_call).unwrap();
+    bind(&registry, &ui_call, &mut input, &limit(512, 1)).unwrap();
+    let OperationInput::ReadContext(input) = input else {
+        panic!()
+    };
+    let ContextKind::DesktopUiInspect(params) = input.kind else {
+        panic!()
+    };
+    assert_eq!((params.max_bytes, params.max_nodes), (512, 1));
+
+    let node = UiNodeProjection {
+        object_ref: ObjectRef {
+            object_kind: ObjectKind::UiElement,
+            ..reference()
+        },
+        parent_index: None,
+        role: "button".into(),
+        name: Some("Apply".into()),
+        value: None,
+        is_protected: false,
+        enabled: true,
+        supported_actions: vec![],
+    };
+    let ui_output = output(ReadContextOutput::DesktopUiInspect(UiInspectOutput {
+        snapshot_id: "snapshot".into(),
+        adapter: ComputerUseAdapterRef {
+            kind: ComputerUseAdapterKind::MacosAccessibility,
+            version: "1".into(),
+        },
+        nodes: vec![node.clone(), node],
+        truncated: false,
+    }));
+    assert!(validate_output(&registry, &ui_call, &ui_output, &limit(4096, 1)).is_err());
+    validate_output(&registry, &ui_call, &ui_output, &limit(4096, 2)).unwrap();
+}

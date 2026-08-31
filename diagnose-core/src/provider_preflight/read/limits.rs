@@ -57,6 +57,11 @@ pub fn bind(
             p.max_objects = p.max_objects.min(items);
             1
         }
+        ContextKind::DesktopUiInspect(p) => {
+            p.max_bytes = p.max_bytes.min(bytes);
+            p.max_nodes = p.max_nodes.min(items);
+            1
+        }
         ContextKind::SpreadsheetLiveInspect(p)
         | ContextKind::DocumentLiveInspect(p)
         | ContextKind::PresentationLiveInspect(p) => {
@@ -110,7 +115,7 @@ pub fn validate_output(
     if bytes as u64 > limits.max_bytes_per_call {
         return Err(unavailable());
     }
-    if !requires_objects(&call.name) {
+    if !requires_objects(&call.name) && call.name != "inspect_desktop_ui" {
         return Ok(());
     }
     if output.image_data_url.is_some() {
@@ -125,6 +130,7 @@ pub fn validate_output(
         return Err(unavailable());
     };
     let items = match (expected.kind, typed) {
+        (ContextKind::DesktopUiInspect(_), ReadContextOutput::DesktopUiInspect(p)) => p.nodes.len(),
         (ContextKind::OfficeDocumentInspect(_), ReadContextOutput::OfficeDocumentInspect(p)) => {
             match p.selection {
                 OfficeSelectionProjection::Excel { cells, .. } => cells.len(),

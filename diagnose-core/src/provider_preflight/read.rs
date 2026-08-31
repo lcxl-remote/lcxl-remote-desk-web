@@ -140,6 +140,10 @@ impl ReadCallPreflight {
         limits::descriptor_limits(&self.capability)
     }
 
+    pub fn root_count(&self) -> u32 {
+        self.root_count
+    }
+
     pub fn grant_call<'a>(
         &'a self,
         subject: &'a ProviderCallSubject<'_>,

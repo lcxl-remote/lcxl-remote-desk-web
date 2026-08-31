@@ -20,6 +20,8 @@ Both the **AI diagnosis panel** and the **terminal AI copilot** share one sealed
 
 When Device Assistant presents a scoped permission request, the owner must approve or deny each item. Approval may only remove resources, operations or export destinations, shorten the lifetime, or reduce the number of uses. The server rechecks the request revision, capability contract and current readiness; it never restores a scope the owner removed. Exact actions remain bound to server-frozen input, and approval records authority rather than dispatch or successful execution. Servers without the corresponding control path do not expose the operation.
 
+For open-source Signal reads, the SQLite Prepare/DispatchIntent/outbox record is also the single-send fence. Signal checks the claimed dispatch, current input, grant revocation/expiry and readiness before sending and again before releasing a result. Typed limits narrow the host request and bound complete success or error payloads. Result labels bind the exact validated bytes and cannot outlive the grant or selected data. A Provider response that arrives after authority changes remains a known durable outcome, but its content is not passed to the model and it is never treated as permission to retry automatically.
+
 ## Owner-Interactive Free-Form Commands
 
 Template matching remains the default admission policy. A trusted central brain may explicitly grant `OwnerInteractive` only to the authenticated owner acting on that owner's own device. The open-source signal's single authenticated account is its owner subject. Non-owners, shared/access-code sessions, organization members acting on shared devices, fleet execution, automation, MCP, and raw agent requests remain template-only or disabled.

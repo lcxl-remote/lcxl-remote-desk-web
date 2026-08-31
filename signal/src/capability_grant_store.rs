@@ -760,6 +760,91 @@ impl SignalCapabilityGrantStore {
         Ok(DispatchClaimResult::Claimed(payload))
     }
 
+    /// Reload the immutable grant behind one already-claimed dispatch. This is
+    /// a current send/result fence, not a second claim or a retry permit.
+    pub async fn validate_claimed_dispatch(
+        &self,
+        dispatch_id: &str,
+        request: PrepareCapabilityCall<'_>,
+    ) -> Result<CapabilityGrant, DbErr> {
+        validate_prepare(&request)?;
+        let txn = self.db.begin().await?;
+        let result = async {
+            let existing = load_prepared(&txn, request.call_id)
+                .await?
+                .ok_or_else(|| DbErr::Custom("claimed capability call is missing".into()))?;
+            validate_replay(&existing, &request)?;
+            let (reservation, work) = existing;
+            if reservation.state != RESERVATION_STATUS_COMMITTED
+                || work.status != CAPABILITY_WORK_DISPATCHING
+                || work.turn_id != request.turn_id
+                || work.actor_id != request.call.actor_id
+                || work.target_device_id != request.call.target_device_id
+            {
+                return Err(DbErr::Custom(
+                    "claimed capability call is no longer dispatchable".into(),
+                ));
+            }
+            let outbox = agent_capability_dispatch_outbox::Entity::find()
+                .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
+                .one(&txn)
+                .await?
+                .ok_or_else(|| DbErr::Custom("claimed dispatch is missing".into()))?;
+            if outbox.state != DISPATCH_OUTBOX_SENDING {
+                return Err(DbErr::Custom(
+                    "claimed dispatch is no longer sending".into(),
+                ));
+            }
+            validate_outbox_replay(&outbox, &reservation, &work, &request)?;
+            let payload: CapabilityDispatchPayload =
+                serde_json::from_str(&outbox.payload_json).map_err(json_error)?;
+            if payload.dispatch_id != dispatch_id
+                || payload.grant_id != request.grant_id
+                || payload.call_id != request.call_id
+                || payload.generation != request.generation
+                || payload.input_revision != request.input_revision
+                || payload.input_watermark != request.input_watermark
+                || payload.provider_id != request.call.provider_id
+                || payload.capability_id != request.call.capability_id
+                || payload.tool_name != request.call.tool_name
+            {
+                return Err(DbErr::Custom("claimed dispatch authority changed".into()));
+            }
+            let session_row = agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(request.call.run_id))
+                .one(&txn)
+                .await?
+                .ok_or_else(|| DbErr::Custom("claimed dispatch session is missing".into()))?;
+            let session = PersistedAgentSession::decode_json(&session_row.state_json)
+                .map_err(|error| DbErr::Custom(format!("invalid claimed session: {error}")))?;
+            if session.actor_id != request.call.actor_id
+                || session.device_id != request.call.target_device_id
+                || session.input_revision != request.input_revision
+                || session.latest_input_seq != request.input_watermark
+            {
+                return Err(DbErr::Custom(
+                    "claimed dispatch input or subject changed".into(),
+                ));
+            }
+            let row = agent_capability_grant::Entity::find()
+                .filter(agent_capability_grant::Column::GrantId.eq(request.grant_id))
+                .one(&txn)
+                .await?
+                .ok_or_else(|| DbErr::Custom("claimed dispatch grant is missing".into()))?;
+            if row.status != GRANT_STATUS_ACTIVE {
+                return Err(DbErr::Custom("claimed dispatch grant is revoked".into()));
+            }
+            let grant = decode_grant(&row)?;
+            match_reserved_capability_grant(&grant, &request.call).map_err(|reason| {
+                DbErr::Custom(format!("claimed dispatch grant changed: {reason:?}"))
+            })?;
+            Ok(grant)
+        }
+        .await;
+        txn.rollback().await.ok();
+        result
+    }
+
     /// Converge a claimed dispatch whose terminal result cannot be proven.
     /// The committed reservation is deliberately retained and no retry is
     /// scheduled: once the handoff boundary was crossed, absence of a result is
@@ -2227,6 +2312,89 @@ mod tests {
         assert!(work.manual_resolved_at.is_some());
         assert_eq!(stored_grant.remaining_uses, 0);
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn claimed_dispatch_revalidation_rejects_revocation_and_new_input() {
+        for change in ["revoke", "input"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("grant-claimed-{change}.db"));
+            let db = file_db(&path).await;
+            insert_session(&db, 1, 1).await;
+            let store = SignalCapabilityGrantStore::new(db.clone());
+            store.issue(&grant(1)).await.unwrap();
+            let resources = vec!["root:selected".into()];
+            let operations = vec!["create_new".into()];
+            let canonical_json = r#"{"path":"claimed.txt"}"#;
+            let canonical = format!("{:x}", Sha256::digest(canonical_json.as_bytes()));
+            store
+                .prepare(request(
+                    "call-claimed",
+                    canonical_json,
+                    &canonical,
+                    &resources,
+                    &operations,
+                    1,
+                ))
+                .await
+                .unwrap();
+            let intent = store
+                .record_dispatch_intent(request(
+                    "call-claimed",
+                    canonical_json,
+                    &canonical,
+                    &resources,
+                    &operations,
+                    1,
+                ))
+                .await
+                .unwrap();
+            let DispatchIntentResult::Recorded { dispatch_id, .. } = intent else {
+                panic!("current input must record an intent")
+            };
+            assert!(matches!(
+                store.claim_dispatch(&dispatch_id, 600).await.unwrap(),
+                DispatchClaimResult::Claimed(_)
+            ));
+            let current = || {
+                let mut request = request(
+                    "call-claimed",
+                    canonical_json,
+                    &canonical,
+                    &resources,
+                    &operations,
+                    1,
+                );
+                request.call.now_unix_ms = 650;
+                request
+            };
+            assert_eq!(
+                store
+                    .validate_claimed_dispatch(&dispatch_id, current())
+                    .await
+                    .unwrap()
+                    .grant_id,
+                "grant-1"
+            );
+            match change {
+                "revoke" => {
+                    store
+                        .revoke("grant-1", "actor-1", "device-1", 651, "owner revoked")
+                        .await
+                        .unwrap();
+                }
+                "input" => advance_session_input(&db, 2, 2).await,
+                _ => unreachable!(),
+            }
+            assert!(
+                store
+                    .validate_claimed_dispatch(&dispatch_id, current())
+                    .await
+                    .is_err(),
+                "{change} must invalidate a claimed dispatch before result use"
+            );
+            db.close().await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -689,6 +689,59 @@ pub struct SignalDeviceAssistantTools {
     exec_tools: crate::agent_exec::SignalAgentTools,
     model_egress_policy: Option<desk_diagnose_core::model_egress::ModelEgressPolicy>,
     original_input: OnceLock<object_read::OriginalInput>,
+    verified_read_labels: Mutex<HashMap<String, VerifiedReadLabel>>,
+}
+
+#[derive(Clone)]
+struct VerifiedReadLabel {
+    digest_sha256: String,
+    expires_at_unix_ms: u64,
+    failed: bool,
+}
+
+struct ProviderInvokeError {
+    error: AgentError,
+    known_completion: Option<(CapabilityDispatchOutcome, String)>,
+}
+
+impl ProviderInvokeError {
+    fn known(
+        error: AgentError,
+        outcome: CapabilityDispatchOutcome,
+        result_digest_sha256: String,
+    ) -> Self {
+        Self {
+            error,
+            known_completion: Some((outcome, result_digest_sha256)),
+        }
+    }
+}
+
+impl From<AgentError> for ProviderInvokeError {
+    fn from(error: AgentError) -> Self {
+        Self {
+            error,
+            known_completion: None,
+        }
+    }
+}
+
+fn verify_read_label(
+    output: &ToolRunOutput,
+    verified: &VerifiedReadLabel,
+    observed_at_unix_ms: u64,
+) -> Result<(), AgentError> {
+    let (_, digest_sha256) = tool_output_fingerprint(output)?;
+    if digest_sha256 != verified.digest_sha256 || observed_at_unix_ms >= verified.expires_at_unix_ms
+    {
+        return Err(error(
+            AgentErrorKind::PermissionDenied,
+            "Provider result changed or expired before labeling",
+            false,
+            false,
+        ));
+    }
+    Ok(())
 }
 
 fn exact_selected_batch_file(roots: &[ObjectRef]) -> Result<ObjectRef, AgentError> {
@@ -812,6 +865,7 @@ impl SignalDeviceAssistantTools {
             exec_tools,
             model_egress_policy: None,
             original_input: OnceLock::new(),
+            verified_read_labels: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1086,6 +1140,19 @@ impl SignalDeviceAssistantTools {
             &capability.wire.authorization_hint.resources,
             capability.wire.effect,
         );
+        let read_preflight = if capability.wire.execution_locality == ExecutionLocality::Edge {
+            self.validate_original_objects().await?;
+            Some(
+                desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build(
+                    &self.provider_registry,
+                    ProductSurface::OssPersonalOwner,
+                    call,
+                    &self.object_binding()?,
+                )?,
+            )
+        } else {
+            None
+        };
         let mut resource_scope = compiled_scope.as_ref().map_or_else(
             || vec!["target:current_device".to_string()],
             |scope| scope.resources.clone(),
@@ -1099,16 +1166,8 @@ impl SignalDeviceAssistantTools {
         {
             resource_scope = exact_external_query_resource_scope(&canonical_input_digest_sha256);
         }
-        if capability.wire.authorization_hint.resources
-            == [desk_agent_protocol::capability_provider::AuthorizationResourceKind::FreshObjectReference]
-        {
-            self.validate_original_objects().await?;
-            resource_scope = desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build(
-                &self.provider_registry,
-                ProductSurface::OssPersonalOwner,
-                call,
-                &self.object_binding()?,
-            )?.resource_scope().to_vec();
+        if let Some(preflight) = &read_preflight {
+            resource_scope = preflight.resource_scope().to_vec();
         }
         let operation_scope =
             compiled_scope.map_or_else(|| vec!["observe".to_string()], |scope| scope.operations);
@@ -1149,8 +1208,10 @@ impl SignalDeviceAssistantTools {
             envelope_ids: &[],
             content_digests_sha256: &[],
             canonical_input_digest_sha256: &canonical_input_digest_sha256,
-            byte_count: canonical_input_json.len() as u64,
-            item_count: 1,
+            byte_count: 0,
+            item_count: read_preflight
+                .as_ref()
+                .map_or(1, |preflight| preflight.root_count()),
             policy_revision: self.policy_revision,
             readiness_revision: self.readiness_revision,
             now_unix_ms,
@@ -1211,7 +1272,11 @@ impl SignalDeviceAssistantTools {
                 canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
                 issued_by: CapabilityGrantIssuer::PolicyAuto,
                 issued_at_unix_ms: now_unix_ms,
-                expires_at_unix_ms: now_unix_ms.saturating_add(120_000),
+                expires_at_unix_ms: now_unix_ms.saturating_add(120_000).min(
+                    read_preflight
+                        .as_ref()
+                        .map_or(u64::MAX, |preflight| preflight.valid_until_unix_ms()),
+                ),
                 remaining_uses: 1,
                 limits: CapabilityGrantLimits {
                     max_bytes_per_call: capability.wire.limits.max_output_bytes,
@@ -1241,54 +1306,60 @@ impl SignalDeviceAssistantTools {
             ));
         };
 
-        let prepare = || PrepareCapabilityCall {
-            grant_id: &grant_id,
-            call_id: &server_call_id,
-            turn_id: &self.turn_id,
-            input_revision: session.input_revision,
-            input_watermark: session.latest_input_seq,
-            generation: 1,
-            canonical_input_json: &canonical_input_json,
-            call: call_authority.clone(),
+        let prepare = |now_unix_ms| {
+            let mut current = call_authority.clone();
+            current.now_unix_ms = now_unix_ms;
+            PrepareCapabilityCall {
+                grant_id: &grant_id,
+                call_id: &server_call_id,
+                turn_id: &self.turn_id,
+                input_revision: session.input_revision,
+                input_watermark: session.latest_input_seq,
+                generation: 1,
+                canonical_input_json: &canonical_input_json,
+                call: current,
+            }
         };
-        store.prepare(prepare()).await.map_err(|db_error| {
-            error(
-                AgentErrorKind::PermissionDenied,
-                format!("Provider call authorization failed: {db_error}"),
-                false,
-                true,
-            )
-        })?;
-        let dispatch_id =
-            match store
-                .record_dispatch_intent(prepare())
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        format!("Provider dispatch authorization failed: {db_error}"),
-                        false,
-                        true,
-                    )
-                })? {
-                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
-                DispatchIntentResult::SupersededBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "Provider call was superseded by newer user input",
-                        false,
-                        true,
-                    ));
-                }
-                DispatchIntentResult::RevokedBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "Provider grant was revoked before dispatch",
-                        false,
-                        true,
-                    ));
-                }
-            };
+        store
+            .prepare(prepare(now_unix_ms))
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("Provider call authorization failed: {db_error}"),
+                    false,
+                    true,
+                )
+            })?;
+        let dispatch_id = match store
+            .record_dispatch_intent(prepare(now_unix_ms))
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("Provider dispatch authorization failed: {db_error}"),
+                    false,
+                    true,
+                )
+            })? {
+            DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+            DispatchIntentResult::SupersededBeforeIntent { .. } => {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "Provider call was superseded by newer user input",
+                    false,
+                    true,
+                ));
+            }
+            DispatchIntentResult::RevokedBeforeIntent { .. } => {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "Provider grant was revoked before dispatch",
+                    false,
+                    true,
+                ));
+            }
+        };
         match store
             .claim_dispatch(&dispatch_id, now_unix_ms)
             .await
@@ -1311,16 +1382,72 @@ impl SignalDeviceAssistantTools {
             }
         }
 
-        let result = if call.name == PREVIEW_COMPUTER_ACTION_TOOL {
-            validate_preview_call(call).map(|content| ToolRunOutput {
-                content,
-                image_data_url: None,
+        let current_time = || {
+            u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "system clock predates the Unix epoch",
+                    false,
+                    false,
+                )
             })
-        } else {
-            self.invoke(call).await
         };
+        let grant = store
+            .validate_claimed_dispatch(&dispatch_id, prepare(current_time()?))
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("Provider dispatch authority is unavailable: {db_error}"),
+                    false,
+                    true,
+                )
+            })?;
+        let authority_expiry = grant.expires_at_unix_ms.min(
+            read_preflight
+                .as_ref()
+                .map_or(u64::MAX, |preflight| preflight.valid_until_unix_ms()),
+        );
+
+        let result: Result<ToolRunOutput, ProviderInvokeError> =
+            if call.name == PREVIEW_COMPUTER_ACTION_TOOL {
+                validate_preview_call(call)
+                    .map(|content| ToolRunOutput {
+                        content,
+                        image_data_url: None,
+                    })
+                    .map_err(Into::into)
+            } else {
+                self.invoke(call, &grant, authority_expiry).await
+            };
         match result {
             Ok(output) => {
+                let post_now = current_time()?;
+                let post_authority = async {
+                    let post_grant = store
+                        .validate_claimed_dispatch(&dispatch_id, prepare(post_now))
+                        .await
+                        .map_err(|db_error| {
+                            error(
+                                AgentErrorKind::PermissionDenied,
+                                format!("Provider result authority is unavailable: {db_error}"),
+                                false,
+                                true,
+                            )
+                        })?;
+                    if capability.wire.execution_locality == ExecutionLocality::Edge {
+                        self.verify_current_readiness(capability).await?;
+                        self.validate_original_objects().await?;
+                    }
+                    desk_diagnose_core::provider_preflight::read::limits::validate_output(
+                        &self.provider_registry,
+                        call,
+                        &output,
+                        &grant.limits,
+                    )?;
+                    Ok::<_, AgentError>(post_grant)
+                }
+                .await;
                 let (_, result_digest_sha256) = tool_output_fingerprint(&output)?;
                 let completion = CapabilityDispatchCompletion {
                     dispatch_id: dispatch_id.clone(),
@@ -1330,7 +1457,7 @@ impl SignalDeviceAssistantTools {
                     result_digest_sha256,
                 };
                 if let Err(db_error) = store
-                    .record_dispatch_completion(&completion, now_unix_ms)
+                    .record_dispatch_completion(&completion, current_time()?)
                     .await
                 {
                     let _ = store
@@ -1338,7 +1465,7 @@ impl SignalDeviceAssistantTools {
                             &dispatch_id,
                             &server_call_id,
                             1,
-                            now_unix_ms,
+                            current_time()?,
                         )
                         .await;
                     return Err(error(
@@ -1348,11 +1475,72 @@ impl SignalDeviceAssistantTools {
                         false,
                     ));
                 }
+                let post_grant = post_authority?;
+                if post_grant != grant || current_time()? >= authority_expiry {
+                    return Err(error(
+                        AgentErrorKind::PermissionDenied,
+                        "Provider result authority changed or expired",
+                        false,
+                        true,
+                    ));
+                }
+                self.verified_read_labels
+                    .lock()
+                    .map_err(|_| {
+                        error(
+                            AgentErrorKind::Internal,
+                            "Provider result label state is unavailable",
+                            false,
+                            false,
+                        )
+                    })?
+                    .insert(
+                        call.id.clone(),
+                        VerifiedReadLabel {
+                            digest_sha256: completion.result_digest_sha256,
+                            expires_at_unix_ms: authority_expiry,
+                            failed: false,
+                        },
+                    );
                 Ok(output)
             }
             Err(provider_error) => {
+                if let Some((outcome, result_digest_sha256)) = provider_error.known_completion {
+                    let completion = CapabilityDispatchCompletion {
+                        dispatch_id: dispatch_id.clone(),
+                        call_id: server_call_id.clone(),
+                        generation: 1,
+                        outcome,
+                        result_digest_sha256,
+                    };
+                    if let Err(db_error) = store
+                        .record_dispatch_completion(&completion, current_time()?)
+                        .await
+                    {
+                        let _ = store
+                            .mark_dispatch_outcome_unknown(
+                                &dispatch_id,
+                                &server_call_id,
+                                1,
+                                current_time()?,
+                            )
+                            .await;
+                        return Err(error(
+                            AgentErrorKind::Internal,
+                            format!("Provider result could not be persisted safely: {db_error}"),
+                            false,
+                            false,
+                        ));
+                    }
+                    return Err(provider_error.error);
+                }
                 store
-                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
+                    .mark_dispatch_outcome_unknown(
+                        &dispatch_id,
+                        &server_call_id,
+                        1,
+                        current_time()?,
+                    )
                     .await
                     .map_err(|db_error| {
                         error(
@@ -1362,7 +1550,7 @@ impl SignalDeviceAssistantTools {
                             false,
                         )
                     })?;
-                Err(provider_error)
+                Err(provider_error.error)
             }
         }
     }
@@ -4135,14 +4323,21 @@ impl SignalDeviceAssistantTools {
             .await
     }
 
-    async fn invoke(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+    async fn invoke(
+        &self,
+        call: &ToolCall,
+        grant: &CapabilityGrant,
+        authority_expiry: u64,
+    ) -> Result<ToolRunOutput, ProviderInvokeError> {
         if call.name == WEB_FETCH_TOOL_NAME {
             let validated = validate_fetch_call(call, &self.current_user_message)?;
-            return fetch_public_web_page(validated).await;
+            return fetch_public_web_page(validated).await.map_err(Into::into);
         }
         if call.name == WEB_SEARCH_TOOL_NAME {
             let validated = validate_search_call(call, &self.current_user_message)?;
-            return search_public_web(validated, &call.id).await;
+            return search_public_web(validated, &call.id)
+                .await
+                .map_err(Into::into);
         }
         let (capability, mut input) = build_read_operation(call)?;
         if capability == desk_agent_protocol::Capability::OfficeDocumentInspect {
@@ -4184,7 +4379,8 @@ impl SignalDeviceAssistantTools {
                         "BatchDocument inspection received the wrong operation input",
                         false,
                         true,
-                    ));
+                    )
+                    .into());
                 }
             };
             let params = LiveDocumentInspectParams {
@@ -4266,7 +4462,8 @@ impl SignalDeviceAssistantTools {
                     "no active file attachment was selected for this turn",
                     false,
                     true,
-                ));
+                )
+                .into());
             }
             let requested = match &input {
                 OperationInput::ReadContext(ReadContextInput {
@@ -4278,7 +4475,8 @@ impl SignalDeviceAssistantTools {
                         "file metadata capability received the wrong operation input",
                         false,
                         true,
-                    ));
+                    )
+                    .into());
                 }
             };
             input = OperationInput::ReadContext(ReadContextInput {
@@ -4308,7 +4506,8 @@ impl SignalDeviceAssistantTools {
                     "select exactly one regular file before reading its text",
                     false,
                     true,
-                ));
+                )
+                .into());
             }
             input = OperationInput::ReadContext(ReadContextInput {
                 kind: ContextKind::FileContentRead(FileContentReadParams {
@@ -4325,7 +4524,8 @@ impl SignalDeviceAssistantTools {
                     "select at least one spreadsheet file or directory before inspecting it",
                     false,
                     true,
-                ));
+                )
+                .into());
             }
             input = OperationInput::ReadContext(ReadContextInput {
                 kind: ContextKind::SpreadsheetFileInspect(SpreadsheetFileInspectParams {
@@ -4345,7 +4545,8 @@ impl SignalDeviceAssistantTools {
                     "select at least one spreadsheet file or directory before previewing a merge",
                     false,
                     true,
-                ));
+                )
+                .into());
             }
             let OperationInput::ReadContext(ReadContextInput {
                 kind: ContextKind::SpreadsheetMergePreview(params),
@@ -4356,7 +4557,8 @@ impl SignalDeviceAssistantTools {
                     "spreadsheet merge preview input is not typed",
                     false,
                     true,
-                ));
+                )
+                .into());
             };
             input = OperationInput::ReadContext(ReadContextInput {
                 kind: ContextKind::SpreadsheetMergePreview(SpreadsheetMergePreviewParams {
@@ -4372,7 +4574,8 @@ impl SignalDeviceAssistantTools {
                     "no active terminal output attachment was selected for this turn",
                     false,
                     true,
-                ));
+                )
+                .into());
             }
             input = OperationInput::ReadContext(ReadContextInput {
                 kind: ContextKind::TerminalOutputInspect(TerminalOutputInspectParams {
@@ -4407,7 +4610,8 @@ impl SignalDeviceAssistantTools {
                 "Device Assistant may only invoke selected read-only observations",
                 false,
                 true,
-            ));
+            )
+            .into());
         }
         let object_expiry = if requires_objects(&call.name) {
             self.validate_original_objects().await?;
@@ -4432,6 +4636,16 @@ impl SignalDeviceAssistantTools {
         } else {
             None
         };
+        desk_diagnose_core::provider_preflight::read::limits::bind(
+            &self.provider_registry,
+            call,
+            &mut input,
+            &grant.limits,
+        )?;
+        let envelope_expiry = object_expiry
+            .and_then(|expiry| chrono::DateTime::parse_from_rfc3339(&expiry).ok())
+            .and_then(|expiry| u64::try_from(expiry.timestamp_millis()).ok())
+            .map_or(authority_expiry, |expiry| expiry.min(authority_expiry));
         let request_id = uuid::Uuid::new_v4().to_string();
         let envelope: desk_agent_protocol::ReadonlyAgentEnvelope = AgentEnvelope {
             protocol_version: ProtocolVersion::default(),
@@ -4455,7 +4669,18 @@ impl SignalDeviceAssistantTools {
             scope: AgentScope {
                 granted: vec![capability],
                 mode: ExecutionMode::ReadOnly,
-                expires_at: object_expiry,
+                expires_at: Some(
+                    chrono::DateTime::from_timestamp_millis(envelope_expiry as i64)
+                        .ok_or_else(|| {
+                            error(
+                                AgentErrorKind::Internal,
+                                "invalid read authorization expiry",
+                                false,
+                                false,
+                            )
+                        })?
+                        .to_rfc3339(),
+                ),
                 policy_name: Some("oss-device-assistant-read-only".into()),
             },
             operation: AgentOperation {
@@ -4503,7 +4728,8 @@ impl SignalDeviceAssistantTools {
                 "duplicate remote tool request id",
                 false,
                 false,
-            ));
+            )
+            .into());
         }
         let frame =
             SignalingModel::new_request(SignalingType::InvokeRemoteTool, None, Some(&request))
@@ -4530,7 +4756,8 @@ impl SignalDeviceAssistantTools {
                 format!("failed to send remote observation request: {e}"),
                 true,
                 true,
-            ));
+            )
+            .into());
         }
         let output = match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(result)) => result?,
@@ -4541,7 +4768,8 @@ impl SignalDeviceAssistantTools {
                     "remote observation result channel closed",
                     true,
                     true,
-                ));
+                )
+                .into());
             }
             Err(_) => {
                 self.pending.cancel(&request_id);
@@ -4550,18 +4778,80 @@ impl SignalDeviceAssistantTools {
                     "timed out waiting for the remote observation",
                     true,
                     true,
-                ));
+                )
+                .into());
             }
         };
+        let descriptor_limit = self
+            .provider_registry
+            .capability_for_tool(&call.name)
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "Provider tool is no longer registered",
+                    false,
+                    true,
+                )
+            })?
+            .wire
+            .limits
+            .max_output_bytes;
+        let encoded_output = serde_json::to_vec(&output).map_err(|_| {
+            ProviderInvokeError::from(error(
+                AgentErrorKind::Internal,
+                "remote observation result cannot be measured",
+                false,
+                false,
+            ))
+        })?;
+        let result_digest_sha256 = format!("{:x}", Sha256::digest(&encoded_output));
+        let provider_outcome = match &output.outcome {
+            AgentOutcome::Ok(_) => CapabilityDispatchOutcome::Succeeded,
+            AgentOutcome::Err(_) => CapabilityDispatchOutcome::Failed,
+        };
+        if encoded_output.len() as u64 > grant.limits.max_bytes_per_call.min(descriptor_limit) {
+            return Err(ProviderInvokeError::known(
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "remote observation exceeded its authorized output limit",
+                    false,
+                    true,
+                ),
+                provider_outcome,
+                result_digest_sha256,
+            ));
+        }
         if requires_objects(&call.name) {
-            self.validate_original_objects().await?;
+            self.validate_original_objects().await.map_err(|error| {
+                ProviderInvokeError::known(error, provider_outcome, result_digest_sha256.clone())
+            })?;
         }
         match output.outcome {
-            AgentOutcome::Ok(value) => Ok(ToolRunOutput {
-                content: serde_json::to_string(&value).unwrap_or_else(|_| "{}".into()),
-                image_data_url: output.image.map(|image| image.data_url),
-            }),
-            AgentOutcome::Err(remote_error) => Err(remote_error),
+            AgentOutcome::Ok(value) => {
+                let output = ToolRunOutput {
+                    content: serde_json::to_string(&value).unwrap_or_else(|_| "{}".into()),
+                    image_data_url: output.image.map(|image| image.data_url),
+                };
+                desk_diagnose_core::provider_preflight::read::limits::validate_output(
+                    &self.provider_registry,
+                    call,
+                    &output,
+                    &grant.limits,
+                )
+                .map_err(|error| {
+                    ProviderInvokeError::known(
+                        error,
+                        CapabilityDispatchOutcome::Succeeded,
+                        result_digest_sha256,
+                    )
+                })?;
+                Ok(output)
+            }
+            AgentOutcome::Err(remote_error) => Err(ProviderInvokeError::known(
+                remote_error,
+                CapabilityDispatchOutcome::Failed,
+                result_digest_sha256,
+            )),
         }
     }
 }
@@ -4569,11 +4859,23 @@ impl SignalDeviceAssistantTools {
 #[async_trait(?Send)]
 impl ToolSeam for SignalDeviceAssistantTools {
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
-        if matches!(
+        self.verified_read_labels
+            .lock()
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "Provider result label state is unavailable",
+                    false,
+                    false,
+                )
+            })?
+            .remove(&call.id);
+        let browser_read = matches!(
             call.name.as_str(),
             "browser_take_snapshot" | "browser_wait_for"
-        ) {
-            return match self.authorize_and_execute_browser(call).await? {
+        );
+        let result = if browser_read {
+            match self.authorize_and_execute_browser(call).await? {
                 ExecOutcome::Executed { output, .. } => Ok(output),
                 ExecOutcome::Unknown(_) => Err(error(
                     AgentErrorKind::PermissionDenied,
@@ -4593,9 +4895,41 @@ impl ToolSeam for SignalDeviceAssistantTools {
                     false,
                     false,
                 )),
+            }
+        } else {
+            self.authorize_and_invoke(call).await
+        };
+        if let Err(provider_error) = &result {
+            let output = ToolRunOutput {
+                content: if provider_error.safe_for_model {
+                    format!("tool error: {}", provider_error.message)
+                } else {
+                    "tool error: the tool could not complete".into()
+                },
+                image_data_url: None,
             };
+            let (_, digest_sha256) = tool_output_fingerprint(&output)?;
+            self.verified_read_labels
+                .lock()
+                .map_err(|_| {
+                    error(
+                        AgentErrorKind::Internal,
+                        "Provider result label state is unavailable",
+                        false,
+                        false,
+                    )
+                })?
+                .insert(
+                    call.id.clone(),
+                    VerifiedReadLabel {
+                        digest_sha256,
+                        expires_at_unix_ms: chrono::Utc::now().timestamp_millis().max(0) as u64
+                            + 120_000,
+                        failed: true,
+                    },
+                );
         }
-        self.authorize_and_invoke(call).await
+        result
     }
 
     async fn confirm_and_exec(
@@ -4780,7 +5114,38 @@ impl ToolSeam for SignalDeviceAssistantTools {
                     false,
                 )
             })?;
-        let envelope = desk_diagnose_core::model_message_labels::read_result_envelope(
+        let browser_read = matches!(
+            call.name.as_str(),
+            "browser_take_snapshot" | "browser_wait_for"
+        );
+        let verified = if browser_read {
+            None
+        } else {
+            let verified = self
+                .verified_read_labels
+                .lock()
+                .map_err(|_| {
+                    error(
+                        AgentErrorKind::Internal,
+                        "Provider result label state is unavailable",
+                        false,
+                        false,
+                    )
+                })?
+                .get(&call.id)
+                .cloned()
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::Internal,
+                        "Provider result was not validated",
+                        false,
+                        false,
+                    )
+                })?;
+            verify_read_label(output, &verified, observed_at_unix_ms)?;
+            Some(verified)
+        };
+        let mut envelope = desk_diagnose_core::model_message_labels::read_result_envelope(
             &registry,
             call,
             output,
@@ -4791,10 +5156,29 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 observed_at_unix_ms,
             },
         )?;
-        if requires_objects(&call.name) {
-            self.object_binding()?
-                .label(call, output, envelope)
-                .map(Some)
+        if let Some(verified) = &verified {
+            envelope.retention.expires_at_unix_ms = Some(
+                envelope
+                    .retention
+                    .expires_at_unix_ms
+                    .unwrap_or(verified.expires_at_unix_ms)
+                    .min(verified.expires_at_unix_ms),
+            );
+        }
+        if verified.as_ref().is_some_and(|verified| verified.failed) {
+            Ok(Some(envelope))
+        } else if requires_objects(&call.name) {
+            let mut envelope = self.object_binding()?.label(call, output, envelope)?;
+            if let Some(verified) = verified {
+                envelope.retention.expires_at_unix_ms = Some(
+                    envelope
+                        .retention
+                        .expires_at_unix_ms
+                        .unwrap_or(verified.expires_at_unix_ms)
+                        .min(verified.expires_at_unix_ms),
+                );
+            }
+            Ok(Some(envelope))
         } else {
             Ok(Some(envelope))
         }
@@ -4946,6 +5330,33 @@ mod tests {
             object_kind,
             expires_at: "2099-01-01T00:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn verified_read_label_rejects_changed_or_expired_result() {
+        let output = ToolRunOutput {
+            content: "bounded result".into(),
+            image_data_url: None,
+        };
+        let (_, digest_sha256) = tool_output_fingerprint(&output).unwrap();
+        let verified = VerifiedReadLabel {
+            digest_sha256,
+            expires_at_unix_ms: 200,
+            failed: false,
+        };
+        verify_read_label(&output, &verified, 199).unwrap();
+        assert!(verify_read_label(&output, &verified, 200).is_err());
+        assert!(
+            verify_read_label(
+                &ToolRunOutput {
+                    content: "changed result".into(),
+                    image_data_url: None,
+                },
+                &verified,
+                199,
+            )
+            .is_err()
+        );
     }
 
     #[test]

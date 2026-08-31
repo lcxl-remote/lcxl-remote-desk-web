@@ -24,12 +24,20 @@ use desk_signal_facade::{
     service::RemoteToolObserver,
 };
 use futures_util::{SinkExt, StreamExt};
+use sea_orm::EntityTrait;
 use std::{sync::Arc, time::Duration};
 
 #[actix_web::test]
 async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_rejects_changed_input()
  {
-    for supersede in [false, true] {
+    for case in [
+        "success",
+        "supersede",
+        "oversized_success",
+        "oversized_error",
+    ] {
+        let supersede = case == "supersede";
+        let oversized = case.starts_with("oversized_");
         let store = setup("sqlite::memory:").await;
         let object = attach(&store, "first", ObjectKind::File).await;
         let mut params = input("message", vec![object.clone()]);
@@ -227,6 +235,12 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
         )
         .unwrap();
         let issued_at = Utc::now().timestamp_millis() as u64;
+        let grant_expires_at = issued_at + 120_000;
+        let output_limit = if oversized {
+            512
+        } else {
+            capability.wire.limits.max_output_bytes
+        };
         crate::capability_grant_store::SignalCapabilityGrantStore::new(store.db.clone())
             .issue(&CapabilityGrant {
                 schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
@@ -258,10 +272,10 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
                 canonical_input_digest_sha256: Some(format!("{:x}", Sha256::digest(canonical))),
                 issued_by: CapabilityGrantIssuer::UserDecision,
                 issued_at_unix_ms: issued_at,
-                expires_at_unix_ms: issued_at + 120_000,
+                expires_at_unix_ms: grant_expires_at,
                 remaining_uses: 1,
                 limits: CapabilityGrantLimits {
-                    max_bytes_per_call: capability.wire.limits.max_output_bytes,
+                    max_bytes_per_call: output_limit,
                     max_items_per_call: capability.wire.limits.max_objects,
                     max_calls: 1,
                 },
@@ -292,6 +306,7 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             };
             assert_eq!(read.roots.as_slice(), std::slice::from_ref(&reference));
             assert!(u64::from(read.max_bytes) <= object.bounds.max_bytes);
+            assert!(u64::from(read.max_bytes) <= output_limit);
             assert!(read.max_entries <= object.bounds.max_objects);
             assert!(
                 !serde_json::to_string(&request)
@@ -304,15 +319,28 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
                     .await
                     .unwrap();
             }
-            let output = RemoteToolOutput {
-                outcome: AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(
+            let oversized_marker = "must-not-reach-model-".repeat(128);
+            let outcome = if case == "oversized_error" {
+                AgentOutcome::Err(desk_agent_protocol::AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::Internal,
+                    message: oversized_marker.clone(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                })
+            } else {
+                AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(
                     desk_agent_protocol::ReadContextOutput::FileMetadataInspect(
                         desk_agent_protocol::computer_use::FileMetadataInspectOutput {
                             snapshot_id: "worker".into(),
                             entries: vec![
                                 desk_agent_protocol::computer_use::FileMetadataProjection {
                                     object_ref: reference.clone(),
-                                    display_name: "synthetic".into(),
+                                    display_name: if case == "oversized_success" {
+                                        oversized_marker.clone()
+                                    } else {
+                                        "synthetic".into()
+                                    },
                                     is_directory: false,
                                     byte_len: Some(16),
                                     modified_at: None,
@@ -322,7 +350,10 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
                             truncated: false,
                         },
                     ),
-                )),
+                ))
+            };
+            let output = RemoteToolOutput {
+                outcome,
                 image: None,
             };
             let bytes = serde_json::to_vec(&output).unwrap();
@@ -346,8 +377,12 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
         };
         let (output, sent) = tokio::join!(tools.run_read(&call), peer);
         assert!(sent, "read failed before dispatch: {output:?}");
-        if supersede {
-            assert!(output.is_err());
+        if case != "success" {
+            let error = output.unwrap_err();
+            assert!(
+                !error.message.contains("must-not-reach-model"),
+                "{case}: oversized Provider body escaped its bounded transport error"
+            );
         } else {
             let output = output.unwrap();
             let label = tools.read_data_envelope(&call, &output).unwrap().unwrap();
@@ -357,7 +392,32 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             );
             assert_eq!(label.allowed_destinations, [destination()]);
             assert!(label.retention.expires_at_unix_ms.unwrap() <= object.expires_at_unix_ms);
+            assert!(label.retention.expires_at_unix_ms.unwrap() <= grant_expires_at);
         }
+        let outbox = crate::entity::agent_capability_dispatch_outbox::Entity::find()
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            outbox.state,
+            crate::capability_grant_store::DISPATCH_OUTBOX_COMPLETED,
+            "{case}: a received Provider result is known even when its body is rejected"
+        );
+        let work = crate::entity::agent_action_item::Entity::find_by_id(outbox.work_id)
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            work.status,
+            if case == "oversized_error" {
+                crate::capability_grant_store::CAPABILITY_WORK_FAILED
+            } else {
+                crate::capability_grant_store::CAPABILITY_WORK_SUCCEEDED
+            },
+            "{case}: durable outcome must describe the Provider response, not local release"
+        );
         socket.send(awc::ws::Message::Close(None)).await.unwrap();
         drop(socket);
         map.write().await.clear();
