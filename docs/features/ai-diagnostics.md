@@ -46,6 +46,8 @@ When Device Assistant accepts an in-flight follow-up, the shared loop rechecks t
 
 The shared execution interface distinguishes runtime-confirmed non-execution from operator rejection. If an execution backend confirms an action was closed before dispatch, the loop records why it was not executed and stops further mutations in that turn, without calling it user cancellation. This internal outcome grants no execution authority and does not imply identical durable recovery support in every backend.
 
+An execution backend may also supply a verified original result label. The shared loop checks that it matches the result bytes and preserves it without regenerating lineage or extending expiry at delivery time. A mismatch rejects the result without acknowledging delivery. The label grants no implicit model export permission. Open-source Signal currently retains its existing result-label generation path; this interface does not imply that every backend persists original result receipts.
+
 ### Linux capability boundary
 
 On Linux, the Assistant advertises each capability independently. System information, process and network inspection, container inspection, terminal-output reads, and owner-confirmed `bash`/`sh` execution use the same thin-edge and confirmation boundaries as Windows and macOS. On a booted systemd host, it also provides `systemd` service status and bounded `journald` JSON queries; those two capabilities remain visibly unavailable when `systemctl`/`journalctl` or the systemd runtime is absent, and journal visibility is limited by the Desk Server process permissions.

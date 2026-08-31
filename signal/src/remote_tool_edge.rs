@@ -1593,7 +1593,11 @@ impl SignalDeviceAssistantTools {
             )
             .await;
         match result {
-            Ok(ExecOutcome::Executed { output, event_id }) => {
+            Ok(ExecOutcome::Executed {
+                output,
+                event_id,
+                data_envelope,
+            }) => {
                 let (_, result_digest_sha256) = tool_output_fingerprint(&output)?;
                 store
                     .record_dispatch_completion(
@@ -1615,7 +1619,11 @@ impl SignalDeviceAssistantTools {
                             false,
                         )
                     })?;
-                Ok(ExecOutcome::Executed { output, event_id })
+                Ok(ExecOutcome::Executed {
+                    output,
+                    event_id,
+                    data_envelope,
+                })
             }
             Ok(ExecOutcome::Rejected { reason }) => {
                 let digest = format!(
@@ -2454,6 +2462,7 @@ impl SignalDeviceAssistantTools {
             })?;
         if verified {
             Ok(ExecOutcome::Executed {
+                data_envelope: None,
                 output: ToolRunOutput {
                     content: output,
                     image_data_url: None,
@@ -3171,6 +3180,7 @@ impl SignalDeviceAssistantTools {
             })?;
         if verified {
             Ok(ExecOutcome::Executed {
+                data_envelope: None,
                 output: ToolRunOutput {
                     content: output,
                     image_data_url: None,
@@ -4238,6 +4248,7 @@ impl SignalDeviceAssistantTools {
             })?;
         if let Some(content) = output_json {
             Ok(ExecOutcome::Executed {
+                data_envelope: None,
                 output: ToolRunOutput {
                     content,
                     image_data_url: None,
@@ -4927,6 +4938,7 @@ impl SignalDeviceAssistantTools {
             })?;
         if let Some(content) = output_json {
             Ok(ExecOutcome::Executed {
+                data_envelope: None,
                 output: ToolRunOutput {
                     content,
                     image_data_url: None,

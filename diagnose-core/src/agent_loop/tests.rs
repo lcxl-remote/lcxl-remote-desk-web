@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 mod egress;
+mod original_results;
 
 /// An in-memory session store: one session, claimed via the pure transition.
 #[derive(Default)]
@@ -21,6 +22,7 @@ struct MemSession {
     superseded_settles: Rc<RefCell<u32>>,
     saves: RefCell<usize>,
     fail_save_at: Option<usize>,
+    fail_save_with_message_id: Option<&'static str>,
     supersede_on_save_failure: bool,
 }
 #[async_trait(?Send)]
@@ -58,7 +60,14 @@ impl SessionSeam for MemSession {
     }
     async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError> {
         *self.saves.borrow_mut() += 1;
-        if self.fail_save_at == Some(*self.saves.borrow()) {
+        if self.fail_save_at == Some(*self.saves.borrow())
+            || self.fail_save_with_message_id.is_some_and(|id| {
+                session
+                    .conversation
+                    .iter()
+                    .any(|message| message.message_id == id)
+            })
+        {
             if self.supersede_on_save_failure {
                 *self.latest_revision.borrow_mut() = Some(session.input_revision + 1);
             }
@@ -2393,6 +2402,7 @@ async fn mutating_executes_then_answers() {
         requests: Rc::new(RefCell::new(vec![])),
     };
     let scripted = tools(vec![ExecOutcome::Executed {
+        data_envelope: None,
         output: ToolRunOutput {
             content: "exit_code=0".into(),
             image_data_url: None,
@@ -2454,6 +2464,7 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
         requests: requests.clone(),
     };
     let scripted = tools(vec![ExecOutcome::Executed {
+        data_envelope: None,
         output: ToolRunOutput {
             content: "action completed".into(),
             image_data_url: None,
@@ -3171,6 +3182,7 @@ async fn executed_keys_the_result_message_on_the_delivery_id() {
         requests: Rc::new(RefCell::new(vec![])),
     };
     let scripted = tools(vec![ExecOutcome::Executed {
+        data_envelope: None,
         output: ToolRunOutput {
             content: "exit_code=0".into(),
             image_data_url: None,
@@ -3447,6 +3459,7 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
                 })
             } else {
                 Ok(ExecOutcome::Executed {
+                    data_envelope: None,
                     output: ToolRunOutput {
                         content: "exit_code=0".into(),
                         image_data_url: None,
@@ -3615,6 +3628,7 @@ async fn streams_awaiting_approval_event() {
         requests: Rc::new(RefCell::new(vec![])),
     };
     let scripted = tools(vec![ExecOutcome::Executed {
+        data_envelope: None,
         output: ToolRunOutput {
             content: "exit_code=0".into(),
             image_data_url: None,
@@ -4477,6 +4491,7 @@ async fn rejected_mutating_result_image_is_not_persisted_and_delivery_is_acked()
         requests: Rc::new(RefCell::new(vec![])),
     };
     let scripted = tools(vec![ExecOutcome::Executed {
+        data_envelope: None,
         output: ToolRunOutput {
             content: RAW_TOOL_CONTENT.into(),
             image_data_url: Some(image_data_url.clone()),
@@ -5593,6 +5608,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
     };
     let scripted = tools(vec![
         ExecOutcome::Executed {
+            data_envelope: None,
             output: ToolRunOutput {
                 content: "xlsx created".into(),
                 image_data_url: None,
@@ -5600,6 +5616,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
             event_id: None,
         },
         ExecOutcome::Executed {
+            data_envelope: None,
             output: ToolRunOutput {
                 content: "docx created".into(),
                 image_data_url: None,
@@ -5607,6 +5624,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
             event_id: None,
         },
         ExecOutcome::Executed {
+            data_envelope: None,
             output: ToolRunOutput {
                 content: "gmail handed off".into(),
                 image_data_url: None,
@@ -5614,6 +5632,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
             event_id: None,
         },
         ExecOutcome::Executed {
+            data_envelope: None,
             output: ToolRunOutput {
                 content: "slack handed off".into(),
                 image_data_url: None,

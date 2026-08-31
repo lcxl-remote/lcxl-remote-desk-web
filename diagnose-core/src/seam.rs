@@ -369,6 +369,10 @@ pub enum ExecOutcome {
     Executed {
         output: ToolRunOutput,
         event_id: Option<String>,
+        /// Original data label already checked against the runtime's durable
+        /// result receipt. When present, preserve it instead of relabeling at
+        /// delivery time; it grants no implicit export permission.
+        data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
     },
     /// The operator rejected the command; nothing ran.
     Rejected { reason: Option<String> },

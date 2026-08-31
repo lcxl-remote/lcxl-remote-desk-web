@@ -2757,6 +2757,16 @@ fn finish_tool(
     sink.on_tool_finished(call_id, ok, output, background_task_id);
 }
 
+fn invalid_original_result() -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::Internal,
+        message: "the tool result does not match its original data envelope".into(),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    }
+}
+
 fn append_mutating_result(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
@@ -3085,7 +3095,11 @@ async fn run_mutating<F: FnMut() -> String>(
     let mut terminal_outcome: Option<LoopOutcome> = None;
 
     match outcome {
-        Ok(ExecOutcome::Executed { output, event_id }) => {
+        Ok(ExecOutcome::Executed {
+            output,
+            event_id,
+            data_envelope,
+        }) => {
             // Key the result message on the stable delivery id when the runtime has
             // one, so a late completion delivery of the same result is recognized as
             // already present (dedup by message_id) rather than appended twice.
@@ -3094,8 +3108,29 @@ async fn run_mutating<F: FnMut() -> String>(
                 None => mint(),
             };
             ack_event_id = event_id;
-            let mut data_envelope = deps.tools.mutating_data_envelope(call, &output)?;
-            bind_tool_input_envelopes(session, call, &mut data_envelope)?;
+            let data_envelope = if let Some(original) = data_envelope {
+                original.validate().map_err(|_| invalid_original_result())?;
+                let bytes = crate::model_egress::message_payload_bytes(
+                    &output.content,
+                    output.image_data_url.as_deref(),
+                )
+                .map_err(|_| invalid_original_result())?;
+                let declared_size = match &original.content {
+                    ContentRef::ImmutableBlob { size_bytes, .. }
+                    | ContentRef::EphemeralObservation { size_bytes, .. }
+                    | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
+                };
+                if original.digest_sha256 != format!("{:x}", Sha256::digest(&bytes))
+                    || declared_size != bytes.len() as u64
+                {
+                    return Err(invalid_original_result());
+                }
+                Some(original)
+            } else {
+                let mut generated = deps.tools.mutating_data_envelope(call, &output)?;
+                bind_tool_input_envelopes(session, call, &mut generated)?;
+                generated
+            };
             let failure = append_reviewed_tool_result(
                 deps,
                 session,

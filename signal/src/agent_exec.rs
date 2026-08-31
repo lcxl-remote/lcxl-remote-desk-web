@@ -798,6 +798,7 @@ impl SignalAgentTools {
                 task,
                 disposition: EdgeExecDisposition::Executed { outcome },
             } => Ok(ExecOutcome::Executed {
+                data_envelope: None,
                 output: ToolRunOutput {
                     content: outcome_content(&outcome),
                     image_data_url: None,
@@ -1047,6 +1048,7 @@ impl ToolSeam for SignalAgentTools {
                 task,
                 disposition: EdgeExecDisposition::Executed { outcome },
             } => Ok(ExecOutcome::Executed {
+                data_envelope: None,
                 output: ToolRunOutput {
                     content: outcome_content(&outcome),
                     image_data_url: None,
