@@ -1,6 +1,8 @@
 //! SQLite-backed agent sessions for the single-node OSS signal central brain.
 
 mod assistant_snapshot;
+mod object_context;
+pub use object_context::UpdateObjectContext;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -51,9 +53,6 @@ pub struct ContextSelectionClaim {
     pub candidates: Vec<ContextAttachment>,
     pub now_unix_ms: u64,
 }
-
-pub use desk_diagnose_core::object_context::ObjectContextMutation;
-use desk_diagnose_core::object_context::apply_object_mutation;
 
 impl SignalAgentSessionStore {
     pub fn new(db: DatabaseConnection) -> Self {
@@ -265,123 +264,6 @@ impl SignalAgentSessionStore {
             }
         }
         Err(transport("Device Assistant context update conflicted"))
-    }
-
-    pub async fn update_object_context(
-        &self,
-        conversation_id: &str,
-        actor_id: &str,
-        device_id: &str,
-        current_scope: AgentScope,
-        mutation: &ObjectContextMutation,
-        now: &str,
-    ) -> Result<bool, AgentError> {
-        let now_dt = now_from(now);
-        for _ in 0..CLAIM_ATTEMPTS {
-            match find(&self.db, conversation_id)
-                .await
-                .map_err(|error| internal(format!("load object context session: {error}")))?
-            {
-                Some(row) => {
-                    let mut session =
-                        PersistedAgentSession::decode_json(&row.state_json).map_err(|error| {
-                            internal(format!("decode object context session: {error}"))
-                        })?;
-                    session.version = row.version;
-                    session
-                        .check_subject(actor_id, device_id)
-                        .map_err(|error| internal(format!("object context subject: {error:?}")))?;
-                    session
-                        .check_surface(self.surface)
-                        .map_err(|error| internal(format!("object context surface: {error:?}")))?;
-                    if session.turn_state.is_active()
-                        && row
-                            .lease_deadline
-                            .is_some_and(|deadline| deadline >= now_dt)
-                    {
-                        return Err(transport("Device Assistant context is busy"));
-                    }
-                    let changed = apply_object_mutation(&mut session, mutation)?;
-                    if !changed {
-                        return Ok(false);
-                    }
-                    let new_version = row.version + 1;
-                    session.version = new_version;
-                    let state_json = session.encode_json_for_storage().map_err(|error| {
-                        internal(format!("encode object context session: {error}"))
-                    })?;
-                    let result = agent_session::Entity::update_many()
-                        .col_expr(agent_session::Column::StateJson, Expr::value(state_json))
-                        .col_expr(agent_session::Column::Version, Expr::value(new_version))
-                        .col_expr(agent_session::Column::UpdatedAt, Expr::value(now_dt))
-                        .filter(agent_session::Column::Id.eq(row.id))
-                        .filter(agent_session::Column::Version.eq(row.version))
-                        .exec(&self.db)
-                        .await
-                        .map_err(|error| {
-                            internal(format!("save object context session: {error}"))
-                        })?;
-                    if result.rows_affected == 1 {
-                        return Ok(true);
-                    }
-                }
-                None => {
-                    if !matches!(mutation, ObjectContextMutation::Attach(_)) {
-                        return Err(transport("Device Assistant attachment does not exist"));
-                    }
-                    let mut session = PersistedAgentSession::new(
-                        conversation_id.to_string(),
-                        actor_id.to_string(),
-                        device_id.to_string(),
-                        0,
-                        current_scope.clone(),
-                        now.to_string(),
-                    );
-                    session.adopt_client_metadata(
-                        self.client_conversation_id.as_deref(),
-                        self.surface,
-                    );
-                    let changed = apply_object_mutation(&mut session, mutation)?;
-                    let state_json = session.encode_json_for_storage().map_err(|error| {
-                        internal(format!("encode new object context session: {error}"))
-                    })?;
-                    let inserted = agent_session::ActiveModel {
-                        conversation_id: Set(session.conversation_id.clone()),
-                        actor_id: Set(session.actor_id.clone()),
-                        device_id: Set(session.device_id.clone()),
-                        state_json: Set(state_json),
-                        version: Set(0),
-                        lease_token: Set(0),
-                        lease_deadline: Set(None),
-                        created_at: Set(now_dt),
-                        updated_at: Set(now_dt),
-                        ..Default::default()
-                    }
-                    .insert(&self.db)
-                    .await;
-                    match inserted {
-                        Ok(_) => return Ok(changed),
-                        Err(_)
-                            if find(&self.db, conversation_id)
-                                .await
-                                .ok()
-                                .flatten()
-                                .is_some() =>
-                        {
-                            continue;
-                        }
-                        Err(error) => {
-                            return Err(internal(format!(
-                                "create object context session: {error}"
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-        Err(transport(
-            "Device Assistant object context update conflicted",
-        ))
     }
 
     /// Read the persisted conversation for the browser's recoverable view.
@@ -2655,20 +2537,6 @@ mod tests {
         }
     }
 
-    fn file_attachment(
-        id: &str,
-        client_request_id: &str,
-        incarnation: &str,
-        now_unix_ms: u64,
-    ) -> ContextAttachment {
-        let mut attachment = context_attachment(id, client_request_id, incarnation, now_unix_ms);
-        attachment.kind = ContextAttachmentKind::File;
-        attachment.object_ref.source_provider_id = "file.workspace".into();
-        attachment.object_ref.source_capability_id = "file.metadata.read".into();
-        attachment.display_summary = "selected.txt".into();
-        attachment
-    }
-
     async fn create_file_store(path: &std::path::Path) -> SignalAgentSessionStore {
         let db = Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
             .await
@@ -2904,103 +2772,6 @@ mod tests {
                 reason: AttachmentStaleReason::Detached
             }
         ));
-    }
-
-    #[tokio::test]
-    async fn object_context_is_idempotent_and_capability_reconciliation_preserves_it() {
-        let base = store().await;
-        let now_unix_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap();
-        let now = Utc::now().to_rfc3339();
-        let scoped = base.clone().with_client_metadata(
-            Some("assistant-files".into()),
-            AgentSessionSurface::DeviceAssistant,
-        );
-        let scope = claim("unused").current_pdp_scope;
-        let attachment = file_attachment(
-            "file-attachment-1",
-            "file-request-1",
-            "worker-1:file-7",
-            now_unix_ms,
-        );
-        let attach = ObjectContextMutation::Attach(attachment);
-
-        assert!(
-            scoped
-                .update_object_context(
-                    "file-conversation",
-                    "1",
-                    "device-1",
-                    scope.clone(),
-                    &attach,
-                    &now,
-                )
-                .await
-                .unwrap()
-        );
-        assert!(
-            !scoped
-                .update_object_context(
-                    "file-conversation",
-                    "1",
-                    "device-1",
-                    scope.clone(),
-                    &attach,
-                    &now,
-                )
-                .await
-                .unwrap()
-        );
-
-        let capability_update = scoped.clone().with_context_selection(context_selection(
-            false,
-            "unused",
-            "worker-1",
-            now_unix_ms + 1,
-        ));
-        assert!(
-            !capability_update
-                .update_context_selection(
-                    "file-conversation",
-                    "1",
-                    "device-1",
-                    scope.clone(),
-                    &now,
-                )
-                .await
-                .unwrap()
-        );
-        let attached = base
-            .read_snapshot("file-conversation")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            attached.context_attachments[0].state,
-            AttachmentState::Active
-        ));
-
-        let detach = ObjectContextMutation::Detach {
-            attachment_id: "file-attachment-1".into(),
-        };
-        assert!(
-            scoped
-                .update_object_context(
-                    "file-conversation",
-                    "1",
-                    "device-1",
-                    scope.clone(),
-                    &detach,
-                    &now,
-                )
-                .await
-                .unwrap()
-        );
-        assert!(
-            !scoped
-                .update_object_context("file-conversation", "1", "device-1", scope, &detach, &now,)
-                .await
-                .unwrap()
-        );
     }
 
     #[tokio::test]

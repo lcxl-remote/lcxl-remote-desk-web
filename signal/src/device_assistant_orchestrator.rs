@@ -537,6 +537,51 @@ pub async fn update_context(
     }
 }
 
+pub(crate) async fn apply_object_context_update(
+    db: DatabaseConnection,
+    actor_user_id: i32,
+    target_device_id: String,
+    update: &DeviceAssistantObjectContextUpdate,
+) -> Result<bool, AgentError> {
+    update.validate().map_err(transport_error)?;
+    let actor_id = actor_user_id.to_string();
+    let mut params = crate::agent_session_store::UpdateObjectContext {
+        run_id: derive_conversation_key(
+            &actor_id,
+            &target_device_id,
+            Some(&update.conversation_id),
+            "",
+        ),
+        actor_id,
+        device_id: target_device_id,
+        update: update.clone(),
+        destination: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+        .with_client_metadata(
+            Some(update.conversation_id.clone()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+    if let Some(changed) = store.replay_object_context(&params).await? {
+        return Ok(changed);
+    }
+    if !matches!(
+        update.operation,
+        desk_agent_protocol::device_assistant::DeviceAssistantObjectContextOperation::Detach { .. }
+    ) {
+        let config = crate::model_provider::load(&db)
+            .await
+            .map_err(|_| transport_error("failed to load model provider config"))?;
+        params.destination = Some(
+            config
+                .destination_identity()
+                .map_err(|_| transport_error("failed to resolve model destination"))?,
+        );
+    }
+    store.update_object_context(&params).await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_object_context(
     connections: web::Data<SharedConnectionMap>,
@@ -548,62 +593,7 @@ pub async fn update_object_context(
     target_device_id: String,
     update: DeviceAssistantObjectContextUpdate,
 ) {
-    let result = async {
-        let config = crate::model_provider::load(&db).await.map_err(|error| {
-            transport_error(format!("failed to load model provider config: {error}"))
-        })?;
-        let destination = config.destination_identity().map_err(|error| {
-            transport_error(format!("failed to resolve model destination: {error}"))
-        })?;
-        let actor_id = actor_user_id.to_string();
-        let now = chrono::Utc::now();
-        let now_unix_ms = u64::try_from(now.timestamp_millis())
-            .map_err(|_| transport_error("system clock predates the Unix epoch"))?;
-        let mutation = desk_diagnose_core::object_context::build_object_context_mutation(
-            &update,
-            desk_diagnose_core::object_context::ObjectContextBuild {
-                actor_id: &actor_id,
-                device_id: &target_device_id,
-                destination: &destination,
-                now_unix_ms,
-                attachment_id: &format!("context-{}", uuid::Uuid::new_v4()),
-                observation_id: &format!("selection-{}", uuid::Uuid::new_v4()),
-            },
-        )?;
-        let conversation_key = derive_conversation_key(
-            &actor_id,
-            &target_device_id,
-            Some(&update.conversation_id),
-            &request_id,
-        );
-        let scope = AgentScope {
-            granted: vec![
-                desk_agent_protocol::Capability::FileMetadataRead,
-                desk_agent_protocol::Capability::FileContentRead,
-                desk_agent_protocol::Capability::SpreadsheetFileInspect,
-                desk_agent_protocol::Capability::SpreadsheetMergePreview,
-                desk_agent_protocol::Capability::TerminalOutputRead,
-            ],
-            mode: ExecutionMode::ReadOnly,
-            expires_at: None,
-            policy_name: Some("oss-device-assistant-read-only".into()),
-        };
-        crate::agent_session_store::SignalAgentSessionStore::new(db)
-            .with_client_metadata(
-                Some(update.conversation_id.clone()),
-                AgentSessionSurface::DeviceAssistant,
-            )
-            .update_object_context(
-                &conversation_key,
-                &actor_id,
-                &target_device_id,
-                scope,
-                &mutation,
-                &now.to_rfc3339(),
-            )
-            .await
-    }
-    .await;
+    let result = apply_object_context_update(db, actor_user_id, target_device_id, &update).await;
 
     let ack = DeviceAssistantObjectContextUpdated {
         conversation_id: update.conversation_id,
