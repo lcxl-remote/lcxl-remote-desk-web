@@ -52,6 +52,8 @@ A transactional execution backend may return a version receipt bound to the orig
 
 Personal Device Assistant shares a compiled policy revision with Manager, independent of unrelated organization policy counters. Older decisions cannot be upgraded automatically and resumed. A new explicit request starts a turn under the current policy without relabeling history, reissuing old grants, or restoring their uses. Automatic continuation and grant issuance require the current revision; a match does not replace target readiness or grant revocation checks. Ordinary terminal Copilot policy semantics remain unchanged.
 
+Browser Providers use shared closed-input preflight: input size is bounded, the selected BrowserSurface must be unexpired, and the server derives action scope and risk. Generic form filling and element activation remain InputFallback; Gmail/Slack draft handoffs do not become send actions. Passing preflight is not execution authority: the existing grant, egress, durable dispatch, and target-device checks still apply.
+
 ### Linux capability boundary
 
 On Linux, the Assistant advertises each capability independently. System information, process and network inspection, container inspection, terminal-output reads, and owner-confirmed `bash`/`sh` execution use the same thin-edge and confirmation boundaries as Windows and macOS. On a booted systemd host, it also provides `systemd` service status and bounded `journald` JSON queries; those two capabilities remain visibly unavailable when `systemctl`/`journalctl` or the systemd runtime is absent, and journal visibility is limited by the Desk Server process permissions.

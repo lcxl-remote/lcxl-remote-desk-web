@@ -14,18 +14,21 @@ use desk_agent_protocol::authz::{
     AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthorizedControlPayload, AuthzActor,
     AuthzDevice, ExecAdmissionPolicy,
 };
+#[cfg(test)]
 use desk_agent_protocol::browser_control::{
-    BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionRequest, BrowserActionResult,
-    BrowserActivationClass, BrowserElementRef, BrowserEngineKind, BrowserFormField,
-    BrowserFormFieldReadback, BrowserFormReadbackKind, BrowserMutationClass,
-    BrowserNavigationTarget, BrowserPageRef, BrowserWaitState,
+    BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionRequest, BrowserMutationClass,
+    BrowserPageRef,
+};
+use desk_agent_protocol::browser_control::{
+    BrowserActionResult, BrowserElementRef, BrowserEngineKind, BrowserFormFieldReadback,
+    BrowserFormReadbackKind,
 };
 use desk_agent_protocol::capability_grant::{
     CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant, CapabilityGrantIssuer, CapabilityGrantLimits,
     CapabilityGrantUsePolicy, CapabilityRiskTier,
 };
 use desk_agent_protocol::capability_provider::{
-    AuthorizationResourceKind, CapabilityDataCategory, ExecutionLocality, ProductSurface,
+    AuthorizationResourceKind, ExecutionLocality, ProductSurface,
 };
 use desk_agent_protocol::communication::{
     COMMUNICATION_SCHEMA_VERSION, CommunicationChannel, CommunicationDraftHandoff,
@@ -63,7 +66,6 @@ use desk_diagnose_core::capability_grant::{
     exact_external_query_resource_scope, exact_external_url_resource_scope,
     fresh_object_resource_scope, match_capability_grant,
 };
-use desk_diagnose_core::capability_risk::{CapabilityRiskSignals, classify_capability_risk};
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::chunk::ByteReassembler;
 use desk_diagnose_core::device_assistant::{
@@ -918,52 +920,7 @@ impl SignalDeviceAssistantTools {
         capability: &desk_diagnose_core::provider_registry::CapabilityDescriptor,
         call: &ToolCall,
     ) -> Result<CapabilityRiskTier, AgentError> {
-        let process_command_line_requested = if capability
-            .wire
-            .data_policy
-            .reads
-            .contains(&CapabilityDataCategory::ProcessMetadata)
-        {
-            matches!(
-                build_read_operation(call)?,
-                (
-                    desk_agent_protocol::Capability::ProcessList,
-                    OperationInput::ReadContext(ReadContextInput {
-                        kind: ContextKind::ProcessList(desk_agent_protocol::ProcessListParams {
-                            include_command_line: true,
-                            ..
-                        }),
-                    })
-                )
-            )
-        } else {
-            false
-        };
-        let sensitive_content = capability.wire.data_policy.reads.iter().any(|category| {
-            matches!(
-                category,
-                CapabilityDataCategory::UiSemanticTree
-                    | CapabilityDataCategory::OfficeSelection
-                    | CapabilityDataCategory::FileContent
-                    | CapabilityDataCategory::TerminalOutput
-                    | CapabilityDataCategory::ScreenPixels
-                    | CapabilityDataCategory::LogContent
-                    | CapabilityDataCategory::CommandOutput
-                    | CapabilityDataCategory::ExternalContent
-                    | CapabilityDataCategory::CommunicationContent
-                    | CapabilityDataCategory::LiveDocumentContent
-            ) || (*category == CapabilityDataCategory::ProcessMetadata
-                && process_command_line_requested)
-        });
-        Ok(classify_capability_risk(
-            capability.wire.effect,
-            CapabilityRiskSignals {
-                sensitive_content,
-                external_egress: capability.wire.data_policy.may_export_data,
-                destructive_or_overwrite: false,
-                unpredictable_input: false,
-            },
-        ))
+        desk_diagnose_core::provider_preflight::classify_provider_call(capability, call)
     }
 
     async fn verify_current_readiness(
@@ -3200,183 +3157,12 @@ impl SignalDeviceAssistantTools {
         }
     }
 
+    #[cfg(test)]
     fn browser_action_from_call(
         call: &ToolCall,
         server_call_id: &str,
     ) -> Result<BrowserActionRequest, AgentError> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct OpenArgs {
-            target: BrowserNavigationTarget,
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct NavigateArgs {
-            page: BrowserPageRef,
-            target: BrowserNavigationTarget,
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct SnapshotArgs {
-            page: BrowserPageRef,
-            max_elements: u16,
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct WaitArgs {
-            page: BrowserPageRef,
-            element: BrowserElementRef,
-            state: BrowserWaitState,
-            timeout_ms: u32,
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct FillArgs {
-            page: BrowserPageRef,
-            fields: Vec<BrowserFormField>,
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct ActivateArgs {
-            page: BrowserPageRef,
-            element: BrowserElementRef,
-        }
-        let decode = |message: &str| {
-            error(
-                AgentErrorKind::InvalidInput,
-                format!("invalid browser Provider input: {message}"),
-                false,
-                true,
-            )
-        };
-        let action = match call.name.as_str() {
-            "browser_open_page" => {
-                let args: OpenArgs = serde_json::from_str(&call.arguments_json)
-                    .map_err(|error| decode(&error.to_string()))?;
-                BrowserAction::OpenPage {
-                    target: args.target,
-                }
-            }
-            "browser_navigate_page" => {
-                let args: NavigateArgs = serde_json::from_str(&call.arguments_json)
-                    .map_err(|error| decode(&error.to_string()))?;
-                BrowserAction::NavigatePage {
-                    page: args.page,
-                    target: args.target,
-                }
-            }
-            "browser_take_snapshot" => {
-                let args: SnapshotArgs = serde_json::from_str(&call.arguments_json)
-                    .map_err(|error| decode(&error.to_string()))?;
-                BrowserAction::TakeSnapshot {
-                    page: args.page,
-                    max_elements: args.max_elements,
-                }
-            }
-            "browser_wait_for" => {
-                let args: WaitArgs = serde_json::from_str(&call.arguments_json)
-                    .map_err(|error| decode(&error.to_string()))?;
-                BrowserAction::WaitFor {
-                    page: args.page,
-                    element: args.element,
-                    state: args.state,
-                    timeout_ms: args.timeout_ms,
-                }
-            }
-            "browser_fill_form" => {
-                let args: FillArgs = serde_json::from_str(&call.arguments_json)
-                    .map_err(|error| decode(&error.to_string()))?;
-                BrowserAction::FillForm {
-                    page: args.page,
-                    fields: args.fields,
-                    mutation_class: BrowserMutationClass::InputFallback,
-                }
-            }
-            "prepare_slack_web_message_handoff" => {
-                let args: SlackWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
-                    .map_err(|error| decode(&error.to_string()))?;
-                args.validate()
-                    .map_err(|error| decode(&error.to_string()))?;
-                BrowserAction::FillForm {
-                    page: args.page,
-                    fields: vec![BrowserFormField {
-                        element: args.composer,
-                        value: args.body_plain_text,
-                    }],
-                    mutation_class: BrowserMutationClass::WriteExternalDraft,
-                }
-            }
-            "prepare_gmail_web_draft_handoff" => {
-                let args: GmailWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
-                    .map_err(|error| decode(&error.to_string()))?;
-                args.validate()
-                    .map_err(|error| decode(&error.to_string()))?;
-                let fields = vec![
-                    BrowserFormField {
-                        element: args.to_field,
-                        value: args.draft.recipients[0].address.clone(),
-                    },
-                    BrowserFormField {
-                        element: args.subject_field,
-                        value: args.draft.subject,
-                    },
-                    BrowserFormField {
-                        element: args.body_field,
-                        value: args.draft.body_plain_text,
-                    },
-                ];
-                match args.attachment {
-                    Some(attachment) => BrowserAction::FillFormAndUpload {
-                        page: args.page,
-                        fields,
-                        upload_element: attachment.element,
-                        file: attachment.artifact.file,
-                        content: attachment.artifact.content,
-                        file_name: attachment.artifact.file_name,
-                        media_type: attachment.artifact.media_type,
-                        size_bytes: attachment.artifact.size_bytes,
-                        digest_sha256: attachment.artifact.digest_sha256,
-                        mutation_class: BrowserMutationClass::WriteExternalDraft,
-                    },
-                    None => BrowserAction::FillForm {
-                        page: args.page,
-                        fields,
-                        mutation_class: BrowserMutationClass::WriteExternalDraft,
-                    },
-                }
-            }
-            "browser_activate_element" => {
-                let args: ActivateArgs = serde_json::from_str(&call.arguments_json)
-                    .map_err(|error| decode(&error.to_string()))?;
-                BrowserAction::ActivateElement {
-                    page: args.page,
-                    element: args.element,
-                    activation_class: BrowserActivationClass::InputFallback,
-                }
-            }
-            _ => {
-                return Err(error(
-                    AgentErrorKind::UnsupportedCapability,
-                    "browser Provider is not registered",
-                    false,
-                    true,
-                ));
-            }
-        };
-        let request = BrowserActionRequest {
-            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
-            call_id: server_call_id.into(),
-            action,
-        };
-        request.validate().map_err(|validation_error| {
-            error(
-                AgentErrorKind::InvalidInput,
-                format!("invalid browser Provider input: {validation_error}"),
-                false,
-                true,
-            )
-        })?;
-        Ok(request)
+        desk_diagnose_core::provider_preflight::browser_action_from_call(call, server_call_id)
     }
 
     async fn authorize_and_execute_browser(
@@ -3452,12 +3238,10 @@ impl SignalDeviceAssistantTools {
             None
         };
         let session = self.authoritative_session().await?;
-        let (canonical_input_json, canonical_input_digest_sha256) =
-            Self::canonical_call_input(call)?;
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
             error(
                 AgentErrorKind::Internal,
-                "system clock predates the Unix epoch",
+                "invalid browser preflight clock",
                 false,
                 false,
             )
@@ -3466,71 +3250,31 @@ impl SignalDeviceAssistantTools {
             "capability-call-{:x}",
             Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
         );
-        let request = Self::browser_action_from_call(call, &server_call_id)?;
-        if ComputerActionKind::Browser(request.clone()).required_capability()
-            != capability.required_capability
-        {
-            return Err(error(
-                AgentErrorKind::PermissionDenied,
-                "browser action does not match the registered capability",
-                false,
-                true,
-            ));
-        }
-        let resource_scope = fresh_object_resource_scope(std::slice::from_ref(&surface));
-        let operation_scope = canonical_compiled_scope(
-            &capability.wire.authorization_hint.resources,
-            capability.wire.effect,
-        )
-        .ok_or_else(|| {
-            error(
-                AgentErrorKind::Internal,
-                "browser Provider has no compiled authorization scope",
-                false,
-                false,
-            )
-        })?
-        .operations;
-        let risk_tier = Self::capability_risk(capability, call)?;
-        let export_destinations = if gmail_input.is_some() {
-            vec![DestinationIdentity::EmailAccount {
-                account_id:
-                    desk_diagnose_core::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                        .into(),
-            }]
-        } else if slack_input.is_some() {
-            vec![DestinationIdentity::ChatAccount {
-                account_id:
-                    desk_diagnose_core::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                        .into(),
-            }]
-        } else {
-            Vec::new()
-        };
-        let call_authority = CapabilityGrantCall {
+        let evaluated = desk_diagnose_core::provider_preflight::BrowserCallPreflight::build(
+            &self.provider_registry,
+            ProductSurface::OssPersonalOwner,
+            call,
+            &server_call_id,
+            &surface,
+            now_unix_ms,
+        )?;
+        let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
-            surface: ProductSurface::OssPersonalOwner,
             target_device_id: &self.target_device_id,
-            target_session_id: None,
-            provider_id: &provider.wire.provider_id,
-            capability_id: &capability.wire.capability_id,
-            tool_name: &call.name,
-            tool_schema_version: capability.wire.input_schema_version,
-            effect: capability.wire.effect,
-            risk_tier,
-            resource_scope: &resource_scope,
-            operation_scope: &operation_scope,
-            export_destinations: &export_destinations,
-            envelope_ids: &[],
-            content_digests_sha256: &[],
-            canonical_input_digest_sha256: &canonical_input_digest_sha256,
-            byte_count: canonical_input_json.len() as u64,
-            item_count: 1,
             policy_revision: self.policy_revision,
             readiness_revision: self.readiness_revision,
             now_unix_ms,
         };
+        let call_authority = evaluated.grant_call(&subject)?;
+        let request = evaluated.request().clone();
+        let canonical_input_json = evaluated.canonical_input_json().to_string();
+        let canonical_input_digest_sha256 =
+            call_authority.canonical_input_digest_sha256.to_string();
+        let resource_scope = call_authority.resource_scope.to_vec();
+        let operation_scope = call_authority.operation_scope.to_vec();
+        let export_destinations = call_authority.export_destinations.to_vec();
+        let risk_tier = call_authority.risk_tier;
         let store = SignalCapabilityGrantStore::new(self.db.clone());
         let grant_id = if let Some(existing) = store
             .prepared_grant_id(&server_call_id)
