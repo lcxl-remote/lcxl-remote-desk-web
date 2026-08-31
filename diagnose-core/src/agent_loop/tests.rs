@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 mod egress;
 mod original_results;
+mod version_handoff;
 
 /// An in-memory session store: one session, claimed via the pure transition.
 #[derive(Default)]

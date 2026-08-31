@@ -406,6 +406,15 @@ pub enum ExecOutcome {
     Dispatched(ExecIdentity),
 }
 
+/// An execution outcome and the runtime's own committed session-version change.
+/// Keep the receipt even when a step after Prepare fails. It is not a refresh
+/// from storage, a grant, or evidence that the action executed successfully.
+#[derive(Debug)]
+pub struct ExecCompletion {
+    pub outcome: Result<ExecOutcome, AgentError>,
+    pub version_advance: Option<crate::action_version::ActionVersionAdvance>,
+}
+
 /// The result of a model actively waiting on a background task via
 /// [`wait_for_task`](ToolSeam::wait_for_task). Unlike the passive completion
 /// notification the publisher injects, a waited-for result becomes the real
@@ -492,6 +501,24 @@ pub trait ToolSeam {
         Ok(ExecOutcome::Rejected {
             reason: Some("mutating execution is not supported by this runtime".into()),
         })
+    }
+
+    /// Execute using the loop's post-save version when the runtime needs to
+    /// transact on that session. A committing runtime returns only its own
+    /// version advance, including on subsequent failure; all writes must still
+    /// compare the original turn/input/lease and held version. The default keeps
+    /// nontransactional runtimes on their existing execution path.
+    async fn confirm_and_exec_versioned(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+        version: Option<&crate::action_version::ActionVersion>,
+    ) -> ExecCompletion {
+        let _ = version;
+        ExecCompletion {
+            outcome: self.confirm_and_exec(call, ctx).await,
+            version_advance: None,
+        }
     }
 
     /// Label a successful mutating result before it is persisted or projected

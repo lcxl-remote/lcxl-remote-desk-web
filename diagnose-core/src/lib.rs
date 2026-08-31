@@ -23,6 +23,7 @@
 
 pub mod action_result;
 pub mod action_turn_fence;
+pub mod action_version;
 pub mod agent_loop;
 #[cfg(test)]
 mod agent_loop_acceptance;

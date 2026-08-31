@@ -2,7 +2,7 @@ use super::*;
 use crate::session::ActionIdentity;
 use desk_agent_protocol::data_lineage::{RetentionBoundary, Sensitivity};
 
-fn original(output: &ToolRunOutput, ephemeral: bool) -> DataEnvelope {
+pub(super) fn original(output: &ToolRunOutput, ephemeral: bool) -> DataEnvelope {
     use crate::{action_result::ActionResultOrigin, action_turn_fence::AssistantTurnFence};
     ActionResultOrigin {
         schema_version: 1,

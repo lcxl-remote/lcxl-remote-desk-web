@@ -3084,7 +3084,15 @@ async fn run_mutating<F: FnMut() -> String>(
     session.turn_state = TurnState::AwaitingApproval;
     deps.session_seam.save(session).await?;
     sink.on_awaiting_approval(&call.name, &call.id, &call.arguments_json);
-    let outcome = deps.tools.confirm_and_exec(call, &ctx).await;
+    let version = crate::action_version::ActionVersion::capture(session, &call.id)?;
+    let completion = deps
+        .tools
+        .confirm_and_exec_versioned(call, &ctx, version.as_ref())
+        .await;
+    if let Some(advance) = completion.version_advance {
+        advance.apply(session, version.as_ref())?;
+    }
+    let outcome = completion.outcome;
     session.turn_state = TurnState::Running;
 
     // A stable delivery id the foreground path must ack (consume) after its save, so
