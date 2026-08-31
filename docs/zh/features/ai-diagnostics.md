@@ -50,6 +50,8 @@ AI 由**中心信令服务器**（“中心大脑”）编排。设备是**瘦�
 
 浏览器 Provider 使用两端共享的闭集输入预检：输入大小受限，选中 BrowserSurface 必须未过期，动作范围与风险由服务端派生。通用填表和元素激活仍按 InputFallback 处理，Gmail/Slack 草稿交接不会变成发送操作。预检通过不是执行授权，后续仍需原有 grant、外发检查、持久化派发与目标设备校验。
 
+桌面语义操作的执行入口、权限申请和 grant 签发共用严格输入解码：只接受 UiElement 与 Invoke/Select/Focus/Toggle、有界 SetValue，Scroll 仍不可用。Toggle 可签发精确动作授权，但这不表示每个原生控件都支持它；原目标设备继续校验引用到期、会话身份和实际支持动作。中央校验不能替代 Accessibility/UIA 的原生执行与读回，也不绕过本地权限、writer lease 或输入抢占。
+
 中心下发的 Computer Action 不要求浏览器保持远程桌面连接：在已有单 worker 的便携/DeskServer 路径中，可以直接交给该 worker；启用多会话路由时仍必须有明确的会话绑定，不能猜选桌面。动作处理器在交付 worker 前拒绝请求时，使用原请求关联的 `ComputerActionCompleted` 报告“确定未开始”，而非等待超时；这不撤销其他动作，也不放宽授权、readiness 或本地能力限制。
 
 受信中心可用 `CancelComputerAction` 请求停止原 Computer Action。daemon 校验授权后将批准者与完整 action/work/generation 传给原 worker；无明确会话时不猜选桌面。`ComputerActionStateReported` 的 `CancelRequested` 只确认已使匹配 writer 失效，不表示系统调用已撤销或动作未发生。后续 adapter 步骤被阻止，但仍以原完成回执或未知结果为准；writer 被取消、抢占或到期后，必须等待原操作释放才允许下一写入者。daemon 与 worker 必须使用同一构建，取消 IPC 的批准者字段不能与旧布局混用。

@@ -579,26 +579,11 @@ pub fn build_permission_request(
                 ));
             }
             if capability.required_capability == Capability::DesktopUiActionConfirmed {
-                #[derive(Deserialize)]
-                struct UiActionOnly {
-                    action: desk_agent_protocol::computer_use::UiSemanticAction,
-                }
-                let action: UiActionOnly = serde_json::from_str(canonical).map_err(|error| {
-                    invalid(format!("decode semantic UI action input: {error}"))
+                crate::provider_preflight::ui_action_from_call(&ToolCall {
+                    id: item.item_id.clone(),
+                    name: capability.wire.tool_name.clone(),
+                    arguments_json: canonical.into(),
                 })?;
-                match action.action {
-                    desk_agent_protocol::computer_use::UiSemanticAction::Invoke
-                    | desk_agent_protocol::computer_use::UiSemanticAction::Toggle { .. }
-                    | desk_agent_protocol::computer_use::UiSemanticAction::Select
-                    | desk_agent_protocol::computer_use::UiSemanticAction::Focus => {}
-                    desk_agent_protocol::computer_use::UiSemanticAction::SetValue { value }
-                        if value.len() <= 16 * 1024 => {}
-                    _ => {
-                        return Err(invalid(
-                            "semantic UI action is not in the bounded macOS action allowlist",
-                        ));
-                    }
-                }
             }
             if capability.required_capability == Capability::DesktopInputFallbackConfirmed {
                 #[derive(Deserialize)]
@@ -1268,7 +1253,7 @@ mod tests {
             "2026-08-28T00:00:00Z".into(),
         )
         .unwrap_err();
-        assert!(error.message.contains("bounded macOS action allowlist"));
+        assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
     }
 
     #[test]

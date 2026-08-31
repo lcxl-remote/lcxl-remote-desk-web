@@ -141,24 +141,11 @@ pub fn build_permission_grants(
             if capability.required_capability
                 == desk_agent_protocol::Capability::DesktopUiActionConfirmed
             {
-                #[derive(serde::Deserialize)]
-                struct UiActionOnly {
-                    action: desk_agent_protocol::computer_use::UiSemanticAction,
-                }
-                let action: UiActionOnly = serde_json::from_str(canonical)
-                    .map_err(|_| internal("approved semantic UI action input is invalid"))?;
-                match action.action {
-                    desk_agent_protocol::computer_use::UiSemanticAction::Invoke
-                    | desk_agent_protocol::computer_use::UiSemanticAction::Select
-                    | desk_agent_protocol::computer_use::UiSemanticAction::Focus => {}
-                    desk_agent_protocol::computer_use::UiSemanticAction::SetValue { value }
-                        if value.len() <= 16 * 1024 => {}
-                    _ => {
-                        return Err(internal(
-                            "approved semantic UI action is outside the bounded allowlist",
-                        ));
-                    }
-                }
+                crate::provider_preflight::ui_action_from_call(&crate::chat::ToolCall {
+                    id: requested.item_id.clone(),
+                    name: capability.wire.tool_name.clone(),
+                    arguments_json: canonical.into(),
+                })?;
             }
             if capability.required_capability
                 == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed

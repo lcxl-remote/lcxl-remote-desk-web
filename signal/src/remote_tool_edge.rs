@@ -1659,12 +1659,6 @@ impl SignalDeviceAssistantTools {
     ) -> Result<ExecOutcome, AgentError> {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct UiActionArgs {
-            target: ObjectRef,
-            action: UiSemanticAction,
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct RawInputArgs {
             target: ObjectRef,
             action: RawInputAction,
@@ -1726,40 +1720,9 @@ impl SignalDeviceAssistantTools {
             action_name,
         ) = match call.name.as_str() {
             EXECUTE_CONFIRMED_UI_ACTION_TOOL => {
-                let args: UiActionArgs =
-                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                if args.target.object_kind != ObjectKind::UiElement {
-                    return Err(error(
-                        AgentErrorKind::InvalidInput,
-                        "semantic UI action requires a fresh UI element reference",
-                        false,
-                        true,
-                    ));
-                }
-                match &args.action {
-                    UiSemanticAction::Invoke
-                    | UiSemanticAction::Toggle { .. }
-                    | UiSemanticAction::Select
-                    | UiSemanticAction::Focus => {}
-                    UiSemanticAction::SetValue { value } if value.len() <= 16 * 1024 => {}
-                    UiSemanticAction::SetValue { .. } => {
-                        return Err(error(
-                            AgentErrorKind::InvalidInput,
-                            "semantic UI value exceeds the 16 KiB limit",
-                            false,
-                            true,
-                        ));
-                    }
-                    UiSemanticAction::Scroll { .. } => {
-                        return Err(error(
-                            AgentErrorKind::UnsupportedCapability,
-                            "this semantic UI action is not enabled by the macOS adapter",
-                            false,
-                            true,
-                        ));
-                    }
-                }
-                let action_name = match &args.action {
+                let (target, action) =
+                    desk_diagnose_core::provider_preflight::ui_action_from_call(call)?;
+                let action_name = match &action {
                     UiSemanticAction::Invoke => "invoke",
                     UiSemanticAction::Select => "select",
                     UiSemanticAction::Focus => "focus",
@@ -1774,9 +1737,9 @@ impl SignalDeviceAssistantTools {
                 #[cfg(not(any(windows, target_os = "macos")))]
                 let ui_adapter_kind = ComputerUseAdapterKind::WindowsUia;
                 (
-                    args.target.clone(),
-                    vec![args.target],
-                    ComputerActionKind::Ui(args.action),
+                    target.clone(),
+                    vec![target],
+                    ComputerActionKind::Ui(action),
                     desk_agent_protocol::Capability::DesktopUiActionConfirmed,
                     ui_adapter_kind,
                     action_name,
