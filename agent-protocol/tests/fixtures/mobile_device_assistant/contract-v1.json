@@ -27,6 +27,19 @@
         "object_context": false
       }
     },
+    "manager_current": {
+      "device_assistant": {
+        "schema_version": 1,
+        "turn_stream": true,
+        "capability_inventory": true,
+        "full_session_snapshot": true,
+        "permission_decision": true,
+        "grant_revoke": true,
+        "background_task_cancel": true,
+        "unknown_outcome_disposition": true,
+        "object_context": true
+      }
+    },
     "legacy": {}
   },
   "asks": {
