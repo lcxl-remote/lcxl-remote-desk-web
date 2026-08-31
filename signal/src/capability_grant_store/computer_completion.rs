@@ -50,6 +50,7 @@ pub(crate) struct OriginalResult {
     pub output: ToolRunOutput,
     pub receipt: ActionResultReceipt,
     pub outcome: CapabilityDispatchOutcome,
+    pub native_result: desk_agent_protocol::computer_use::ComputerActionResultClass,
 }
 
 impl OriginalResult {
@@ -237,6 +238,7 @@ pub(super) fn terminal_result(
         },
         receipt: terminal.receipt,
         outcome: terminal.projection.outcome,
+        native_result: terminal.observation.native.result,
     }))
 }
 

@@ -155,7 +155,7 @@ async fn owner_snapshot_advances_on_background_and_result_without_invalidating_e
         running.background_tasks[0].state,
         BackgroundTaskState::Running
     );
-    assert!(!running.background_tasks[0].supports_cancel);
+    assert!(running.background_tasks[0].supports_cancel);
     let again = sessions
         .read_assistant_snapshot_for_subject("run-1", "actor-1", "device-1")
         .await

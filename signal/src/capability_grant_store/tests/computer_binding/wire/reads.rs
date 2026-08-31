@@ -18,7 +18,8 @@ use serde_json::json;
 #[actix_web::test]
 async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acceptance() {
     let directory = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new(file_db(&directory.path().join("read-tools.db")).await).await;
+    let fixture =
+        Fixture::new_for_actor(file_db(&directory.path().join("read-tools.db")).await, "1").await;
     let connection_id = format!("read-host-{}", uuid::Uuid::new_v4());
     let connections = Arc::new(SharedConnectionMap::new());
     let map = connections.clone();
@@ -142,7 +143,7 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
         Arc::new(SignalRemoteToolPendingStore::default()),
         connection_id.clone(),
         "device-1".into(),
-        "actor-1".into(),
+        "1".into(),
         None,
         None,
         None,
@@ -292,6 +293,54 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                 }
                 if background && reply.signaling_type == SignalingType::ComputerActionCompleted {
                     foreground_closed.notified().await;
+                    let mut stop_id = None;
+                    for _ in 0..2 {
+                        let awc::ws::Frame::Text(text) = socket.next().await.unwrap().unwrap()
+                        else {
+                            panic!("expected stop")
+                        };
+                        let stop: SignalingModel = serde_json::from_slice(&text).unwrap();
+                        assert_eq!(stop.signaling_type, SignalingType::CancelComputerAction);
+                        let wrapper: AuthorizedControlPayload<
+                            desk_agent_protocol::computer_use::ComputerActionCancel,
+                        > = stop.get_data().unwrap();
+                        assert_eq!(wrapper.inner.work_id, completion.work_id);
+                        assert_eq!(
+                            wrapper.inner.action_request_id,
+                            completion.action_request_id
+                        );
+                        assert_eq!(
+                            wrapper.inner.execution_generation,
+                            completion.execution_generation
+                        );
+                        assert_eq!(wrapper.authz.actor.user_id, Some(1));
+                        if let Some(previous) = &stop_id {
+                            assert_eq!(&stop.request_id, previous);
+                        }
+                        stop_id = Some(stop.request_id);
+                    }
+                    let report = desk_agent_protocol::computer_use::ComputerActionStateReport {
+                        work_id: completion.work_id.clone(),
+                        action_request_id: completion.action_request_id.clone(),
+                        execution_generation: completion.execution_generation.clone(),
+                        phase:
+                            desk_agent_protocol::computer_use::ComputerActionPhase::CancelRequested,
+                        result: None,
+                    };
+                    let acknowledged = SignalingModel::success_response(
+                        stop_id.as_deref().unwrap(),
+                        SignalingType::ComputerActionStateReported,
+                        None,
+                        None,
+                        Some(&report),
+                    )
+                    .unwrap();
+                    socket
+                        .send(awc::ws::Message::Text(
+                            serde_json::to_string(&acknowledged).unwrap().into(),
+                        ))
+                        .await
+                        .unwrap();
                 }
                 socket
                     .send(awc::ws::Message::Text(
@@ -315,7 +364,7 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                 conversation_id: "run-1".into(),
                 turn_id: "turn-1".into(),
                 tool_call_id: call.id.clone(),
-                actor_id: "actor-1".into(),
+                actor_id: "1".into(),
                 policy_revision: fixture.session.policy_revision,
                 scope: fixture.session.scope_snapshot.clone(),
                 connection_id: None,
@@ -341,7 +390,7 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                     let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(
                         fixture.store.db.clone(),
                     )
-                    .read_assistant_snapshot_for_subject("run-1", "actor-1", "device-1")
+                    .read_assistant_snapshot_for_subject("run-1", "1", "device-1")
                     .await
                     .unwrap()
                     .unwrap();
@@ -355,6 +404,30 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                         task.state,
                         desk_diagnose_core::dynamic_run::BackgroundTaskState::Running
                     );
+                    let stopped = fixture
+                        .store
+                        .request_computer_background_cancel(
+                            &action.action_request_id,
+                            "run-1",
+                            "1",
+                            "device-1",
+                            "runtime-stop",
+                            "stop after foreground budget",
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        stopped.state,
+                        desk_diagnose_core::dynamic_run::BackgroundTaskState::CancelRequested
+                    );
+                    let dispatcher =
+                        crate::computer_cancel_dispatch::SignalComputerCancelDispatcher::new(
+                            fixture.store.db.clone(),
+                            connections.clone(),
+                        );
+                    assert!(dispatcher.send_original(action.work_id).await.unwrap());
+                    assert!(dispatcher.send_original(action.work_id).await.unwrap());
                     foreground_closed.notify_one();
                     Ok(desk_diagnose_core::seam::ToolRunOutput {
                         content: "background".into(),
@@ -391,7 +464,7 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                         .unwrap();
                     if let Some(original) = fixture
                         .store
-                        .read_computer_result(&outbox.dispatch_id, "run-1", "actor-1", "device-1")
+                        .read_computer_result(&outbox.dispatch_id, "run-1", "1", "device-1")
                         .await
                         .unwrap()
                     {

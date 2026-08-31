@@ -1,5 +1,6 @@
 use super::*;
 mod background;
+mod cancellation;
 mod completion;
 mod wire;
 use crate::capability_grant_store::computer_binding::{
@@ -29,6 +30,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(db: DatabaseConnection) -> Self {
+        Self::new_for_actor(db, "actor-1").await
+    }
+
+    async fn new_for_actor(db: DatabaseConnection, actor: &str) -> Self {
         insert_session(&db, 1, 1).await;
         let mut row = agent_session::Entity::find()
             .one(&db)
@@ -36,6 +41,8 @@ impl Fixture {
             .unwrap()
             .unwrap();
         let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+        session.actor_id = actor.into();
+        row.actor_id = actor.into();
         session.policy_revision =
             desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
         session.surface = AgentSessionSurface::DeviceAssistant;
@@ -110,7 +117,7 @@ impl Fixture {
         )
         .unwrap();
         let subject = ProviderCallSubject {
-            actor_id: "actor-1",
+            actor_id: actor,
             run_id: "run-1",
             target_device_id: "device-1",
             policy_revision:
@@ -120,6 +127,7 @@ impl Fixture {
         };
         let authority = evaluated.grant_call(&subject).unwrap();
         let mut permission = grant(1);
+        permission.actor_id = actor.into();
         permission.policy_revision = subject.policy_revision;
         permission.target_session_id = authority.target_session_id.map(str::to_owned);
         permission.provider_id = authority.provider_id.into();
@@ -164,7 +172,7 @@ impl Fixture {
                 version: "1".into(),
             },
             approval_id: "grant-1".into(),
-            approved_actor_id: "actor-1".into(),
+            approved_actor_id: actor.into(),
             draft_hash: authority.canonical_input_digest_sha256.into(),
             expires_at,
             timeout_ms: 30_000,

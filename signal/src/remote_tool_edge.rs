@@ -38,14 +38,14 @@ use desk_agent_protocol::communication::{
 };
 use desk_agent_protocol::computer_use::{
     BatchDocumentOutput, COMPUTER_USE_SCHEMA_VERSION, ComputerActionCompleted, ComputerActionKind,
-    ComputerActionOutput, ComputerActionResultClass, ComputerActionStarted, ComputerActionStep,
-    ComputerUseAdapterKind, ComputerUseAdapterRef, DocumentLiveBatchPatchAction,
-    DocumentLivePatchAction, FileContentReadParams, FileMetadataInspectParams, FilePatchAction,
-    LiveDocumentInspectParams, ObjectKind, ObjectRef, OfficeInspectParams,
-    PresentationLiveBatchPatchAction, PresentationLivePatchAction, RawInputAction,
-    SealedComputerActionPlan, SpreadsheetFileInspectParams, SpreadsheetLiveBatchPatchAction,
-    SpreadsheetLivePatchAction, SpreadsheetMergePreviewParams, TerminalOutputInspectParams,
-    UiSemanticAction,
+    ComputerActionOutput, ComputerActionResultClass, ComputerActionStarted,
+    ComputerActionStateReport, ComputerActionStep, ComputerUseAdapterKind, ComputerUseAdapterRef,
+    DocumentLiveBatchPatchAction, DocumentLivePatchAction, FileContentReadParams,
+    FileMetadataInspectParams, FilePatchAction, LiveDocumentInspectParams, ObjectKind, ObjectRef,
+    OfficeInspectParams, PresentationLiveBatchPatchAction, PresentationLivePatchAction,
+    RawInputAction, SealedComputerActionPlan, SpreadsheetFileInspectParams,
+    SpreadsheetLiveBatchPatchAction, SpreadsheetLivePatchAction, SpreadsheetMergePreviewParams,
+    TerminalOutputInspectParams, UiSemanticAction,
 };
 use desk_agent_protocol::data_lineage::{
     ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, DestinationIdentity,
@@ -527,6 +527,33 @@ impl ComputerActionObserver for SignalComputerActionObserver {
             }
             let source_id = source.model.connection_id.as_str();
             match model.signaling_type {
+                SignalingType::ComputerActionStateReported => {
+                    if !model
+                        .response_state
+                        .as_ref()
+                        .is_some_and(|state| state.is_success())
+                    {
+                        return;
+                    }
+                    if let (Some(audience), Ok(state)) = (
+                        source.model.version_info.client_id.as_deref(),
+                        model.get_data::<ComputerActionStateReport>(),
+                    ) {
+                        if self
+                            .store
+                            .accept_computer_cancel_state(
+                                source_id,
+                                audience,
+                                &model.request_id,
+                                &state,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            log::warn!("[computer-action] rejected inconsistent stop observation");
+                        }
+                    }
+                }
                 SignalingType::ComputerActionStarted => {
                     if let Ok(started) = model.get_data::<ComputerActionStarted>() {
                         let Some(audience) = source.model.version_info.client_id.as_deref() else {

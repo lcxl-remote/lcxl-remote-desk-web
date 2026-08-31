@@ -1379,6 +1379,28 @@ pub async fn cancel_device_assistant_background_task(
         }
         (None, None) => return Ok(not_accessible()),
     };
+    let original =
+        crate::capability_grant_store::SignalCapabilityGrantStore::new(crate::db::get_db().clone())
+            .request_computer_background_cancel(
+                &body.task_id,
+                &session_id,
+                &actor_id,
+                &target_audience,
+                &body.request_id,
+                &body.reason,
+            )
+            .await
+            .map_err(|error| {
+                DeskSignalError::new_custom_error(
+                    DeskErrorCode::PRECONDITION_FAILED,
+                    &error.to_string(),
+                )
+            })?;
+    if let Some(record) = original {
+        return Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+            BackgroundTaskDto::from(record),
+        )));
+    }
     let store = crate::agent_background_task_store::SignalBackgroundTaskStore::new(
         crate::db::get_db().clone(),
     );

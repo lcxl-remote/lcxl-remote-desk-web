@@ -4,6 +4,7 @@ use super::computer_binding::{ComputerAcceptance, ComputerBinding, original_on, 
 use super::computer_completion::terminal_result;
 use super::*;
 use desk_agent_protocol::capability_provider::CapabilityTaskRef;
+use desk_agent_protocol::computer_use::ComputerActionResultClass;
 use desk_diagnose_core::dynamic_run::{
     BACKGROUND_TASK_SCHEMA_VERSION, BackgroundTaskRecord, BackgroundTaskState,
 };
@@ -11,11 +12,13 @@ use sea_orm::{DatabaseTransaction, QueryOrder};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Promotion {
+pub(super) struct Promotion {
     schema_version: u16,
     binding_sha256: String,
     acceptance_sha256: String,
-    promoted_at_unix_ms: u64,
+    pub promoted_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<super::computer_cancel::CancelIntent>,
 }
 
 fn invalid() -> DbErr {
@@ -122,6 +125,7 @@ pub(crate) async fn task_on(
     let execution = binding.execution.as_ref().ok_or_else(invalid)?;
     let accepted = acceptance(&outbox, &binding)?.ok_or_else(invalid)?;
     let promotion: Promotion = serde_json::from_str(json).map_err(|_| invalid())?;
+    super::computer_cancel::validate_intent(&promotion.cancel, work, &promotion)?;
     let (foreground, hard) = deadlines(&outbox, &binding)?;
     if promotion.schema_version != 1
         || promotion.binding_sha256 != accepted.binding_sha256
@@ -158,7 +162,7 @@ pub(crate) async fn task_on(
         canonical_input_digest_sha256: payload.canonical_input_digest_sha256.clone(),
         effect: execution.effect,
         execution_policy: execution.policy,
-        supports_cancel: false,
+        supports_cancel: true,
         state: BackgroundTaskState::Running,
         progress_sequence: 0,
         started_at,
@@ -170,6 +174,11 @@ pub(crate) async fn task_on(
     if let Some(result) = terminal_result(&outbox, original, &payload)? {
         record.state = match result.outcome {
             CapabilityDispatchOutcome::Succeeded => BackgroundTaskState::Succeeded,
+            CapabilityDispatchOutcome::Failed
+                if result.native_result == ComputerActionResultClass::PausedByUser =>
+            {
+                BackgroundTaskState::Cancelled
+            }
             CapabilityDispatchOutcome::Failed => BackgroundTaskState::Failed,
         };
         record.result_envelope_ids = vec![result.receipt.envelope.envelope_id];
@@ -185,7 +194,11 @@ pub(crate) async fn task_on(
             record.updated_at = timestamp(hard)?.to_rfc3339();
         }
         record.terminal_at = Some(record.updated_at.clone());
+    } else if promotion.cancel.is_some() {
+        record.state = BackgroundTaskState::CancelRequested;
+        record.progress_sequence = 1;
     }
+    record.cancel_request_id = promotion.cancel.map(|intent| intent.request_id);
     record.validate().map_err(|_| invalid())?;
     Ok(Some(record))
 }
@@ -263,6 +276,7 @@ impl SignalCapabilityGrantStore {
                             .ok_or_else(invalid)?,
                     ),
                     promoted_at_unix_ms: now,
+                    cancel: None,
                 };
                 let changed = agent_capability_dispatch_outbox::Entity::update_many()
                     .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))

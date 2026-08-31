@@ -23,6 +23,7 @@ use crate::entity::{
 
 pub(crate) mod computer_background;
 pub(crate) mod computer_binding;
+pub(crate) mod computer_cancel;
 pub(crate) mod computer_completion;
 pub(crate) mod computer_delivery;
 pub(crate) mod computer_export;

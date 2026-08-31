@@ -627,6 +627,15 @@ pub async fn run_with_hub(
         };
 
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
+    if startup_mode_has_signal_db(&startup_mode) {
+        tokio::spawn(
+            desk_signal::computer_cancel_dispatch::SignalComputerCancelDispatcher::new(
+                desk_signal::db::get_db().clone(),
+                connection_map.clone().into_inner(),
+            )
+            .run(),
+        );
+    }
 
     // The live connection→device binding map, shared by the signaling handlers
     // (which record it) and the TURN usage collector (which resolves it). The
