@@ -1241,6 +1241,12 @@ impl SessionSeam for SignalAgentSessionStore {
                     session
                         .check_surface(self.surface)
                         .map_err(ClaimError::Subject)?;
+                    desk_diagnose_core::assistant_policy::validate_claim(
+                        self.surface,
+                        Some(session.policy_revision),
+                        &params,
+                    )
+                    .map_err(ClaimError::Backend)?;
                     session.adopt_client_metadata(
                         self.client_conversation_id.as_deref(),
                         self.surface,
@@ -1340,6 +1346,12 @@ impl SessionSeam for SignalAgentSessionStore {
                     }
                 }
                 None => {
+                    desk_diagnose_core::assistant_policy::validate_claim(
+                        self.surface,
+                        None,
+                        &params,
+                    )
+                    .map_err(ClaimError::Backend)?;
                     let mut session = PersistedAgentSession::new(
                         params.conversation_id.clone(),
                         params.actor_id.clone(),
@@ -1964,7 +1976,8 @@ mod tests {
             conversation_id: "conversation-1".into(),
             actor_id: "1".into(),
             device_id: "device-1".into(),
-            policy_revision: 0,
+            policy_revision:
+                desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
             current_pdp_scope: AgentScope {
                 granted: vec![],
                 mode: ExecutionMode::ReadOnly,
@@ -2703,6 +2716,70 @@ mod tests {
             .await
             .unwrap();
         SignalAgentSessionStore::new(db)
+    }
+
+    #[tokio::test]
+    async fn assistant_policy_upgrade_requires_user_input_and_preserves_original_history() {
+        let store = store().await.with_client_metadata(
+            Some("client-conversation-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        let mut original = store.claim_turn(claim("first")).await.unwrap();
+        original
+            .conversation
+            .push(desk_diagnose_core::chat::ChatMessage::text(
+                "original",
+                desk_diagnose_core::chat::ChatRole::User,
+                "original requirement",
+            ));
+        original.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        store.save(&mut original).await.unwrap();
+        original.policy_revision = 0;
+        agent_session::Entity::update_many()
+            .col_expr(
+                agent_session::Column::StateJson,
+                Expr::value(original.encode_json_for_storage().unwrap()),
+            )
+            .exec(&store.db)
+            .await
+            .unwrap();
+        let before = find(&store.db, "conversation-1").await.unwrap().unwrap();
+        for trigger in [
+            TriggerOrigin::PermissionDecision,
+            TriggerOrigin::ExecCompletion,
+        ] {
+            let mut automatic = claim("automatic");
+            automatic.trigger_origin = trigger;
+            assert!(store.claim_turn(automatic).await.is_err());
+            assert_eq!(
+                find(&store.db, "conversation-1").await.unwrap().unwrap(),
+                before
+            );
+        }
+        let mut invalid = claim("invalid");
+        invalid.policy_revision = 0;
+        assert!(store.claim_turn(invalid).await.is_err());
+        assert_eq!(
+            find(&store.db, "conversation-1").await.unwrap().unwrap(),
+            before
+        );
+        let upgraded = store.claim_turn(claim("explicit-followup")).await.unwrap();
+        assert_eq!(
+            upgraded.policy_revision,
+            desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION
+        );
+        assert_eq!(upgraded.conversation, original.conversation);
+
+        let ordinary = store
+            .clone()
+            .with_client_metadata(None, AgentSessionSurface::TerminalCopilot);
+        let mut legacy = claim("ordinary");
+        legacy.conversation_id = "ordinary-conversation".into();
+        legacy.policy_revision = 0;
+        assert_eq!(
+            ordinary.claim_turn(legacy).await.unwrap().policy_revision,
+            0
+        );
     }
 
     #[tokio::test]

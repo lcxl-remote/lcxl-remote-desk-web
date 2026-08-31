@@ -42,6 +42,7 @@ pub fn build_permission_grants(
     decisions: &[crate::dynamic_run::PermissionDecisionItem],
     context: &PermissionGrantIssuanceContext<'_>,
 ) -> Result<Vec<CapabilityGrant>, AgentError> {
+    crate::assistant_policy::require_current_policy(session.policy_revision)?;
     request
         .validate()
         .map_err(|error| internal(format!("invalid permission request: {error}")))?;

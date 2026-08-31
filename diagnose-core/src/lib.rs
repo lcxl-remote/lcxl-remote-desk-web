@@ -28,6 +28,7 @@ pub mod agent_loop;
 #[cfg(test)]
 mod agent_loop_acceptance;
 pub mod agentic_prompt;
+pub mod assistant_policy;
 pub mod browser_control;
 pub mod capability_availability;
 pub mod capability_grant;

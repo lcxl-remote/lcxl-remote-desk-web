@@ -17,6 +17,7 @@ use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope, ExecutionMode}
 use desk_diagnose_core::agent_loop::{
     LoopDeps, LoopOutcome, resume_agent_turn_after_permission, run_agent_turn,
 };
+use desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
 use desk_diagnose_core::capability_availability::{
     CapabilityAvailability, callable_tools, inventory_snapshot, project_capability_availability,
 };
@@ -53,7 +54,6 @@ use crate::model_dial::SignalModelSeam;
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BUSY_FOLLOWUP_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
-const OSS_ASSISTANT_POLICY_REVISION: i64 = 1;
 use desk_diagnose_core::permission_resume::{
     bind_exact_authorization_system_message, model_bound_permission_resume_message,
 };
@@ -1881,7 +1881,7 @@ async fn run_turn_inner(
         ask.question.clone(),
         conversation_id.clone(),
         turn_id.clone(),
-        OSS_ASSISTANT_POLICY_REVISION,
+        PERSONAL_ASSISTANT_POLICY_REVISION,
         readiness_revision,
         available_exec_shells,
         max_command_runtime_ms,
@@ -1948,7 +1948,7 @@ async fn run_turn_inner(
             conversation_id,
             actor_id,
             device_id: target_device_id,
-            policy_revision: OSS_ASSISTANT_POLICY_REVISION,
+            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
             current_pdp_scope: scope,
             turn_id: turn_id.clone(),
             request_id: None,
@@ -2002,7 +2002,7 @@ async fn run_turn_inner(
             actor_id: actor_id.clone(),
             device_id: target_device_id.clone(),
             surface: AgentSessionSurface::DeviceAssistant,
-            policy_revision: OSS_ASSISTANT_POLICY_REVISION,
+            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
             current_scope: scope.clone(),
             message: user.clone(),
             created_at: accepted_at.clone(),
@@ -2055,7 +2055,7 @@ async fn run_turn_inner(
         conversation_id,
         actor_id,
         device_id: target_device_id,
-        policy_revision: OSS_ASSISTANT_POLICY_REVISION,
+        policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
         current_pdp_scope: scope,
         turn_id: turn_id.clone(),
         request_id: Some(request_id.clone()),

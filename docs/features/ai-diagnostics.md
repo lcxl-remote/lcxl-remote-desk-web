@@ -50,6 +50,8 @@ An execution backend may also supply a verified original result label. The share
 
 A transactional execution backend may return a version receipt bound to the original input, lease, call, and post-save session version. The shared loop accepts only its executor's consecutive version advances, including when a later step fails, so the error can be saved against the correct version. It never refreshes to bypass concurrent revocation or new input, and the receipt is not tool authorization. Open-source Signal defaults to its existing execution entry and requires no Manager shared storage for this interface.
 
+Personal Device Assistant shares a compiled policy revision with Manager, independent of unrelated organization policy counters. Older decisions cannot be upgraded automatically and resumed. A new explicit request starts a turn under the current policy without relabeling history, reissuing old grants, or restoring their uses. Automatic continuation and grant issuance require the current revision; a match does not replace target readiness or grant revocation checks. Ordinary terminal Copilot policy semantics remain unchanged.
+
 ### Linux capability boundary
 
 On Linux, the Assistant advertises each capability independently. System information, process and network inspection, container inspection, terminal-output reads, and owner-confirmed `bash`/`sh` execution use the same thin-edge and confirmation boundaries as Windows and macOS. On a booted systemd host, it also provides `systemd` service status and bounded `journald` JSON queries; those two capabilities remain visibly unavailable when `systemctl`/`journalctl` or the systemd runtime is absent, and journal visibility is limited by the Desk Server process permissions.

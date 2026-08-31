@@ -869,6 +869,7 @@ impl SignalDeviceAssistantTools {
     async fn authoritative_session(
         &self,
     ) -> Result<desk_diagnose_core::session::PersistedAgentSession, AgentError> {
+        desk_diagnose_core::assistant_policy::require_current_policy(self.policy_revision)?;
         let row = agent_session::Entity::find()
             .filter(agent_session::Column::ConversationId.eq(&self.run_id))
             .one(&self.db)

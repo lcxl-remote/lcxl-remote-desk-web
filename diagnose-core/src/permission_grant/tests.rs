@@ -135,6 +135,29 @@ fn oss_and_manager_compile_identical_narrowed_authority_except_surface() {
 }
 
 #[test]
+fn compiler_rejects_stale_policy_for_approval_and_denial_on_both_servers() {
+    let (mut session, request, decisions) = decision_fixture();
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        for revision in [0, 2, i64::MAX] {
+            session.policy_revision = revision;
+            let before = session.clone();
+            assert!(compile(surface, &session, &request, &decisions, true).is_err());
+            let mut denied = decisions.clone();
+            denied[0].decision = PermissionItemDecision::Deny;
+            assert!(compile(surface, &session, &request, &denied, false).is_err());
+            assert_eq!(session, before);
+        }
+        session.policy_revision = crate::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+        let grants = compile(surface, &session, &request, &decisions, true).unwrap();
+        assert_eq!(grants[0].policy_revision, session.policy_revision);
+        grants[0].validate().unwrap();
+    }
+}
+
+#[test]
 fn compiler_rejects_incomplete_duplicate_widened_stale_and_unready_decisions() {
     let (mut session, request, mut decisions) = decision_fixture();
     for surface in [
