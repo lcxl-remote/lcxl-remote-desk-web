@@ -234,42 +234,6 @@ pub(super) async fn handle_confirm_exec_inbound(
         return Ok(());
     }
 
-    // Administrator templates are executable only through the Device Assistant
-    // edge-dispatch path, which binds a selected Linux registration, performs
-    // polkit authorization, and hands the sealed plan to the root supervisor.
-    // The browser ConfirmExec/ResolveExec path dispatches to a session worker and
-    // must never park or approve a plan that the worker is forbidden to elevate.
-    if outcome.draft.as_ref().is_some_and(|draft| {
-        draft.principal == desk_agent_protocol::exec::ExecutionPrincipal::Administrator
-    }) {
-        ctx.audit
-            .record(AuditEvent::capability_denied(
-                new_audit_event_id(),
-                audit_now(),
-                &request_id,
-                risk_str(classification.risk),
-                "administrator execution requires the Device Assistant privileged flow".to_string(),
-            ))
-            .await;
-        send_exec_preview(
-            &ctx.outbound_tx,
-            &request_id,
-            to,
-            non_executable_preview(
-                shell,
-                command,
-                cwd,
-                limits.timeout_ms,
-                classification.risk,
-                Some(
-                    "administrator execution requires the Device Assistant privileged flow"
-                        .to_string(),
-                ),
-            ),
-        );
-        return Ok(());
-    }
-
     // Decide executability from the classification + the active execution mode.
     let mode_note = match (
         classification.decision,
@@ -329,7 +293,7 @@ pub(super) async fn handle_confirm_exec_inbound(
         let capability = OperationInput::required_capability(&classification).map(|c| c.as_str());
         let risk = classification.risk;
         let execution_basis = draft.execution_basis;
-        let principal = draft.principal;
+        let io_mode = draft.io_mode;
 
         // On a manager link the ConfirmExec frame request_id is the PDP's
         // authorization-ledger key; carry it through the whole exec lifecycle so
@@ -396,14 +360,15 @@ pub(super) async fn handle_confirm_exec_inbound(
                 approval_timeout_ms: 0,
                 timeout_ms: limits.timeout_ms,
                 risk: classification.risk,
+                io_mode,
+                requires_live_carrier: io_mode.is_pty(),
                 execution_basis,
-                principal,
                 requires_confirmation: false,
                 executable: true,
                 blocked_reason: None,
             };
             send_exec_preview(&ctx.outbound_tx, &request_id, to.clone(), preview);
-            dispatch_exec_plan(ctx, &request_id, to, plan, audit_source).await;
+            dispatch_exec_plan(ctx, &request_id, to, plan, audit_source, None).await;
             return Ok(());
         }
 
@@ -441,8 +406,9 @@ pub(super) async fn handle_confirm_exec_inbound(
             approval_timeout_ms: super::super::exec_approval::TTL.as_millis() as u64,
             timeout_ms: limits.timeout_ms,
             risk: classification.risk,
+            io_mode,
+            requires_live_carrier: io_mode.is_pty(),
             execution_basis,
-            principal,
             requires_confirmation: true,
             executable: true,
             blocked_reason: None,
@@ -510,61 +476,23 @@ pub(super) async fn handle_exec_control_inbound(
             "[router] exec cancel requested: generation={generation} by={requested_by} \
              (request_id={request_id})"
         );
-        // A privileged row is owned by the Linux root supervisor, never by a
-        // session worker. Ask it first so the reserve→spawn cancellation token
-        // can win before systemd admission and restart recovery can target the
-        // deterministic transient unit. A non-privileged generation falls
-        // through to the existing worker path.
-        #[cfg(target_os = "linux")]
-        let privileged_handled = if let Some(supervisor) = ctx.privileged_exec.as_ref() {
-            match supervisor.cancel_generation(&generation).await {
-                Ok(
-                    crate::daemon::linux_privileged_exec::PrivilegedCancelOutcome::NotPrivileged,
-                ) => false,
-                Ok(outcome) => {
-                    log::info!(
-                        "[router] privileged exec cancel outcome: generation={generation} \
-                         outcome={outcome:?}"
-                    );
-                    true
-                }
-                Err(error) => {
-                    // Fail closed: if the root supervisor cannot read its
-                    // durable authority, do not guess that a session worker owns
-                    // this generation. The state reply below remains the source
-                    // of truth and the caller can retry the cancel.
-                    log::error!(
-                        "[router] privileged exec cancel could not be resolved: \
-                         generation={generation} error={error}"
-                    );
-                    true
-                }
-            }
+        // Best-effort by design: the worker may be gone, or the command may
+        // have just finished. Either way the ledger below reports what is
+        // actually true, rather than this send's success standing in for it.
+        let result = if let Some(connection_id) = to.as_deref() {
+            ctx.worker_mgr
+                .send_to_connection_worker(
+                    connection_id,
+                    ServiceToWorker::ExecCancel(ExecCancelPayload {
+                        execution_generation: generation.clone(),
+                    }),
+                )
+                .await
         } else {
-            false
+            Err("exec cancel has no selected desktop session".to_string())
         };
-        #[cfg(not(target_os = "linux"))]
-        let privileged_handled = false;
-
-        if !privileged_handled {
-            // Best-effort by design: the worker may be gone, or the command may
-            // have just finished. Either way the ledger below reports what is
-            // actually true, rather than this send's success standing in for it.
-            let result = if let Some(connection_id) = to.as_deref() {
-                ctx.worker_mgr
-                    .send_to_connection_worker(
-                        connection_id,
-                        ServiceToWorker::ExecCancel(ExecCancelPayload {
-                            execution_generation: generation.clone(),
-                        }),
-                    )
-                    .await
-            } else {
-                Err("exec cancel has no selected desktop session".to_string())
-            };
-            if let Err(e) = result {
-                log::warn!("[router] could not pass the cancel to the worker: {e}");
-            }
+        if let Err(e) = result {
+            log::warn!("[router] could not pass the cancel to the worker: {e}");
         }
         // `requested_by` is a wire hint only; the audit pipeline stamps the
         // authenticated actor, so a control end cannot name someone else as the
@@ -813,7 +741,15 @@ pub(super) async fn handle_resolve_exec_inbound(
                 ctx.session_approvals.grant(conn, template_id);
             }
             let result_to = consumed.connection_id.or(to);
-            dispatch_exec_plan(ctx, &request_id, result_to, plan, audit_source).await;
+            dispatch_exec_plan(
+                ctx,
+                &request_id,
+                result_to,
+                plan,
+                audit_source,
+                data.carrier_id,
+            )
+            .await;
             Ok(())
         }
     }
@@ -831,9 +767,29 @@ pub(super) async fn dispatch_exec_plan(
     to_connection_id: Option<String>,
     plan: desk_agent_protocol::exec::ExecPlan,
     audit_source_request_id: Option<String>,
+    carrier_id: Option<String>,
 ) {
     let exec_request_id = plan.exec_request_id.clone();
     let plan_generation = plan.execution_generation.clone();
+
+    let pty_capabilities = current_exec_pty_capabilities(&ctx.settings).await;
+    if let Some(reason) = pty_dispatch_refusal(&plan, pty_capabilities) {
+        send_execution_completed(
+            &ctx.outbound_tx,
+            request_id,
+            to_connection_id,
+            ExecResultPayload {
+                exec_request_id,
+                outcome: AgentOutcome::Err(agent_error(
+                    AgentErrorKind::UnsupportedCapability,
+                    reason,
+                    false,
+                    true,
+                )),
+            },
+        );
+        return;
+    }
 
     // Claim this dispatch in the ledger before the worker can start anything. A
     // redelivered frame is answered from the record instead of run a second time.
@@ -915,18 +871,87 @@ pub(super) async fn dispatch_exec_plan(
         }
     }
 
-    let payload = ExecPlanPayload {
-        request_id: request_id.to_string(),
-        connection_id: to_connection_id.clone(),
-        plan,
-        audit_source_request_id,
-    };
-    let dispatch = if let Some(connection_id) = to_connection_id.as_deref() {
-        ctx.worker_mgr
-            .send_to_connection_worker(connection_id, ServiceToWorker::ExecPlan(payload))
-            .await
+    let dispatch = if plan.io_mode.is_pty() {
+        let carrier_id = carrier_id
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "approved PTY execution has no live carrier".to_string());
+        let link = ctx
+            .exec_pty_link
+            .clone()
+            .ok_or_else(|| "this signaling link has no PTY binary carrier".to_string());
+        match (carrier_id, link) {
+            (Ok(stream_id), Ok(link)) => {
+                match ctx
+                    .worker_mgr
+                    .exec_worker_target_for_connection(to_connection_id.as_deref())
+                    .await
+                {
+                    Ok(target) => {
+                        let payload = desk_ipc_protocol::message::ExecPtyStartPayload {
+                            request_id: request_id.to_string(),
+                            connection_id: to_connection_id.clone(),
+                            exec_pty: pty_capabilities.exec_pty,
+                            exec_pty_elevation: pty_capabilities.exec_pty_elevation,
+                            stream_id: stream_id.clone(),
+                            session_target_id: target.session_target_id,
+                            registration_generation: target.registration_generation,
+                            worker_incarnation: target.wire_worker_incarnation,
+                            plan,
+                            audit_source_request_id,
+                        };
+                        match link.registry.bind(
+                            link.link_id,
+                            &payload,
+                            target.worker_key.clone(),
+                            target.source_incarnation,
+                            link.outbound,
+                        ) {
+                            Ok(()) => {
+                                let send = match target.worker_key.as_ref() {
+                                    Some(key) => {
+                                        ctx.worker_mgr
+                                            .send_to_session_worker(
+                                                &key.session,
+                                                ServiceToWorker::ExecPtyStart(payload),
+                                            )
+                                            .await
+                                    }
+                                    None => {
+                                        ctx.worker_mgr
+                                            .send_to_worker(ServiceToWorker::ExecPtyStart(payload))
+                                            .await
+                                    }
+                                };
+                                if send.is_err() {
+                                    link.registry.remove_stream(
+                                        &stream_id,
+                                        desk_agent_protocol::exec_pty::PtyCloseReason::SessionStale,
+                                    );
+                                }
+                                send
+                            }
+                            Err(error) => Err(format!("PTY carrier binding failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
     } else {
-        Err("exec request has no selected desktop session".to_string())
+        let payload = ExecPlanPayload {
+            request_id: request_id.to_string(),
+            connection_id: to_connection_id.clone(),
+            plan,
+            audit_source_request_id,
+        };
+        if let Some(connection_id) = to_connection_id.as_deref() {
+            ctx.worker_mgr
+                .send_to_connection_worker(connection_id, ServiceToWorker::ExecPlan(payload))
+                .await
+        } else {
+            Err("exec request has no selected desktop session".to_string())
+        }
     };
     if let Err(e) = dispatch {
         // Nothing was started, so the slot is free again immediately.
@@ -982,7 +1007,6 @@ pub(super) fn plan_matches_draft(
         && expected.argv == plan.argv
         && expected.risk == plan.risk
         && expected.execution_basis == plan.execution_basis
-        && expected.principal == plan.principal
         && expected.shell == plan.shell
         && expected.cwd == plan.cwd
         && expected.template_id == plan.template_id
@@ -1006,9 +1030,8 @@ pub(super) fn pep_common_checks(
         return Some(reason);
     }
 
-    // Session-user execution is handed to the worker, so its containment backend
-    // must satisfy the sealed tier. Administrator execution is checked separately
-    // and runs in a systemd transient service owned by the root supervisor.
+    // Execution is handed to the worker, so its containment backend must satisfy
+    // the sealed tier.
     if plan.containment.required_enforcement
         == desk_agent_protocol::exec::RequiredEnforcement::NativeHard
         && !crate::worker::exec_containment::provides_native_hard()
@@ -1088,12 +1111,13 @@ pub(super) fn validate_fleet_edge_exec(
         .filter(|t| t.template_id == plan.template_id)
     {
         saw_candidate = true;
-        let expected = build_exact_argv_draft(
+        let expected = desk_agent_protocol::exec_policy::build_exact_argv_draft_with_io_mode(
             template,
             None,
             DEFAULT_OUTPUT_BYTES,
             DEFAULT_OUTPUT_BYTES,
             None,
+            desk_agent_protocol::exec::ExecIoMode::NonInteractive,
         );
         if plan_matches_draft(plan, &expected) {
             faithful = true;
@@ -1147,20 +1171,6 @@ pub(super) fn validate_agentic_edge_exec(
     templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
     blocklist: &[desk_agent_protocol::command_blocklist::BlocklistRule],
 ) -> Option<String> {
-    if plan.principal == desk_agent_protocol::exec::ExecutionPrincipal::Administrator {
-        if let Some(reason) = pep_policy_checks(plan, max_risk, blocklist) {
-            return Some(reason);
-        }
-        #[cfg(target_os = "linux")]
-        return crate::daemon::linux_privileged_exec::validate_privileged_agentic_request(
-            plan,
-            validation_input,
-        )
-        .err()
-        .map(|error| format!("pep_rejected:privileged_plan:{error}"));
-        #[cfg(not(target_os = "linux"))]
-        return Some("pep_rejected:administrator_unsupported_platform".to_string());
-    }
     if plan.execution_basis == desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
         && admission_policy != desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive
     {

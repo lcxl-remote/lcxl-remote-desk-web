@@ -679,10 +679,10 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
                 .expect("in-memory ledger"),
         ),
         #[cfg(target_os = "linux")]
-        privileged_exec: None,
         pc_registry,
         admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,
         manager_credential_link: None,
+        exec_pty_link: None,
         outbound_tx: outbound_tx.clone(),
         settings,
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
@@ -1329,6 +1329,7 @@ fn wrapped_confirm_exec_model(request_id: &str, audience: &str) -> SignalingMode
                     },
                     command: "systemctl status nginx".to_string(),
                     cwd: Some("/srv".to_string()),
+                    io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
                     timeout_ms: 0,
                     max_stdout_bytes: 0,
                     max_stderr_bytes: 0,

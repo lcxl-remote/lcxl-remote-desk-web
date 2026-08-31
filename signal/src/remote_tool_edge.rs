@@ -1421,6 +1421,7 @@ impl SignalDeviceAssistantTools {
             },
             command: command.command,
             cwd: command.cwd,
+            io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
             timeout_ms: command.timeout_ms,
             max_stdout_bytes: 65_536,
             max_stderr_bytes: 65_536,

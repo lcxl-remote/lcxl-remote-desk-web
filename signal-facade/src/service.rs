@@ -213,6 +213,9 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// frames. Manager feeds its distributed execution ledger; OSS Signal feeds
     /// its single-node SQLite task ledger.
     pub edge_exec_observer: Option<Arc<dyn EdgeExecObserver>>,
+    /// Volatile binary-frame relay used by exec PTY. When absent, binary frames
+    /// fail closed; they are never treated as generic signaling payloads.
+    pub binary_frame_observer: Option<Arc<dyn BinaryFrameObserver>>,
     /// Reconcile-reply consumer for an inbound `ExecStateReply` the central brain
     /// itself asked for. Both Manager and OSS Signal use it to recover a missed
     /// live result from the host's authoritative ledger.
@@ -416,6 +419,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             audit_observer: None,
             collect_observer: None,
             edge_exec_observer: None,
+            binary_frame_observer: None,
             exec_state_reply_observer: None,
             remote_tool_observer: None,
             computer_action_observer: None,
@@ -475,6 +479,11 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// frames are ignored there.
     pub fn with_edge_exec_observer(mut self, observer: Arc<dyn EdgeExecObserver>) -> Self {
         self.edge_exec_observer = Some(observer);
+        self
+    }
+
+    pub fn with_binary_frame_observer(mut self, observer: Arc<dyn BinaryFrameObserver>) -> Self {
+        self.binary_frame_observer = Some(observer);
         self
     }
 
@@ -1391,9 +1400,14 @@ impl<U: SignalingUser> SignalingHandler<U> {
         Ok(control)
     }
 
-    pub async fn binary(&mut self, _bin: Bytes) -> Result<(), DeskSignalFacadeError> {
-        log::debug!("Received binary message: {} bytes", _bin.len());
-        Ok(())
+    pub async fn binary(&mut self, bin: Bytes) -> Result<(), DeskSignalFacadeError> {
+        let Some(observer) = self.binary_frame_observer.clone() else {
+            return DeskSignalFacadeError::custom_error(
+                DeskErrorCode::INVALID_PARAMS,
+                "binary signaling frames are not enabled on this connection",
+            );
+        };
+        observer.on_binary_frame(&self.connection_state, bin).await
     }
 
     pub async fn ping(&mut self, bin: Bytes) -> Result<(), DeskSignalFacadeError> {
@@ -1428,9 +1442,11 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 }
 
                 Ok(AggregatedMessage::Binary(bin)) => {
-                    // echo binary message
                     if let Err(e) = self.binary(bin).await {
                         log::error!("Error handling binary message: {}", e);
+                        let session = self.connection_state.session.read().await.clone();
+                        let _ = session.close(None).await;
+                        break;
                     }
                 }
 

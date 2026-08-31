@@ -103,6 +103,13 @@ impl Drop for CentralPendingConnectionGuard {
             .drain_for_connection(&self.connection_id);
         self.computer_action_pending
             .drain_for_connection(&self.connection_id);
+        let connection_id = self.connection_id.clone();
+        let registry = crate::exec_pty_carrier::global_exec_pty_carriers();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                registry.disconnect_target(&connection_id).await;
+            });
+        }
     }
 }
 
@@ -284,6 +291,7 @@ pub async fn handle_signaling(
         ),
     ))
     .with_edge_exec_observer(edge_exec_observer)
+    .with_binary_frame_observer(crate::exec_pty_carrier::global_exec_pty_carriers())
     .with_exec_state_reply_observer(exec_state_reply_observer)
     .with_remote_tool_observer(remote_tool_observer)
     .with_computer_action_observer(computer_action_observer)

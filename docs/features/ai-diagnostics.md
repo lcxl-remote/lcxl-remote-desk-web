@@ -96,6 +96,8 @@ Long conversations remain fully persisted and visible. After the configured high
 
 Each device additionally keeps two **local** controls in its own settings: an **execution ceiling** (the highest mode the AI may use on that device, which caps any central grant) and an **evidence collection policy** (`allow_logs` / `allow_screen`, the device's final say over what evidence may leave it).
 
+On Linux, the same local AI policy page also controls **one-shot PTY execution** for approved commands that need standard input. It is a machine-wide setting and is enabled by default; turning it off blocks new PTY dispatches but does not terminate a command that is already running. **Interactive elevation** is a separate, default-off subordinate setting. It remains disabled in the UI until the ServiceDaemon root-containment path is available. PTY input is relayed as ordinary bytes: the remote program controls terminal echo, and LCXL does not identify, retain, or add a separate password field for that input.
+
 ## Security
 
 Device-read failures marked unsafe for the model become a generic tool failure before further model calls or conversation persistence. Internal error details are not included in that message.

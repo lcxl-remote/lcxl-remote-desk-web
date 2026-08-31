@@ -31,13 +31,13 @@ use desk_agent_protocol::diagnose::{
     COLLECT_CHUNK_PAYLOAD_LIMIT, CollectRequest, CollectResponse, CollectResponseError,
 };
 use desk_agent_protocol::edge_exec::{
-    EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload, PrivilegedExecRequest,
+    EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload,
 };
 use desk_agent_protocol::exec::{
     ConfirmExecData, ExecDecision, ExecEffect, ExecPlan, ExecPreview, ExecResultPayload,
     ResolveExecData,
 };
-use desk_agent_protocol::exec_policy::{DEFAULT_OUTPUT_BYTES, build_exact_argv_draft};
+use desk_agent_protocol::exec_policy::DEFAULT_OUTPUT_BYTES;
 
 use crate::terminal_copilot::copilot_signaling_sink;
 use desk_agent_protocol::exec_lifecycle::{ExecControlAction, ExecControlPayload};
@@ -440,6 +440,9 @@ pub struct RouterContext {
     /// and bare remote-signaling lanes.
     pub manager_credential_link:
         Option<crate::daemon::manager_credential_scope::ManagerCredentialLink>,
+    /// The exact upstream WebSocket carrying a prepared one-shot PTY. `None` in
+    /// base/test contexts and set per live signaling connection; never durable.
+    pub exec_pty_link: Option<crate::daemon::exec_pty_carrier::ExecPtyLinkContext>,
     pub outbound_tx: broadcast::Sender<String>,
     pub settings: web::Data<SharedSettings>,
     /// What the daemon-side permission gates read. Backed by the host's
@@ -548,19 +551,33 @@ pub struct RouterContext {
     /// frame cannot spawn a second process. Not optional: a host without a ledger
     /// would silently double-execute, so there is no "skip it if absent" path.
     pub exec_ledger: Arc<crate::daemon::exec_ledger::ExecLedger>,
-    /// Linux ServiceDaemon-only owner of one-shot privileged launch and
-    /// cancellation state. Keeping this in the shared router context closes the
-    /// prepare→spawn cancellation race and lets a cancel after daemon restart
-    /// recover from the same sealed ledger/systemd unit identity. Other Linux
-    /// startup modes leave it `None`; non-Linux builds have no field at all.
-    #[cfg(target_os = "linux")]
-    pub privileged_exec:
-        Option<Arc<crate::daemon::linux_privileged_exec::LinuxPrivilegedExecSupervisor>>,
     /// How many commands this host currently has running. Enforced locally on
     /// every path, because a central quota only binds work the manager dispatched
     /// and a control end can reach this host through an open-source signal server
     /// without the manager being involved at all.
     pub exec_capacity: Arc<crate::daemon::exec_capacity::ExecCapacity>,
+}
+
+async fn current_exec_pty_capabilities(
+    settings: &web::Data<SharedSettings>,
+) -> crate::worker::exec_pty::ExecPtyCapabilities {
+    let settings = settings.read().await;
+    crate::worker::exec_pty::effective_capabilities(&settings.ai_policy)
+}
+
+fn pty_dispatch_refusal(
+    plan: &desk_agent_protocol::exec::ExecPlan,
+    capabilities: crate::worker::exec_pty::ExecPtyCapabilities,
+) -> Option<&'static str> {
+    if !plan.io_mode.is_pty() {
+        None
+    } else if !capabilities.exec_pty {
+        Some("interactive execution is not enabled on this host")
+    } else if plan.requires_root_pty_containment() && !capabilities.exec_pty_elevation {
+        Some("interactive elevation is not enabled on this host")
+    } else {
+        None
+    }
 }
 
 /// What the ledger says should happen to an exec dispatch.

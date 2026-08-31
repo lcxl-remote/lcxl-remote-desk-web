@@ -37,6 +37,11 @@ beforeEach(() => {
     h.policyData = {
         execution_mode: "confirm_each_action",
         max_concurrent_executions: 7,
+        max_command_runtime_seconds: 600,
+        exec_pty_enabled: true,
+        interactive_elevation_enabled: false,
+        exec_pty_supported: true,
+        interactive_elevation_supported: false,
     }
     h.collectionData = { allow_screen: false, allow_logs: true }
 })
@@ -52,6 +57,33 @@ describe("AiPolicySettings", () => {
         const payload = (h.policyMutateAsync.mock.calls[0][0] as { data: Record<string, unknown> }).data
         expect(payload.execution_mode).toBe("confirm_each_action")
         expect(payload.max_concurrent_executions).toBe(7)
+        expect(payload.exec_pty_enabled).toBe(true)
+        expect(payload.interactive_elevation_enabled).toBe(false)
+    })
+
+    it("resets elevation when ordinary PTY is disabled", async () => {
+        h.policyData.interactive_elevation_enabled = true
+        h.policyData.interactive_elevation_supported = true
+        render(<AiPolicySettings />)
+
+        const ptySwitch = await screen.findByRole("switch", { name: "One-shot PTY execution" })
+        const elevationSwitch = screen.getByRole("switch", { name: "Interactive elevation" })
+        expect(ptySwitch).toBeChecked()
+        expect(elevationSwitch).toBeChecked()
+
+        fireEvent.click(ptySwitch)
+        expect(elevationSwitch).not.toBeChecked()
+        expect(elevationSwitch).toBeDisabled()
+    })
+
+    it("shows elevation as unavailable before root containment is implemented", async () => {
+        render(<AiPolicySettings />)
+
+        const elevationSwitch = await screen.findByRole("switch", { name: "Interactive elevation" })
+        expect(elevationSwitch).toBeDisabled()
+        expect(
+            screen.getByText("Unavailable until Linux ServiceDaemon root containment is implemented."),
+        ).toBeInTheDocument()
     })
 
     it("saves the Desk Server evidence collection policy separately", async () => {

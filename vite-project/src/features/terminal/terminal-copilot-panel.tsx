@@ -10,6 +10,7 @@ import {
     CornerDownLeft,
     Ban,
     Play,
+    Keyboard,
     ArrowDown,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -25,6 +26,7 @@ import type {
 } from './use-terminal-copilot';
 import { ExecLifecycle } from '../exec/exec-lifecycle';
 import type { ExecEntry, ExecRequestInput } from '../exec/use-confirm-exec';
+import type { ExecPtyClient } from '../exec/exec-pty-client';
 import { ModelSelector } from '../desk/model-selector';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
 
@@ -33,10 +35,11 @@ import { useFollowLatest } from '@/hooks/use-follow-latest';
 export type CopilotExecControls = {
     entries: Record<number, ExecEntry>;
     requestPreview: (rowIndex: number, input: ExecRequestInput) => void;
-    approve: (rowIndex: number) => void;
+    approve: (rowIndex: number) => void | Promise<void>;
     reject: (rowIndex: number) => void;
     cancel: (rowIndex: number) => void;
     dismiss: (rowIndex: number) => void;
+    ptyClient: (rowIndex: number) => ExecPtyClient | null;
 };
 
 /** Per-turn stride for the exec entry index, so suggestions from different turns
@@ -154,11 +157,34 @@ function SuggestionRow({ index, suggestion, onFill, exec }: SuggestionRowProps) 
                                         command: suggestion.command,
                                         cwd: suggestion.cwd ?? null,
                                         reason: suggestion.note,
+                                        ioMode: { type: 'non_interactive' },
                                     })
                                 }
                             >
                                 <Play className="mr-1 h-3.5 w-3.5" />
                                 {t('pages.deskTerminal.copilot.run')}
+                            </Button>
+                        )}
+                        {canRun && !entry && (
+                            <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() =>
+                                    exec!.requestPreview(index, {
+                                        shell: suggestion.shell,
+                                        command: suggestion.command,
+                                        cwd: suggestion.cwd ?? null,
+                                        reason: suggestion.note,
+                                        ioMode: {
+                                            type: 'pty',
+                                            initial_rows: 24,
+                                            initial_cols: 80,
+                                        },
+                                    })
+                                }
+                            >
+                                <Keyboard className="mr-1 h-3.5 w-3.5" />
+                                {t('pages.deskTerminal.copilot.runInteractive')}
                             </Button>
                         )}
                     </div>
@@ -169,6 +195,7 @@ function SuggestionRow({ index, suggestion, onFill, exec }: SuggestionRowProps) 
                             onReject={() => exec.reject(index)}
                             onCancel={() => exec.cancel(index)}
                             onDismiss={() => exec.dismiss(index)}
+                            ptyClient={exec.ptyClient(index)}
                         />
                     )}
                     {modeBlocked && (

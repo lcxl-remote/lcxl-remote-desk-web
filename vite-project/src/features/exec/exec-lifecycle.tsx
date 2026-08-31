@@ -3,6 +3,8 @@ import { Loader2, Check, Ban, Square, Terminal as TerminalIcon } from "lucide-re
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import type { ExecEntry } from "./use-confirm-exec"
+import type { ExecPtyClient } from './exec-pty-client'
+import { ExecPtyTerminal } from './exec-pty-terminal'
 
 function riskClass(risk: string): string {
     switch (risk) {
@@ -35,6 +37,7 @@ export function ExecLifecycle({
     onReject,
     onCancel,
     onDismiss,
+    ptyClient,
 }: {
     entry: ExecEntry
     onApprove: () => void
@@ -42,6 +45,7 @@ export function ExecLifecycle({
     /** Ask the host to stop a running command. Omitted where no surface offers it. */
     onCancel?: () => void
     onDismiss: () => void
+    ptyClient?: ExecPtyClient | null
 }) {
     const { t } = useTranslation()
 
@@ -84,6 +88,11 @@ export function ExecLifecycle({
                 <div className="text-[10px] text-white/50">
                     {t("pages.exec.timeout")}: {Math.round(p.timeout_ms / 1000)}s
                 </div>
+                {p.io_mode.type === 'pty' && (
+                    <div className="rounded border border-blue-500/40 bg-blue-500/10 p-1.5 text-[11px] text-blue-200">
+                        {t('pages.exec.ptyNotice')}
+                    </div>
+                )}
                 <div className="mt-1 flex gap-2">
                     <Button
                         type="button"
@@ -109,51 +118,66 @@ export function ExecLifecycle({
         )
     }
 
+    if (entry.phase === 'preparing_carrier') {
+        return (
+            <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t('pages.exec.preparingCarrier')}
+            </div>
+        )
+    }
+
     // Waiting for the host to say it started. Distinct from `running`, which is
     // only ever entered because the host reported it — an approval that never
     // reached a host must not look like a command that is working.
     if (entry.phase === "dispatching") {
         return (
-            <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                {t("pages.exec.dispatching")}
-            </div>
+            <>
+                <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    {t("pages.exec.dispatching")}
+                </div>
+                {ptyClient && <ExecPtyTerminal client={ptyClient} />}
+            </>
         )
     }
 
     if (entry.phase === "running") {
         return (
-            <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                <span>
-                    {t("pages.exec.running")}
-                    {entry.runningMs !== null &&
-                        ` (${Math.round(entry.runningMs / 1000)}s)`}
-                </span>
-                {entry.cancelRequested ? (
-                    // The command is not over until the host says so, so the row
-                    // keeps showing it as running rather than as stopped.
-                    <span className="text-white/50">{t("pages.exec.cancelRequested")}</span>
-                ) : (
-                    onCancel && (
-                        <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-6 px-2 text-[10px]"
-                            onClick={onCancel}
-                        >
-                            <Square className="mr-1 h-3 w-3" />
-                            {t("pages.exec.cancel")}
-                        </Button>
-                    )
-                )}
-            </div>
+            <>
+                <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    <span>
+                        {t("pages.exec.running")}
+                        {entry.runningMs !== null &&
+                            ` (${Math.round(entry.runningMs / 1000)}s)`}
+                    </span>
+                    {entry.cancelRequested ? (
+                        <span className="text-white/50">{t("pages.exec.cancelRequested")}</span>
+                    ) : (
+                        onCancel && (
+                            <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 px-2 text-[10px]"
+                                onClick={onCancel}
+                            >
+                                <Square className="mr-1 h-3 w-3" />
+                                {t("pages.exec.cancel")}
+                            </Button>
+                        )
+                    )}
+                </div>
+                {ptyClient && <ExecPtyTerminal client={ptyClient} />}
+            </>
         )
     }
 
     if (entry.phase === "done" && entry.output) {
         const o = entry.output
         const ok = o.exit_code === 0
+        const split = o.streams.type === 'split' ? o.streams : null
+        const terminal = o.streams.type === 'pty_combined' ? o.streams : null
         return (
             <div className="mt-2 flex flex-col gap-1 rounded-md border border-white/10 bg-black/40 p-2">
                 <div className="flex items-center justify-between">
@@ -169,16 +193,22 @@ export function ExecLifecycle({
                     </Badge>
                     <span className="text-[10px] text-white/40">{o.duration_ms}ms</span>
                 </div>
-                {o.stdout && (
+                {split?.stdout && (
                     <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-white/80">
-                        {o.stdout}
-                        {o.stdout_truncated && " …"}
+                        {split.stdout}
+                        {split.stdout_truncated && " …"}
                     </pre>
                 )}
-                {o.stderr && (
+                {split?.stderr && (
                     <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-red-300/80">
-                        {o.stderr}
-                        {o.stderr_truncated && " …"}
+                        {split.stderr}
+                        {split.stderr_truncated && " …"}
+                    </pre>
+                )}
+                {terminal?.terminal && (
+                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-white/80">
+                        {terminal.terminal}
+                        {terminal.truncated && " …"}
                     </pre>
                 )}
                 <Button

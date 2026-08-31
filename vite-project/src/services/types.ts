@@ -41,9 +41,29 @@ export type ExecutionMode = ExecutionModeEnumKey;
 */
 export type AiExecutionPolicyPublic = {
     /**
+     * @description Machine-wide local switch for ordinary one-shot PTY execution.
+     * @type boolean
+    */
+    exec_pty_enabled: boolean;
+    /**
+     * @description Whether this host build/runtime can execute an ordinary one-shot PTY.
+     * @type boolean
+    */
+    exec_pty_supported: boolean;
+    /**
      * @type string
     */
     execution_mode: ExecutionMode;
+    /**
+     * @description Machine-wide local switch for bounded sudo/doas PTY execution.
+     * @type boolean
+    */
+    interactive_elevation_enabled: boolean;
+    /**
+     * @description Whether this host currently has the root ServiceDaemon containment\nrequired for interactive elevation.
+     * @type boolean
+    */
+    interactive_elevation_supported: boolean;
     /**
      * @description Total wall-time ceiling for one AI command, in seconds.
      * @minLength 0
@@ -62,7 +82,17 @@ export type AiExecutionPolicyPublic = {
  * @description Update body for `POST /api/desk/settings/ai-policy`.
 */
 export type AiExecutionPolicyUpdate = {
+    /**
+     * @description `None` leaves the local switch unchanged. Setting this to `false` also\nresets `interactive_elevation_enabled` to `false`.
+     * @type boolean,null
+    */
+    exec_pty_enabled?: boolean | null;
     execution_mode?: (null | ExecutionMode);
+    /**
+     * @description `None` leaves the local switch unchanged. A `true` value is ignored while\nordinary PTY execution is disabled.
+     * @type boolean,null
+    */
+    interactive_elevation_enabled?: boolean | null;
     /**
      * @description `None` leaves the stored wall-time ceiling unchanged. Out-of-range values\nare clamped into the device-supported range.
      * @minLength 0
@@ -658,6 +688,16 @@ export type VersionInfo = {
      * @type string,null
     */
     display_name?: string | null;
+    /**
+     * @description Current host support for the one-shot exec-PTY transport. This is a\ncapability/readiness bit, not a protocol version.
+     * @type boolean | undefined
+    */
+    exec_pty?: boolean;
+    /**
+     * @description Current host support for root-contained interactive sudo/doas execution.\nThis is separately reported because ordinary PTY support does not imply\nthat a privileged command can be contained safely.
+     * @type boolean | undefined
+    */
+    exec_pty_elevation?: boolean;
     /**
      * @description Edge-local total wall-time ceiling for one AI command. The central brain\nadvertises this to the model and reproduces it when sealing a plan; the\nedge re-applies the current value at PEP time.
      * @minLength 0
@@ -1449,6 +1489,11 @@ export type DeviceAssistantClientCapabilities = {
      * @type boolean
     */
     capability_inventory: boolean;
+    /**
+     * @description This server exposes the dedicated one-shot exec-PTY carrier surface.\nPer-device/session readiness is still proven by a successful prepare.
+     * @type boolean
+    */
+    exec_pty: boolean;
     /**
      * @type boolean
     */
@@ -3796,9 +3841,29 @@ export type RestResponseAiExecutionPolicyPublic = {
     */
     data?: {
         /**
+         * @description Machine-wide local switch for ordinary one-shot PTY execution.
+         * @type boolean
+        */
+        exec_pty_enabled: boolean;
+        /**
+         * @description Whether this host build/runtime can execute an ordinary one-shot PTY.
+         * @type boolean
+        */
+        exec_pty_supported: boolean;
+        /**
          * @type string
         */
         execution_mode: ExecutionMode;
+        /**
+         * @description Machine-wide local switch for bounded sudo/doas PTY execution.
+         * @type boolean
+        */
+        interactive_elevation_enabled: boolean;
+        /**
+         * @description Whether this host currently has the root ServiceDaemon containment\nrequired for interactive elevation.
+         * @type boolean
+        */
+        interactive_elevation_supported: boolean;
         /**
          * @description Total wall-time ceiling for one AI command, in seconds.
          * @minLength 0
@@ -6804,6 +6869,18 @@ export type DeleteDeviceCodeMutation = {
 };
 
 /**
+ * @description WebSocket stream
+*/
+export type OpenExecPtyCarrier200 = any;
+
+export type OpenExecPtyCarrierQueryResponse = OpenExecPtyCarrier200;
+
+export type OpenExecPtyCarrierQuery = {
+    Response: OpenExecPtyCarrier200;
+    Errors: any;
+};
+
+/**
  * @description Get macOS automatic-login status successfully
 */
 export type QueryMacosAutologin200 = RestResponseMacosAutologin;
@@ -7174,6 +7251,16 @@ export type OpenSignalingHandleQueryParams = {
      * @type integer | undefined, int32
     */
     max_ai_command_runtime_ms?: number;
+    /**
+     * @description Current host support for the one-shot exec-PTY transport. This is a\ncapability/readiness bit, not a protocol version.
+     * @type boolean | undefined
+    */
+    exec_pty?: boolean;
+    /**
+     * @description Current host support for root-contained interactive sudo/doas execution.\nThis is separately reported because ordinary PTY support does not imply\nthat a privileged command can be contained safely.
+     * @type boolean | undefined
+    */
+    exec_pty_elevation?: boolean;
 };
 
 /**

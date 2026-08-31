@@ -239,6 +239,22 @@ pub enum ServiceToWorker {
     /// executable plan, so a read-only `InvokeAgentCapability` can never become one.
     ExecPlan(ExecPlanPayload),
 
+    /// Daemon → worker: start a sealed one-shot PTY command. The stream must
+    /// already be bound to a live approved carrier at the daemon.
+    ExecPtyStart(ExecPtyStartPayload),
+
+    /// Daemon → worker: opaque bytes for a running one-shot PTY.
+    ExecPtyInput(desk_agent_protocol::exec_pty::PtyInputFrame),
+
+    /// Daemon → worker: resize a running one-shot PTY.
+    ExecPtyResize(desk_agent_protocol::exec_pty::PtyResizeFrame),
+
+    /// Daemon → worker: fence and stop one exact PTY stream. Unlike the generic
+    /// execution cancel below, this carries the complete session/worker binding
+    /// so a delayed carrier teardown can never stop a retry or replacement
+    /// worker that happens to reuse an execution identifier.
+    ExecPtyCancel(desk_agent_protocol::exec_pty::PtyCancelFrame),
+
     /// Daemon → worker: stop the execution running under this generation and
     /// reclaim its process tree.
     ///
@@ -521,6 +537,15 @@ pub enum WorkerToService {
     /// query against the daemon's ledger.
     ExecHeartbeat(ExecHeartbeatPayload),
 
+    /// Worker → daemon: the PTY child is attached and ready for live I/O.
+    ExecPtyOpened(desk_agent_protocol::exec_pty::PtyStreamOpened),
+
+    /// Worker → daemon: one binary terminal-output chunk.
+    ExecPtyOutput(desk_agent_protocol::exec_pty::PtyOutputFrame),
+
+    /// Worker → daemon: terminal PTY lifecycle outcome and safe counters.
+    ExecPtyClosed(desk_agent_protocol::exec_pty::PtyStreamClosed),
+
     /// Confirms that the worker applied a remote-access state transition and
     /// reports the worker-owned activity cancelled by it.
     RemoteAccessStateApplied(RemoteAccessStateAppliedPayload),
@@ -598,6 +623,7 @@ impl WorkerToService {
             Self::ExecutionCompleted(payload) => payload.connection_id.as_deref(),
             Self::ExecSpawnReport(payload) => payload.connection_id.as_deref(),
             Self::ExecHeartbeat(payload) => payload.connection_id.as_deref(),
+            Self::ExecPtyOpened(_) | Self::ExecPtyOutput(_) | Self::ExecPtyClosed(_) => None,
             Self::Ready
             | Self::Capabilities(_)
             | Self::WaylandPortalStatus(_)

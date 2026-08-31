@@ -10,6 +10,7 @@ export type SignalingMessage = {
     request_id?: string;
     signaling_type: number;
     signaling_data: any;
+    from_connection_id?: string;
     to_connection_id?: string;
     response_state?: {
         error_code: number;

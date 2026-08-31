@@ -2313,7 +2313,7 @@ fn sample_computer_use_readiness() -> desk_agent_protocol::computer_use::Compute
 fn sample_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
     use desk_agent_protocol::RiskLevel;
     use desk_agent_protocol::exec::{
-        ApprovalId, ExecExecutionBasis, ExecPlan, ExecRequestId, ExecShellKind,
+        ApprovalId, ExecExecutionBasis, ExecIoMode, ExecPlan, ExecRequestId, ExecShellKind,
     };
     ExecPlan {
         execution_generation: "gen-1".into(),
@@ -2323,8 +2323,8 @@ fn sample_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
         cwd: None,
         shell: ExecShellKind::Native,
         risk: RiskLevel::High,
+        io_mode: ExecIoMode::NonInteractive,
         execution_basis: ExecExecutionBasis::Template,
-        principal: Default::default(),
         template_id: "docker_restart".to_string(),
         approval_id: ApprovalId("appr-1".to_string()),
         fingerprint: "fp".to_string(),
@@ -2363,10 +2363,12 @@ fn exec_plan_and_result_round_trip_wincode() {
             outcome: desk_agent_protocol::AgentOutcome::Ok(
                 desk_agent_protocol::OperationOutput::Exec(desk_agent_protocol::ExecOutput {
                     exit_code: 0,
-                    stdout: "ok".to_string(),
-                    stderr: String::new(),
-                    stdout_truncated: false,
-                    stderr_truncated: false,
+                    streams: desk_agent_protocol::ExecOutputStreams::Split {
+                        stdout: "ok".to_string(),
+                        stderr: String::new(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    },
                     duration_ms: 5,
                     redactions: vec![],
                 }),
@@ -2383,6 +2385,37 @@ fn exec_plan_and_result_round_trip_wincode() {
                 p.result.outcome,
                 desk_agent_protocol::AgentOutcome::Ok(_)
             ));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn exec_pty_start_carries_the_authoritative_capability_snapshot() {
+    let mut plan = sample_exec_plan();
+    plan.io_mode = desk_agent_protocol::exec::ExecIoMode::Pty {
+        initial_rows: 24,
+        initial_cols: 80,
+    };
+    let message = ServiceToWorker::ExecPtyStart(ExecPtyStartPayload {
+        request_id: "generation-1".to_string(),
+        connection_id: Some("controller-1".to_string()),
+        exec_pty: true,
+        exec_pty_elevation: false,
+        stream_id: "stream-1".to_string(),
+        session_target_id: "session-1".to_string(),
+        registration_generation: 7,
+        worker_incarnation: 9,
+        plan,
+        audit_source_request_id: Some("approval-1".to_string()),
+    });
+
+    match wincode_round_trip(&message) {
+        ServiceToWorker::ExecPtyStart(payload) => {
+            assert!(payload.exec_pty);
+            assert!(!payload.exec_pty_elevation);
+            assert_eq!(payload.registration_generation, 7);
+            assert_eq!(payload.worker_incarnation, 9);
         }
         other => panic!("unexpected: {other:?}"),
     }
@@ -2417,6 +2450,7 @@ fn invoke_agent_capability_cannot_decode_an_exec_envelope() {
         },
         command: "Get-Service".to_string(),
         cwd: None,
+        io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
         timeout_ms: 10_000,
         max_stdout_bytes: 65_536,
         max_stderr_bytes: 65_536,

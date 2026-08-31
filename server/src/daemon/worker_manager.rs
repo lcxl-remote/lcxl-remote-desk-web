@@ -54,6 +54,17 @@ impl std::fmt::Display for WorkerIncarnation {
     }
 }
 
+impl WorkerIncarnation {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveInteractiveRoute {
     worker_key: WorkerKey,
@@ -80,6 +91,17 @@ pub struct WorkerMessage {
     /// adapter deliberately remains anonymous and single-worker.
     pub worker_key: Option<WorkerKey>,
     pub message: WorkerToService,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecWorkerTarget {
+    pub worker_key: Option<WorkerKey>,
+    pub source_incarnation: WorkerIncarnation,
+    pub session_target_id: String,
+    pub registration_generation: u64,
+    /// Anonymous portable workers predate keyed identities and use zero on the
+    /// PTY wire; resident workers echo their daemon-issued incarnation.
+    pub wire_worker_incarnation: u64,
 }
 
 /// Whether the worker a daemon-side task is working for is still the one the
@@ -2687,6 +2709,54 @@ impl WorkerManager {
         } else {
             Err("No active worker".to_string())
         }
+    }
+
+    pub async fn exec_worker_target_for_connection(
+        &self,
+        connection_id: Option<&str>,
+    ) -> Result<ExecWorkerTarget, String> {
+        let inner = self.inner.lock().await;
+        if self.session_targeting_enabled.load(Ordering::Acquire) {
+            let connection_id = connection_id
+                .ok_or_else(|| "PTY execution has no immutable session connection".to_string())?;
+            let session = self
+                .connection_targets
+                .lock()
+                .unwrap()
+                .get(connection_id)
+                .cloned()
+                .ok_or_else(|| format!("connection {connection_id} has no session target"))?;
+            let key = [DesktopTarget::LinuxSession, DesktopTarget::WindowsDefault]
+                .into_iter()
+                .map(|desktop| WorkerKey {
+                    session: session.clone(),
+                    desktop,
+                })
+                .find(|key| inner.resident_workers.contains_key(key))
+                .ok_or_else(|| format!("no session-user worker for target {session:?}"))?;
+            let worker = inner
+                .resident_workers
+                .get(&key)
+                .expect("selected resident worker disappeared under manager lock");
+            return Ok(ExecWorkerTarget {
+                worker_key: Some(key.clone()),
+                source_incarnation: worker.incarnation,
+                session_target_id: key.session.platform_session_id.clone(),
+                registration_generation: key.session.session_generation,
+                wire_worker_incarnation: worker.incarnation.get(),
+            });
+        }
+        let worker = inner
+            .active_worker
+            .as_ref()
+            .ok_or_else(|| "No active worker".to_string())?;
+        Ok(ExecWorkerTarget {
+            worker_key: None,
+            source_incarnation: worker.incarnation,
+            session_target_id: worker.session_id.to_string(),
+            registration_generation: 0,
+            wire_worker_incarnation: 0,
+        })
     }
 
     pub async fn send_to_session_worker(

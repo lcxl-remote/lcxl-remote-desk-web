@@ -52,7 +52,7 @@ pub const MAX_MAX_COMMAND_RUNTIME_SECONDS: u32 =
 ///
 /// Holds no model credentials (those live on the central brain); the fields are
 /// the local execution ceiling and how much may run at once.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AiExecutionPolicy {
     /// How far the AI may go in acting on the device. Default `suggest_only`
@@ -75,6 +75,16 @@ pub struct AiExecutionPolicy {
     pub max_concurrent_executions: u32,
     /// Total wall-time ceiling for each AI-started command, in seconds.
     pub max_command_runtime_seconds: u32,
+    /// Whether one-shot PTY execution is allowed on this device. This is a
+    /// machine-wide local ceiling, independent of which signaling service the
+    /// host connects to. Defaults on; the normal execution-mode and exact
+    /// approval gates still apply.
+    pub exec_pty_enabled: bool,
+    /// Whether an otherwise-supported PTY may launch a bounded sudo/doas
+    /// wrapper. Defaults off and is forced off whenever `exec_pty_enabled` is
+    /// disabled. Runtime support is reported separately and cannot be widened
+    /// by this preference.
+    pub interactive_elevation_enabled: bool,
 }
 
 impl Default for AiExecutionPolicy {
@@ -83,17 +93,27 @@ impl Default for AiExecutionPolicy {
             execution_mode: ExecutionMode::default(),
             max_concurrent_executions: DEFAULT_MAX_CONCURRENT_EXECUTIONS,
             max_command_runtime_seconds: DEFAULT_MAX_COMMAND_RUNTIME_SECONDS,
+            exec_pty_enabled: true,
+            interactive_elevation_enabled: false,
         }
     }
 }
 
 impl AiExecutionPolicy {
     /// Project the public view returned by the query endpoint.
-    pub fn public_view(&self) -> AiExecutionPolicyPublic {
+    pub fn public_view(
+        &self,
+        exec_pty_supported: bool,
+        interactive_elevation_supported: bool,
+    ) -> AiExecutionPolicyPublic {
         AiExecutionPolicyPublic {
             execution_mode: self.execution_mode,
             max_concurrent_executions: self.max_concurrent_executions,
             max_command_runtime_seconds: self.max_command_runtime_seconds,
+            exec_pty_enabled: self.exec_pty_enabled,
+            interactive_elevation_enabled: self.interactive_elevation_enabled,
+            exec_pty_supported,
+            interactive_elevation_supported,
         }
     }
 
@@ -119,6 +139,15 @@ impl AiExecutionPolicy {
                 MAX_MAX_COMMAND_RUNTIME_SECONDS,
             );
         }
+        if let Some(enabled) = update.exec_pty_enabled {
+            self.exec_pty_enabled = enabled;
+            if !enabled {
+                self.interactive_elevation_enabled = false;
+            }
+        }
+        if let Some(enabled) = update.interactive_elevation_enabled {
+            self.interactive_elevation_enabled = self.exec_pty_enabled && enabled;
+        }
     }
 }
 
@@ -131,6 +160,15 @@ pub struct AiExecutionPolicyPublic {
     pub max_concurrent_executions: u32,
     /// Total wall-time ceiling for one AI command, in seconds.
     pub max_command_runtime_seconds: u32,
+    /// Machine-wide local switch for ordinary one-shot PTY execution.
+    pub exec_pty_enabled: bool,
+    /// Machine-wide local switch for bounded sudo/doas PTY execution.
+    pub interactive_elevation_enabled: bool,
+    /// Whether this host build/runtime can execute an ordinary one-shot PTY.
+    pub exec_pty_supported: bool,
+    /// Whether this host currently has the root ServiceDaemon containment
+    /// required for interactive elevation.
+    pub interactive_elevation_supported: bool,
 }
 
 /// Update body for `POST /api/desk/settings/ai-policy`.
@@ -145,6 +183,12 @@ pub struct AiExecutionPolicyUpdate {
     /// `None` leaves the stored wall-time ceiling unchanged. Out-of-range values
     /// are clamped into the device-supported range.
     pub max_command_runtime_seconds: Option<u32>,
+    /// `None` leaves the local switch unchanged. Setting this to `false` also
+    /// resets `interactive_elevation_enabled` to `false`.
+    pub exec_pty_enabled: Option<bool>,
+    /// `None` leaves the local switch unchanged. A `true` value is ignored while
+    /// ordinary PTY execution is disabled.
+    pub interactive_elevation_enabled: Option<bool>,
 }
 
 #[cfg(test)]
@@ -177,6 +221,7 @@ mod tests {
             execution_mode: None,
             max_concurrent_executions: Some(0),
             max_command_runtime_seconds: None,
+            ..Default::default()
         });
         assert_eq!(
             policy.max_concurrent_executions,
@@ -187,6 +232,7 @@ mod tests {
             execution_mode: None,
             max_concurrent_executions: Some(u32::MAX),
             max_command_runtime_seconds: None,
+            ..Default::default()
         });
         assert_eq!(
             policy.max_concurrent_executions,
@@ -197,6 +243,7 @@ mod tests {
             execution_mode: None,
             max_concurrent_executions: Some(8),
             max_command_runtime_seconds: None,
+            ..Default::default()
         });
         assert_eq!(policy.max_concurrent_executions, 8);
     }
@@ -209,11 +256,13 @@ mod tests {
             execution_mode: ExecutionMode::SuggestOnly,
             max_concurrent_executions: 9,
             max_command_runtime_seconds: DEFAULT_MAX_COMMAND_RUNTIME_SECONDS,
+            ..Default::default()
         };
         policy.apply_update(AiExecutionPolicyUpdate {
             execution_mode: Some(ExecutionMode::ConfirmEachAction),
             max_concurrent_executions: None,
             max_command_runtime_seconds: None,
+            ..Default::default()
         });
         assert_eq!(policy.max_concurrent_executions, 9);
         assert_eq!(policy.execution_mode, ExecutionMode::ConfirmEachAction);
@@ -222,6 +271,7 @@ mod tests {
             execution_mode: None,
             max_concurrent_executions: Some(3),
             max_command_runtime_seconds: None,
+            ..Default::default()
         });
         assert_eq!(policy.execution_mode, ExecutionMode::ConfirmEachAction);
         assert_eq!(policy.max_concurrent_executions, 3);
@@ -236,6 +286,7 @@ mod tests {
             execution_mode: None,
             max_concurrent_executions: None,
             max_command_runtime_seconds: Some(1),
+            ..Default::default()
         });
         assert_eq!(
             policy.max_command_runtime_seconds,
@@ -246,6 +297,7 @@ mod tests {
             execution_mode: None,
             max_concurrent_executions: None,
             max_command_runtime_seconds: Some(u32::MAX),
+            ..Default::default()
         });
         assert_eq!(
             policy.max_command_runtime_seconds,
@@ -281,6 +333,7 @@ mod tests {
                 execution_mode: Some(mode),
                 max_concurrent_executions: None,
                 max_command_runtime_seconds: None,
+                ..Default::default()
             });
             assert_eq!(s.execution_mode, mode);
         }
@@ -289,12 +342,14 @@ mod tests {
             execution_mode: Some(ExecutionMode::ConfirmEachAction),
             max_concurrent_executions: None,
             max_command_runtime_seconds: None,
+            ..Default::default()
         });
         for mode in [ExecutionMode::SessionApproved, ExecutionMode::Automated] {
             s.apply_update(AiExecutionPolicyUpdate {
                 execution_mode: Some(mode),
                 max_concurrent_executions: None,
                 max_command_runtime_seconds: None,
+                ..Default::default()
             });
             assert_eq!(
                 s.execution_mode,
@@ -316,10 +371,39 @@ mod tests {
             execution_mode: Some(ExecutionMode::ConfirmEachAction),
             max_concurrent_executions: None,
             max_command_runtime_seconds: None,
+            ..Default::default()
         });
         assert_eq!(
-            s.public_view().execution_mode,
+            s.public_view(true, false).execution_mode,
             ExecutionMode::ConfirmEachAction
         );
+    }
+
+    #[test]
+    fn pty_defaults_are_safe_and_missing_fields_use_them() {
+        let default = AiExecutionPolicy::default();
+        assert!(default.exec_pty_enabled);
+        assert!(!default.interactive_elevation_enabled);
+
+        let legacy: AiExecutionPolicy = serde_json::from_str("{}").expect("legacy config");
+        assert!(legacy.exec_pty_enabled);
+        assert!(!legacy.interactive_elevation_enabled);
+    }
+
+    #[test]
+    fn disabling_pty_persistently_resets_elevation() {
+        let mut policy = AiExecutionPolicy {
+            interactive_elevation_enabled: true,
+            ..Default::default()
+        };
+
+        policy.apply_update(AiExecutionPolicyUpdate {
+            exec_pty_enabled: Some(false),
+            interactive_elevation_enabled: Some(true),
+            ..Default::default()
+        });
+
+        assert!(!policy.exec_pty_enabled);
+        assert!(!policy.interactive_elevation_enabled);
     }
 }

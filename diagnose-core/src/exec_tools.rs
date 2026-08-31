@@ -11,6 +11,7 @@
 //! so the registry's `required_capability` is only the model-exposure gate, not the
 //! authz decision.
 
+use desk_agent_protocol::exec::ExecIoMode;
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, Capability, ExecInput, ExecTarget, OperationInput,
 };
@@ -55,6 +56,9 @@ struct ExecCommandParams {
     cwd: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u32>,
+    /// Required execution I/O contract. PTY is never inferred from command text.
+    #[serde(default)]
+    io_mode: Option<ExecIoMode>,
     /// Free-text "why" the model wants to run this; flows into the audit event.
     #[serde(default)]
     reason: Option<String>,
@@ -139,9 +143,30 @@ pub fn exec_tool_registry_for_shells_with_timeout(
                             "Command wall-time limit in milliseconds. Defaults to the target device ceiling of {max_runtime_ms}; set it explicitly only when a shorter limit is required."
                         )
                     },
+                    "io_mode": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {"type": {"const": "non_interactive"}},
+                                "required": ["type"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"const": "pty"},
+                                    "initial_rows": {"type": "integer", "minimum": 1, "maximum": 500},
+                                    "initial_cols": {"type": "integer", "minimum": 1, "maximum": 500}
+                                },
+                                "required": ["type", "initial_rows", "initial_cols"],
+                                "additionalProperties": false
+                            }
+                        ],
+                        "description": "Use PTY only for commands requiring a TTY or live standard input. Never request credentials in chat; wait for the owner to type in the dedicated PTY panel."
+                    },
                     "reason": {"type": "string", "description": "Why this command is needed."}
                 },
-                "required": ["command", "shell"]
+                "required": ["command", "shell", "io_mode"]
             }),
         },
         // Exposure gate only; the real authz capability is decided by classification.
@@ -245,6 +270,10 @@ pub fn build_exec_input(call: &ToolCall) -> Result<(OperationInput, Option<Strin
     if params.command.trim().is_empty() {
         return Err(bad_arguments("`command` is required and must be non-empty"));
     }
+    let io_mode = params
+        .io_mode
+        .ok_or_else(|| bad_arguments("`io_mode` is required"))?;
+    io_mode.validate().map_err(bad_arguments)?;
     let input = ExecInput {
         target: ExecTarget::Shell {
             shell: params
@@ -254,6 +283,7 @@ pub fn build_exec_input(call: &ToolCall) -> Result<(OperationInput, Option<Strin
         },
         command: params.command,
         cwd: params.cwd,
+        io_mode,
         // Keep an omitted timeout distinguishable until the target-specific
         // execution ceiling is applied by the central execution seam.
         timeout_ms: params.timeout_ms.unwrap_or(0),
@@ -290,8 +320,13 @@ mod tests {
         );
         assert_eq!(
             reg[0].spec.parameters_schema["required"],
-            json!(["command", "shell"])
+            json!(["command", "shell", "io_mode"])
         );
+        let io_description = reg[0].spec.parameters_schema["properties"]["io_mode"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(io_description.contains("live standard input"));
+        assert!(io_description.contains("Never request credentials in chat"));
         assert_eq!(
             reg[0].spec.parameters_schema["properties"]["shell"]["default"],
             json!("powershell")
@@ -318,7 +353,7 @@ mod tests {
         );
 
         let mut input = match build_exec_input(&call(
-            r#"{"command":"Get-Process","shell":"powershell","timeout_ms":900000}"#,
+            r#"{"command":"Get-Process","shell":"powershell","timeout_ms":900000,"io_mode":{"type":"non_interactive"}}"#,
         ))
         .unwrap()
         .0
@@ -354,7 +389,7 @@ mod tests {
     #[test]
     fn builds_exec_input_with_defaults_and_overrides() {
         let (input, reason) = build_exec_input(&call(
-            r#"{"command":"Restart-Service Spooler","shell":"powershell","reason":"fix printing"}"#,
+            r#"{"command":"Restart-Service Spooler","shell":"powershell","io_mode":{"type":"non_interactive"},"reason":"fix printing"}"#,
         ))
         .unwrap();
         assert_eq!(reason.as_deref(), Some("fix printing"));
@@ -363,6 +398,7 @@ mod tests {
                 assert_eq!(e.command, "Restart-Service Spooler");
                 assert_eq!(e.timeout_ms, 0);
                 assert_eq!(e.max_stdout_bytes, DEFAULT_EXEC_MAX_STDOUT_BYTES);
+                assert_eq!(e.io_mode, ExecIoMode::NonInteractive);
                 assert!(matches!(e.target, ExecTarget::Shell { shell } if shell == "powershell"));
             }
             other => panic!("expected Exec, got {other:?}"),
@@ -372,7 +408,10 @@ mod tests {
     /// A blank shell falls back to the default family.
     #[test]
     fn blank_shell_defaults() {
-        let (input, _) = build_exec_input(&call(r#"{"command":"ls","shell":"  "}"#)).unwrap();
+        let (input, _) = build_exec_input(&call(
+            r#"{"command":"ls","shell":"  ","io_mode":{"type":"non_interactive"}}"#,
+        ))
+        .unwrap();
         match input {
             OperationInput::Exec(e) => {
                 assert!(
@@ -387,9 +426,21 @@ mod tests {
     #[test]
     fn empty_command_is_rejected() {
         assert!(build_exec_input(&call("{}")).is_err());
-        assert!(build_exec_input(&call(r#"{"command":"   "}"#)).is_err());
+        assert!(
+            build_exec_input(&call(
+                r#"{"command":"   ","io_mode":{"type":"non_interactive"}}"#
+            ))
+            .is_err()
+        );
         // Malformed JSON is an error too.
         assert!(build_exec_input(&call("{not json")).is_err());
+    }
+
+    #[test]
+    fn missing_io_mode_is_rejected_instead_of_inferred() {
+        assert!(
+            build_exec_input(&call(r#"{"command":"Get-Process","shell":"powershell"}"#)).is_err()
+        );
     }
 
     /// A call for a different tool name is rejected.

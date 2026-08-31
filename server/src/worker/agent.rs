@@ -641,6 +641,7 @@ mod tests {
             },
             command: "Get-Service".into(),
             cwd: None,
+            io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
             timeout_ms: 1_000,
             max_stdout_bytes: 1_024,
             max_stderr_bytes: 1_024,

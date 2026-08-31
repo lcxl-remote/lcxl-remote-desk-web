@@ -29,10 +29,10 @@ use desk_agent_protocol::command_blocklist::{BlocklistRule, blocklist_match};
 use desk_agent_protocol::command_template::SyncedCommandTemplate;
 use desk_agent_protocol::exec::{
     CommandClassification, ExecContainmentSnapshot, ExecDecision, ExecEffect, ExecExecutionBasis,
-    ExecPlanDraft, ExecShellKind, ExecutionPrincipal,
+    ExecIoMode, ExecPlanDraft, ExecShellKind,
 };
 use desk_agent_protocol::exec_policy::{
-    build_exact_argv_draft, builtin_blocklist, fingerprint_for_principal,
+    build_exact_argv_draft_with_io_mode, builtin_blocklist, fingerprint_with_io_mode,
 };
 use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
 
@@ -133,22 +133,32 @@ fn classify_command_core_with_policy(
     effective_blocklist: &[BlocklistRule],
     admission_policy: ExecAdmissionPolicy,
 ) -> ClassifyOutcome {
-    let command = input.command.as_str();
-
-    // Step 0: blocklist (hard deny) against the effective set, on the raw command.
-    if desk_agent_protocol::exec_policy::privilege_trampoline(command) {
+    if input.io_mode.validate().is_err() {
         return ClassifyOutcome {
             classification: CommandClassification {
                 risk: RiskLevel::Blocked,
                 matched_template: None,
-                impact: "Blocked: privilege-escalation trampolines are never executable"
-                    .to_string(),
+                impact: "Blocked: invalid PTY dimensions".to_string(),
                 decision: ExecDecision::Blocked,
                 effect: None,
             },
             draft: None,
         };
     }
+    let command = input.command.as_str();
+
+    // Step 0: blocklist (hard deny) against the effective set, on the raw command.
+    let elevation_tokens = if desk_agent_protocol::exec_policy::privilege_trampoline(command) {
+        if !input.io_mode.is_pty() {
+            return blocked("privilege-escalation trampolines require an interactive PTY");
+        }
+        match tokenize::tokenize(command) {
+            Ok(tokens) => Some(tokens),
+            Err(_) => return blocked("interactive elevation command cannot be normalized"),
+        }
+    } else {
+        None
+    };
     if let Some(category) = blocklist_match(effective_blocklist, &command.to_ascii_lowercase()) {
         return ClassifyOutcome {
             classification: CommandClassification {
@@ -161,6 +171,15 @@ fn classify_command_core_with_policy(
             draft: None,
         };
     }
+    if let Some(tokens) = elevation_tokens {
+        return classify_interactive_elevation(
+            input,
+            &tokens,
+            operator,
+            effective_blocklist,
+            admission_policy,
+        );
+    }
 
     // Only a shell target is executable; a domain-tool target is not.
     let ExecTarget::Shell { shell } = &input.target else {
@@ -171,22 +190,6 @@ fn classify_command_core_with_policy(
     // not end OwnerInteractive classification because shell metacharacters are
     // valid free-form syntax; structural validation still runs before fallback.
     let tokens = tokenize::tokenize(command).ok();
-    if let Some(action) = privileged_service_action(command, input) {
-        let draft = privileged_service_draft(action);
-        return ClassifyOutcome {
-            classification: CommandClassification {
-                risk: RiskLevel::Critical,
-                matched_template: Some(draft.template_id.clone()),
-                impact: format!(
-                    "Run systemctl {} for the LCXL Remote Desk system service as administrator",
-                    action.verb()
-                ),
-                decision: ExecDecision::ConfirmRequired,
-                effect: Some(ExecEffect::Mutating),
-            },
-            draft: Some(draft),
-        };
-    }
     let table = templates::templates();
     if let Some(m) = tokens
         .as_ref()
@@ -197,14 +200,14 @@ fn classify_command_core_with_policy(
         let cwd = input.cwd.clone();
         // Built-in slot templates run foreground under the baseline envelope.
         let containment = ExecContainmentSnapshot::default();
-        let principal = ExecutionPrincipal::SessionUser;
-        let fingerprint = fingerprint_for_principal(
+        let risk = interactive_risk(m.template.risk, input.io_mode);
+        let fingerprint = fingerprint_with_io_mode(
             &program,
             &argv,
             cwd.as_deref(),
             &limits,
             &containment,
-            principal,
+            input.io_mode,
         );
 
         let impact = if m.bound.is_empty() {
@@ -218,9 +221,9 @@ fn classify_command_core_with_policy(
             argv,
             cwd,
             shell: m.template.shell,
-            risk: m.template.risk,
+            risk,
+            io_mode: input.io_mode,
             execution_basis: ExecExecutionBasis::Template,
-            principal,
             template_id: m.template.id.to_string(),
             fingerprint,
             timeout_ms: limits.timeout_ms,
@@ -231,7 +234,7 @@ fn classify_command_core_with_policy(
 
         return ClassifyOutcome {
             classification: CommandClassification {
-                risk: m.template.risk,
+                risk,
                 matched_template: Some(m.template.id.to_string()),
                 impact,
                 decision: ExecDecision::ConfirmRequired,
@@ -257,16 +260,18 @@ fn classify_command_core_with_policy(
         // so a background-whitelisted template can still resolve past 60 s. Output
         // caps stay clamped.
         let request_wall = (input.timeout_ms != 0).then_some(input.timeout_ms);
-        let draft = build_exact_argv_draft(
+        let draft = build_exact_argv_draft_with_io_mode(
             t,
             request_wall,
             limits.max_stdout_bytes,
             limits.max_stderr_bytes,
             input.cwd.clone(),
+            input.io_mode,
         );
+        let risk = interactive_risk(t.risk(), input.io_mode);
         return ClassifyOutcome {
             classification: CommandClassification {
-                risk: t.risk(),
+                risk,
                 matched_template: Some(t.template_id.clone()),
                 impact: format!("Operator template: {}", t.argv.join(" ")),
                 decision: ExecDecision::ConfirmRequired,
@@ -279,95 +284,6 @@ fn classify_command_core_with_policy(
     match admission_policy {
         ExecAdmissionPolicy::TemplateOnly => not_executable(),
         ExecAdmissionPolicy::OwnerInteractive => freeform_draft(input, shell),
-    }
-}
-
-#[derive(Clone, Copy)]
-enum PrivilegedServiceAction {
-    Start,
-    Stop,
-    Restart,
-}
-
-impl PrivilegedServiceAction {
-    fn verb(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::Stop => "stop",
-            Self::Restart => "restart",
-        }
-    }
-
-    fn template_id(self) -> &'static str {
-        match self {
-            Self::Start => "linux.systemd.start.lcxl-remote-desk.v1",
-            Self::Stop => "linux.systemd.stop.lcxl-remote-desk.v1",
-            Self::Restart => "linux.systemd.restart.lcxl-remote-desk.v1",
-        }
-    }
-}
-
-/// Trusted-central copy of the three privileged template renders. The Linux root
-/// daemon independently rebuilds the same ids and every executable field before
-/// it prompts or launches; keeping this copy here lets manager and OSS signal
-/// preview/seal an Administrator plan without importing daemon code.
-fn privileged_service_action(command: &str, input: &ExecInput) -> Option<PrivilegedServiceAction> {
-    if input.cwd.is_some() || !matches!(input.target, ExecTarget::Shell { .. }) {
-        return None;
-    }
-    [
-        PrivilegedServiceAction::Start,
-        PrivilegedServiceAction::Stop,
-        PrivilegedServiceAction::Restart,
-    ]
-    .into_iter()
-    .find(|action| {
-        ["systemctl", "/usr/bin/systemctl"]
-            .into_iter()
-            .any(|program| {
-                command.trim() == format!("{program} {} lcxl-remote-desk.service", action.verb())
-            })
-    })
-}
-
-fn privileged_service_draft(action: PrivilegedServiceAction) -> ExecPlanDraft {
-    let program = "/usr/bin/systemctl".to_string();
-    let argv = vec![
-        action.verb().to_string(),
-        "lcxl-remote-desk.service".to_string(),
-    ];
-    let containment = ExecContainmentSnapshot {
-        allow_background: false,
-        required_enforcement: desk_agent_protocol::exec::RequiredEnforcement::NativeHard,
-        max_processes: Some(16),
-        max_memory_bytes: Some(128 * 1024 * 1024),
-        cpu_max_percent: Some(50),
-        io_max_bytes_per_sec: None,
-        resource_profile_id: Some("linux.privileged.systemd.v1".to_string()),
-        resource_profile_revision: Some(1),
-    };
-    let limits = ExecLimits {
-        timeout_ms: 30_000,
-        max_stdout_bytes: 64 * 1024,
-        max_stderr_bytes: 64 * 1024,
-    };
-    let principal = ExecutionPrincipal::Administrator;
-    let fingerprint =
-        fingerprint_for_principal(&program, &argv, None, &limits, &containment, principal);
-    ExecPlanDraft {
-        program,
-        argv,
-        cwd: None,
-        shell: ExecShellKind::Native,
-        risk: RiskLevel::Critical,
-        execution_basis: ExecExecutionBasis::Template,
-        principal,
-        template_id: action.template_id().to_string(),
-        fingerprint,
-        timeout_ms: limits.timeout_ms,
-        max_stdout_bytes: limits.max_stdout_bytes,
-        max_stderr_bytes: limits.max_stderr_bytes,
-        containment,
     }
 }
 
@@ -411,14 +327,13 @@ fn freeform_draft(input: &ExecInput, shell: &str) -> ClassifyOutcome {
     let limits = ExecLimits::clamped(input);
     let cwd = input.cwd.clone();
     let containment = ExecContainmentSnapshot::default();
-    let principal = ExecutionPrincipal::SessionUser;
-    let fingerprint = fingerprint_for_principal(
+    let fingerprint = fingerprint_with_io_mode(
         &program,
         &argv,
         cwd.as_deref(),
         &limits,
         &containment,
-        principal,
+        input.io_mode,
     );
     let draft = ExecPlanDraft {
         program,
@@ -426,8 +341,8 @@ fn freeform_draft(input: &ExecInput, shell: &str) -> ClassifyOutcome {
         cwd,
         shell: shell_kind,
         risk: RiskLevel::Critical,
+        io_mode: input.io_mode,
         execution_basis: ExecExecutionBasis::OwnerBlocklistOnly,
-        principal,
         template_id: String::new(),
         fingerprint,
         timeout_ms: limits.timeout_ms,
@@ -447,6 +362,158 @@ fn freeform_draft(input: &ExecInput, shell: &str) -> ClassifyOutcome {
             effect: Some(ExecEffect::Mutating),
         },
         draft: Some(draft),
+    }
+}
+
+fn interactive_risk(base: RiskLevel, io_mode: ExecIoMode) -> RiskLevel {
+    if io_mode.is_pty() {
+        base.max(RiskLevel::High)
+    } else {
+        base
+    }
+}
+
+fn classify_interactive_elevation(
+    input: &ExecInput,
+    tokens: &[String],
+    operator: &[SyncedCommandTemplate],
+    effective_blocklist: &[BlocklistRule],
+    admission_policy: ExecAdmissionPolicy,
+) -> ClassifyOutcome {
+    if admission_policy != ExecAdmissionPolicy::OwnerInteractive {
+        return blocked("interactive elevation is restricted to the personal device owner");
+    }
+    let Some(wrapper) = tokens.first().map(|token| token.to_ascii_lowercase()) else {
+        return blocked("interactive elevation command is empty");
+    };
+    if matches!(wrapper.as_str(), "su" | "pkexec") {
+        return blocked("this elevation wrapper is not supported by the PTY policy");
+    }
+    if !matches!(wrapper.as_str(), "sudo" | "doas") {
+        return blocked("the elevation wrapper must be the first executable token");
+    }
+    let payload = &tokens[1..];
+    if payload.is_empty()
+        || payload[0].starts_with('-')
+        || payload.iter().any(|token| {
+            token.is_empty() || token.chars().any(|c| c.is_whitespace() || c.is_control())
+        })
+    {
+        return blocked("interactive elevation options or payload are outside the closed grammar");
+    }
+
+    let ExecTarget::Shell { shell } = &input.target else {
+        return blocked("interactive elevation requires a shell command target");
+    };
+    let inner_input = ExecInput {
+        target: ExecTarget::Shell {
+            shell: shell.clone(),
+        },
+        command: payload.join(" "),
+        cwd: input.cwd.clone(),
+        io_mode: ExecIoMode::NonInteractive,
+        timeout_ms: input.timeout_ms,
+        max_stdout_bytes: input.max_stdout_bytes,
+        max_stderr_bytes: input.max_stderr_bytes,
+    };
+    let inner = classify_command_core_with_policy(
+        &inner_input,
+        operator,
+        effective_blocklist,
+        ExecAdmissionPolicy::TemplateOnly,
+    );
+    let Some(inner_draft) = inner.draft else {
+        return blocked(
+            "the command inside the elevation wrapper is not an exact allowed template",
+        );
+    };
+    if inner_draft.shell != ExecShellKind::Native
+        || is_unbounded_interactive_program(&inner_draft.program)
+    {
+        return blocked("interactive elevation cannot launch a shell, REPL, editor, or pager");
+    }
+
+    let program = wrapper;
+    let mut argv = Vec::with_capacity(1 + inner_draft.argv.len());
+    argv.push(inner_draft.program.clone());
+    argv.extend(inner_draft.argv.clone());
+    let limits = ExecLimits {
+        timeout_ms: inner_draft.timeout_ms,
+        max_stdout_bytes: inner_draft.max_stdout_bytes,
+        max_stderr_bytes: inner_draft.max_stderr_bytes,
+    };
+    let fingerprint = fingerprint_with_io_mode(
+        &program,
+        &argv,
+        inner_draft.cwd.as_deref(),
+        &limits,
+        &inner_draft.containment,
+        input.io_mode,
+    );
+    let template_id = format!("interactive_elevation:{}", inner_draft.template_id);
+    let draft = ExecPlanDraft {
+        program,
+        argv,
+        cwd: inner_draft.cwd,
+        shell: ExecShellKind::Native,
+        risk: RiskLevel::Critical,
+        io_mode: input.io_mode,
+        execution_basis: ExecExecutionBasis::Template,
+        template_id: template_id.clone(),
+        fingerprint,
+        timeout_ms: limits.timeout_ms,
+        max_stdout_bytes: limits.max_stdout_bytes,
+        max_stderr_bytes: limits.max_stderr_bytes,
+        containment: inner_draft.containment,
+    };
+    ClassifyOutcome {
+        classification: CommandClassification {
+            risk: RiskLevel::Critical,
+            matched_template: Some(template_id),
+            impact: "Interactive elevation of one exact direct-argv command; the owner must keep the PTY carrier connected"
+                .to_string(),
+            decision: ExecDecision::ConfirmRequired,
+            effect: inner.classification.effect,
+        },
+        draft: Some(draft),
+    }
+}
+
+fn is_unbounded_interactive_program(program: &str) -> bool {
+    let leaf = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    matches!(
+        leaf.to_ascii_lowercase().as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "csh"
+            | "ksh"
+            | "dash"
+            | "python"
+            | "python3"
+            | "node"
+            | "ruby"
+            | "perl"
+            | "vim"
+            | "vi"
+            | "nano"
+            | "emacs"
+            | "less"
+            | "more"
+            | "man"
+    )
+}
+
+fn blocked(reason: &str) -> ClassifyOutcome {
+    ClassifyOutcome {
+        classification: CommandClassification {
+            risk: RiskLevel::Blocked,
+            matched_template: None,
+            impact: format!("Blocked: {reason}"),
+            decision: ExecDecision::Blocked,
+            effect: None,
+        },
+        draft: None,
     }
 }
 
@@ -484,7 +551,7 @@ fn invalid_freeform() -> ClassifyOutcome {
 mod tests {
     use super::*;
     use desk_agent_protocol::authz::ExecAdmissionPolicy;
-    use desk_agent_protocol::exec::{ExecEffect, ExecExecutionBasis, ExecShellKind};
+    use desk_agent_protocol::exec::{ExecEffect, ExecExecutionBasis, ExecIoMode, ExecShellKind};
     use desk_agent_protocol::exec_policy::{
         DEFAULT_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS, MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS,
     };
@@ -496,6 +563,7 @@ mod tests {
             },
             command: command.to_string(),
             cwd: None,
+            io_mode: ExecIoMode::NonInteractive,
             timeout_ms: 0,
             max_stdout_bytes: 0,
             max_stderr_bytes: 0,
@@ -533,45 +601,6 @@ mod tests {
         assert_eq!(
             desk_agent_protocol::OperationInput::required_capability(&out.classification),
             Some(desk_agent_protocol::Capability::ShellExecConfirmed)
-        );
-    }
-
-    #[test]
-    fn exact_lcxl_system_service_action_seals_an_administrator_plan() {
-        for verb in ["start", "stop", "restart"] {
-            let out = classify_command(&shell_input(&format!(
-                "systemctl {verb} lcxl-remote-desk.service"
-            )));
-            assert_eq!(out.classification.decision, ExecDecision::ConfirmRequired);
-            assert_eq!(out.classification.risk, RiskLevel::Critical);
-            let draft = out.draft.expect("privileged draft");
-            assert_eq!(draft.principal, ExecutionPrincipal::Administrator);
-            assert_eq!(draft.program, "/usr/bin/systemctl");
-            assert_eq!(
-                draft.argv,
-                vec![verb.to_string(), "lcxl-remote-desk.service".to_string()]
-            );
-            assert_eq!(draft.cwd, None);
-            assert_eq!(
-                draft.containment.required_enforcement,
-                desk_agent_protocol::exec::RequiredEnforcement::NativeHard
-            );
-        }
-    }
-
-    #[test]
-    fn privileged_template_rejects_cwd_and_arbitrary_units() {
-        let mut with_cwd = shell_input("systemctl restart lcxl-remote-desk.service");
-        with_cwd.cwd = Some("/tmp".to_string());
-        assert_eq!(
-            classify_command(&with_cwd).classification.decision,
-            ExecDecision::NotExecutable
-        );
-        assert_eq!(
-            classify_command(&shell_input("systemctl restart ssh.service"))
-                .classification
-                .decision,
-            ExecDecision::NotExecutable
         );
     }
 
@@ -845,6 +874,7 @@ mod tests {
             },
             command: "Get-Service -Name Spooler".to_string(),
             cwd: None,
+            io_mode: ExecIoMode::NonInteractive,
             timeout_ms: 0,
             max_stdout_bytes: 0,
             max_stderr_bytes: 0,

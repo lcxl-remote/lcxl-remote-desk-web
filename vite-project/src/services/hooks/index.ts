@@ -29,6 +29,8 @@ export type { DeleteDeviceCodeMutationKey } from "./deviceCodeController/useDele
 export type { ListDeviceCodesQueryKey } from "./deviceCodeController/useListDeviceCodes.ts";
 export type { ListDeviceCodesSuspenseQueryKey } from "./deviceCodeController/useListDeviceCodesSuspense.ts";
 export type { UpdateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
+export type { OpenExecPtyCarrierQueryKey } from "./execPTYController/useOpenExecPtyCarrier.ts";
+export type { OpenExecPtyCarrierSuspenseQueryKey } from "./execPTYController/useOpenExecPtyCarrierSuspense.ts";
 export type { AuthorizeWaylandMutationKey } from "./hostReadinessController/useAuthorizeWayland.ts";
 export type { CancelWaylandMutationKey } from "./hostReadinessController/useCancelWayland.ts";
 export type { RequestMacosPermissionsMutationKey } from "./hostReadinessController/useRequestMacosPermissions.ts";
@@ -198,6 +200,12 @@ export { useListDeviceCodesSuspense } from "./deviceCodeController/useListDevice
 export { updateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { updateDeviceCodeMutationOptions } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { useUpdateDeviceCode } from "./deviceCodeController/useUpdateDeviceCode.ts";
+export { openExecPtyCarrierQueryKey } from "./execPTYController/useOpenExecPtyCarrier.ts";
+export { openExecPtyCarrierQueryOptions } from "./execPTYController/useOpenExecPtyCarrier.ts";
+export { useOpenExecPtyCarrier } from "./execPTYController/useOpenExecPtyCarrier.ts";
+export { openExecPtyCarrierSuspenseQueryKey } from "./execPTYController/useOpenExecPtyCarrierSuspense.ts";
+export { openExecPtyCarrierSuspenseQueryOptions } from "./execPTYController/useOpenExecPtyCarrierSuspense.ts";
+export { useOpenExecPtyCarrierSuspense } from "./execPTYController/useOpenExecPtyCarrierSuspense.ts";
 export { authorizeWaylandMutationKey } from "./hostReadinessController/useAuthorizeWayland.ts";
 export { authorizeWaylandMutationOptions } from "./hostReadinessController/useAuthorizeWayland.ts";
 export { useAuthorizeWayland } from "./hostReadinessController/useAuthorizeWayland.ts";

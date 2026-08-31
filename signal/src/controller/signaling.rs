@@ -240,6 +240,8 @@ pub async fn open_signaling_handle(
         repository_url: None,
         available_exec_shells: None,
         max_ai_command_runtime_ms: None,
+        exec_pty: false,
+        exec_pty_elevation: false,
     });
     // Overwrite browser identity fields with server-adjudicated values before
     // the connection enters the shared map. Node display names remain device

@@ -297,6 +297,8 @@ mod tests {
             repository_url: None,
             available_exec_shells: None,
             max_ai_command_runtime_ms: None,
+            exec_pty: false,
+            exec_pty_elevation: false,
         }
     }
 

@@ -41,6 +41,17 @@ impl WorkerSession {
             .worker_identity
             .as_ref()
             .map_or(WorkerProfile::SessionUser, |identity| identity.profile);
+        let (exec_session_target_id, exec_registration_generation, exec_worker_incarnation) =
+            init_payload.worker_identity.as_ref().map_or_else(
+                || (init_payload.session_id.clone(), 0, 0),
+                |identity| {
+                    (
+                        identity.key.session.platform_session_id.clone(),
+                        identity.key.session.session_generation,
+                        identity.incarnation,
+                    )
+                },
+            );
         // Legacy/in-process workers have no keyed identity and remain active
         // under the single-worker adapter. Every keyed resident starts in
         // standby and must receive an epoch-fenced activation from the daemon.
@@ -577,6 +588,7 @@ impl WorkerSession {
         // Stop switches for the commands currently running, so a cancel arriving
         // on this loop can reach an execution running in a task of its own.
         let exec_registry = crate::worker::exec_registry::ExecRegistry::new();
+        let (pty_control_tx, _pty_control_task) = exec_registry.spawn_pty_control_lane();
         let file_transfer_dispatcher = (worker_profile == WorkerProfile::SessionUser).then(|| {
             FileTransferDispatcher::new(
                 file_sender,
@@ -2651,13 +2663,218 @@ impl WorkerSession {
                                         }
                                     });
                                 }
+                                ServiceToWorker::ExecPtyStart(payload) => {
+                                    info!(
+                                        "Worker received ExecPtyStart req={} template={} stream={} target={} registration_generation={} worker_incarnation={}",
+                                        payload.request_id,
+                                        payload.plan.template_id,
+                                        payload.stream_id,
+                                        payload.session_target_id,
+                                        payload.registration_generation,
+                                        payload.worker_incarnation,
+                                    );
+                                    let binding_matches = payload.session_target_id
+                                        == exec_session_target_id
+                                        && payload.registration_generation
+                                            == exec_registration_generation
+                                        && payload.worker_incarnation == exec_worker_incarnation
+                                        && payload.plan.execution_generation == payload.request_id;
+                                    if !binding_matches {
+                                        let message = "PTY dispatch session binding is stale";
+                                        let _ = writer_tx.send(WorkerToService::ExecSpawnReport(
+                                            ExecSpawnReportPayload {
+                                                request_id: payload.request_id.clone(),
+                                                connection_id: payload.connection_id.clone(),
+                                                report: desk_ipc_protocol::message::ExecSpawnReport::Failed {
+                                                    reason: message.to_string(),
+                                                },
+                                            },
+                                        ));
+                                        let result = desk_agent_protocol::exec::ExecResultPayload {
+                                            exec_request_id: payload.plan.exec_request_id,
+                                            outcome: AgentOutcome::Err(desk_agent_protocol::AgentError {
+                                                kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+                                                message: message.to_string(),
+                                                retryable: false,
+                                                safe_for_model: true,
+                                                error_code: None,
+                                            }),
+                                        };
+                                        let _ = writer_tx.send(WorkerToService::ExecutionCompleted(
+                                            ExecResultIpcPayload {
+                                                request_id: payload.request_id,
+                                                connection_id: payload.connection_id,
+                                                result,
+                                                audit_source_request_id: payload.audit_source_request_id,
+                                            },
+                                        ));
+                                        continue;
+                                    }
+
+                                    let writer_tx = writer_tx.clone();
+                                    let event_sender = Arc::clone(&event_tx);
+                                    let registry = exec_registry.clone();
+                                    let session_target_id = exec_session_target_id.clone();
+                                    let registration_generation = exec_registration_generation;
+                                    let worker_incarnation = exec_worker_incarnation;
+                                    let (cancel, registration) =
+                                        registry.register(&payload.plan.execution_generation);
+                                    tokio::spawn(async move {
+                                        let _registration = registration;
+                                        let heartbeat = {
+                                            let tx = writer_tx.clone();
+                                            let request_id = payload.request_id.clone();
+                                            let connection_id = payload.connection_id.clone();
+                                            tokio::spawn(async move {
+                                                let started = std::time::Instant::now();
+                                                let mut ticker = tokio::time::interval(
+                                                    EXEC_HEARTBEAT_INTERVAL,
+                                                );
+                                                ticker.tick().await;
+                                                loop {
+                                                    ticker.tick().await;
+                                                    if tx
+                                                        .send(WorkerToService::ExecHeartbeat(
+                                                            ExecHeartbeatPayload {
+                                                                request_id: request_id.clone(),
+                                                                connection_id: connection_id.clone(),
+                                                                running_ms: started
+                                                                    .elapsed()
+                                                                    .as_millis()
+                                                                    .min(u64::MAX as u128)
+                                                                    as u64,
+                                                            },
+                                                        ))
+                                                        .is_err()
+                                                    {
+                                                        break;
+                                                    }
+                                                }
+                                            })
+                                        };
+                                        let spawn_tx = writer_tx.clone();
+                                        let spawn_request_id = payload.request_id.clone();
+                                        let spawn_connection_id = payload.connection_id.clone();
+                                        let outcome = crate::worker::exec_pty::execute_pty_plan_cancellable(
+                                            &payload.plan,
+                                            payload.exec_pty,
+                                            payload.exec_pty_elevation,
+                                            payload.stream_id,
+                                            session_target_id,
+                                            registration_generation,
+                                            worker_incarnation,
+                                            registry,
+                                            cancel.subscribe(),
+                                            event_sender,
+                                            move |report| {
+                                                if spawn_tx
+                                                    .send(WorkerToService::ExecSpawnReport(
+                                                        ExecSpawnReportPayload {
+                                                            request_id: spawn_request_id,
+                                                            connection_id: spawn_connection_id,
+                                                            report,
+                                                        },
+                                                    ))
+                                                    .is_err()
+                                                {
+                                                    warn!("writer task closed; dropping PTY ExecSpawnReport");
+                                                }
+                                            },
+                                        )
+                                        .await;
+                                        heartbeat.abort();
+                                        let result = desk_agent_protocol::exec::ExecResultPayload {
+                                            exec_request_id: payload.plan.exec_request_id,
+                                            outcome,
+                                        };
+                                        if writer_tx
+                                            .send(WorkerToService::ExecutionCompleted(
+                                                ExecResultIpcPayload {
+                                                    request_id: payload.request_id,
+                                                    connection_id: payload.connection_id,
+                                                    result,
+                                                    audit_source_request_id: payload
+                                                        .audit_source_request_id,
+                                                },
+                                            ))
+                                            .is_err()
+                                        {
+                                            warn!("writer task closed; dropping PTY ExecutionCompleted");
+                                        }
+                                    });
+                                }
+                                ServiceToWorker::ExecPtyInput(frame) => {
+                                    let generation = frame.execution_generation.clone();
+                                    let stream_id = frame.stream_id.clone();
+                                    let sequence = frame.sequence;
+                                    let input_bytes = frame.data.len();
+                                    if let Err(error) = pty_control_tx.try_send(
+                                        crate::worker::exec_registry::PtyControlCommand::Input(frame),
+                                    ) {
+                                        let reason = match error {
+                                            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                                                desk_agent_protocol::exec_pty::PtyCloseReason::SlowConsumer
+                                            }
+                                            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                                                desk_agent_protocol::exec_pty::PtyCloseReason::InternalError
+                                            }
+                                        };
+                                        warn!(
+                                            "PTY input control queue unavailable generation={} stream={} sequence={} input_bytes={} reason={:?}",
+                                            generation, stream_id, sequence, input_bytes, reason
+                                        );
+                                        exec_registry.stop_pty(&generation, reason);
+                                    }
+                                }
+                                ServiceToWorker::ExecPtyResize(frame) => {
+                                    let generation = frame.execution_generation.clone();
+                                    let stream_id = frame.stream_id.clone();
+                                    let sequence = frame.sequence;
+                                    if let Err(error) = pty_control_tx.try_send(
+                                        crate::worker::exec_registry::PtyControlCommand::Resize(frame),
+                                    ) {
+                                        let reason = match error {
+                                            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                                                desk_agent_protocol::exec_pty::PtyCloseReason::SlowConsumer
+                                            }
+                                            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                                                desk_agent_protocol::exec_pty::PtyCloseReason::InternalError
+                                            }
+                                        };
+                                        warn!(
+                                            "PTY resize control queue unavailable generation={} stream={} sequence={} reason={:?}",
+                                            generation, stream_id, sequence, reason
+                                        );
+                                        exec_registry.stop_pty(&generation, reason);
+                                    }
+                                }
+                                ServiceToWorker::ExecPtyCancel(frame) => {
+                                    let generation = frame.execution_generation.clone();
+                                    let stream_id = frame.stream_id.clone();
+                                    let reason = frame.reason;
+                                    let stopped = exec_registry.stop_pty_bound(
+                                        &frame.execution_generation,
+                                        &frame.stream_id,
+                                        &frame.session_target_id,
+                                        frame.registration_generation,
+                                        frame.worker_incarnation,
+                                        reason,
+                                    );
+                                    info!(
+                                        "Worker received ExecPtyCancel generation={} stream={} reason={:?} stopped={}",
+                                        generation, stream_id, reason, stopped
+                                    );
+                                }
                                 ServiceToWorker::ExecCancel(ExecCancelPayload {
                                     execution_generation,
                                 }) => {
                                     // Nothing to stop is the ordinary outcome of a
                                     // cancel that arrived just as the command
                                     // finished; the daemon answers from its ledger.
-                                    let stopped = exec_registry.cancel(&execution_generation);
+                                    let stopped = exec_registry.stop_pty(
+                                        &execution_generation,
+                                        desk_agent_protocol::exec_pty::PtyCloseReason::Cancelled,
+                                    );
                                     info!(
                                         "Worker received ExecCancel generation={execution_generation} stopped={stopped}"
                                     );
