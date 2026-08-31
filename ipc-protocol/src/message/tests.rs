@@ -1316,6 +1316,7 @@ fn service_to_worker_all_variants_round_trip() {
         ServiceToWorker::ComputerActionCancel(ComputerActionCancelPayload {
             request_id: "r-computer-cancel".to_string(),
             connection_id: Some("c".to_string()),
+            approved_actor_id: "7".into(),
             cancel: desk_agent_protocol::computer_use::ComputerActionCancel {
                 work_id: "work-1".to_string(),
                 action_request_id: "action-1".to_string(),
@@ -2322,6 +2323,7 @@ fn sample_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
         shell: ExecShellKind::Native,
         risk: RiskLevel::High,
         execution_basis: ExecExecutionBasis::Template,
+        principal: Default::default(),
         template_id: "docker_restart".to_string(),
         approval_id: ApprovalId("appr-1".to_string()),
         fingerprint: "fp".to_string(),

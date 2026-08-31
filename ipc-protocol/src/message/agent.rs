@@ -34,6 +34,8 @@ pub struct ComputerActionPlanPayload {
 pub struct ComputerActionCancelPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
+    /// Validated central actor; the worker compares it with the original lease.
+    pub approved_actor_id: String,
     pub cancel: desk_agent_protocol::computer_use::ComputerActionCancel,
 }
 

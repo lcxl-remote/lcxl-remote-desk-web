@@ -1271,6 +1271,47 @@ fn wrapper_from_non_central_source_is_dropped() {
     }
 }
 
+#[test]
+fn computer_action_stop_requires_a_trusted_central_wrapper_and_exact_audience() {
+    let mut bare = bare_ai_model("stop-1");
+    bare.signaling_type = SignalingType::CancelComputerAction;
+    assert!(matches!(
+        gate_authz_frame(bare, InboundSignalingSource::TrustedCentral, "dev-1", NOW),
+        AuthzGateOutcome::Drop(_)
+    ));
+    for source in [
+        InboundSignalingSource::Local,
+        InboundSignalingSource::RemoteSignaling,
+    ] {
+        let mut wrapped = wrapped_ai_model("stop-1", "dev-1");
+        wrapped.signaling_type = SignalingType::CancelComputerAction;
+        assert!(matches!(
+            gate_authz_frame(wrapped, source, "dev-1", NOW),
+            AuthzGateOutcome::Drop(_)
+        ));
+    }
+    let mut wrapped = wrapped_ai_model("stop-1", "dev-1");
+    wrapped.signaling_type = SignalingType::CancelComputerAction;
+    assert!(matches!(
+        gate_authz_frame(
+            wrapped.clone(),
+            InboundSignalingSource::TrustedCentral,
+            "other-device",
+            NOW
+        ),
+        AuthzGateOutcome::Drop(_)
+    ));
+    assert!(matches!(
+        gate_authz_frame(
+            wrapped,
+            InboundSignalingSource::TrustedCentral,
+            "dev-1",
+            NOW
+        ),
+        AuthzGateOutcome::Pass(_, Some(_))
+    ));
+}
+
 // A ConfirmExec carrying the operator-promoted copilot command, wrapped by the
 // central brain exactly as `control_authorizer::build_wrapper_outcome` emits
 // it. Source-gating it proves the terminal copilot exec path is reachable on

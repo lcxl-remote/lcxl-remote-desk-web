@@ -260,10 +260,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // command, but never asked what it knows — the ledger outlives it.
         SignalingType::ControlExecution => RouteOwnership::Daemon,
 
-        // Computer Use owns a dedicated daemon broker/lifecycle. A1 registers
-        // the wire and keeps it fail-closed; A2/A3 attach the durable ledger and
-        // adapter dispatch without ever bridging these frames through the
-        // generic worker signaling path.
+        // Computer Use owns a dedicated daemon broker/lifecycle and typed IPC,
+        // never the generic worker signaling path.
         SignalingType::DispatchComputerAction
         | SignalingType::CancelComputerAction
         | SignalingType::QueryComputerActionState => RouteOwnership::Daemon,
@@ -1222,8 +1220,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         SignalingType::ResolveExecution => handle_resolve_exec_inbound(ctx, model).await,
         SignalingType::ControlExecution => handle_exec_control_inbound(ctx, model).await,
         SignalingType::DispatchComputerAction => handle_computer_action_inbound(ctx, model).await,
-        SignalingType::CancelComputerAction
-        | SignalingType::QueryComputerActionState => {
+        SignalingType::CancelComputerAction => handle_computer_action_cancel_inbound(ctx, model).await,
+        SignalingType::QueryComputerActionState => {
             emit_standard_error_response(
                 ctx,
                 model,
@@ -1565,6 +1563,7 @@ fn allowed_while_remote_access_locked(signaling_type: SignalingType) -> bool {
             | SignalingType::RevokeAccessGrant
             | SignalingType::RemoteAccessLockUpdated
             | SignalingType::RemotePeerTerminationResolved
+            | SignalingType::CancelComputerAction
     )
 }
 

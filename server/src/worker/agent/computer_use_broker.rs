@@ -2557,8 +2557,12 @@ impl ComputerUseBroker {
         Ok(state)
     }
 
-    pub fn cancel_writer_lease(&self, execution_generation: &str) -> bool {
-        self.writer_lease.cancel(execution_generation)
+    pub fn cancel_writer_lease(
+        &self,
+        cancel: &desk_agent_protocol::computer_use::ComputerActionCancel,
+        approved_actor_id: &str,
+    ) -> bool {
+        self.writer_lease.cancel(cancel, approved_actor_id)
     }
 
     pub fn release_writer_lease(&self, execution_generation: &str) -> bool {
@@ -3341,6 +3345,7 @@ mod tests {
                 work_id: "work-before-respawn".into(),
                 action_request_id: "action-before-respawn".into(),
                 execution_generation: "generation-before-respawn".into(),
+                approved_actor_id: "7".into(),
                 interactive_session_incarnation: "session-before-respawn".into(),
                 expires_at: Utc::now() + Duration::seconds(30),
             })
@@ -3386,6 +3391,7 @@ mod tests {
             work_id: "work".into(),
             action_request_id: "action".into(),
             execution_generation: "generation".into(),
+            approved_actor_id: "7".into(),
             interactive_session_incarnation: "session-stale".into(),
             expires_at: Utc::now() + Duration::seconds(30),
         };
@@ -3418,6 +3424,7 @@ mod tests {
                 work_id: "work".into(),
                 action_request_id: "action".into(),
                 execution_generation: "generation".into(),
+                approved_actor_id: "7".into(),
                 interactive_session_incarnation: "session-a".into(),
                 expires_at: Utc::now() + Duration::seconds(30),
             })
@@ -3452,6 +3459,7 @@ mod tests {
                 work_id: "macos-live-work".into(),
                 action_request_id: "macos-live-action".into(),
                 execution_generation: "macos-live-generation".into(),
+                approved_actor_id: "7".into(),
                 interactive_session_incarnation: session.into(),
                 expires_at: Utc::now() + Duration::seconds(30),
             })

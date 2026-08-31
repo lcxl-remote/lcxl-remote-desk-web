@@ -1763,6 +1763,7 @@ impl WorkerSession {
                                         action_request_id: plan.action_request_id.clone(),
                                         execution_generation: plan.execution_generation.clone(),
                                         interactive_session_incarnation: plan.interactive_session_incarnation.clone(),
+                                        approved_actor_id: plan.approved_actor_id.clone(),
                                         expires_at: chrono::DateTime::parse_from_rfc3339(&plan.expires_at)
                                             .map(|value| value.with_timezone(&chrono::Utc))
                                             .unwrap_or_else(|_| chrono::Utc::now() - chrono::Duration::seconds(1)),
@@ -2496,15 +2497,16 @@ impl WorkerSession {
                                     });
                                 }
                                 ServiceToWorker::ComputerActionCancel(payload) => {
-                                    computer_use_broker.cancel_writer_lease(
-                                        &payload.cancel.execution_generation,
+                                    let requested = computer_use_broker.cancel_writer_lease(
+                                        &payload.cancel,
+                                        &payload.approved_actor_id,
                                     );
                                     let state = ComputerActionStateReport {
                                         work_id: payload.cancel.work_id,
                                         action_request_id: payload.cancel.action_request_id,
                                         execution_generation: payload.cancel.execution_generation,
-                                        phase: ComputerActionPhase::OutcomeUnknown,
-                                        result: Some(ComputerActionResultClass::OutcomeUnknown),
+                                        phase: if requested { ComputerActionPhase::CancelRequested } else { ComputerActionPhase::OutcomeUnknown },
+                                        result: if requested { None } else { Some(ComputerActionResultClass::OutcomeUnknown) },
                                     };
                                     let _ = writer_tx.send(
                                         WorkerToService::ComputerActionStateReported(

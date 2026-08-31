@@ -118,3 +118,136 @@ async fn central_computer_action_dispatches_without_peer_and_rejects_missing_wor
     read(output.try_recv().unwrap());
     assert!(receiver.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn central_stop_preserves_identity_without_renewing_action_authority() {
+    use desk_agent_protocol::authz::*;
+    for issuer in ["manager", "signal"] {
+        let mut ctx = make_ctx().await;
+        let mut output = ctx.outbound_tx.subscribe();
+        ctx.host_control_hub
+            .remote_access_gate()
+            .initialize_from_store(crate::daemon::remote_access::RemoteAccessState::locked(
+                2,
+                "lock-1".into(),
+                chrono::Utc::now().to_rfc3339(),
+                false,
+            ));
+        let cancel = ComputerActionCancel {
+            work_id: "1".into(),
+            action_request_id: "action-1".into(),
+            execution_generation: "generation-1".into(),
+            reason: "owner stopped".into(),
+        };
+        let model = SignalingModel::new(
+            "stop-1",
+            SignalingType::CancelComputerAction,
+            None,
+            None,
+            Some(serde_json::to_value(&cancel).unwrap()),
+            None,
+        );
+        let stamp = AuthorizationBlock {
+            version: AUTHORIZATION_BLOCK_VERSION,
+            scope: AgentScope {
+                granted: vec![],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            orchestrator_grants: vec![],
+            max_risk: desk_agent_protocol::RiskLevel::Low,
+            actor: AuthzActor { user_id: Some(7) },
+            device: AuthzDevice {
+                device_id: Some(11),
+            },
+            request_id: model.request_id.clone(),
+            session_id: None,
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(10)).to_rfc3339()),
+            issuer: issuer.into(),
+            audience: "host-client".into(),
+            signature: None,
+            exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
+        };
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        ctx.worker_mgr.install_active_for_test(sender).await;
+        for case in ["missing", "actor", "request", "expired", "payload"] {
+            ctx.inbound_authz = Some(stamp.clone());
+            let mut malformed = model.clone();
+            match case {
+                "missing" => ctx.inbound_authz = None,
+                "actor" => ctx.inbound_authz.as_mut().unwrap().actor.user_id = Some(0),
+                "request" => ctx
+                    .inbound_authz
+                    .as_mut()
+                    .unwrap()
+                    .request_id
+                    .push_str("-other"),
+                "expired" => {
+                    ctx.inbound_authz.as_mut().unwrap().expires_at =
+                        Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339())
+                }
+                "payload" => {
+                    malformed = SignalingModel::new(
+                        "stop-1",
+                        SignalingType::CancelComputerAction,
+                        None,
+                        None,
+                        Some(serde_json::json!({})),
+                        None,
+                    )
+                }
+                _ => unreachable!(),
+            }
+            route(&malformed, &ctx).await.unwrap();
+            let frame: SignalingModel = serde_json::from_str(&output.try_recv().unwrap()).unwrap();
+            assert_eq!(
+                frame.signaling_type,
+                SignalingType::ComputerActionStateReported,
+                "{case}"
+            );
+            assert_eq!(frame.request_id, model.request_id);
+            assert_ne!(frame.response_state.unwrap().error_code, 0);
+            assert!(receiver.try_recv().is_err());
+        }
+        ctx.inbound_authz = Some(stamp);
+        route(&model, &ctx).await.unwrap();
+        let ServiceToWorker::ComputerActionCancel(payload) = receiver.try_recv().unwrap() else {
+            panic!("stop expected")
+        };
+        assert_eq!(payload.cancel, cancel);
+        assert_eq!(payload.approved_actor_id, "7");
+        assert_eq!(payload.request_id, model.request_id);
+        assert!(payload.connection_id.is_none());
+        assert!(output.try_recv().is_err());
+        let dispatch = SignalingModel::new(
+            "dispatch-while-locked",
+            SignalingType::DispatchComputerAction,
+            None,
+            None,
+            Some(serde_json::to_value(plan()).unwrap()),
+            None,
+        );
+        route(&dispatch, &ctx).await.unwrap();
+        let denied: SignalingModel = serde_json::from_str(&output.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            denied.signaling_type,
+            SignalingType::ComputerActionCompleted
+        );
+        assert_eq!(
+            denied.response_state.unwrap().error_code,
+            DeskErrorCode::REMOTE_ACCESS_LOCKED.code()
+        );
+        assert!(receiver.try_recv().is_err());
+        ctx.worker_mgr.enable_session_targeting_for_test();
+        route(&model, &ctx).await.unwrap();
+        let frame: SignalingModel = serde_json::from_str(&output.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            frame.signaling_type,
+            SignalingType::ComputerActionStateReported
+        );
+        assert_eq!(frame.request_id, model.request_id);
+        assert_ne!(frame.response_state.unwrap().error_code, 0);
+        assert!(receiver.try_recv().is_err());
+    }
+}

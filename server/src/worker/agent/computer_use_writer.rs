@@ -1,10 +1,10 @@
 //! Single-writer lease state for Computer Use mutation.
 //!
-//! This state machine is intentionally independent from any adapter. A4 UIA or
+//! This state machine is intentionally independent from any adapter. UIA or
 //! Office execution may only start after acquiring this lease; browser input,
 //! unclassified local input, cancellation, expiry, or a generation mismatch
-//! makes further steps fail closed. Defining the state machine does not expose a
-//! mutation capability or make the current A3 worker execute action plans.
+//! makes further steps fail closed. Invalidating a lease does not prove the
+//! outstanding adapter operation stopped; only its release frees the writer.
 
 use std::sync::Mutex;
 
@@ -22,6 +22,7 @@ pub struct WriterLeaseRequest {
     pub work_id: String,
     pub action_request_id: String,
     pub execution_generation: String,
+    pub approved_actor_id: String,
     pub interactive_session_incarnation: String,
     pub expires_at: DateTime<Utc>,
 }
@@ -52,7 +53,7 @@ impl WriterLeaseCoordinator {
     }
 
     /// Acquire the worker's only AI writer slot. An exact duplicate dispatch is
-    /// idempotent; a different live generation is rejected at capacity.
+    /// idempotent; every unreleased generation continues to occupy capacity.
     pub fn acquire(
         &self,
         request: WriterLeaseRequest,
@@ -68,11 +69,11 @@ impl WriterLeaseCoordinator {
             ));
         }
         let mut slot = self.state.lock().map_err(|_| unavailable())?;
-        if let Some(existing) = slot.as_ref()
-            && existing.status == WriterLeaseStatus::Active
-            && existing.request.expires_at > now
-        {
-            if existing.request == request {
+        if let Some(existing) = slot.as_ref() {
+            if existing.status == WriterLeaseStatus::Active
+                && existing.request == request
+                && existing.input_epoch_at_acquire == current_input_epoch
+            {
                 return Ok(existing.clone());
             }
             return Err(error(
@@ -152,9 +153,13 @@ impl WriterLeaseCoordinator {
         }
     }
 
-    /// Cancellation is generation-fenced. A stale cancel cannot touch a newer
-    /// writer; an exact repeat is idempotent.
-    pub fn cancel(&self, execution_generation: &str) -> bool {
+    /// Cancellation targets the original actor and complete action identity.
+    /// It forbids subsequent steps but does not assert that an OS call stopped.
+    pub fn cancel(
+        &self,
+        cancel: &desk_agent_protocol::computer_use::ComputerActionCancel,
+        approved_actor_id: &str,
+    ) -> bool {
         let mut slot = self
             .state
             .lock()
@@ -162,7 +167,11 @@ impl WriterLeaseCoordinator {
         let Some(state) = slot.as_mut() else {
             return false;
         };
-        if state.request.execution_generation != execution_generation {
+        if state.request.execution_generation != cancel.execution_generation
+            || state.request.work_id != cancel.work_id
+            || state.request.action_request_id != cancel.action_request_id
+            || state.request.approved_actor_id != approved_actor_id
+        {
             return false;
         }
         state.status = WriterLeaseStatus::Cancelled;
@@ -200,6 +209,7 @@ fn validate_request(request: &WriterLeaseRequest) -> Result<(), AgentError> {
     for (field, value) in [
         ("work_id", request.work_id.as_str()),
         ("action_request_id", request.action_request_id.as_str()),
+        ("approved_actor_id", request.approved_actor_id.as_str()),
         (
             "execution_generation",
             request.execution_generation.as_str(),
@@ -249,6 +259,7 @@ mod tests {
             work_id: "work-1".into(),
             action_request_id: "action-1".into(),
             execution_generation: generation.into(),
+            approved_actor_id: "7".into(),
             interactive_session_incarnation: "session-1:worker-1".into(),
             expires_at: Utc::now() + Duration::seconds(30),
         }
@@ -288,10 +299,16 @@ mod tests {
     fn stale_cancel_and_release_cannot_touch_a_newer_generation() {
         let leases = WriterLeaseCoordinator::new();
         leases.acquire(request("generation-2"), 0).unwrap();
-        assert!(!leases.cancel("generation-1"));
+        let cancel = |generation: &str| desk_agent_protocol::computer_use::ComputerActionCancel {
+            work_id: "work-1".into(),
+            action_request_id: "action-1".into(),
+            execution_generation: generation.into(),
+            reason: "owner stopped".into(),
+        };
+        assert!(!leases.cancel(&cancel("generation-1"), "7"));
         assert!(!leases.release("generation-1"));
         assert!(leases.require_active("generation-2", 0).is_ok());
-        assert!(leases.cancel("generation-2"));
+        assert!(leases.cancel(&cancel("generation-2"), "7"));
         assert_eq!(
             leases.require_active("generation-2", 0).unwrap_err().kind,
             AgentErrorKind::Cancelled
@@ -322,5 +339,90 @@ mod tests {
                 .kind,
             AgentErrorKind::InvalidInput
         );
+    }
+
+    #[test]
+    fn cancellation_requires_the_complete_original_identity() {
+        use desk_agent_protocol::computer_use::ComputerActionCancel;
+        let leases = WriterLeaseCoordinator::new();
+        leases.acquire(request("generation-1"), 0).unwrap();
+        let original = ComputerActionCancel {
+            work_id: "work-1".into(),
+            action_request_id: "action-1".into(),
+            execution_generation: "generation-1".into(),
+            reason: "owner stopped".into(),
+        };
+        for field in ["work", "action", "generation", "actor"] {
+            let mut cancel = original.clone();
+            let mut actor = "7";
+            match field {
+                "work" => cancel.work_id.push_str("-other"),
+                "action" => cancel.action_request_id.push_str("-other"),
+                "generation" => cancel.execution_generation.push_str("-other"),
+                "actor" => actor = "8",
+                _ => unreachable!(),
+            }
+            assert!(!leases.cancel(&cancel, actor), "{field}");
+            assert!(leases.require_active("generation-1", 0).is_ok());
+        }
+        assert!(leases.cancel(&original, "7"));
+        assert!(leases.cancel(&original, "7"));
+        assert_eq!(
+            leases.snapshot().unwrap().status,
+            WriterLeaseStatus::Cancelled
+        );
+        assert!(leases.release("generation-1"));
+        assert!(!leases.cancel(&original, "7"));
+    }
+
+    #[test]
+    fn invalidation_does_not_release_an_outstanding_adapter_writer() {
+        for case in ["cancel", "preempt", "expiry", "epoch"] {
+            let leases = WriterLeaseCoordinator::new();
+            let original = request("generation-1");
+            leases.acquire(original.clone(), 0).unwrap();
+            let mut epoch = 0;
+            match case {
+                "cancel" => {
+                    assert!(leases.cancel(
+                        &desk_agent_protocol::computer_use::ComputerActionCancel {
+                            work_id: original.work_id.clone(),
+                            action_request_id: original.action_request_id.clone(),
+                            execution_generation: original.execution_generation.clone(),
+                            reason: String::new(),
+                        },
+                        "7"
+                    ));
+                }
+                "preempt" => leases.preempt(InputPreemptionSource::LocalExternal),
+                "expiry" => {
+                    leases
+                        .state
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .request
+                        .expires_at = Utc::now() - Duration::seconds(1);
+                }
+                "epoch" => epoch = 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                leases.require_active("generation-1", epoch).is_err(),
+                "{case}"
+            );
+            for next in [original, request("generation-2")] {
+                assert_eq!(
+                    leases.acquire(next, epoch).unwrap_err().kind,
+                    AgentErrorKind::HostAtCapacity,
+                    "{case}"
+                );
+            }
+            assert!(leases.release("generation-1"));
+            leases.acquire(request("generation-2"), epoch).unwrap();
+            assert!(!leases.release("generation-1"));
+            assert!(leases.require_active("generation-2", epoch).is_ok());
+        }
     }
 }

@@ -1082,6 +1082,84 @@ pub(super) async fn handle_computer_action_inbound(
     Ok(())
 }
 
+/// A central stop request cannot grant a new action or infer a completed effect.
+/// The worker compares the stamped actor and full identity with its original lease.
+pub(super) async fn handle_computer_action_cancel_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    use desk_agent_protocol::computer_use::ComputerActionCancel;
+    use desk_ipc_protocol::message::ComputerActionCancelPayload;
+
+    let reject = || {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::PERMISSION_ERROR,
+            "Computer Action stop authorization or binding is invalid",
+        )
+    };
+    let Some(authz) = ctx.inbound_authz.as_ref() else {
+        reject();
+        return Ok(());
+    };
+    let Some(actor) = authz.actor.user_id.filter(|actor| *actor > 0) else {
+        reject();
+        return Ok(());
+    };
+    if authz.request_id != model.request_id
+        || authz
+            .validate(
+                &model.request_id,
+                &authz.audience,
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .is_err()
+    {
+        reject();
+        return Ok(());
+    }
+    let Ok(cancel) = model.get_data::<ComputerActionCancel>() else {
+        reject();
+        return Ok(());
+    };
+    if [
+        &cancel.work_id,
+        &cancel.action_request_id,
+        &cancel.execution_generation,
+    ]
+    .iter()
+    .any(|value| value.trim().is_empty() || value.len() > 512)
+        || cancel.reason.len() > 512
+    {
+        reject();
+        return Ok(());
+    }
+    let payload = ComputerActionCancelPayload {
+        request_id: model.request_id.clone(),
+        connection_id: model.from_connection_id.clone(),
+        approved_actor_id: actor.to_string(),
+        cancel,
+    };
+    if ctx
+        .worker_mgr
+        .send_central_or_connection_worker(
+            model.from_connection_id.as_deref(),
+            ServiceToWorker::ComputerActionCancel(payload),
+        )
+        .await
+        .is_err()
+    {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            "Computer Action stop target worker is unavailable or ambiguous",
+        );
+    }
+    Ok(())
+}
+
 /// A rejection inside the action handler is a request-specific completion,
 /// not an uncorrelated protocol Error. No worker has accepted the action.
 fn emit_computer_action_rejected(ctx: &RouterContext, model: &SignalingModel, message: &str) {
