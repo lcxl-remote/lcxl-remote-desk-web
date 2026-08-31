@@ -2767,6 +2767,32 @@ fn invalid_original_result() -> AgentError {
     }
 }
 
+fn original_action_anchor(
+    session: &crate::session::PersistedAgentSession,
+    action: &crate::session::ActionIdentity,
+    call_id: &str,
+) -> Result<usize, AgentError> {
+    let mut matches = session
+        .conversation
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.tool_call_id.as_deref() == Some(call_id));
+    let (index, message) = matches.next().ok_or_else(invalid_original_result)?;
+    if matches.next().is_some()
+        || !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
+        || message
+            .background_task_id
+            .as_ref()
+            .is_some_and(|id| id != &action.action_request_id)
+        || session.execution_state.waitable_task() != Some(action)
+        || matches!(&session.execution_state, ExecutionState::OutcomeUnknown { placeholder_message_id, .. }
+            if *placeholder_message_id != message.message_id)
+    {
+        return Err(invalid_original_result());
+    }
+    Ok(index)
+}
+
 fn append_mutating_result(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
@@ -2777,7 +2803,32 @@ fn append_mutating_result(
         content: message.text.clone(),
         image_data_url: message.image_data_url.clone(),
     };
-    message.data_envelope = deps.tools.mutating_data_envelope(call, &output)?;
+    // Control outcomes are not native Provider results. Inherit the original
+    // proposal's boundary without inventing a completion receipt or asking a
+    // strict Provider to attest to centrally generated text.
+    let parent = session
+        .conversation
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == ChatRole::Assistant
+                && message.tool_calls.iter().any(|candidate| {
+                    candidate.id == call.id
+                        && candidate.name == call.name
+                        && candidate.arguments_json == call.arguments_json
+                })
+        })
+        .and_then(|message| message.data_envelope.as_ref());
+    message.data_envelope = if parent.is_some() {
+        crate::model_message_labels::internal_tool_result_envelope(
+            parent,
+            &call.id,
+            &output.content,
+            "provider_execution_status",
+        )?
+    } else {
+        deps.tools.mutating_data_envelope(call, &output)?
+    };
     session.conversation.push(message);
     Ok(())
 }
@@ -3328,30 +3379,41 @@ async fn run_wait<F: FnMut() -> String>(
     let task_id = match crate::wait_tools::parse_wait_task_id(call) {
         Ok(id) => id,
         Err(e) => {
-            session.conversation.push(ChatMessage::tool_result(
-                mint(),
-                &call.id,
-                format!("wait error: {}", e.message),
-            ));
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(mint(), &call.id, format!("wait error: {}", e.message)),
+            )?;
             return Ok(None);
         }
     };
     // Only the session's own in-flight task may be waited on, matched by its stable
     // id. No task, or a mismatched id, is a well-formed error result.
     let Some(action) = session.execution_state.waitable_task().cloned() else {
-        session.conversation.push(ChatMessage::tool_result(
-            mint(),
-            &call.id,
-            "no background task is running; there is nothing to wait for",
-        ));
+        append_mutating_result(
+            deps,
+            session,
+            call,
+            ChatMessage::tool_result(
+                mint(),
+                &call.id,
+                "no background task is running; there is nothing to wait for",
+            ),
+        )?;
         return Ok(None);
     };
     if task_id != action.action_request_id {
-        session.conversation.push(ChatMessage::tool_result(
-            mint(),
-            &call.id,
-            format!("no running background task with id `{task_id}`"),
-        ));
+        append_mutating_result(
+            deps,
+            session,
+            call,
+            ChatMessage::tool_result(
+                mint(),
+                &call.id,
+                format!("no running background task with id `{task_id}`"),
+            ),
+        )?;
         return Ok(None);
     }
 
@@ -3363,6 +3425,77 @@ async fn run_wait<F: FnMut() -> String>(
     let mut ack_event_id: Option<String> = None;
     let mut terminal_outcome: Option<LoopOutcome> = None;
     match outcome {
+        Ok(WaitOutcome::CompletedWithReceipt {
+            action: completed_action,
+            original_call_id,
+            output,
+            event_id,
+            data_envelope,
+        }) => {
+            if completed_action != action || output.image_data_url.is_some() {
+                return Err(invalid_original_result());
+            }
+            original_action_anchor(session, &action, &original_call_id)?;
+            data_envelope
+                .validate()
+                .map_err(|_| invalid_original_result())?;
+            let declared_size = match &data_envelope.content {
+                ContentRef::ImmutableBlob { size_bytes, .. }
+                | ContentRef::EphemeralObservation { size_bytes, .. }
+                | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
+            };
+            if declared_size != output.content.len() as u64
+                || data_envelope.digest_sha256
+                    != format!("{:x}", Sha256::digest(output.content.as_bytes()))
+            {
+                return Err(invalid_original_result());
+            }
+            if !remaining_calls.is_empty() {
+                // A native completion is an independent untrusted message, not
+                // this call's result. Keep its receipt unconsumed until the
+                // model closes this group; never dispatch the action again.
+                append_mutating_result(
+                    deps,
+                    session,
+                    call,
+                    ChatMessage::tool_result(
+                        mint(),
+                        &call.id,
+                        "the task has completed; call wait_for_task last in a tool-call group or on its own to retrieve the original result",
+                    ),
+                )?;
+                finish_tool(session, &call.id, true, sink);
+                deps.session_seam.save(session).await?;
+                return Ok(None);
+            }
+            let completion_position = session.conversation.len();
+            if !session.apply_completion_with_envelope(
+                &event_id,
+                &action.execution_id,
+                &original_call_id,
+                &action.action_request_id,
+                &output.content,
+                Some(data_envelope.clone()),
+                (deps.clock)(),
+            ) {
+                return Err(invalid_original_result());
+            }
+            let text =
+                "background task completed; its original result is recorded in the conversation";
+            let envelope = crate::model_message_labels::internal_tool_result_envelope(
+                Some(&data_envelope),
+                &call.id,
+                text,
+                "wait_for_task_status",
+            )?;
+            let mut message = ChatMessage::tool_result(mint(), &call.id, text);
+            message.data_envelope = envelope;
+            // Close the wait call before any appended untrusted completion so
+            // the model's assistant/tool-result group remains contiguous.
+            session.conversation.insert(completion_position, message);
+            ack_event_id = Some(event_id);
+            finish_tool(session, &call.id, true, sink);
+        }
         Ok(WaitOutcome::Completed { output, event_id }) => {
             // Key on the stable delivery id so a racing publisher delivery of the
             // same result dedups instead of appending a second copy.
@@ -3394,25 +3527,62 @@ async fn run_wait<F: FnMut() -> String>(
             }
         }
         Ok(WaitOutcome::StillRunning) => {
-            session
-                .conversation
-                .push(ChatMessage::background_task_running(
-                    mint(),
-                    &call.id,
-                    &action.action_request_id,
-                ));
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::background_task_running(mint(), &call.id, &action.action_request_id),
+            )?;
             finish_tool(session, &call.id, true, sink);
+        }
+        Ok(WaitOutcome::UnknownWithIdentity {
+            action: unknown_action,
+            original_call_id,
+        }) => {
+            if unknown_action != action {
+                return Err(invalid_original_result());
+            }
+            let index = original_action_anchor(session, &action, &original_call_id)?;
+            if matches!(session.execution_state, ExecutionState::Executing { .. }) {
+                let original = &mut session.conversation[index];
+                original.data_envelope =
+                    crate::model_message_labels::internal_tool_result_envelope(
+                        original.data_envelope.as_ref(),
+                        &original_call_id,
+                        OUTCOME_UNKNOWN_PLACEHOLDER,
+                        "background_task_outcome_unknown",
+                    )?;
+                original.text = OUTCOME_UNKNOWN_PLACEHOLDER.into();
+                session.execution_state = ExecutionState::OutcomeUnknown {
+                    action,
+                    placeholder_message_id: original.message_id.clone(),
+                    since: (deps.clock)(),
+                };
+            }
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(mint(), &call.id, OUTCOME_UNKNOWN_PLACEHOLDER),
+            )?;
+            finish_tool(session, &call.id, false, sink);
+            *halted = Some("a prior command's outcome is unknown".into());
         }
         Ok(WaitOutcome::Unknown) => {
             // The task was recovered without a result. Degrade to an unknown outcome
             // using this call's own result as the reconcile placeholder, and bar
             // further mutation until a late result reconciles it.
             let placeholder_id = mint();
-            session.conversation.push(ChatMessage::tool_result(
-                placeholder_id.clone(),
-                &call.id,
-                OUTCOME_UNKNOWN_PLACEHOLDER,
-            ));
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(
+                    placeholder_id.clone(),
+                    &call.id,
+                    OUTCOME_UNKNOWN_PLACEHOLDER,
+                ),
+            )?;
             session.execution_state = ExecutionState::OutcomeUnknown {
                 action,
                 placeholder_message_id: placeholder_id,
@@ -3422,11 +3592,12 @@ async fn run_wait<F: FnMut() -> String>(
             *halted = Some("a prior command's outcome is unknown".to_string());
         }
         Err(e) if e.safe_for_model => {
-            session.conversation.push(ChatMessage::tool_result(
-                mint(),
-                &call.id,
-                format!("wait error: {}", e.message),
-            ));
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(mint(), &call.id, format!("wait error: {}", e.message)),
+            )?;
             finish_tool(session, &call.id, false, sink);
         }
         Err(e) => {

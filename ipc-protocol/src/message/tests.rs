@@ -1685,6 +1685,7 @@ fn worker_to_service_all_variants_round_trip() {
                 execution_generation: "generation-1".to_string(),
                 disposition:
                     desk_agent_protocol::computer_use::ComputerActionStartDisposition::MayHaveStarted,
+                executor_accepted: true,
                 reason: None,
             },
         }),

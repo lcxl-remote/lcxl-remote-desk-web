@@ -5215,7 +5215,11 @@ impl ToolSeam for SignalDeviceAssistantTools {
                         )
                     })?;
             }
-            WaitOutcome::StillRunning => {}
+            // A receipt-bearing Provider completion already has its own durable
+            // lineage. It must not be recorded as a legacy command completion.
+            WaitOutcome::StillRunning
+            | WaitOutcome::CompletedWithReceipt { .. }
+            | WaitOutcome::UnknownWithIdentity { .. } => {}
         }
         Ok(outcome)
     }

@@ -421,6 +421,22 @@ pub struct ExecCompletion {
 /// tool result of the wait call — the model asked and this is its answer.
 #[derive(Debug, Clone)]
 pub enum WaitOutcome {
+    /// The original Provider action remains unknown. Reconciliation must retain
+    /// that call's existing result anchor, never the new wait call's identity.
+    UnknownWithIdentity {
+        action: ExecIdentity,
+        original_call_id: String,
+    },
+    /// A strict Provider's original completion is delivered under its original
+    /// call identity. The wait call gets a separate control-status result; it
+    /// must not relabel or take over the Provider's durable result receipt.
+    CompletedWithReceipt {
+        action: ExecIdentity,
+        original_call_id: String,
+        output: ToolRunOutput,
+        event_id: String,
+        data_envelope: desk_agent_protocol::data_lineage::DataEnvelope,
+    },
     /// The task reached a terminal result. `event_id` is the stable delivery id of
     /// the completion (the manager's `work:{work_id}:done`), so the loop keys the
     /// wait tool result on it and the background publisher's delivery of the same

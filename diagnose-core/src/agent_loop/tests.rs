@@ -11,6 +11,7 @@ use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+mod background_receipts;
 mod egress;
 mod original_results;
 mod version_handoff;

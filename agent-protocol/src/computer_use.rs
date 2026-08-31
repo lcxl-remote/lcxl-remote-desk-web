@@ -1546,7 +1546,20 @@ pub struct ComputerActionStarted {
     pub action_request_id: String,
     pub execution_generation: String,
     pub disposition: ComputerActionStartDisposition,
+    /// The worker passed preflight, owns the writer lease, and accepted the
+    /// bounded executor. This does not prove native effects or eventual success.
+    /// Legacy senders omit this field and therefore provide no acceptance proof.
+    #[serde(default)]
+    pub executor_accepted: bool,
     pub reason: Option<String>,
+}
+
+impl ComputerActionStarted {
+    pub fn confirms_executor_acceptance(&self) -> bool {
+        self.executor_accepted
+            && self.disposition == ComputerActionStartDisposition::MayHaveStarted
+            && self.reason.is_none()
+    }
 }
 
 #[derive(
@@ -2060,6 +2073,26 @@ mod tests {
         let rendered = format!("{:?}", object("secret-token"));
         assert!(!rendered.contains("secret-token"));
         assert!(rendered.contains("[redacted]"));
+    }
+
+    #[test]
+    fn explicit_executor_acceptance_never_reinterprets_legacy_start_disposition() {
+        let legacy = serde_json::json!({
+            "work_id":"work", "action_request_id":"action", "execution_generation":"generation",
+            "disposition":"may_have_started", "reason":null
+        });
+        let mut started: ComputerActionStarted = serde_json::from_value(legacy).unwrap();
+        assert!(!started.confirms_executor_acceptance());
+        started.executor_accepted = true;
+        assert!(started.confirms_executor_acceptance());
+        let round_trip: ComputerActionStarted =
+            serde_json::from_str(&serde_json::to_string(&started).unwrap()).unwrap();
+        assert_eq!(round_trip, started);
+        started.disposition = ComputerActionStartDisposition::DefinitelyNotStarted;
+        assert!(!started.confirms_executor_acceptance());
+        started.disposition = ComputerActionStartDisposition::MayHaveStarted;
+        started.reason = Some("refused".into());
+        assert!(!started.confirms_executor_acceptance());
     }
 
     #[test]

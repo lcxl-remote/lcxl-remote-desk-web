@@ -78,6 +78,12 @@ A stop is a request, not an outcome. The command is not treated as over until
 the host reports its own ending, so a stopped command that had already made a
 change is not misreported as one that never ran.
 
+## Computer Action executor acceptance
+
+A worker sets `executor_accepted=true` in `ComputerActionStarted` only after the original action passes preflight and acquires the writer lease. Missing fields mean false. Legacy `MayHaveStarted`, a successful send, and timeout are not acceptance receipts. The marker indicates executor ownership, not native effects, eventual success, or permission to retry after restart. Daemon and worker must use matching builds because their IPC is binary.
+
+The shared loop labels background/unknown/wait statuses as central-control information inheriting the original message boundary, not as native results. Receipt-bearing late completion preserves the original call, digest, label, and stable completion ID. The wait response is separate from that result, whose delivery is acknowledged only after a successful save. This protocol support alone does not connect actual OSS generic background-task creation and cancellation.
+
 ## Redaction Fails Closed
 
 The pipeline runs **collect → redact → model → render**. Collection and redaction happen on the **edge device**; the model call happens **centrally**. If redaction fails, the edge returns an error and the central brain aborts **before** the model is called. Evidence (with raw screenshot bytes stripped) is always redacted before it leaves the host or reaches the model.
