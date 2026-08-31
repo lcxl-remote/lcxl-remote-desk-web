@@ -16,6 +16,107 @@ mod egress;
 mod original_results;
 mod version_handoff;
 
+#[test]
+fn selected_object_lineage_keeps_explicit_sources_without_later_context_expansion() {
+    use crate::object_context::{
+        ObjectContextBuild, ObjectContextMutation, build_object_context_mutation,
+    };
+    use desk_agent_protocol::{
+        computer_use::{ObjectKind, ObjectRef},
+        data_lineage::DestinationIdentity,
+        device_assistant::{
+            DeviceAssistantObjectContextOperation, DeviceAssistantObjectContextUpdate,
+        },
+    };
+    let destination = DestinationIdentity::Model {
+        connection_id: "gateway".into(),
+        connection_revision: 1,
+        model_id: "model".into(),
+        profile_revision: 1,
+    };
+    let mut session = PersistedAgentSession::new(
+        "run",
+        "actor",
+        "device",
+        1,
+        AgentScope {
+            granted: vec![],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        "2026-08-31T00:00:00Z",
+    );
+    session.adopt_client_metadata(
+        Some("client"),
+        crate::session::AgentSessionSurface::DeviceAssistant,
+    );
+    for id in ["selected", "unselected"] {
+        let update = DeviceAssistantObjectContextUpdate {
+            conversation_id: "client".into(),
+            client_request_id: id.into(),
+            operation: DeviceAssistantObjectContextOperation::AttachFile {
+                object_ref: ObjectRef {
+                    token: id.into(),
+                    snapshot_id: "snapshot".into(),
+                    object_kind: ObjectKind::File,
+                    expires_at: "2030-01-01T00:00:00Z".into(),
+                },
+                display_summary: "file".into(),
+            },
+        };
+        let ObjectContextMutation::Attach(object) = build_object_context_mutation(
+            &update,
+            ObjectContextBuild {
+                actor_id: "actor",
+                device_id: "device",
+                destination: &destination,
+                now_unix_ms: 1,
+                attachment_id: id,
+                observation_id: id,
+            },
+        )
+        .unwrap() else {
+            panic!("attachment");
+        };
+        session.context_attachments.push(object);
+    }
+    let user = crate::model_message_labels::model_bound_user_message(
+        "user".into(),
+        "read selected file".into(),
+        destination,
+    )
+    .unwrap();
+    let user_source = user.data_envelope.as_ref().unwrap().envelope_id.clone();
+    session.conversation.push(user);
+    let call = ToolCall {
+        id: "read".into(),
+        name: "read_selected_text_file".into(),
+        arguments_json: "{}".into(),
+    };
+    for explicit in [
+        None,
+        Some("envelope-selected"),
+        Some("another-authoritative-source"),
+    ] {
+        let mut envelope = session.context_attachments[0].envelope.clone();
+        envelope.envelope_id = "result".into();
+        envelope.provenance.source_envelope_ids =
+            explicit.into_iter().map(str::to_string).collect();
+        let mut envelope = Some(envelope);
+        bind_tool_input_envelopes(&session, &call, &mut envelope).unwrap();
+        let ids = envelope.unwrap().provenance.source_envelope_ids;
+        assert!(ids.contains(&user_source));
+        if let Some(source) = explicit {
+            assert!(ids.iter().any(|id| id == source));
+            assert!(!ids.iter().any(|id| id == "envelope-unselected"));
+        } else {
+            assert!(ids.iter().any(|id| id == "envelope-selected"));
+            assert!(ids.iter().any(|id| id == "envelope-unselected"));
+        }
+    }
+}
+
 /// An in-memory session store: one session, claimed via the pure transition.
 #[derive(Default)]
 struct MemSession {

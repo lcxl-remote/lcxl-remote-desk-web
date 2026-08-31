@@ -2881,6 +2881,7 @@ pub(crate) fn bind_tool_input_envelopes(
     let mut preview_ids = HashSet::new();
     collect_identity_values(&arguments, &mut artifact_ids, &mut preview_ids);
     let mut source_ids = envelope.provenance.source_envelope_ids.clone();
+    let has_explicit_input_lineage = !source_ids.is_empty();
 
     // A Word report may opt into an exact subset of one prior Web Search
     // result. The lookup below has already been enforced before dispatch; bind
@@ -2922,9 +2923,12 @@ pub(crate) fn bind_tool_input_envelopes(
         source_ids.push(user.envelope_id.clone());
     }
 
-    // Selected-object tools consume the edge-held objects represented by the
-    // active context attachments, not model-supplied paths or envelope ids.
-    if call.name.contains("selected") || call.name == "preview_spreadsheet_merge" {
+    // An explicit input lineage comes from the trusted runtime's exact object
+    // selection. Never expand it with unrelated, later session attachments.
+    // Unlabeled legacy calls retain their conservative context fallback.
+    if !has_explicit_input_lineage
+        && (call.name.contains("selected") || call.name == "preview_spreadsheet_merge")
+    {
         source_ids.extend(
             session
                 .context_attachments

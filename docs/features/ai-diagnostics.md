@@ -44,6 +44,8 @@ reader's place unexpectedly.
 
 Owner-selected file, directory and terminal attachments store only bounded display metadata, opaque device references and source labels, not their contents. Selection does not grant execution authority. In open-source Signal, a repeated selection keeps the original attachment identity and expiry; reusing the same client request ID with different metadata or a different model destination is rejected. Replaying a detached selection does not reactivate it. The original device still validates each reference when data is read.
 
+When a trusted runtime supplies explicit input-source labels, the shared Assistant loop preserves those sources instead of adding unrelated active attachments from the conversation. Model-output and owner-message provenance links remain attached; this bookkeeping does not authorize another read or export.
+
 When Device Assistant accepts an in-flight follow-up, the shared loop rechecks the input revision at both the initial and final save boundaries so an old answer cannot become the result for a new requirement. Ordinary storage failures remain errors rather than being reported as supersession. Retracting an old answer does not confirm cancellation of a device action that already started.
 
 The shared execution interface distinguishes runtime-confirmed non-execution from operator rejection. If an execution backend confirms an action was closed before dispatch, the loop records why it was not executed and stops further mutations in that turn, without calling it user cancellation. This internal outcome grants no execution authority and does not imply identical durable recovery support in every backend.
