@@ -94,6 +94,7 @@ async fn all_object_read_grants_ignore_later_objects_display_names_and_ambient_r
                         .to_rfc3339(),
                 ),
                 object_attachments: vec![selected.clone()],
+                live_targets: Vec::new(),
             };
             let grants =
                 build_permission_grants(&session, &request, &decisions, &context, Some(&original))

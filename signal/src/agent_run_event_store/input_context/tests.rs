@@ -14,6 +14,7 @@ use desk_diagnose_core::{
 use sea_orm::{ConnectionTrait, Database, sea_query::Expr};
 
 mod grants;
+mod live_targets;
 mod wire;
 
 fn destination() -> DestinationIdentity {
@@ -140,6 +141,7 @@ fn input(id: &str, mut objects: Vec<ContextAttachment>) -> AppendUserFollowupPar
             tool_names: vec!["read_selected_text_file".into()],
             expires_at: None,
             object_attachments: objects,
+            live_targets: Vec::new(),
         }),
         message: model_bound_user_message(
             id.into(),
@@ -420,6 +422,7 @@ async fn shared_object_binding_clamps_all_file_reads_and_rejects_expired_or_chan
             tool_names: vec![name.into()],
             expires_at: None,
             object_attachments: vec![object.clone()],
+            live_targets: Vec::new(),
         };
         let call = ToolCall {
             id: "call".into(),

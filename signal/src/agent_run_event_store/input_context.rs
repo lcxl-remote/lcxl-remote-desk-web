@@ -64,6 +64,7 @@ struct StoredInput {
 
 pub(super) fn payload_version(selection: Option<&ReadContextSelection>) -> i32 {
     match selection {
+        Some(selection) if !selection.live_targets.is_empty() => 4,
         Some(selection) if !selection.object_attachments.is_empty() => 3,
         Some(_) => 2,
         None => i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION),
@@ -178,7 +179,7 @@ pub(super) fn validate_selection(
     {
         return Err(internal("original read context expired"));
     }
-    if selection.object_attachments.is_empty() {
+    if selection.object_attachments.is_empty() && selection.live_targets.is_empty() {
         return Ok(());
     }
     let destinations = &message
@@ -189,6 +190,12 @@ pub(super) fn validate_selection(
     let [destination @ DestinationIdentity::Model { .. }] = destinations.as_slice() else {
         return Err(internal("object input has no exact model destination"));
     };
+    desk_diagnose_core::input_read_context::live_read::validate_input(
+        selection,
+        message,
+        destination,
+        u64::try_from(now.timestamp_millis()).map_err(|_| internal("invalid input time"))?,
+    )?;
     validate_current_objects(
         session,
         &selection.object_attachments,
@@ -381,6 +388,17 @@ impl SignalAgentRunEventStore {
             })
         {
             return Err(internal("original object input changed or expired"));
+        }
+        if !original.live_targets.is_empty() {
+            desk_diagnose_core::input_read_context::live_read::validate_input(
+                original,
+                desk_diagnose_core::permission_resume::latest_user_requirement(
+                    &session.conversation,
+                )
+                .ok_or_else(|| internal("original live input missing"))?,
+                destination,
+                now,
+            )?;
         }
         validate_current_objects(&session, &original.object_attachments, destination, now)?;
         txn.commit()

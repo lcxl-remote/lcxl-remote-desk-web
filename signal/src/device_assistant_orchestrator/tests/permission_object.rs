@@ -527,7 +527,7 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
                         actor_id:"1".into(), device_id:"device".into(), surface:AgentSessionSurface::DeviceAssistant,
                         policy_revision:desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
                         current_scope:snapshot.scope_snapshot.clone(),
-                        read_context:Some(crate::agent_run_event_store::ReadContextSelection {tool_names:vec![], expires_at:None, object_attachments:vec![]}),
+                        read_context:Some(crate::agent_run_event_store::ReadContextSelection {tool_names:vec![], expires_at:None, object_attachments:vec![], live_targets:vec![]}),
                         message:model_bound_user_message("new-input".into(),"A new requirement".into(),destination).unwrap(),
                         created_at:Utc::now().to_rfc3339(),
                     },

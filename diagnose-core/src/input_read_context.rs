@@ -1,5 +1,6 @@
 //! Immutable owner-selected read context, shared by both central backends.
 
+pub mod live_read;
 pub mod object_read;
 
 use crate::{
@@ -27,6 +28,8 @@ pub struct ReadContextSelection {
     pub expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub object_attachments: Vec<ContextAttachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_targets: Vec<live_read::LiveReadTarget>,
 }
 
 impl ReadContextSelection {
@@ -45,6 +48,7 @@ impl ReadContextSelection {
                 .collect(),
             expires_at: scope.expires_at.clone(),
             object_attachments: Vec::new(),
+            live_targets: Vec::new(),
         };
         selection.validate()?;
         Ok(selection)
@@ -52,6 +56,7 @@ impl ReadContextSelection {
 
     pub fn validate(&self) -> Result<(), AgentError> {
         validate_objects(&self.object_attachments)?;
+        live_read::validate_targets(self)?;
         let providers = crate::device_assistant::device_assistant_provider_registry();
         let compiled = providers.registered_tools();
         if self.tool_names.len() > MAX_READ_TOOLS
