@@ -71,6 +71,12 @@ fn live_read_authority_uses_original_targets_on_both_surfaces() {
             };
             let authority = preflight.grant_call(&subject).unwrap();
             assert_eq!(
+                authority.byte_count, 0,
+                "output size is checked after the read"
+            );
+            assert_eq!(authority.item_count, 1);
+            assert!(preflight.output_limits().max_bytes_per_call > 2);
+            assert_eq!(
                 authority.resource_scope,
                 fresh_object_resource_scope(std::slice::from_ref(&reference))
             );

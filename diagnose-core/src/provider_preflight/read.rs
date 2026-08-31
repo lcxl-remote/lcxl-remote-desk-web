@@ -4,12 +4,14 @@ use super::*;
 use crate::input_read_context::object_read::{ObjectReadBinding, requires_objects};
 use desk_agent_protocol::capability_provider::{CapabilityEffect, ExecutionLocality};
 
+pub mod limits;
+
 pub struct ReadCallPreflight {
     capability: CapabilityDescriptor,
     provider_id: String,
     surface: ProductSurface,
     canonical_input_digest_sha256: String,
-    canonical_input_bytes: u64,
+    root_count: u32,
     resource_scope: Vec<String>,
     operation_scope: Vec<String>,
     risk_tier: CapabilityRiskTier,
@@ -79,6 +81,7 @@ impl ReadCallPreflight {
                     .ok_or_else(unavailable)?,
             );
         }
+        let mut root_count = 1;
         if requires_objects(&call.name) {
             binding.bind(call, &mut operation)?;
             deadline = deadline.min(binding.expiry(call)?);
@@ -102,6 +105,7 @@ impl ReadCallPreflight {
                     })
                     .collect::<Result<Vec<_>, _>>()?
             };
+            root_count = u32::try_from(refs.len()).map_err(|_| unavailable())?;
             scope.resources = fresh_object_resource_scope(&refs);
         } else if capability.wire.authorization_hint.resources
             != [AuthorizationResourceKind::TargetDevice]
@@ -116,7 +120,7 @@ impl ReadCallPreflight {
             provider_id: provider.wire.provider_id.clone(),
             surface,
             canonical_input_digest_sha256: format!("{:x}", Sha256::digest(canonical.as_bytes())),
-            canonical_input_bytes: canonical.len() as u64,
+            root_count,
             resource_scope: scope.resources,
             operation_scope: scope.operations,
             risk_tier: classify_provider_call(capability, call)?,
@@ -130,6 +134,10 @@ impl ReadCallPreflight {
 
     pub fn resource_scope(&self) -> &[String] {
         &self.resource_scope
+    }
+
+    pub fn output_limits(&self) -> desk_agent_protocol::capability_grant::CapabilityGrantLimits {
+        limits::descriptor_limits(&self.capability)
     }
 
     pub fn grant_call<'a>(
@@ -164,8 +172,10 @@ impl ReadCallPreflight {
             envelope_ids: &[],
             content_digests_sha256: &[],
             canonical_input_digest_sha256: &self.canonical_input_digest_sha256,
-            byte_count: self.canonical_input_bytes,
-            item_count: 1,
+            // Output size is unknown before dispatch. The runtime must enforce
+            // the original grant's output limits before retaining any result.
+            byte_count: 0,
+            item_count: self.root_count,
             policy_revision: subject.policy_revision,
             readiness_revision: subject.readiness_revision,
             now_unix_ms: subject.now_unix_ms,
