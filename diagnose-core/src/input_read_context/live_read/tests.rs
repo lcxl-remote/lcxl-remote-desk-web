@@ -328,6 +328,118 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
 }
 
 #[test]
+fn durable_selection_withdrawal_and_later_reselection_cannot_revive_old_input() {
+    use crate::{
+        capability_availability::CapabilityAvailability,
+        live_context::{LiveContextBuild, build_live_context, reconcile_live_context},
+        session::{AgentSessionSurface, PersistedAgentSession},
+    };
+    use desk_agent_protocol::{AgentScope, ExecutionMode, data_lineage::DestinationIdentity};
+
+    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let capability = registry
+        .capability_for_tool("inspect_live_document")
+        .unwrap();
+    let provider = registry
+        .provider_for_capability(&capability.wire.capability_id)
+        .unwrap();
+    let inventory = vec![CapabilityAvailability {
+        provider_id: provider.wire.provider_id.clone(),
+        capability_id: capability.wire.capability_id.clone(),
+        tool_name: capability.wire.tool_name.clone(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let destination = DestinationIdentity::Model {
+        connection_id: "gateway".into(),
+        connection_revision: 1,
+        model_id: "model".into(),
+        profile_revision: 1,
+    };
+    let mut nonce = 0_u64;
+    let mut claim = |request_id: &str, ids: &[String], at: u64| {
+        build_live_context(
+            LiveContextBuild {
+                registry: &registry,
+                inventory: &inventory,
+                readiness: Some(&readiness()),
+                selected_capability_ids: ids,
+                request_id,
+                actor_id: "owner",
+                device_id: "device",
+                destination: &destination,
+                now_unix_ms: at,
+            },
+            || {
+                nonce += 1;
+                format!("nonce-{nonce}")
+            },
+        )
+        .unwrap()
+    };
+    let mut session = PersistedAgentSession::new(
+        "run",
+        "owner",
+        "device",
+        0,
+        AgentScope {
+            granted: vec![],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        "2026-08-31T00:00:00Z",
+    );
+    session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+    let ids = vec![capability.wire.capability_id.clone()];
+    let selected = claim("select", &ids, now());
+    reconcile_live_context(&mut session, &selected).unwrap();
+    let mut original = selection(&["inspect_live_document"]);
+    original.live_targets = capture(&original, Some(&readiness()), now()).unwrap();
+    let input_time = now() + 1;
+    validate_durable_selection(
+        &original,
+        &session,
+        &registry,
+        &destination,
+        input_time,
+        input_time,
+    )
+    .unwrap();
+
+    let cleared = claim("clear", &[], input_time + 1);
+    reconcile_live_context(&mut session, &cleared).unwrap();
+    assert!(
+        validate_durable_selection(
+            &original,
+            &session,
+            &registry,
+            &destination,
+            input_time,
+            input_time + 1,
+        )
+        .is_err()
+    );
+
+    let reselected = claim("reselect", &ids, input_time + 2);
+    reconcile_live_context(&mut session, &reselected).unwrap();
+    assert!(
+        validate_durable_selection(
+            &original,
+            &session,
+            &registry,
+            &destination,
+            input_time,
+            input_time + 2,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn legacy_live_reads_cannot_bypass_the_original_object_fence() {
     use crate::{chat::ToolCall, input_read_context::object_read::ObjectReadBinding};
     use desk_agent_protocol::data_lineage::DestinationIdentity;

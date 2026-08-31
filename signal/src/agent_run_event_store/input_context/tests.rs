@@ -60,6 +60,92 @@ async fn state(store: &SignalAgentRunEventStore) -> PersistedAgentSession {
     PersistedAgentSession::decode_json(&session_row(store).await.state_json).unwrap()
 }
 
+async fn select_live_document(store: &SignalAgentRunEventStore) {
+    use desk_agent_protocol::computer_use::{
+        ComputerUseAdapterKind, ComputerUseAdapterRef, ComputerUseCapabilityReadiness,
+        ComputerUseContextReference, ComputerUseReadiness,
+    };
+    use desk_diagnose_core::{
+        capability_availability::CapabilityAvailability,
+        live_context::{LiveContextBuild, build_live_context},
+    };
+
+    let now = Utc::now();
+    let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+    let capability = registry
+        .capability_for_tool("inspect_live_document")
+        .unwrap();
+    let provider = registry
+        .provider_for_capability(&capability.wire.capability_id)
+        .unwrap();
+    let inventory = [CapabilityAvailability {
+        provider_id: provider.wire.provider_id.clone(),
+        capability_id: capability.wire.capability_id.clone(),
+        tool_name: capability.wire.tool_name.clone(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let readiness = ComputerUseReadiness {
+        schema_version: 1,
+        revision: 1,
+        observed_at: now.to_rfc3339(),
+        expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
+        server_api_version: 1,
+        os: "macos".into(),
+        interactive_session_incarnation: "worker-1".into(),
+        local_ceiling_revision: 1,
+        capabilities: vec![ComputerUseCapabilityReadiness {
+            capability: Capability::DocumentLiveInspect,
+            adapter: ComputerUseAdapterRef {
+                kind: ComputerUseAdapterKind::IworkPages,
+                version: "1".into(),
+            },
+            supported: true,
+            ready: true,
+            reason: None,
+        }],
+        context_references: vec![ComputerUseContextReference {
+            capability: Capability::DocumentLiveInspect,
+            object_ref: ObjectRef {
+                token: "original-document".into(),
+                snapshot_id: "snapshot-1".into(),
+                object_kind: ObjectKind::Document,
+                expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
+            },
+        }],
+    };
+    let selected_capability_ids = vec![capability.wire.capability_id.clone()];
+    let selection = build_live_context(
+        LiveContextBuild {
+            registry: &registry,
+            inventory: &inventory,
+            readiness: Some(&readiness),
+            selected_capability_ids: &selected_capability_ids,
+            request_id: "select-live-document",
+            actor_id: "7",
+            device_id: "device",
+            destination: &destination(),
+            now_unix_ms: now.timestamp_millis() as u64,
+        },
+        || uuid::Uuid::new_v4().to_string(),
+    )
+    .unwrap();
+    sessions(store)
+        .with_context_selection(selection)
+        .update_context_selection(
+            "run",
+            "7",
+            "device",
+            "select-live-document",
+            &now.to_rfc3339(),
+        )
+        .await
+        .unwrap();
+}
+
 async fn attach(store: &SignalAgentRunEventStore, id: &str, kind: ObjectKind) -> ContextAttachment {
     let reference = ObjectRef {
         token: format!("ref-{id}"),

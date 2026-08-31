@@ -3,7 +3,9 @@ use super::*;
 use crate::remote_tool_edge::SignalRemoteToolObserver;
 use chrono::Utc;
 use desk_agent_protocol::computer_use::*;
-use desk_agent_protocol::device_assistant::DeviceAssistantObjectContextOperation;
+use desk_agent_protocol::device_assistant::{
+    DeviceAssistantContextUpdate, DeviceAssistantObjectContextOperation,
+};
 use desk_agent_protocol::remote_tool::{RemoteToolOutput, RemoteToolRequest, RemoteToolResponse};
 use desk_agent_protocol::{AgentOutcome, Capability, ContextKind, ReadContextInput};
 use desk_diagnose_core::{
@@ -71,7 +73,13 @@ async fn live_document_permission_resume_reads_the_frozen_target_over_real_trans
 
 #[actix_web::test]
 async fn changed_live_target_worker_or_model_cannot_be_reselected_on_resume() {
-    for change in ["live_target", "live_worker", "model", "new_input"] {
+    for change in [
+        "live_target",
+        "live_worker",
+        "live_withdraw",
+        "model",
+        "new_input",
+    ] {
         run_case_with_live(Some(change), ResumeMode::Direct, true).await;
     }
 }
@@ -281,6 +289,23 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
     let connections = web::Data::from(map.clone());
     let client_id = "permission-object";
     let run_id = derive_conversation_key("1", "device", Some(client_id), "unused");
+    if live {
+        update_context(
+            connections.clone(),
+            db.clone(),
+            "select-live-transport".into(),
+            "controller".into(),
+            host.clone(),
+            1,
+            "device".into(),
+            DeviceAssistantContextUpdate {
+                conversation_id: client_id.into(),
+                client_request_id: "select-live".into(),
+                selected_capability_ids: vec![capability.wire.capability_id.clone()],
+            },
+        )
+        .await;
+    }
     let reference = ObjectRef {
         token: "original-file".into(),
         snapshot_id: "worker".into(),
@@ -569,6 +594,27 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                 config.profile_revision += 1;
                 crate::model_provider::save(&db, config).await.unwrap();
             }
+            "live_withdraw" => {
+                // Exercise the production 638 path after permission was granted.
+                // The durable grant remains a historical authorization fact, but
+                // withdrawing the live selection must invalidate the frozen input
+                // before any resumed model call or device read can occur.
+                update_context(
+                    connections.clone(),
+                    db.clone(),
+                    "withdraw-live-transport".into(),
+                    "offline-controller".into(),
+                    host.clone(),
+                    1,
+                    "device".into(),
+                    DeviceAssistantContextUpdate {
+                        conversation_id: client_id.into(),
+                        client_request_id: "withdraw-live".into(),
+                        selected_capability_ids: vec![],
+                    },
+                )
+                .await;
+            }
             "detach" => {
                 apply_object_context_update(
                     db.clone(),
@@ -638,6 +684,14 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
             before,
             "{change}: unexpected resume mutation"
         );
+        if change == "live_withdraw" {
+            let grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+                .list_for_subject(&run_id, "1", "device")
+                .await
+                .unwrap();
+            assert_eq!(grants.len(), 1);
+            assert_eq!(grants[0].remaining_uses, 1);
+        }
         capture.abort();
         let _ = capture.await;
         socket.send(awc::ws::Message::Close(None)).await.unwrap();

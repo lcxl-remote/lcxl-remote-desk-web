@@ -196,6 +196,19 @@ pub(super) fn validate_selection(
         destination,
         u64::try_from(now.timestamp_millis()).map_err(|_| internal("invalid input time"))?,
     )?;
+    if !selection.live_targets.is_empty() {
+        let now_unix_ms =
+            u64::try_from(now.timestamp_millis()).map_err(|_| internal("invalid input time"))?;
+        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        desk_diagnose_core::input_read_context::live_read::validate_durable_selection(
+            selection,
+            session,
+            &registry,
+            destination,
+            now_unix_ms,
+            now_unix_ms,
+        )?;
+    }
     validate_current_objects(
         session,
         &selection.object_attachments,
@@ -311,6 +324,13 @@ pub(crate) async fn original_on(
     txn: &sea_orm::DatabaseTransaction,
     session: &PersistedAgentSession,
 ) -> Result<Option<ReadContextSelection>, AgentError> {
+    Ok(original_with_time_on(txn, session).await?.0)
+}
+
+async fn original_with_time_on(
+    txn: &sea_orm::DatabaseTransaction,
+    session: &PersistedAgentSession,
+) -> Result<(Option<ReadContextSelection>, DateTime<Utc>), AgentError> {
     let rows = agent_run_event::Entity::find()
         .filter(agent_run_event::Column::RunId.eq(&session.conversation_id))
         .filter(
@@ -353,7 +373,7 @@ pub(crate) async fn original_on(
     };
     validate_replay(row, &params, session)?;
 
-    Ok(selection)
+    Ok((selection, row.created_at))
 }
 
 impl SignalAgentRunEventStore {
@@ -378,8 +398,9 @@ impl SignalAgentRunEventStore {
             .map_err(|_| internal("object read storage unavailable"))?
             .ok_or_else(|| internal("object read session missing"))?;
         let session = decode_session(&row, subject)?;
+        let (stored, input_created_at) = original_with_time_on(&txn, &session).await?;
         if session.input_revision != input_revision
-            || original_on(&txn, &session).await?.as_ref() != Some(original)
+            || stored.as_ref() != Some(original)
             || original.expires_at.as_ref().is_some_and(|expiry| {
                 parse_time(expiry)
                     .ok()
@@ -390,6 +411,8 @@ impl SignalAgentRunEventStore {
             return Err(internal("original object input changed or expired"));
         }
         if !original.live_targets.is_empty() {
+            let input_created_at_unix_ms = u64::try_from(input_created_at.timestamp_millis())
+                .map_err(|_| internal("original live input time is invalid"))?;
             desk_diagnose_core::input_read_context::live_read::validate_input(
                 original,
                 desk_diagnose_core::permission_resume::latest_user_requirement(
@@ -397,6 +420,16 @@ impl SignalAgentRunEventStore {
                 )
                 .ok_or_else(|| internal("original live input missing"))?,
                 destination,
+                now,
+            )?;
+            let registry =
+                desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+            desk_diagnose_core::input_read_context::live_read::validate_durable_selection(
+                original,
+                &session,
+                &registry,
+                destination,
+                input_created_at_unix_ms,
                 now,
             )?;
         }

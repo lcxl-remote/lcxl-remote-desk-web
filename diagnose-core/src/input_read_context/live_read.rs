@@ -7,6 +7,12 @@ use desk_agent_protocol::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::{
+    context_attachment::{AttachmentState, ContextAttachmentKind},
+    provider_registry::ProviderRegistry,
+    session::PersistedAgentSession,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveReadTarget {
@@ -201,6 +207,59 @@ pub fn validate_input(
     }
     for original in &selection.live_targets {
         target(selection, &original.tool_name, now)?;
+    }
+    Ok(())
+}
+
+/// Proves that every frozen live target still belongs to the unique durable
+/// selection that was active when the original input was accepted.
+///
+/// A later re-selection cannot revive an older input: attachments created after
+/// `input_created_at_unix_ms` are ignored, while a withdrawn historical
+/// attachment remains stale and therefore fails closed.
+pub fn validate_durable_selection(
+    selection: &ReadContextSelection,
+    session: &PersistedAgentSession,
+    registry: &ProviderRegistry,
+    destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+    input_created_at_unix_ms: u64,
+    now_unix_ms: u64,
+) -> Result<(), AgentError> {
+    validate_targets(selection)?;
+    for target in &selection.live_targets {
+        let capability = registry
+            .capability_for_tool(&target.tool_name)
+            .ok_or_else(|| invalid("original live capability is unavailable"))?;
+        let provider = registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .ok_or_else(|| invalid("original live Provider is unavailable"))?;
+        let mut candidates = session
+            .context_attachments
+            .iter()
+            .filter(|attachment| {
+                attachment.kind == ContextAttachmentKind::InteractiveSession
+                    && attachment.created_at_unix_ms <= input_created_at_unix_ms
+                    && attachment.object_ref.source_provider_id == provider.wire.provider_id
+                    && attachment.object_ref.source_capability_id == capability.wire.capability_id
+                    && attachment.object_ref.object_incarnation
+                        == target.interactive_session_incarnation
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|attachment| attachment.created_at_unix_ms);
+        let Some(latest) = candidates.last().copied() else {
+            return Err(invalid("original live selection is unavailable"));
+        };
+        if candidates
+            .iter()
+            .rev()
+            .skip(1)
+            .any(|candidate| candidate.created_at_unix_ms == latest.created_at_unix_ms)
+            || !matches!(latest.state, AttachmentState::Active)
+            || !latest.is_active_at(now_unix_ms)
+            || latest.envelope.allowed_destinations.as_slice() != [destination.clone()]
+        {
+            return Err(invalid("original live selection changed or was withdrawn"));
+        }
     }
     Ok(())
 }

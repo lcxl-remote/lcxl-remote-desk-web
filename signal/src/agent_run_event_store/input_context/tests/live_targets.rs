@@ -1,5 +1,6 @@
 use super::*;
 use desk_diagnose_core::input_read_context::live_read::LiveReadTarget;
+use sea_orm::PaginatorTrait;
 
 fn live_input() -> AppendUserFollowupParams {
     let mut params = input("live-input", vec![]);
@@ -22,11 +23,33 @@ fn live_input() -> AppendUserFollowupParams {
 }
 
 #[tokio::test]
+async fn live_input_without_a_durable_selection_is_rejected_at_intake() {
+    let store = setup("sqlite::memory:").await;
+    assert!(store.append_user_followup(live_input()).await.is_err());
+    assert!(
+        agent_session::Entity::find()
+            .one(&store.db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        agent_run_event::Entity::find()
+            .count(&store.db)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn original_live_target_receipt_is_immutable_even_after_expiry() {
     let store = setup("sqlite::memory:").await;
+    select_live_document(&store).await;
     let params = live_input();
     let first = store.append_user_followup(params.clone()).await.unwrap();
     let row = agent_run_event::Entity::find()
+        .filter(agent_run_event::Column::Kind.eq(AgentRunEventKind::UserFollowup.as_str()))
         .one(&store.db)
         .await
         .unwrap()
@@ -93,6 +116,7 @@ async fn original_live_target_receipt_is_immutable_even_after_expiry() {
     );
     assert_eq!(
         agent_run_event::Entity::find()
+            .filter(agent_run_event::Column::Kind.eq(AgentRunEventKind::UserFollowup.as_str()))
             .one(&store.db)
             .await
             .unwrap()
@@ -105,23 +129,19 @@ async fn original_live_target_receipt_is_immutable_even_after_expiry() {
 #[tokio::test]
 async fn expired_live_input_rolls_back_and_corrupt_versions_cannot_replay() {
     let store = setup("sqlite::memory:").await;
+    select_live_document(&store).await;
     let params = live_input();
+    let before = state(&store).await;
     let mut expired = params.clone();
     expired.read_context.as_mut().unwrap().live_targets[0].readiness_expires_at_unix_ms = 1;
     assert!(store.append_user_followup(expired).await.is_err());
-    assert!(
-        agent_session::Entity::find()
-            .one(&store.db)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
+    assert_eq!(state(&store).await, before);
+    assert_eq!(
         agent_run_event::Entity::find()
-            .one(&store.db)
+            .count(&store.db)
             .await
-            .unwrap()
-            .is_none()
+            .unwrap(),
+        1
     );
     let receipt = store.append_user_followup(params.clone()).await.unwrap();
     agent_run_event::Entity::update_many()
@@ -129,6 +149,7 @@ async fn expired_live_input_rolls_back_and_corrupt_versions_cannot_replay() {
             agent_run_event::Column::PayloadSchemaVersion,
             Expr::value(3),
         )
+        .filter(agent_run_event::Column::Kind.eq(AgentRunEventKind::UserFollowup.as_str()))
         .exec(&store.db)
         .await
         .unwrap();
@@ -146,6 +167,7 @@ async fn live_target_survives_sqlite_reopen_and_new_input_supersedes_it() {
         std::env::temp_dir().join(format!("signal-live-input-{}.sqlite", uuid::Uuid::new_v4()));
     let url = format!("sqlite://{}?mode=rwc", path.display());
     let store = setup(&url).await;
+    select_live_document(&store).await;
     let params = live_input();
     let receipt = store.append_user_followup(params.clone()).await.unwrap();
     store.db.close().await.unwrap();
