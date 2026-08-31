@@ -21,6 +21,7 @@
 //! - [`seam`]: the [`ModelSeam`](seam::ModelSeam) the loop calls, abstracting the
 //!   wire dialect.
 
+pub mod action_result;
 pub mod action_turn_fence;
 pub mod agent_loop;
 #[cfg(test)]

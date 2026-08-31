@@ -2777,7 +2777,7 @@ fn append_mutating_result(
 /// artifact/preview identities are resolved from prior typed results, selected
 /// objects resolve to active context attachments, and the current requirement
 /// resolves to the latest user envelope. Unmatched identities add no claim.
-fn bind_tool_input_envelopes(
+pub(crate) fn bind_tool_input_envelopes(
     session: &crate::session::PersistedAgentSession,
     call: &crate::chat::ToolCall,
     envelope: &mut Option<DataEnvelope>,
