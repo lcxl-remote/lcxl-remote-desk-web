@@ -8,11 +8,14 @@
 use std::sync::Arc;
 
 use desk_agent_protocol::exec::ExecPlan;
-use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome};
+use desk_agent_protocol::{
+    AgentError, AgentErrorKind, AgentOutcome, ExecOutput, ExecOutputStreams, OperationOutput,
+};
 use desk_ipc_protocol::dual_transport::EventSender;
 use desk_ipc_protocol::message::{ExecSpawnReport, WorkerToService};
 use tokio::sync::watch;
 
+use crate::agent_adapter::redaction::{Redactor, RegexRedactor};
 use crate::model::settings::AiExecutionPolicy;
 use crate::worker::exec_registry::ExecRegistry;
 
@@ -28,12 +31,24 @@ pub struct ExecPtyCapabilities {
     pub exec_pty_elevation: bool,
 }
 
-/// Capabilities compiled into this host. Interactive elevation remains false
-/// until the Linux ServiceDaemon owns the root containment and restart path.
-pub const fn runtime_support() -> ExecPtyCapabilities {
+/// Capabilities available in this process right now. Interactive elevation is
+/// true only after the root ServiceDaemon completed its systemd/cgroup/trusted-
+/// launcher readiness probe; a root portable process does not gain it.
+pub fn runtime_support() -> ExecPtyCapabilities {
     ExecPtyCapabilities {
         exec_pty: cfg!(target_os = "linux"),
-        exec_pty_elevation: false,
+        exec_pty_elevation: cfg!(target_os = "linux") && elevation_runtime_ready(),
+    }
+}
+
+fn elevation_runtime_ready() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::daemon::linux_exec_pty::runtime_ready()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
     }
 }
 
@@ -41,7 +56,13 @@ pub const fn runtime_support() -> ExecPtyCapabilities {
 /// machine-wide local policy. Elevation can never be advertised without the
 /// ordinary PTY transport it depends on.
 pub fn effective_capabilities(policy: &AiExecutionPolicy) -> ExecPtyCapabilities {
-    let support = runtime_support();
+    effective_capabilities_for(policy, runtime_support())
+}
+
+fn effective_capabilities_for(
+    policy: &AiExecutionPolicy,
+    support: ExecPtyCapabilities,
+) -> ExecPtyCapabilities {
     let exec_pty = support.exec_pty && policy.exec_pty_enabled;
     ExecPtyCapabilities {
         exec_pty,
@@ -49,6 +70,113 @@ pub fn effective_capabilities(policy: &AiExecutionPolicy) -> ExecPtyCapabilities
             && support.exec_pty_elevation
             && policy.interactive_elevation_enabled,
     }
+}
+
+/// Shared PTY result projector for worker-owned ordinary PTYs and daemon-owned
+/// root-contained PTYs. Raw terminal control strings and unredacted bytes never
+/// cross into the model-visible result.
+pub(crate) fn finish_combined_result(
+    exit_code: i32,
+    duration: std::time::Duration,
+    retained: &[u8],
+    overflowed: bool,
+    cap: usize,
+) -> AgentOutcome {
+    let projected = project_terminal_text(retained);
+    let redacted = match RegexRedactor::new().redact(&projected) {
+        Ok(redacted) => redacted,
+        Err(_) => {
+            return AgentOutcome::Err(agent_error(
+                AgentErrorKind::RedactionFailed,
+                "PTY output withheld: redaction failed".to_string(),
+            ));
+        }
+    };
+    let (terminal, truncated) = finalize_combined(redacted.text, cap, overflowed);
+    AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
+        exit_code,
+        streams: ExecOutputStreams::PtyCombined {
+            terminal,
+            truncated,
+        },
+        duration_ms: duration.as_millis().min(u32::MAX as u128) as u32,
+        redactions: redacted.kinds,
+    }))
+}
+
+fn finalize_combined(text: String, cap: usize, overflowed: bool) -> (String, bool) {
+    if text.len() <= cap && !overflowed {
+        return (text, false);
+    }
+    let mut end = cap.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
+fn project_terminal_text(bytes: &[u8]) -> String {
+    #[derive(Clone, Copy)]
+    enum State {
+        Ground,
+        Escape,
+        Csi,
+        String,
+        StringEscape,
+    }
+
+    let mut state = State::Ground;
+    let mut plain = Vec::with_capacity(bytes.len());
+    for &byte in bytes {
+        state = match state {
+            State::Ground => match byte {
+                0x1b => State::Escape,
+                0x9b => State::Csi,
+                0x90 | 0x98 | 0x9d | 0x9e | 0x9f => State::String,
+                b'\n' | b'\r' | b'\t' => {
+                    plain.push(byte);
+                    State::Ground
+                }
+                0x08 => {
+                    plain.pop();
+                    State::Ground
+                }
+                0x00..=0x1f | 0x7f => State::Ground,
+                _ => {
+                    plain.push(byte);
+                    State::Ground
+                }
+            },
+            State::Escape => match byte {
+                b'[' => State::Csi,
+                b']' | b'P' | b'X' | b'^' | b'_' => State::String,
+                0x20..=0x2f => State::Escape,
+                _ => State::Ground,
+            },
+            State::Csi => {
+                if (0x40..=0x7e).contains(&byte) {
+                    State::Ground
+                } else {
+                    State::Csi
+                }
+            }
+            State::String => match byte {
+                0x07 => State::Ground,
+                0x1b => State::StringEscape,
+                _ => State::String,
+            },
+            State::StringEscape => {
+                if byte == b'\\' {
+                    State::Ground
+                } else if byte == 0x1b {
+                    State::StringEscape
+                } else {
+                    State::String
+                }
+            }
+        };
+    }
+    String::from_utf8_lossy(&plain).into_owned()
 }
 
 pub async fn execute_pty_plan_cancellable(
@@ -140,7 +268,7 @@ pub async fn execute_pty_plan_cancellable(
     outcome
 }
 
-fn agent_error(kind: AgentErrorKind, message: String) -> AgentError {
+pub(crate) fn agent_error(kind: AgentErrorKind, message: String) -> AgentError {
     AgentError {
         kind,
         message,
@@ -152,7 +280,9 @@ fn agent_error(kind: AgentErrorKind, message: String) -> AgentError {
 
 #[cfg(test)]
 mod gate_tests {
-    use super::{effective_capabilities, runtime_support};
+    use super::{
+        ExecPtyCapabilities, effective_capabilities, effective_capabilities_for, runtime_support,
+    };
     use crate::model::settings::AiExecutionPolicy;
 
     #[test]
@@ -168,6 +298,34 @@ mod gate_tests {
         assert!(!effective_capabilities(&policy).exec_pty);
         assert!(!effective_capabilities(&policy).exec_pty_elevation);
     }
+
+    #[test]
+    fn elevation_requires_both_runtime_and_both_host_switches() {
+        let ready = ExecPtyCapabilities {
+            exec_pty: true,
+            exec_pty_elevation: true,
+        };
+        let mut policy = AiExecutionPolicy::default();
+        assert!(!effective_capabilities_for(&policy, ready).exec_pty_elevation);
+
+        policy.interactive_elevation_enabled = true;
+        assert!(effective_capabilities_for(&policy, ready).exec_pty_elevation);
+
+        policy.exec_pty_enabled = false;
+        assert!(!effective_capabilities_for(&policy, ready).exec_pty_elevation);
+
+        policy.exec_pty_enabled = true;
+        assert!(
+            !effective_capabilities_for(
+                &policy,
+                ExecPtyCapabilities {
+                    exec_pty: true,
+                    exec_pty_elevation: false,
+                },
+            )
+            .exec_pty_elevation
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -180,14 +338,14 @@ mod platform {
     use desk_agent_protocol::exec_pty::{
         PtyCloseReason, PtyOutputFrame, PtyStreamClosed, PtyStreamOpened,
     };
-    use desk_agent_protocol::{AgentErrorKind, AgentOutcome, ExecOutput, ExecOutputStreams};
-    use desk_agent_protocol::{OperationOutput, exec_pty::MAX_PTY_DATA_FRAME_BYTES};
+    use desk_agent_protocol::{AgentErrorKind, AgentOutcome, exec_pty::MAX_PTY_DATA_FRAME_BYTES};
     use desk_ipc_protocol::message::{ExecSpawnReport, WorkerToService};
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use tokio::sync::{mpsc, watch};
 
-    use crate::agent_adapter::redaction::{Redactor, RegexRedactor};
-    use crate::worker::exec_pty::agent_error;
+    #[cfg(test)]
+    use crate::worker::exec_pty::project_terminal_text;
+    use crate::worker::exec_pty::{agent_error, finish_combined_result};
     use crate::worker::exec_registry::ExecRegistry;
 
     const REDACTION_MARGIN: usize = 8 * 1024;
@@ -549,37 +707,13 @@ mod platform {
         reader: ReaderResult,
         cap: usize,
     ) -> AgentOutcome {
-        let projected = project_terminal_text(&reader.retained);
-        let redacted = match RegexRedactor::new().redact(&projected) {
-            Ok(redacted) => redacted,
-            Err(_) => {
-                return AgentOutcome::Err(agent_error(
-                    AgentErrorKind::RedactionFailed,
-                    "PTY output withheld: redaction failed".to_string(),
-                ));
-            }
-        };
-        let (terminal, truncated) = finalize(redacted.text, cap, reader.overflowed);
-        AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
+        finish_combined_result(
             exit_code,
-            streams: ExecOutputStreams::PtyCombined {
-                terminal,
-                truncated,
-            },
-            duration_ms: duration.as_millis().min(u32::MAX as u128) as u32,
-            redactions: redacted.kinds,
-        }))
-    }
-
-    fn finalize(text: String, cap: usize, overflowed: bool) -> (String, bool) {
-        if text.len() <= cap && !overflowed {
-            return (text, false);
-        }
-        let mut end = cap.min(text.len());
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        (text[..end].to_string(), true)
+            duration,
+            &reader.retained,
+            reader.overflowed,
+            cap,
+        )
     }
 
     fn reclaim_group(pgid: Option<libc::pid_t>) {
@@ -593,73 +727,6 @@ mod platform {
         }
     }
 
-    /// Produce inert, plain text for result backfill. Live rendering still sees
-    /// the original PTY bytes, but model-visible output cannot contain OSC 52,
-    /// DCS/APC/PM payloads, CSI effects, or clickable terminal escape sequences.
-    fn project_terminal_text(bytes: &[u8]) -> String {
-        #[derive(Clone, Copy)]
-        enum State {
-            Ground,
-            Escape,
-            Csi,
-            String,
-            StringEscape,
-        }
-
-        let mut state = State::Ground;
-        let mut plain = Vec::with_capacity(bytes.len());
-        for &byte in bytes {
-            state = match state {
-                State::Ground => match byte {
-                    0x1b => State::Escape,
-                    0x9b => State::Csi,
-                    0x90 | 0x98 | 0x9d | 0x9e | 0x9f => State::String,
-                    b'\n' | b'\r' | b'\t' => {
-                        plain.push(byte);
-                        State::Ground
-                    }
-                    0x08 => {
-                        plain.pop();
-                        State::Ground
-                    }
-                    0x00..=0x1f | 0x7f => State::Ground,
-                    _ => {
-                        plain.push(byte);
-                        State::Ground
-                    }
-                },
-                State::Escape => match byte {
-                    b'[' => State::Csi,
-                    b']' | b'P' | b'X' | b'^' | b'_' => State::String,
-                    0x20..=0x2f => State::Escape,
-                    _ => State::Ground,
-                },
-                State::Csi => {
-                    if (0x40..=0x7e).contains(&byte) {
-                        State::Ground
-                    } else {
-                        State::Csi
-                    }
-                }
-                State::String => match byte {
-                    0x07 => State::Ground,
-                    0x1b => State::StringEscape,
-                    _ => State::String,
-                },
-                State::StringEscape => {
-                    if byte == b'\\' {
-                        State::Ground
-                    } else if byte == 0x1b {
-                        State::StringEscape
-                    } else {
-                        State::String
-                    }
-                }
-            };
-        }
-        String::from_utf8_lossy(&plain).into_owned()
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -667,7 +734,7 @@ mod platform {
             ApprovalId, ExecContainmentSnapshot, ExecExecutionBasis, ExecIoMode, ExecRequestId,
             ExecShellKind,
         };
-        use desk_agent_protocol::{OperationOutput, RiskLevel};
+        use desk_agent_protocol::{ExecOutput, ExecOutputStreams, OperationOutput, RiskLevel};
 
         #[test]
         fn projector_removes_terminal_side_effect_sequences() {

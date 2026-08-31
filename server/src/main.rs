@@ -142,6 +142,22 @@ fn confirm_cli_lock() -> anyhow::Result<()> {
 }
 
 fn main() {
+    // This private launcher is entered before clap, logging, settings, or any
+    // network/runtime initialization. Its stdin/stdout are a bounded binary
+    // control pipe owned by the root ServiceDaemon; argv never carries the
+    // approved command, environment, or credentials.
+    #[cfg(target_os = "linux")]
+    {
+        let mut launcher_args = std::env::args_os();
+        let _program = launcher_args.next();
+        if launcher_args.next().as_deref() == Some(std::ffi::OsStr::new("exec-pty-launcher"))
+            && launcher_args.next().is_none()
+        {
+            let code = lcxl_remote_desk_server::daemon::linux_exec_pty::run_launcher_mode();
+            std::process::exit(code);
+        }
+    }
+
     // Local access control is deliberately handled before the permissive
     // legacy parser and before any server infrastructure is initialized.
     if std::env::args().nth(1).as_deref() == Some("access") {

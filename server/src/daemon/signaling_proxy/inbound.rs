@@ -244,7 +244,7 @@ pub(super) async fn handle_inbound_signaling_text(
 /// Notification-style and best-effort: these frames report progress, and the
 /// authoritative answer is always a state query against the ledger. Dropping one
 /// therefore costs nothing an upstream would act on.
-pub(super) fn send_exec_lifecycle(
+pub(crate) fn send_exec_lifecycle(
     outbound_tx: &tokio::sync::broadcast::Sender<String>,
     execution_generation: &str,
     to_connection_id: Option<String>,

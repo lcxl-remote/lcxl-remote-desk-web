@@ -426,7 +426,10 @@ pub(super) async fn maintain_proxy_connection(
                                 let stream_id = frame.stream_id().to_string();
                                 let generation = frame.execution_generation().to_string();
                                 match exec_pty_carriers.accept_upstream_frame(pty_link_id, frame) {
-                                    Ok((worker_key, command)) => {
+                                    Ok(crate::daemon::exec_pty_carrier::CarrierDispatch::Worker {
+                                        worker_key,
+                                        command,
+                                    }) => {
                                         let dispatch = match worker_key.as_ref() {
                                             Some(key) => router_ctx
                                                 .worker_mgr
@@ -442,6 +445,27 @@ pub(super) async fn maintain_proxy_connection(
                                             if let Some(cancel) = exec_pty_carriers.remove_stream(
                                                 &stream_id,
                                                 desk_agent_protocol::exec_pty::PtyCloseReason::SessionStale,
+                                            ) {
+                                                super::cancel_pty_worker(
+                                                    &router_ctx.worker_mgr,
+                                                    cancel,
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                    }
+                                    Ok(crate::daemon::exec_pty_carrier::CarrierDispatch::Daemon {
+                                        control,
+                                        frame,
+                                    }) => {
+                                        if control.try_send(frame).is_err() {
+                                            warn!(
+                                                "[exec-pty] daemon control lane unavailable generation={} stream={}",
+                                                generation, stream_id
+                                            );
+                                            if let Some(cancel) = exec_pty_carriers.remove_stream(
+                                                &stream_id,
+                                                desk_agent_protocol::exec_pty::PtyCloseReason::SlowConsumer,
                                             ) {
                                                 super::cancel_pty_worker(
                                                     &router_ctx.worker_mgr,

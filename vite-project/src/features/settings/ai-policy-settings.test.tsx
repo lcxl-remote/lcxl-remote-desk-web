@@ -76,13 +76,13 @@ describe("AiPolicySettings", () => {
         expect(elevationSwitch).toBeDisabled()
     })
 
-    it("shows elevation as unavailable before root containment is implemented", async () => {
+    it("shows elevation as unavailable when root containment is not ready", async () => {
         render(<AiPolicySettings />)
 
         const elevationSwitch = await screen.findByRole("switch", { name: "Interactive elevation" })
         expect(elevationSwitch).toBeDisabled()
         expect(
-            screen.getByText("Unavailable until Linux ServiceDaemon root containment is implemented."),
+            screen.getByText("Unavailable unless this host is a root Linux ServiceDaemon with ready systemd containment."),
         ).toBeInTheDocument()
     })
 

@@ -7,6 +7,8 @@ pub mod exec_capacity;
 pub mod exec_ledger;
 pub mod exec_pty_carrier;
 #[cfg(target_os = "linux")]
+pub mod linux_exec_pty;
+#[cfg(target_os = "linux")]
 pub mod linux_service;
 pub mod local_access_control;
 pub mod local_access_control_transport;
@@ -420,10 +422,32 @@ async fn open_exec_ledger(
         .map_err(|e| format!("Failed to open the exec ledger in {dir}: {e}"))?;
     info!("Exec ledger initialized at {dir}");
 
-    // Anything still marked in flight belongs to a process that is gone. Settle it
-    // as indeterminate now: the host genuinely cannot say whether those commands
-    // ran, and leaving them looking in-progress would tell a manager "still
-    // working on it" for ever.
+    // A root PTY scope may outlive a crashed daemon. Reclaim the deterministic
+    // cgroup before settling the ledger row; never mark it abandoned while root
+    // descendants could still be running.
+    #[cfg(target_os = "linux")]
+    for row in ledger
+        .in_flight()
+        .await
+        .map_err(|error| format!("Failed to inspect in-flight executions: {error}"))?
+    {
+        if let Some(identity) = row.containment_identity.as_deref()
+            && identity.starts_with("systemd-scope:lrd-exec-pty-")
+        {
+            crate::daemon::linux_exec_pty::reconcile_containment_identity(identity)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Failed to reclaim root PTY execution {} ({identity}): {error}",
+                        row.execution_generation
+                    )
+                })?;
+        }
+    }
+
+    // Anything still marked in flight is now stopped (or belonged to a process
+    // group that vanished with the prior process). Settle it as indeterminate:
+    // the host cannot assert which side effects landed and must never replay it.
     let abandoned = ledger.abandon_in_flight().await;
     match abandoned {
         Ok(lost) if !lost.is_empty() => {

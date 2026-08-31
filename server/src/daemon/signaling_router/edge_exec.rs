@@ -352,6 +352,54 @@ pub(super) async fn dispatch_fleet_exec_plan(
     if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
         pending.insert(request_id.to_string());
     }
+    #[cfg(target_os = "linux")]
+    if plan.requires_root_pty_containment() {
+        let dispatch = dispatch_root_fleet_pty(
+            ctx,
+            request_id,
+            plan,
+            selected_session.as_ref(),
+            session_connection_id,
+            carrier_id,
+            pty_capabilities,
+        )
+        .await;
+        if let Err(error) = dispatch {
+            if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
+                pending.remove(request_id);
+            }
+            match ctx
+                .exec_ledger
+                .mark_terminal(
+                    request_id,
+                    crate::daemon::exec_ledger::Terminal::SpawnFailed(error.clone()),
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => log::error!(
+                    "[exec-ledger] root PTY pre-spawn failure could not settle {request_id}"
+                ),
+                Err(ledger_error) => log::error!(
+                    "[exec-ledger] could not record root PTY pre-spawn failure {request_id}: {ledger_error}"
+                ),
+            }
+            ctx.exec_capacity.release(request_id);
+            send_edge_execution_completed(
+                &ctx.outbound_tx,
+                request_id,
+                EdgeExecDisposition::DispatchFailedBeforeWorker {
+                    error: agent_error(
+                        AgentErrorKind::SessionUnavailable,
+                        &format!("root PTY unavailable: {error}"),
+                        true,
+                        true,
+                    ),
+                },
+            );
+        }
+        return;
+    }
     let dispatch = if plan.io_mode.is_pty() {
         match (carrier_id, ctx.exec_pty_link.clone()) {
             (Some(stream_id), Some(link)) => match ctx
@@ -449,6 +497,186 @@ pub(super) async fn dispatch_fleet_exec_plan(
             },
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_root_fleet_pty(
+    ctx: &RouterContext,
+    request_id: &str,
+    plan: ExecPlan,
+    selected_session: Option<&desk_ipc_protocol::message::SessionKey>,
+    session_connection_id: Option<&str>,
+    carrier_id: Option<String>,
+    capabilities: crate::worker::exec_pty::ExecPtyCapabilities,
+) -> Result<(), String> {
+    if !capabilities.exec_pty_elevation {
+        return Err("interactive elevation runtime is not ready".into());
+    }
+    let session = selected_session.ok_or("root PTY requires a registered Linux session")?;
+    let target = ctx
+        .worker_mgr
+        .exec_worker_target_for_connection(session_connection_id)
+        .await?;
+    if target.worker_key.as_ref().map(|key| &key.session) != Some(session) {
+        return Err("root PTY session target changed before dispatch".into());
+    }
+    let registration = ctx
+        .worker_mgr
+        .session_shell_registration(session)
+        .ok_or("root PTY session registration is no longer current")?;
+    let session_registry = ctx
+        .worker_mgr
+        .session_shell_registry()
+        .ok_or("root PTY session registry is unavailable")?;
+    let stream_id = carrier_id
+        .filter(|value| !value.is_empty())
+        .ok_or("approved root PTY has no live carrier")?;
+    let link = ctx
+        .exec_pty_link
+        .clone()
+        .ok_or("trusted central link has no PTY binary carrier")?;
+    let payload = desk_ipc_protocol::message::ExecPtyStartPayload {
+        request_id: request_id.to_string(),
+        connection_id: None,
+        exec_pty: capabilities.exec_pty,
+        exec_pty_elevation: capabilities.exec_pty_elevation,
+        stream_id: stream_id.clone(),
+        session_target_id: target.session_target_id,
+        registration_generation: target.registration_generation,
+        worker_incarnation: target.wire_worker_incarnation,
+        plan,
+        audit_source_request_id: Some(request_id.to_string()),
+    };
+    let (control_tx, control_rx) = tokio::sync::mpsc::channel(32);
+    link.registry
+        .bind_daemon(link.link_id, &payload, control_tx, link.outbound.clone())
+        .map_err(|error| format!("PTY carrier binding failed: {error}"))?;
+
+    let task_ctx = ctx.clone();
+    let task_request_id = request_id.to_string();
+    let carrier = link.registry.clone();
+    tokio::spawn(async move {
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_callback = Arc::clone(&started);
+        let (done_tx, mut done_rx) = tokio::sync::watch::channel(false);
+        let start_outbound = task_ctx.outbound_tx.clone();
+        let start_request = task_request_id.clone();
+        let result = crate::daemon::linux_exec_pty::run_root_pty(
+            payload.clone(),
+            registration,
+            session_registry,
+            carrier.clone(),
+            control_rx,
+            Arc::clone(&task_ctx.exec_ledger),
+            move |containment_identity| {
+                started_callback.store(true, std::sync::atomic::Ordering::Release);
+                tokio::spawn(async move {
+                    crate::daemon::signaling_proxy::inbound::send_exec_lifecycle(
+                        &start_outbound,
+                        &start_request,
+                        None,
+                        desk_agent_protocol::exec_lifecycle::ExecLifecycleEvent::Accepted {
+                            containment_identity: Some(containment_identity),
+                        },
+                    );
+                    let began = std::time::Instant::now();
+                    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(10));
+                    heartbeat.tick().await;
+                    loop {
+                        tokio::select! {
+                            _ = heartbeat.tick() => {
+                                crate::daemon::signaling_proxy::inbound::send_exec_lifecycle(
+                                    &start_outbound,
+                                    &start_request,
+                                    None,
+                                    desk_agent_protocol::exec_lifecycle::ExecLifecycleEvent::Heartbeat {
+                                        running_ms: began.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                                    },
+                                );
+                            }
+                            changed = done_rx.changed() => {
+                                if changed.is_err() || *done_rx.borrow() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            },
+        )
+        .await;
+        done_tx.send_replace(true);
+
+        let (outcome, spawn_failure) = match result {
+            Ok(execution) => (execution.outcome, None),
+            Err(error) => {
+                carrier.remove_stream(
+                    &stream_id,
+                    desk_agent_protocol::exec_pty::PtyCloseReason::InternalError,
+                );
+                let outcome = AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    &format!("root PTY execution failed: {error}"),
+                    false,
+                    true,
+                ));
+                let spawn_failure =
+                    (!started.load(std::sync::atomic::Ordering::Acquire)).then_some(error);
+                (outcome, spawn_failure)
+            }
+        };
+        let terminal = match spawn_failure {
+            Some(reason) => crate::daemon::exec_ledger::Terminal::SpawnFailed(reason),
+            None => crate::daemon::exec_ledger::Terminal::Completed(
+                serde_json::to_string(&outcome).unwrap_or_else(|_| "null".into()),
+            ),
+        };
+        if let Err(error) = task_ctx
+            .exec_ledger
+            .mark_terminal(&task_request_id, terminal)
+            .await
+        {
+            log::error!(
+                "[exec-ledger] could not record root PTY result {}: {error}",
+                task_request_id
+            );
+        }
+        task_ctx.exec_capacity.release(&task_request_id);
+        let (success, summary, redactions) = match &outcome {
+            AgentOutcome::Ok(desk_agent_protocol::OperationOutput::Exec(output)) => (
+                output.exit_code == 0,
+                format!("exit {}", output.exit_code),
+                output.redactions.len() as i32,
+            ),
+            AgentOutcome::Ok(_) => (true, "ok".to_string(), 0),
+            AgentOutcome::Err(error) => (false, format!("{:?}", error.kind), 0),
+        };
+        task_ctx
+            .audit
+            .record(
+                desk_agent_protocol::audit::AuditEvent::command_completed(
+                    uuid::Uuid::new_v4().to_string(),
+                    chrono::Utc::now().to_rfc3339(),
+                    &payload.plan.exec_request_id.0,
+                    success,
+                    summary,
+                    redactions,
+                    0,
+                )
+                .with_task_id(Some(&task_request_id)),
+            )
+            .await;
+        if let Ok(mut pending) = task_ctx.edge_exec_pending.lock() {
+            pending.remove(&task_request_id);
+        }
+        send_edge_execution_completed(
+            &task_ctx.outbound_tx,
+            &task_request_id,
+            EdgeExecDisposition::Executed { outcome },
+        );
+    });
+    Ok(())
 }
 
 /// Assemble the authoritative [`AgentEnvelope`] from a parsed control-end

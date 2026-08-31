@@ -1338,7 +1338,7 @@ export default {
   'pages.aiPolicy.execPty.unsupported': '当前主机版本或平台不支持一次性 PTY 执行。',
   'pages.aiPolicy.interactiveElevation': '交互式提权',
   'pages.aiPolicy.interactiveElevation.description': '允许已批准的一次性 PTY 命令使用受 root 隔离的 sudo/doas 路径；必须同时启用普通 PTY。',
-  'pages.aiPolicy.interactiveElevation.unsupported': 'Linux ServiceDaemon 的 root containment 实现前暂不可用。',
+  'pages.aiPolicy.interactiveElevation.unsupported': '仅在以 root 运行且 systemd 隔离就绪的 Linux ServiceDaemon 上可用。',
   'pages.aiPolicy.updateSucceedMessage': '本地执行上限更新成功',
   'pages.aiPolicy.updateFailedMessage': '本地执行上限更新失败',
   'pages.collectionPolicy.title': '证据采集策略',

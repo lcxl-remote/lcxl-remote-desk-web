@@ -1348,7 +1348,7 @@ export default {
   'pages.aiPolicy.execPty.unsupported': 'One-shot PTY execution is not supported by this host build or platform.',
   'pages.aiPolicy.interactiveElevation': 'Interactive elevation',
   'pages.aiPolicy.interactiveElevation.description': 'Allow approved one-shot PTY commands to use the root-contained sudo/doas path. Ordinary PTY execution must also be enabled.',
-  'pages.aiPolicy.interactiveElevation.unsupported': 'Unavailable until Linux ServiceDaemon root containment is implemented.',
+  'pages.aiPolicy.interactiveElevation.unsupported': 'Unavailable unless this host is a root Linux ServiceDaemon with ready systemd containment.',
   'pages.aiPolicy.updateSucceedMessage': 'Local execution ceiling updated successfully',
   'pages.aiPolicy.updateFailedMessage': 'Failed to update the local execution ceiling',
   'pages.collectionPolicy.title': 'Evidence Collection Policy',

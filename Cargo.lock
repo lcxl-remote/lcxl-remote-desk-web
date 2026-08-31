@@ -5002,6 +5002,7 @@ dependencies = [
  "webrtc-mdns",
  "webrtc-media",
  "which 8.0.0",
+ "wincode",
  "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-numerics 0.2.0",

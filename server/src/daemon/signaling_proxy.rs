@@ -191,6 +191,13 @@ pub async fn run_signaling_proxy(
     exec_ledger: Arc<crate::daemon::exec_ledger::ExecLedger>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
+    #[cfg(target_os = "linux")]
+    if settings.read().await.args.startup_mode == StartupMode::ServiceDaemon {
+        match crate::daemon::linux_exec_pty::initialize_runtime().await {
+            Ok(_) => info!("[exec-pty] root systemd containment is ready"),
+            Err(error) => warn!("[exec-pty] interactive elevation remains unavailable: {error}"),
+        }
+    }
     let host_activity = host_control_hub.host_activity();
     let exec_pty_carriers =
         Arc::new(crate::daemon::exec_pty_carrier::ExecPtyCarrierRegistry::new());
@@ -1682,6 +1689,10 @@ pub async fn run_signaling_proxy(
         }
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(runtime) = crate::daemon::linux_exec_pty::runtime() {
+        runtime.stop_all().await;
+    }
     local_handle.abort();
     remote_sig_handle.abort();
     remote_mgr_handle.abort();
@@ -1696,28 +1707,29 @@ async fn cancel_pty_worker(
     worker_mgr: &WorkerManager,
     cancel: crate::daemon::exec_pty_carrier::CarrierCancellation,
 ) {
-    let command = desk_ipc_protocol::message::ServiceToWorker::ExecPtyCancel(
-        desk_agent_protocol::exec_pty::PtyCancelFrame {
-            stream_id: cancel.stream_id.clone(),
-            execution_generation: cancel.execution_generation.clone(),
-            session_target_id: cancel.session_target_id,
-            registration_generation: cancel.registration_generation,
-            worker_incarnation: cancel.worker_incarnation,
-            reason: cancel.reason,
+    let generation = cancel.execution_generation.clone();
+    let stream_id = cancel.stream_id.clone();
+    let result = match cancel.into_dispatch() {
+        crate::daemon::exec_pty_carrier::CarrierDispatch::Worker {
+            worker_key,
+            command,
+        } => match worker_key.as_ref() {
+            Some(key) => {
+                worker_mgr
+                    .send_to_session_worker(&key.session, command)
+                    .await
+            }
+            None => worker_mgr.send_to_worker(command).await,
         },
-    );
-    let result = match cancel.worker_key.as_ref() {
-        Some(key) => {
-            worker_mgr
-                .send_to_session_worker(&key.session, command)
-                .await
-        }
-        None => worker_mgr.send_to_worker(command).await,
+        crate::daemon::exec_pty_carrier::CarrierDispatch::Daemon { control, frame } => control
+            .send(frame)
+            .await
+            .map_err(|error| format!("daemon PTY control lane closed: {error}")),
     };
     if let Err(error) = result {
         warn!(
             "[exec-pty] failed to cancel generation={} stream={} after carrier rejection: {}",
-            cancel.execution_generation, cancel.stream_id, error
+            generation, stream_id, error
         );
     }
 }
@@ -1740,7 +1752,7 @@ use authorization::*;
 mod central_authorization;
 use central_authorization::*;
 
-mod inbound;
+pub(crate) mod inbound;
 use inbound::*;
 
 #[cfg(test)]
