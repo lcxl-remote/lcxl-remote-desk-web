@@ -2,7 +2,9 @@
 
 mod assistant_snapshot;
 mod object_context;
+mod permission_receipt;
 pub use object_context::UpdateObjectContext;
+pub use permission_receipt::PermissionDecisionOutcome;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -330,7 +332,7 @@ impl SignalAgentSessionStore {
         decisions: Vec<desk_diagnose_core::dynamic_run::PermissionDecisionItem>,
         grant_context: PermissionGrantIssuanceContext<'_>,
         now: &str,
-    ) -> Result<desk_diagnose_core::dynamic_run::PermissionRequestState, AgentError> {
+    ) -> Result<PermissionDecisionOutcome, AgentError> {
         for _ in 0..CLAIM_ATTEMPTS {
             let txn = self
                 .db
@@ -346,12 +348,19 @@ impl SignalAgentSessionStore {
                 txn.rollback().await.ok();
                 return Err(internal("permission request run was not found"));
             };
-            let mut session = PersistedAgentSession::decode_json(&row.state_json)
-                .map_err(|error| internal(format!("decode permission decision run: {error}")))?;
-            session.version = row.version;
-            session
-                .check_subject(actor_id, device_id)
-                .map_err(|error| internal(format!("permission decision subject: {error:?}")))?;
+            let mut session =
+                permission_receipt::session(&row, conversation_id, actor_id, device_id)?;
+            if let Some(state) =
+                permission_receipt::replay_on(&txn, &session, request_id, &decisions).await?
+            {
+                txn.commit()
+                    .await
+                    .map_err(|_| internal("read permission receipt transaction failed"))?;
+                return Ok(PermissionDecisionOutcome {
+                    state,
+                    newly_recorded: false,
+                });
+            }
             if session.turn_state.is_active() {
                 txn.rollback().await.ok();
                 return Err(transport(
@@ -364,6 +373,15 @@ impl SignalAgentSessionStore {
                 .position(|request| request.request_id == request_id)
                 .ok_or_else(|| internal("permission request was not found"))?;
             let requested = session.permission_requests[request_index].clone();
+            if permission_receipt::requested_on(&txn, &session, request_id)
+                .await?
+                .request
+                != requested
+            {
+                return Err(internal(
+                    "permission request differs from its original event",
+                ));
+            }
             let request = &mut session.permission_requests[request_index];
             if request.input_revision != session.input_revision {
                 txn.rollback().await.ok();
@@ -491,7 +509,10 @@ impl SignalAgentSessionStore {
             txn.commit()
                 .await
                 .map_err(|error| internal(format!("commit permission decision: {error}")))?;
-            return Ok(resulting_state);
+            return Ok(PermissionDecisionOutcome {
+                state: resulting_state,
+                newly_recorded: true,
+            });
         }
         Err(transport("permission decision conflicted; retry"))
     }
@@ -1048,7 +1069,7 @@ fn now_from(raw: &str) -> DateTime<Utc> {
 }
 
 async fn find(
-    db: &DatabaseConnection,
+    db: &impl sea_orm::ConnectionTrait,
     conversation_id: &str,
 ) -> Result<Option<agent_session::Model>, sea_orm::DbErr> {
     agent_session::Entity::find()
@@ -1815,6 +1836,7 @@ fn superseded_tool_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod permission_receipts;
     use desk_agent_protocol::capability_grant::{CapabilityGrant, CapabilityGrantUsePolicy};
     use desk_agent_protocol::capability_provider::{CapabilityEffect, ProductSurface};
     use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
@@ -2166,7 +2188,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resulting_state, PermissionRequestState::Approved);
+        assert_eq!(resulting_state.state, PermissionRequestState::Approved);
+        assert!(resulting_state.newly_recorded);
 
         let snapshot = store
             .read_snapshot("conversation-1")

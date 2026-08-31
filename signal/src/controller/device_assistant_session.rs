@@ -1138,6 +1138,14 @@ pub async fn decide_device_assistant_permission(
     connection_map: web::Data<SharedConnectionMap>,
     body: web::Json<PermissionDecisionBody>,
 ) -> Result<HttpResponse, DeskSignalError> {
+    decide_permission_on(crate::db::get_db(), connection_map, body).await
+}
+
+pub(crate) async fn decide_permission_on(
+    db: &sea_orm::DatabaseConnection,
+    connection_map: web::Data<SharedConnectionMap>,
+    body: web::Json<PermissionDecisionBody>,
+) -> Result<HttpResponse, DeskSignalError> {
     let target_audience = {
         let map = connection_map.read().await;
         let Some(target) = map.get(&body.connection) else {
@@ -1154,7 +1162,7 @@ pub async fn decide_device_assistant_permission(
         }
     };
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
-    let store = SignalAgentSessionStore::new(crate::db::get_db().clone());
+    let store = SignalAgentSessionStore::new(db.clone());
     let session_id = match (
         body.session.as_deref().filter(|value| !value.is_empty()),
         body.conversation.as_deref(),
@@ -1165,6 +1173,27 @@ pub async fn decide_device_assistant_permission(
         }
         (None, None) => return Ok(not_accessible()),
     };
+    let decisions: Vec<desk_diagnose_core::dynamic_run::PermissionDecisionItem> =
+        body.items.clone().into_iter().map(Into::into).collect();
+    if let Some(state) = store
+        .replay_permission_decision(
+            &session_id,
+            &actor_id,
+            &target_audience,
+            &body.request_id,
+            &decisions,
+        )
+        .await
+        .map_err(|error| {
+            DeskSignalError::new_custom_error(DeskErrorCode::PRECONDITION_FAILED, &error.message)
+        })?
+    {
+        return Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+            PermissionDecisionResponse {
+                state: state.into(),
+            },
+        )));
+    }
     let now_dt = chrono::Utc::now();
     let now_unix_ms = u64::try_from(now_dt.timestamp_millis()).map_err(|_| {
         DeskSignalError::new_custom_error(
@@ -1217,13 +1246,13 @@ pub async fn decide_device_assistant_permission(
         )
     })?;
     let now = now_dt.to_rfc3339();
-    let state = store
+    let decision = store
         .decide_permission_request(
             &session_id,
             &actor_id,
             &target_audience,
             &body.request_id,
-            body.items.clone().into_iter().map(Into::into).collect(),
+            decisions,
             PermissionGrantIssuanceContext {
                 surface: desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
                 registry: &registry,
@@ -1238,12 +1267,13 @@ pub async fn decide_device_assistant_permission(
         .map_err(|error| {
             DeskSignalError::new_custom_error(DeskErrorCode::PRECONDITION_FAILED, &error.message)
         })?;
-    if let Some(snapshot) = store
-        .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
-        .await
-        .map_err(|error| {
-            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
-        })?
+    if decision.newly_recorded
+        && let Some(snapshot) = store
+            .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
+            .await
+            .map_err(|error| {
+                DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+            })?
         && let Some(question) =
             desk_diagnose_core::permission_resume::latest_user_requirement(&snapshot.messages)
                 .map(|message| message.text.clone())
@@ -1260,7 +1290,7 @@ pub async fn decide_device_assistant_permission(
             selected_attachment_ids: Vec::new(),
         };
         let resume_connections = connection_map.clone();
-        let resume_db = crate::db::get_db().clone();
+        let resume_db = db.clone();
         let resume_target_connection = body.connection.clone();
         let resume_target_audience = target_audience.clone();
         let resume_session_id = session_id.clone();
@@ -1282,7 +1312,7 @@ pub async fn decide_device_assistant_permission(
     }
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
         PermissionDecisionResponse {
-            state: state.into(),
+            state: decision.state.into(),
         },
     )))
 }
