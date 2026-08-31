@@ -5288,6 +5288,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
             // lineage. It must not be recorded as a legacy command completion.
             WaitOutcome::StillRunning
             | WaitOutcome::CompletedWithReceipt { .. }
+            | WaitOutcome::FailedWithReceipt { .. }
             | WaitOutcome::UnknownWithIdentity { .. } => {}
         }
         Ok(outcome)

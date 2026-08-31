@@ -37,6 +37,224 @@ fn waiter() -> ScriptModel {
     }
 }
 
+fn failed_receipt() -> WaitOutcome {
+    let output = ToolRunOutput {
+        content: "original native failure".into(),
+        image_data_url: None,
+    };
+    WaitOutcome::FailedWithReceipt {
+        action: crate::session::ActionIdentity::agent_exec(8, "exec_task9", "e9"),
+        original_call_id: "c1".into(),
+        data_envelope: original_results::original(&output, false),
+        output,
+        event_id: "work:8:done".into(),
+    }
+}
+
+#[tokio::test]
+async fn failed_background_receipt_stops_open_group_then_delivers_original_failure() {
+    let sess = original_task_session();
+    let mut first = tool_use_args("c2", "wait_for_task", r#"{"task_id":"exec_task9"}"#);
+    first.tool_calls.push(ToolCall {
+        id: "c3".into(),
+        name: "exec_command".into(),
+        arguments_json: "{}".into(),
+    });
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                first,
+                tool_use_args("c4", "wait_for_task", r#"{"task_id":"exec_task9"}"#),
+                answer("failed"),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let scripted = tools_with_waits(vec![], vec![failed_receipt(), failed_receipt()]);
+    let reg = wait_reg();
+    let clock = || "t".to_string();
+    let events = Rc::new(RefCell::new(vec![]));
+    run_agent_turn(
+        &exec_deps(&sess, &model, &scripted, &reg, &clock),
+        exec_claim(),
+        ChatMessage::text("u", ChatRole::User, "wait then run the next action"),
+        &mut EventLog(events.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(scripted.exec_calls.borrow().is_empty());
+    assert_eq!(scripted.acks.borrow().as_slice(), ["work:8:done"]);
+    assert!(
+        !model.requests.borrow()[1]
+            .messages
+            .iter()
+            .any(|m| m.message_id == "work:8:done")
+    );
+    let saved = sess.inner.borrow();
+    let session = saved.as_ref().unwrap();
+    assert_eq!(session.execution_state, ExecutionState::None);
+    let messages = &session.conversation;
+    let original = messages
+        .iter()
+        .find(|m| m.message_id == "work:8:done")
+        .unwrap();
+    assert_eq!(original.text, "original native failure");
+    assert_eq!(original.tool_call_id.as_deref(), Some("c1"));
+    let WaitOutcome::FailedWithReceipt { data_envelope, .. } = failed_receipt() else {
+        unreachable!()
+    };
+    assert_eq!(original.data_envelope.as_ref(), Some(&data_envelope));
+    let position = |call| {
+        messages
+            .iter()
+            .position(|m| m.tool_call_id.as_deref() == Some(call))
+            .unwrap()
+    };
+    assert!(position("c2") < position("c3"));
+    assert!(position("c3") < position("c4"));
+    assert!(
+        position("c4")
+            < messages
+                .iter()
+                .position(|m| m.message_id == "work:8:done")
+                .unwrap()
+    );
+    assert!(
+        messages[position("c3")]
+            .text
+            .contains("background action failed")
+    );
+    for id in ["c2", "c4"] {
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|e| e.starts_with(&format!("finished:{id}:false:")))
+        );
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|e| e.starts_with(&format!("finished:{id}:true:")))
+        );
+    }
+}
+
+#[tokio::test]
+async fn unknown_then_late_failure_reconciles_original_anchor_without_new_execution() {
+    let sess = original_task_session();
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args("c2", "wait_for_task", r#"{"task_id":"exec_task9"}"#),
+                tool_use_args("c3", "wait_for_task", r#"{"task_id":"exec_task9"}"#),
+                answer("failed"),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let scripted = tools_with_waits(
+        vec![],
+        vec![
+            WaitOutcome::UnknownWithIdentity {
+                action: crate::session::ActionIdentity::agent_exec(8, "exec_task9", "e9"),
+                original_call_id: "c1".into(),
+            },
+            failed_receipt(),
+        ],
+    );
+    let reg = wait_reg();
+    let clock = || "t".to_string();
+    let events = Rc::new(RefCell::new(vec![]));
+    run_agent_turn(
+        &exec_deps(&sess, &model, &scripted, &reg, &clock),
+        exec_claim(),
+        ChatMessage::text("u", ChatRole::User, "wait"),
+        &mut EventLog(events.clone()),
+    )
+    .await
+    .unwrap();
+    let saved = sess.inner.borrow();
+    let session = saved.as_ref().unwrap();
+    assert_eq!(session.execution_state, ExecutionState::None);
+    let original: Vec<_> = session
+        .conversation
+        .iter()
+        .filter(|m| m.tool_call_id.as_deref() == Some("c1"))
+        .collect();
+    assert_eq!(original.len(), 1);
+    assert_eq!(original[0].message_id, "work:8:done");
+    assert_eq!(original[0].text, "original native failure");
+    let WaitOutcome::FailedWithReceipt { data_envelope, .. } = failed_receipt() else {
+        unreachable!()
+    };
+    assert_eq!(original[0].data_envelope.as_ref(), Some(&data_envelope));
+    assert!(scripted.exec_calls.borrow().is_empty());
+    assert_eq!(scripted.acks.borrow().as_slice(), ["work:8:done"]);
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| e.starts_with("finished:c3:false:"))
+    );
+}
+
+#[tokio::test]
+async fn failed_background_receipt_rejects_invalid_data_and_save_failures_without_ack() {
+    for case in ["identity", "bytes", "label", "save"] {
+        let mut sess = original_task_session();
+        if case == "save" {
+            sess.fail_save_with_message_id = Some("work:8:done");
+        }
+        let mut receipt = failed_receipt();
+        let WaitOutcome::FailedWithReceipt {
+            action,
+            output,
+            data_envelope,
+            ..
+        } = &mut receipt
+        else {
+            unreachable!()
+        };
+        match case {
+            "identity" => action.execution_id = "wrong".into(),
+            "bytes" => output.content = "changed".into(),
+            "label" => data_envelope.schema_version += 1,
+            "save" => {}
+            _ => unreachable!(),
+        }
+        let model = waiter();
+        let scripted = tools_with_waits(vec![], vec![receipt]);
+        let reg = wait_reg();
+        let clock = || "t".to_string();
+        assert!(
+            run_agent_turn(
+                &exec_deps(&sess, &model, &scripted, &reg, &clock),
+                exec_claim(),
+                ChatMessage::text("u", ChatRole::User, "wait"),
+                &mut NullTurnSink,
+            )
+            .await
+            .is_err(),
+            "{case}"
+        );
+        assert!(scripted.acks.borrow().is_empty(), "{case}");
+        assert!(
+            !sess
+                .inner
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .conversation
+                .iter()
+                .any(|m| m.message_id == "work:8:done"),
+            "{case}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn background_receipt_wait_in_a_batch_does_not_split_or_ack_an_open_tool_group() {
     let sess = original_task_session();

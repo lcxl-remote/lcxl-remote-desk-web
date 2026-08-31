@@ -358,7 +358,7 @@ pub type ExecIdentity = crate::session::ActionIdentity;
 /// execution-reconciliation state.
 #[derive(Debug, Clone)]
 pub enum ExecOutcome {
-    /// Approved and executed to a known, already-redacted result.
+    /// Approved and executed successfully to a known, already-redacted result.
     ///
     /// `event_id` is the stable delivery id of this result when the runtime records
     /// completions durably (the manager's `work:{work_id}:done`). The loop uses it
@@ -372,6 +372,15 @@ pub enum ExecOutcome {
         /// Original data label already checked against the runtime's durable
         /// result receipt. When present, preserve it instead of relabeling at
         /// delivery time; it grants no implicit export permission.
+        data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+    },
+    /// A known terminal failure, not uncertainty about an action's effects.
+    /// Preserve and review its result just like `Executed`, including the
+    /// original label and save-before-ack delivery contract when provided, but
+    /// report failure and stop the rest of the current tool-call group.
+    Failed {
+        output: ToolRunOutput,
+        event_id: Option<String>,
         data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
     },
     /// The operator rejected the command; nothing ran.
@@ -417,8 +426,9 @@ pub struct ExecCompletion {
 
 /// The result of a model actively waiting on a background task via
 /// [`wait_for_task`](ToolSeam::wait_for_task). Unlike the passive completion
-/// notification the publisher injects, a waited-for result becomes the real
-/// tool result of the wait call — the model asked and this is its answer.
+/// notification the publisher injects, waiting returns an explicit status to
+/// the model. Original Provider receipts retain their original call identity;
+/// legacy results become the wait call's own tool result.
 #[derive(Debug, Clone)]
 pub enum WaitOutcome {
     /// The original Provider action remains unknown. Reconciliation must retain
@@ -431,6 +441,16 @@ pub enum WaitOutcome {
     /// call identity. The wait call gets a separate control-status result; it
     /// must not relabel or take over the Provider's durable result receipt.
     CompletedWithReceipt {
+        action: ExecIdentity,
+        original_call_id: String,
+        output: ToolRunOutput,
+        event_id: String,
+        data_envelope: desk_agent_protocol::data_lineage::DataEnvelope,
+    },
+    /// The original Provider action has a known terminal failure. Its receipt
+    /// retains the original call identity just as `CompletedWithReceipt` does;
+    /// the separate wait status reports failure and stops the current group.
+    FailedWithReceipt {
         action: ExecIdentity,
         original_call_id: String,
         output: ToolRunOutput,

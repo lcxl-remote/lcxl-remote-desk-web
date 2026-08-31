@@ -3148,13 +3148,18 @@ async fn run_mutating<F: FnMut() -> String>(
 
     // A stable delivery id the foreground path must ack (consume) after its save, so
     // the background completion publisher does not also deliver the same result.
-    // Only the foreground-win result (Executed with a delivery id) is acked; a
+    // Only a foreground terminal result with a delivery id is acked; a
     // Dispatched outcome deliberately leaves the delivery pending for the publisher.
     let mut ack_event_id: Option<String> = None;
     let mut terminal_outcome: Option<LoopOutcome> = None;
-
+    let failed = matches!(&outcome, Ok(ExecOutcome::Failed { .. }));
     match outcome {
         Ok(ExecOutcome::Executed {
+            output,
+            event_id,
+            data_envelope,
+        })
+        | Ok(ExecOutcome::Failed {
             output,
             event_id,
             data_envelope,
@@ -3213,7 +3218,10 @@ async fn run_mutating<F: FnMut() -> String>(
                     .await?,
                 );
             } else {
-                finish_tool(session, &call.id, true, sink);
+                finish_tool(session, &call.id, !failed, sink);
+                if failed {
+                    *halted = Some("not executed: a prior action in this group failed".into());
+                }
             }
         }
         Ok(ExecOutcome::Rejected { reason }) => {
@@ -3359,12 +3367,12 @@ async fn run_mutating<F: FnMut() -> String>(
 /// Run a `wait_for_task` call: the model actively waits on the background task it
 /// dispatched. Validated against the session's own execution identity (a control end
 /// can never steer it at another task), then handed to the seam. A completed result
-/// becomes this call's real tool result — keyed on the completion's delivery id so a
-/// racing publisher delivery dedups — and clears the execution machine so a follow-up
-/// may mutate again. A still-running wait closes the call with a "still running"
-/// note, leaving the task in flight. An unknown outcome degrades to
-/// [`ExecutionState::OutcomeUnknown`] with this call's result as the reconcile
-/// placeholder, so a late real result can still land.
+/// retains its original Provider identity when supplied with a receipt; the
+/// wait call receives a separate status. Legacy results belong to the wait
+/// call. Stable delivery ids deduplicate a racing publisher, and settlement
+/// clears the execution machine. A known failure stops the current group.
+/// Unknown outcomes retain the original anchor when supplied, otherwise the
+/// wait result becomes the reconcile placeholder for a late completion.
 #[allow(clippy::too_many_arguments)]
 async fn run_wait<F: FnMut() -> String>(
     deps: &LoopDeps<'_>,
@@ -3424,8 +3432,16 @@ async fn run_wait<F: FnMut() -> String>(
         .await;
     let mut ack_event_id: Option<String> = None;
     let mut terminal_outcome: Option<LoopOutcome> = None;
+    let failed = matches!(&outcome, Ok(WaitOutcome::FailedWithReceipt { .. }));
     match outcome {
         Ok(WaitOutcome::CompletedWithReceipt {
+            action: completed_action,
+            original_call_id,
+            output,
+            event_id,
+            data_envelope,
+        })
+        | Ok(WaitOutcome::FailedWithReceipt {
             action: completed_action,
             original_call_id,
             output,
@@ -3461,10 +3477,17 @@ async fn run_wait<F: FnMut() -> String>(
                     ChatMessage::tool_result(
                         mint(),
                         &call.id,
-                        "the task has completed; call wait_for_task last in a tool-call group or on its own to retrieve the original result",
+                        if failed {
+                            "the task failed; call wait_for_task on its own to retrieve the original result"
+                        } else {
+                            "the task has completed; call wait_for_task last in a tool-call group or on its own to retrieve the original result"
+                        },
                     ),
                 )?;
-                finish_tool(session, &call.id, true, sink);
+                finish_tool(session, &call.id, !failed, sink);
+                if failed {
+                    *halted = Some("not executed: the background action failed".into());
+                }
                 deps.session_seam.save(session).await?;
                 return Ok(None);
             }
@@ -3480,8 +3503,11 @@ async fn run_wait<F: FnMut() -> String>(
             ) {
                 return Err(invalid_original_result());
             }
-            let text =
-                "background task completed; its original result is recorded in the conversation";
+            let text = if failed {
+                "background task failed; its original result is recorded in the conversation"
+            } else {
+                "background task completed; its original result is recorded in the conversation"
+            };
             let envelope = crate::model_message_labels::internal_tool_result_envelope(
                 Some(&data_envelope),
                 &call.id,
@@ -3494,7 +3520,10 @@ async fn run_wait<F: FnMut() -> String>(
             // the model's assistant/tool-result group remains contiguous.
             session.conversation.insert(completion_position, message);
             ack_event_id = Some(event_id);
-            finish_tool(session, &call.id, true, sink);
+            finish_tool(session, &call.id, !failed, sink);
+            if failed {
+                *halted = Some("not executed: the background action failed".into());
+            }
         }
         Ok(WaitOutcome::Completed { output, event_id }) => {
             // Key on the stable delivery id so a racing publisher delivery of the

@@ -211,3 +211,130 @@ async fn original_result_save_failure_leaves_delivery_unacknowledged() {
             .all(|message| message.message_id != "durable-done-42")
     );
 }
+
+#[tokio::test]
+async fn original_failure_preserves_receipt_reports_failure_and_stops_the_group() {
+    let sess = MemSession::default();
+    let mut first = tool_use("c1", "exec_command");
+    first.tool_calls.push(ToolCall {
+        id: "c2".into(),
+        name: "exec_command".into(),
+        arguments_json: "{}".into(),
+    });
+    let model = ScriptModel {
+        turns: RefCell::new([first, answer("failed")].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    // Opaque content cannot determine success: the Provider's typed outcome does.
+    let output = ToolRunOutput {
+        content: "a native receipt without an error keyword".into(),
+        image_data_url: None,
+    };
+    let envelope = original(&output, true);
+    let scripted = tools(vec![ExecOutcome::Failed {
+        output: output.clone(),
+        event_id: Some("durable-failed-42".into()),
+        data_envelope: Some(envelope.clone()),
+    }]);
+    let reg = vec![mutating_tool(
+        "exec_command",
+        Capability::ShellExecConfirmed,
+    )];
+    let events = Rc::new(RefCell::new(vec![]));
+    let clock = || "t".to_string();
+    run_agent_turn(
+        &exec_deps(&sess, &model, &scripted, &reg, &clock),
+        exec_claim(),
+        ChatMessage::text("u", ChatRole::User, "run the actions"),
+        &mut EventLog(events.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scripted.exec_calls.borrow().as_slice(), ["c1"]);
+    assert_eq!(scripted.acks.borrow().as_slice(), ["durable-failed-42"]);
+    let saved = sess.inner.borrow();
+    let messages = &saved.as_ref().unwrap().conversation;
+    let result = messages
+        .iter()
+        .find(|m| m.message_id == "durable-failed-42")
+        .unwrap();
+    assert_eq!(result.text, output.content);
+    assert_eq!(result.tool_call_id.as_deref(), Some("c1"));
+    assert_eq!(result.data_envelope.as_ref(), Some(&envelope));
+    let skipped = messages
+        .iter()
+        .find(|m| m.tool_call_id.as_deref() == Some("c2"))
+        .unwrap();
+    assert!(skipped.text.contains("prior action in this group failed"));
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| e.starts_with("finished:c1:false:"))
+    );
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|e| e.starts_with("finished:c1:true:"))
+    );
+}
+
+#[tokio::test]
+async fn original_failure_rejects_corruption_and_never_acks_before_save() {
+    for case in ["corrupt-output", "corrupt-label", "save-failed"] {
+        let sess = MemSession {
+            fail_save_with_message_id: (case == "save-failed").then_some("durable-failed-42"),
+            ..Default::default()
+        };
+        let model = model();
+        let mut output = ToolRunOutput {
+            content: "native failure".into(),
+            image_data_url: None,
+        };
+        let mut envelope = original(&output, false);
+        if case == "corrupt-output" {
+            output.content = "altered".into();
+        }
+        if case == "corrupt-label" {
+            envelope.schema_version += 1;
+        }
+        let scripted = tools(vec![ExecOutcome::Failed {
+            output,
+            event_id: Some("durable-failed-42".into()),
+            data_envelope: Some(envelope),
+        }]);
+        let reg = vec![mutating_tool(
+            "exec_command",
+            Capability::ShellExecConfirmed,
+        )];
+        let clock = || "t".to_string();
+        assert!(
+            run_agent_turn(
+                &exec_deps(&sess, &model, &scripted, &reg, &clock),
+                exec_claim(),
+                ChatMessage::text("u", ChatRole::User, "run it"),
+                &mut NullTurnSink,
+            )
+            .await
+            .is_err(),
+            "{case}"
+        );
+        assert!(scripted.acks.borrow().is_empty(), "{case}");
+        assert!(
+            scripted.mutation_envelope_inputs.borrow().is_empty(),
+            "{case}"
+        );
+        assert!(
+            !sess
+                .inner
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .conversation
+                .iter()
+                .any(|m| m.message_id == "durable-failed-42"),
+            "{case}"
+        );
+    }
+}
