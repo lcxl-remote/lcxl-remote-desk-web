@@ -57,7 +57,7 @@ pub fn implicit_object_tool(name: &str, objects: &[ContextAttachment]) -> bool {
 }
 
 impl ObjectReadBinding<'_> {
-    fn selected(&self, call: &ToolCall) -> Result<Vec<&ContextAttachment>, AgentError> {
+    pub(crate) fn selected(&self, call: &ToolCall) -> Result<Vec<&ContextAttachment>, AgentError> {
         if !self.original.tool_names.contains(&call.name) {
             return Err(denied());
         }

@@ -4,6 +4,10 @@
 //! owner and atomically persist the decision, grants, audit and durable resume
 //! trigger under the current session/input fence before exposing success.
 
+use crate::input_read_context::{
+    ReadContextSelection,
+    object_read::{ObjectReadBinding, requires_objects},
+};
 use crate::{
     capability_availability::CapabilityAvailability,
     capability_risk::{CapabilityRiskSignals, classify_capability_risk},
@@ -23,6 +27,22 @@ use desk_agent_protocol::{
 };
 use sha2::{Digest, Sha256};
 
+pub fn requires_original_read_context(
+    request: &crate::dynamic_run::PermissionRequest,
+    decisions: &[crate::dynamic_run::PermissionDecisionItem],
+) -> bool {
+    request.items.iter().any(|item| {
+        requires_objects(&item.tool_name)
+            && decisions.iter().any(|decision| {
+                decision.item_id == item.item_id
+                    && matches!(
+                        decision.decision,
+                        crate::dynamic_run::PermissionItemDecision::Approve { .. }
+                    )
+            })
+    })
+}
+
 pub struct PermissionGrantIssuanceContext<'a> {
     pub surface: ProductSurface,
     pub registry: &'a ProviderRegistry,
@@ -41,6 +61,7 @@ pub fn build_permission_grants(
     request: &crate::dynamic_run::PermissionRequest,
     decisions: &[crate::dynamic_run::PermissionDecisionItem],
     context: &PermissionGrantIssuanceContext<'_>,
+    original_reads: Option<&ReadContextSelection>,
 ) -> Result<Vec<CapabilityGrant>, AgentError> {
     crate::assistant_policy::require_current_policy(session.policy_revision)?;
     request
@@ -102,6 +123,44 @@ pub fn build_permission_grants(
                 "approved permission capability is no longer ready; refresh and decide again",
             ));
         }
+        let original_read = if requires_objects(&requested.tool_name) {
+            let original = original_reads
+                .ok_or_else(|| internal("original object read selection is missing"))?;
+            original.validate()?;
+            let destination = original
+                .object_attachments
+                .first()
+                .and_then(|object| object.envelope.allowed_destinations.first())
+                .ok_or_else(|| internal("original object destination is missing"))?;
+            crate::input_read_context::validate_current_objects(
+                session,
+                &original.object_attachments,
+                destination,
+                context.now_unix_ms,
+            )?;
+            let binding = ObjectReadBinding {
+                original,
+                destination,
+                now_unix_ms: context.now_unix_ms,
+            };
+            let call = crate::chat::ToolCall {
+                id: requested.item_id.clone(),
+                name: requested.tool_name.clone(),
+                arguments_json: "{}".into(),
+            };
+            let expiry = binding.expiry(&call)?;
+            let references = binding
+                .selected(&call)?
+                .into_iter()
+                .map(|object| {
+                    serde_json::from_str::<ObjectRef>(&object.object_ref.opaque_token)
+                        .map_err(|_| internal("invalid original object reference"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some((references, expiry))
+        } else {
+            None
+        };
         let sensitive_content = capability.wire.data_policy.reads.iter().any(|category| {
             !matches!(
                 category,
@@ -167,35 +226,39 @@ pub fn build_permission_grants(
         } else if capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::FreshObjectReference]
         {
-            let object_refs = session
-                .context_attachments
-                .iter()
-                .filter(|attachment| {
-                    matches!(attachment.state, AttachmentState::Active)
-                        && attachment_matches_fresh_object_capability(
-                            capability.required_capability,
-                            attachment,
-                        )
-                })
-                .filter_map(|attachment| {
-                    serde_json::from_str::<desk_agent_protocol::computer_use::ObjectRef>(
-                        &attachment.object_ref.opaque_token,
-                    )
-                    .ok()
-                })
-                .chain(
-                    context
-                        .implicit_fresh_object_refs
-                        .iter()
-                        .filter(|object_ref| {
-                            object_ref_matches_fresh_object_capability(
+            let object_refs = if let Some((references, _)) = &original_read {
+                references.clone()
+            } else {
+                session
+                    .context_attachments
+                    .iter()
+                    .filter(|attachment| {
+                        matches!(attachment.state, AttachmentState::Active)
+                            && attachment_matches_fresh_object_capability(
                                 capability.required_capability,
-                                object_ref,
+                                attachment,
                             )
-                        })
-                        .cloned(),
-                )
-                .collect::<Vec<_>>();
+                    })
+                    .filter_map(|attachment| {
+                        serde_json::from_str::<desk_agent_protocol::computer_use::ObjectRef>(
+                            &attachment.object_ref.opaque_token,
+                        )
+                        .ok()
+                    })
+                    .chain(
+                        context
+                            .implicit_fresh_object_refs
+                            .iter()
+                            .filter(|object_ref| {
+                                object_ref_matches_fresh_object_capability(
+                                    capability.required_capability,
+                                    object_ref,
+                                )
+                            })
+                            .cloned(),
+                    )
+                    .collect::<Vec<_>>()
+            };
             let exact = crate::capability_grant::fresh_object_resource_scope(&object_refs);
             if exact.is_empty() {
                 return Err(internal(
@@ -265,6 +328,9 @@ pub fn build_permission_grants(
             .now_unix_ms
             .checked_add(u64::from(*ttl_seconds).saturating_mul(1_000))
             .ok_or_else(|| internal("grant expiry exceeds timestamp range"))?;
+        let expires_at_unix_ms = original_read.map_or(expires_at_unix_ms, |(_, expiry)| {
+            expires_at_unix_ms.min(expiry)
+        });
         let grant_id = format!(
             "grant-{:x}",
             Sha256::digest(
@@ -339,13 +405,6 @@ pub fn build_permission_grants(
     Ok(grants)
 }
 
-fn is_supported_spreadsheet_attachment(display_summary: &str) -> bool {
-    let display_summary = display_summary.to_ascii_lowercase();
-    [".xlsx", ".csv", ".tsv"]
-        .iter()
-        .any(|extension| display_summary.ends_with(extension))
-}
-
 fn attachment_matches_fresh_object_capability(
     capability: desk_agent_protocol::Capability,
     attachment: &ContextAttachment,
@@ -357,22 +416,6 @@ fn attachment_matches_fresh_object_capability(
         | desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed
         | desk_agent_protocol::Capability::WordDocumentCreateConfirmed => {
             attachment.kind == ContextAttachmentKind::DirectorySelection
-        }
-        desk_agent_protocol::Capability::FileMetadataRead => matches!(
-            attachment.kind,
-            ContextAttachmentKind::File | ContextAttachmentKind::DirectorySelection
-        ),
-        desk_agent_protocol::Capability::FileContentRead => {
-            attachment.kind == ContextAttachmentKind::File
-        }
-        desk_agent_protocol::Capability::SpreadsheetFileInspect
-        | desk_agent_protocol::Capability::SpreadsheetMergePreview => {
-            attachment.kind == ContextAttachmentKind::DirectorySelection
-                || (attachment.kind == ContextAttachmentKind::File
-                    && is_supported_spreadsheet_attachment(&attachment.display_summary))
-        }
-        desk_agent_protocol::Capability::TerminalOutputRead => {
-            attachment.kind == ContextAttachmentKind::TerminalSessionRef
         }
         _ => false,
     }

@@ -76,6 +76,51 @@ pub fn model_bound_permission_resume_message(
     Ok(message)
 }
 
+/// Authorize the original as the current message before replaying its text.
+/// Historical omission must never turn expired or differently bound content
+/// into a freshly authorized runtime bridge.
+pub fn authorized_permission_resume_message(
+    message_id: String,
+    policy: &crate::model_egress::ModelEgressPolicy,
+    original: &ChatMessage,
+) -> Result<ChatMessage, AgentError> {
+    let denied = || AgentError {
+        kind: AgentErrorKind::PermissionDenied,
+        message: "The original requirement is unavailable for this permission continuation.".into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    };
+    if original.role != ChatRole::User
+        || is_permission_resume_message(original)
+        || original.text.trim().is_empty()
+    {
+        return Err(denied());
+    }
+    let authorized = policy
+        .authorize_request(crate::seam::ModelRequest::text_only(
+            vec![original.clone()],
+            crate::prompt::ResponseFormatSpec::None,
+        ))
+        .map_err(|_| denied())?;
+    if authorized.request.messages.len() != 1 || authorized.input_envelopes.len() != 1 {
+        return Err(denied());
+    }
+    let source = &authorized.input_envelopes[0];
+    let mut bridge = model_bound_permission_resume_message(
+        message_id,
+        policy.destination.clone(),
+        &original.text,
+    )?;
+    let envelope = bridge.data_envelope.as_mut().ok_or_else(denied)?;
+    envelope.sensitivity = envelope.sensitivity.max(source.sensitivity);
+    envelope.retention = envelope.retention.most_restrictive(source.retention);
+    envelope.allowed_destinations = source.allowed_destinations.clone();
+    envelope.provenance.source_envelope_ids = vec![source.envelope_id.clone()];
+    envelope.validate().map_err(|_| denied())?;
+    Ok(bridge)
+}
+
 pub fn bind_exact_authorization_system_message(
     mut message: ChatMessage,
     destination: DestinationIdentity,

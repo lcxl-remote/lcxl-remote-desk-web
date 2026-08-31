@@ -1,6 +1,6 @@
 //! SQLite append-only event ledger for the OSS dynamic Device Assistant run.
 
-mod input_context;
+pub(crate) mod input_context;
 pub use desk_diagnose_core::input_read_context::ReadContextSelection;
 pub use input_context::InputSubject;
 

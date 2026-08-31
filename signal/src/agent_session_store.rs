@@ -301,6 +301,7 @@ impl SignalAgentSessionStore {
             _ => None,
         };
         Ok(Some(SessionSnapshot {
+            client_conversation_id: session.client_conversation_id,
             seq: row.version,
             active: session.turn_state.is_active(),
             request_id: session.current_request_id,
@@ -372,7 +373,21 @@ impl SignalAgentSessionStore {
             let resulting_state = request
                 .apply_user_decision(&decisions)
                 .map_err(|error| internal(format!("invalid permission decision: {error}")))?;
-            let grants = build_permission_grants(&session, &requested, &decisions, &grant_context)?;
+            let original_reads =
+                if desk_diagnose_core::permission_grant::requires_original_read_context(
+                    &requested, &decisions,
+                ) {
+                    crate::agent_run_event_store::input_context::original_on(&txn, &session).await?
+                } else {
+                    None
+                };
+            let grants = build_permission_grants(
+                &session,
+                &requested,
+                &decisions,
+                &grant_context,
+                original_reads.as_ref(),
+            )?;
             session.last_event_seq = session
                 .last_event_seq
                 .checked_add(1)
@@ -948,6 +963,7 @@ pub enum EventAppend {
 
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
+    pub client_conversation_id: Option<String>,
     pub seq: i64,
     pub active: bool,
     pub request_id: Option<String>,
@@ -987,6 +1003,7 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         _ => None,
     };
     Ok(SessionSnapshot {
+        client_conversation_id: session.client_conversation_id,
         seq: row.version,
         active: session.turn_state.is_active(),
         request_id: session.current_request_id,
@@ -2276,7 +2293,7 @@ mod tests {
             now_unix_ms: 1_000,
             implicit_fresh_object_refs: &[],
         };
-        assert!(build_permission_grants(&session, &request, &decisions, &context).is_err());
+        assert!(build_permission_grants(&session, &request, &decisions, &context, None).is_err());
         decisions[0].decision = PermissionItemDecision::Approve {
             resource_scope: exact_resource_scope.clone(),
             operation_scope: request.items[0].operation_scope.clone(),
@@ -2284,7 +2301,8 @@ mod tests {
             ttl_seconds: 120,
             max_uses: 1,
         };
-        let grants = build_permission_grants(&session, &request, &decisions, &context).unwrap();
+        let grants =
+            build_permission_grants(&session, &request, &decisions, &context, None).unwrap();
 
         assert_eq!(grants.len(), 1);
         let grant = &grants[0];
@@ -2305,7 +2323,8 @@ mod tests {
             ttl_seconds: 120,
             max_uses: 1,
         };
-        let narrowed = build_permission_grants(&session, &request, &decisions, &context).unwrap();
+        let narrowed =
+            build_permission_grants(&session, &request, &decisions, &context, None).unwrap();
         assert!(narrowed[0].resource_scope.is_empty());
         assert!(narrowed[0].operation_scope.is_empty());
     }

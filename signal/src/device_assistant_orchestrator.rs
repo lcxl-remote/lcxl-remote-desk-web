@@ -56,8 +56,10 @@ use crate::model_dial::SignalModelSeam;
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BUSY_FOLLOWUP_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+#[cfg(test)]
+use desk_diagnose_core::permission_resume::model_bound_permission_resume_message;
 use desk_diagnose_core::permission_resume::{
-    bind_exact_authorization_system_message, model_bound_permission_resume_message,
+    authorized_permission_resume_message, bind_exact_authorization_system_message,
 };
 
 fn extend_fixed_exact_action_capabilities(
@@ -697,6 +699,7 @@ pub async fn resume_after_permission_decision(
     actor_user_id: i32,
     target_device_id: String,
     conversation_id: String,
+    permission_request_id: String,
     ask: DeviceAssistantAsk,
 ) {
     run_turn_inner(
@@ -708,9 +711,18 @@ pub async fn resume_after_permission_decision(
         actor_user_id,
         target_device_id,
         ask,
-        Some(conversation_id),
+        Some(PermissionResume {
+            conversation_id,
+            permission_request_id,
+        }),
     )
     .await;
+}
+
+#[derive(Clone)]
+struct PermissionResume {
+    conversation_id: String,
+    permission_request_id: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -723,7 +735,7 @@ async fn run_turn_inner(
     actor_user_id: i32,
     target_device_id: String,
     ask: DeviceAssistantAsk,
-    resume_conversation_id: Option<String>,
+    resume_conversation_id: Option<PermissionResume>,
 ) {
     stream_event(
         connections.as_ref(),
@@ -783,14 +795,17 @@ async fn run_turn_inner(
         .map(str::trim)
         .filter(|id| is_valid_client_conversation_id(id))
         .map(str::to_string);
-    let conversation_id = resume_conversation_id.clone().unwrap_or_else(|| {
-        derive_conversation_key(
-            &actor_id,
-            &target_device_id,
-            ask.conversation_id.as_deref(),
-            &request_id,
-        )
-    });
+    let conversation_id = resume_conversation_id
+        .as_ref()
+        .map(|resume| resume.conversation_id.clone())
+        .unwrap_or_else(|| {
+            derive_conversation_key(
+                &actor_id,
+                &target_device_id,
+                ask.conversation_id.as_deref(),
+                &request_id,
+            )
+        });
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
         .expect("current time is after the Unix epoch");
     let session_reader = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
@@ -814,6 +829,13 @@ async fn run_turn_inner(
         }
     };
     let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
+    let client_conversation_id = if resume_conversation_id.is_some() {
+        snapshot
+            .as_ref()
+            .and_then(|session| session.client_conversation_id.clone())
+    } else {
+        client_conversation_id
+    };
     let subject = crate::agent_run_event_store::InputSubject {
         run_id: &conversation_id,
         actor_id: &actor_id,
@@ -821,12 +843,28 @@ async fn run_turn_inner(
         client_conversation_id: client_conversation_id.as_deref(),
     };
     let selection = async {
-        let original = if resume_conversation_id.is_some() {
-            let revision = snapshot
+        let original = if let Some(resume) = resume_conversation_id.as_ref() {
+            let session = snapshot
                 .as_ref()
-                .ok_or_else(|| transport_error("original input session is missing"))?
-                .input_revision;
-            event_store.original_read_context(subject, revision).await?
+                .ok_or_else(|| transport_error("original input session is missing"))?;
+            use desk_diagnose_core::dynamic_run::PermissionRequestState;
+            if !session.permission_requests.iter().any(|request| {
+                request.request_id == resume.permission_request_id
+                    && request.input_revision == session.input_revision
+                    && matches!(
+                        request.state,
+                        PermissionRequestState::Approved
+                            | PermissionRequestState::PartiallyApproved
+                            | PermissionRequestState::Denied
+                    )
+            }) {
+                return Err(transport_error(
+                    "permission decision no longer belongs to the current input",
+                ));
+            }
+            event_store
+                .original_read_context(subject, session.input_revision)
+                .await?
         } else {
             None
         };
@@ -862,6 +900,13 @@ async fn run_turn_inner(
     };
     let mut ask = ask;
     if resume_conversation_id.is_some() {
+        ask.question = snapshot
+            .as_ref()
+            .and_then(|session| {
+                desk_diagnose_core::permission_resume::latest_user_requirement(&session.messages)
+            })
+            .map(|message| message.text.clone())
+            .unwrap_or_default();
         let providers = device_assistant_provider_registry();
         ask.selected_capability_ids = original_read_context
             .as_ref()
@@ -1611,11 +1656,24 @@ async fn run_turn_inner(
     };
     let accepted_at = clock();
     if resume_conversation_id.is_some() {
-        let decision_message = match model_bound_permission_resume_message(
-            format!("{request_id}-decision"),
-            destination,
-            &ask.question,
-        ) {
+        let decision_message = match (|| {
+            let original = snapshot
+                .as_ref()
+                .and_then(|session| {
+                    desk_diagnose_core::permission_resume::latest_user_requirement(
+                        &session.messages,
+                    )
+                })
+                .ok_or_else(|| transport_error("original permission input is unavailable"))?;
+            let policy = model
+                .model_egress_policy()?
+                .ok_or_else(|| transport_error("permission model policy is unavailable"))?;
+            authorized_permission_resume_message(
+                format!("{request_id}-decision"),
+                &policy,
+                original,
+            )
+        })() {
             Ok(message) => message,
             Err(error) => {
                 log::warn!("[device-assistant] failed to bind permission resume event: {error:?}");
@@ -1837,6 +1895,7 @@ async fn run_turn_inner(
 mod tests {
     use super::*;
     mod original_input;
+    mod permission_object;
     use desk_agent_protocol::data_lineage::Sensitivity;
     use desk_diagnose_core::seam::NullTurnSink;
     use sea_orm::{Database, EntityTrait};
@@ -2004,10 +2063,10 @@ mod tests {
     }
 
     async fn capture_one_openai_request_with_sse(
-        listener: TcpListener,
-        sse: &'static str,
+        listener: impl std::borrow::Borrow<TcpListener>,
+        sse: &str,
     ) -> Vec<u8> {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (mut socket, _) = listener.borrow().accept().await.unwrap();
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4096];
         let (header_end, content_length) = loop {

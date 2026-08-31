@@ -82,3 +82,105 @@ fn invalid_model_destination_never_produces_a_bridge() {
         .is_err()
     );
 }
+
+fn policy() -> crate::model_egress::ModelEgressPolicy {
+    crate::model_egress::ModelEgressPolicy {
+        destination: destination(),
+        selected_source_tools: Default::default(),
+        export_authorization_id: "resume-test".into(),
+        now_unix_ms: 1_000,
+        byte_cap: crate::sink_authorizer::MAX_SINK_BYTES,
+        omit_finite_retention_historical_turns: true,
+    }
+}
+
+fn original() -> ChatMessage {
+    let mut original = crate::model_message_labels::model_bound_user_message(
+        "original".into(),
+        "original requirement".into(),
+        destination(),
+    )
+    .unwrap();
+    original.turn_id = Some("original-turn".into());
+    let envelope = original.data_envelope.as_mut().unwrap();
+    envelope.sensitivity = Sensitivity::Sensitive;
+    envelope.retention.expires_at_unix_ms = Some(100_000);
+    original
+}
+
+#[test]
+fn authorized_bridge_keeps_original_lineage_sensitivity_and_deadline() {
+    let original = original();
+    let bridge =
+        authorized_permission_resume_message("bridge".into(), &policy(), &original).unwrap();
+    let source = original.data_envelope.as_ref().unwrap();
+    let envelope = bridge.data_envelope.as_ref().unwrap();
+    assert_eq!(envelope.sensitivity, source.sensitivity);
+    assert_eq!(
+        envelope.retention.expires_at_unix_ms,
+        source.retention.expires_at_unix_ms
+    );
+    assert!(envelope.retention.delete_with_run);
+    assert_eq!(envelope.allowed_destinations, source.allowed_destinations);
+    assert_eq!(
+        envelope.provenance.source_envelope_ids.as_slice(),
+        std::slice::from_ref(&source.envelope_id)
+    );
+    assert!(bridge.text.contains(&original.text));
+    assert!(is_permission_resume_message(&bridge));
+    policy()
+        .authorize_request(crate::seam::ModelRequest::text_only(
+            vec![bridge],
+            crate::prompt::ResponseFormatSpec::None,
+        ))
+        .unwrap();
+}
+
+#[test]
+fn original_content_cannot_be_omitted_then_reminted_for_permission_resume() {
+    for mutation in 0..8 {
+        let mut original = original();
+        let mut policy = policy();
+        match mutation {
+            0 => original.data_envelope = None,
+            1 => original.text.push_str(" tampered"),
+            2 => original.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret,
+            3 => {
+                original
+                    .data_envelope
+                    .as_mut()
+                    .unwrap()
+                    .retention
+                    .expires_at_unix_ms = Some(999)
+            }
+            4 => {
+                if let DestinationIdentity::Model {
+                    connection_revision,
+                    ..
+                } = &mut policy.destination
+                {
+                    *connection_revision += 1;
+                }
+            }
+            5 => original
+                .data_envelope
+                .as_mut()
+                .unwrap()
+                .allowed_destinations
+                .clear(),
+            6 => original.role = ChatRole::Assistant,
+            _ => {
+                original = model_bound_permission_resume_message(
+                    "old-bridge".into(),
+                    destination(),
+                    "request",
+                )
+                .unwrap()
+            }
+        }
+        assert!(
+            authorized_permission_resume_message("bridge".into(), &policy, &original).is_err(),
+            "mutation={mutation}"
+        );
+    }
+}

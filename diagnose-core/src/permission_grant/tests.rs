@@ -97,6 +97,7 @@ fn compile(
             now_unix_ms: 1000,
             implicit_fresh_object_refs: &[],
         },
+        None,
     )
 }
 
@@ -256,6 +257,7 @@ fn exact_external_grant_never_restores_removed_scopes_or_destinations() {
             now_unix_ms: 1000,
             implicit_fresh_object_refs: &[],
         },
+        None,
     )
     .unwrap();
     assert_eq!(grants.len(), 1);
@@ -318,23 +320,10 @@ fn context_attachment(
 }
 
 #[test]
-fn directory_selection_can_back_spreadsheet_and_local_draft_grants() {
+fn directory_selection_can_back_local_draft_grants() {
     let mut directory = context_attachment("directory", "attach-directory", "worker-1", 1);
     directory.kind = ContextAttachmentKind::DirectorySelection;
-    directory.display_summary = "selected spreadsheet input directory".into();
-
-    assert!(attachment_matches_fresh_object_capability(
-        desk_agent_protocol::Capability::SpreadsheetFileInspect,
-        &directory,
-    ));
-    assert!(attachment_matches_fresh_object_capability(
-        desk_agent_protocol::Capability::SpreadsheetMergePreview,
-        &directory,
-    ));
-    assert!(!attachment_matches_fresh_object_capability(
-        desk_agent_protocol::Capability::FileContentRead,
-        &directory,
-    ));
+    directory.display_summary = "selected draft output directory".into();
     assert!(attachment_matches_fresh_object_capability(
         desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed,
         &directory,
@@ -344,7 +333,7 @@ fn directory_selection_can_back_spreadsheet_and_local_draft_grants() {
     unsupported_file.kind = ContextAttachmentKind::File;
     unsupported_file.display_summary = "notes.txt".into();
     assert!(!attachment_matches_fresh_object_capability(
-        desk_agent_protocol::Capability::SpreadsheetFileInspect,
+        desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed,
         &unsupported_file,
     ));
 }

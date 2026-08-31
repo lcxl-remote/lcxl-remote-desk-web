@@ -13,6 +13,7 @@ use desk_diagnose_core::{
 };
 use sea_orm::{ConnectionTrait, Database, sea_query::Expr};
 
+mod grants;
 mod wire;
 
 fn destination() -> DestinationIdentity {

@@ -300,7 +300,7 @@ impl SignalAgentRunEventStore {
     }
 }
 
-async fn original_on(
+pub(crate) async fn original_on(
     txn: &sea_orm::DatabaseTransaction,
     session: &PersistedAgentSession,
 ) -> Result<Option<ReadContextSelection>, AgentError> {
