@@ -52,6 +52,7 @@ pub mod model_context;
 pub mod model_egress;
 pub mod model_message_labels;
 pub mod model_profile;
+pub mod object_context;
 pub mod parser;
 pub mod permission_grant;
 pub mod permission_resume;

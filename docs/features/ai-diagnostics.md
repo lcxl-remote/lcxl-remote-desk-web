@@ -42,6 +42,8 @@ reader's place unexpectedly.
 - **Inspectable Tool Calls** — select any item in the tool timeline to expand the model-produced JSON input and the redacted, bounded output returned to the model. The details remain available in settled turns and restored conversation history.
 - **Shared Core** — the transport-neutral diagnostic logic lives in the `desk-diagnose-core` crate, reused by the central brain so behavior never drifts.
 
+Owner-selected file, directory and terminal attachments store only bounded display metadata, opaque device references and source labels, not their contents. Selection does not grant execution authority. In open-source Signal, a repeated selection keeps the original attachment identity and expiry; reusing the same client request ID with different metadata or a different model destination is rejected. Replaying a detached selection does not reactivate it. The original device still validates each reference when data is read.
+
 When Device Assistant accepts an in-flight follow-up, the shared loop rechecks the input revision at both the initial and final save boundaries so an old answer cannot become the result for a new requirement. Ordinary storage failures remain errors rather than being reported as supersession. Retracting an old answer does not confirm cancellation of a device action that already started.
 
 The shared execution interface distinguishes runtime-confirmed non-execution from operator rejection. If an execution backend confirms an action was closed before dispatch, the loop records why it was not executed and stops further mutations in that turn, without calling it user cancellation. This internal outcome grants no execution authority and does not imply identical durable recovery support in every backend.

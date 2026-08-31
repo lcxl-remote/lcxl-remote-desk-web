@@ -99,6 +99,7 @@ impl TaskStatusProjection {
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunEventKind {
     UserFollowup,
+    ObjectContextUpdated,
     ModelStep,
     ToolDiscovery,
     PermissionRequested,
@@ -118,6 +119,7 @@ impl AgentRunEventKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::UserFollowup => "user_followup",
+            Self::ObjectContextUpdated => "object_context_updated",
             Self::ModelStep => "model_step",
             Self::ToolDiscovery => "tool_discovery",
             Self::PermissionRequested => "permission_requested",

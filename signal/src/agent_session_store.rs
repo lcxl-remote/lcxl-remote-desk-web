@@ -7,8 +7,7 @@ use chrono::{DateTime, Duration, Utc};
 use desk_agent_protocol::capability_grant::CAPABILITY_GRANT_SCHEMA_VERSION;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
 use desk_diagnose_core::context_attachment::{
-    AttachmentRuntimeBinding, AttachmentStaleReason, AttachmentState, ContextAttachment,
-    ContextAttachmentKind,
+    AttachmentRuntimeBinding, AttachmentState, ContextAttachment, ContextAttachmentKind,
 };
 use desk_diagnose_core::dynamic_run::{
     AGENT_RUN_EVENT_SCHEMA_VERSION, PermissionRequestedEvent, TaskStatusUpdatedEvent,
@@ -53,17 +52,8 @@ pub struct ContextSelectionClaim {
     pub now_unix_ms: u64,
 }
 
-#[derive(Debug, Clone)]
-pub enum ObjectContextMutation {
-    Attach(ContextAttachment),
-    Detach {
-        attachment_id: String,
-    },
-    Refresh {
-        stale_attachment_id: String,
-        replacement: ContextAttachment,
-    },
-}
+pub use desk_diagnose_core::object_context::ObjectContextMutation;
+use desk_diagnose_core::object_context::apply_object_mutation;
 
 impl SignalAgentSessionStore {
     pub fn new(db: DatabaseConnection) -> Self {
@@ -1121,50 +1111,6 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         context_notices: session.context_notices,
         context_attachments: session.context_attachments,
     })
-}
-
-fn apply_object_mutation(
-    session: &mut PersistedAgentSession,
-    mutation: &ObjectContextMutation,
-) -> Result<bool, AgentError> {
-    match mutation {
-        ObjectContextMutation::Attach(attachment) => {
-            if session.context_attachments.iter().any(|existing| {
-                matches!(existing.state, AttachmentState::Active)
-                    && existing.object_ref.source_provider_id
-                        == attachment.object_ref.source_provider_id
-                    && existing.object_ref.source_capability_id
-                        == attachment.object_ref.source_capability_id
-                    && existing.object_ref.object_incarnation
-                        == attachment.object_ref.object_incarnation
-            }) {
-                return Ok(false);
-            }
-            session
-                .attach_context(attachment.clone())
-                .map_err(|error| internal(format!("attach Device Assistant object: {error}")))
-        }
-        ObjectContextMutation::Detach { attachment_id } => {
-            if !session
-                .context_attachments
-                .iter()
-                .any(|attachment| attachment.attachment_id == *attachment_id)
-            {
-                return Err(transport("Device Assistant attachment does not exist"));
-            }
-            Ok(session.detach_context(attachment_id))
-        }
-        ObjectContextMutation::Refresh {
-            stale_attachment_id,
-            replacement,
-        } => session
-            .refresh_context(
-                stale_attachment_id,
-                AttachmentStaleReason::ObjectChanged,
-                replacement.clone(),
-            )
-            .map_err(|error| internal(format!("refresh Device Assistant object: {error}"))),
-    }
 }
 
 fn internal(message: impl Into<String>) -> AgentError {

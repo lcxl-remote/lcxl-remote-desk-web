@@ -9,8 +9,7 @@ use desk_agent_protocol::data_lineage::{
 };
 use desk_agent_protocol::device_assistant::{
     DeviceAssistantAsk, DeviceAssistantContextUpdate, DeviceAssistantContextUpdated,
-    DeviceAssistantEvent, DeviceAssistantObjectContextOperation,
-    DeviceAssistantObjectContextUpdate, DeviceAssistantObjectContextUpdated,
+    DeviceAssistantEvent, DeviceAssistantObjectContextUpdate, DeviceAssistantObjectContextUpdated,
 };
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope, ExecutionMode};
@@ -538,181 +537,6 @@ pub async fn update_context(
     }
 }
 
-fn file_context_attachment(
-    update: &DeviceAssistantObjectContextUpdate,
-    object_ref: &desk_agent_protocol::computer_use::ObjectRef,
-    display_summary: &str,
-    actor_id: &str,
-    device_id: &str,
-    destination: &DestinationIdentity,
-    now_unix_ms: u64,
-) -> Result<ContextAttachment, AgentError> {
-    let expires_at_unix_ms = u64::try_from(
-        chrono::DateTime::parse_from_rfc3339(&object_ref.expires_at)
-            .map_err(|_| transport_error("invalid file reference expiry"))?
-            .timestamp_millis(),
-    )
-    .map_err(|_| transport_error("file reference expiry predates the Unix epoch"))?;
-    if expires_at_unix_ms <= now_unix_ms {
-        return Err(transport_error("selected file reference already expired"));
-    }
-    let encoded_ref = serde_json::to_string(object_ref)
-        .map_err(|error| transport_error(format!("encode selected file reference: {error}")))?;
-    let metadata = serde_json::to_vec(&serde_json::json!({
-        "provider_id": desk_diagnose_core::device_assistant::FILE_WORKSPACE_PROVIDER_ID,
-        "capability_id": desk_diagnose_core::device_assistant::FILE_METADATA_CAPABILITY_ID,
-        "object_ref": object_ref,
-        "display_summary": display_summary,
-    }))
-    .map_err(|error| transport_error(format!("encode selected file metadata: {error}")))?;
-    let digest = format!("{:x}", Sha256::digest(&metadata));
-    let attachment_id = format!("context-{}", uuid::Uuid::new_v4());
-    Ok(ContextAttachment {
-        schema_version: CONTEXT_ATTACHMENT_SCHEMA_VERSION,
-        attachment_id: attachment_id.clone(),
-        client_request_id: update.client_request_id.clone(),
-        actor_id: actor_id.to_string(),
-        device_id: device_id.to_string(),
-        surface: AgentSessionSurface::DeviceAssistant,
-        kind: match object_ref.object_kind {
-            desk_agent_protocol::computer_use::ObjectKind::File => ContextAttachmentKind::File,
-            desk_agent_protocol::computer_use::ObjectKind::Directory => {
-                ContextAttachmentKind::DirectorySelection
-            }
-            _ => {
-                return Err(transport_error(
-                    "selected object is not a file or directory",
-                ));
-            }
-        },
-        object_ref: AttachmentObjectRef {
-            opaque_token: encoded_ref,
-            object_incarnation: format!("{}:{}", object_ref.snapshot_id, object_ref.token),
-            source_provider_id: desk_diagnose_core::device_assistant::FILE_WORKSPACE_PROVIDER_ID
-                .into(),
-            source_capability_id: desk_diagnose_core::device_assistant::FILE_METADATA_CAPABILITY_ID
-                .into(),
-        },
-        bounds: AttachmentBounds {
-            max_bytes: 64 * 1024,
-            max_objects: 32,
-        },
-        display_summary: display_summary.to_string(),
-        created_at_unix_ms: now_unix_ms,
-        expires_at_unix_ms,
-        envelope: DataEnvelope {
-            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-            envelope_id: format!("envelope-{attachment_id}"),
-            content: ContentRef::EphemeralObservation {
-                observation_id: format!("selection-{}", uuid::Uuid::new_v4()),
-                size_bytes: metadata.len() as u64,
-                expires_at_unix_ms,
-            },
-            provenance: DataProvenance {
-                source_provider_id:
-                    desk_diagnose_core::device_assistant::FILE_WORKSPACE_PROVIDER_ID.into(),
-                source_tool_name: "inspect_selected_file_metadata".into(),
-                source_object_id: Some(object_ref.token.clone()),
-                source_envelope_ids: Vec::new(),
-            },
-            digest_sha256: digest,
-            sensitivity: Sensitivity::Sensitive,
-            allowed_destinations: vec![destination.clone()],
-            retention: RetentionBoundary {
-                expires_at_unix_ms: Some(expires_at_unix_ms),
-                delete_with_run: false,
-            },
-        },
-        state: AttachmentState::Active,
-    })
-}
-
-fn terminal_context_attachment(
-    update: &DeviceAssistantObjectContextUpdate,
-    object_ref: &desk_agent_protocol::computer_use::ObjectRef,
-    display_summary: &str,
-    actor_id: &str,
-    device_id: &str,
-    destination: &DestinationIdentity,
-    now_unix_ms: u64,
-) -> Result<ContextAttachment, AgentError> {
-    if object_ref.object_kind != desk_agent_protocol::computer_use::ObjectKind::TerminalOutput {
-        return Err(transport_error(
-            "selected object is not a terminal output snapshot",
-        ));
-    }
-    let expires_at_unix_ms = u64::try_from(
-        chrono::DateTime::parse_from_rfc3339(&object_ref.expires_at)
-            .map_err(|_| transport_error("invalid terminal reference expiry"))?
-            .timestamp_millis(),
-    )
-    .map_err(|_| transport_error("terminal reference expiry predates the Unix epoch"))?;
-    if expires_at_unix_ms <= now_unix_ms {
-        return Err(transport_error(
-            "selected terminal reference already expired",
-        ));
-    }
-    let encoded_ref = serde_json::to_string(object_ref)
-        .map_err(|error| transport_error(format!("encode terminal reference: {error}")))?;
-    let metadata = serde_json::to_vec(&serde_json::json!({
-        "provider_id": desk_diagnose_core::device_assistant::TERMINAL_OUTPUT_PROVIDER_ID,
-        "capability_id": desk_diagnose_core::device_assistant::TERMINAL_OUTPUT_CAPABILITY_ID,
-        "object_ref": object_ref,
-        "display_summary": display_summary,
-    }))
-    .map_err(|error| transport_error(format!("encode terminal metadata: {error}")))?;
-    let digest = format!("{:x}", Sha256::digest(&metadata));
-    let attachment_id = format!("context-{}", uuid::Uuid::new_v4());
-    Ok(ContextAttachment {
-        schema_version: CONTEXT_ATTACHMENT_SCHEMA_VERSION,
-        attachment_id: attachment_id.clone(),
-        client_request_id: update.client_request_id.clone(),
-        actor_id: actor_id.to_string(),
-        device_id: device_id.to_string(),
-        surface: AgentSessionSurface::DeviceAssistant,
-        kind: ContextAttachmentKind::TerminalSessionRef,
-        object_ref: AttachmentObjectRef {
-            opaque_token: encoded_ref,
-            object_incarnation: format!("{}:{}", object_ref.snapshot_id, object_ref.token),
-            source_provider_id: desk_diagnose_core::device_assistant::TERMINAL_OUTPUT_PROVIDER_ID
-                .into(),
-            source_capability_id:
-                desk_diagnose_core::device_assistant::TERMINAL_OUTPUT_CAPABILITY_ID.into(),
-        },
-        bounds: AttachmentBounds {
-            max_bytes: 32 * 1024,
-            max_objects: 8,
-        },
-        display_summary: display_summary.to_string(),
-        created_at_unix_ms: now_unix_ms,
-        expires_at_unix_ms,
-        envelope: DataEnvelope {
-            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-            envelope_id: format!("envelope-{attachment_id}"),
-            content: ContentRef::EphemeralObservation {
-                observation_id: format!("terminal-selection-{}", uuid::Uuid::new_v4()),
-                size_bytes: metadata.len() as u64,
-                expires_at_unix_ms,
-            },
-            provenance: DataProvenance {
-                source_provider_id:
-                    desk_diagnose_core::device_assistant::TERMINAL_OUTPUT_PROVIDER_ID.into(),
-                source_tool_name: "inspect_selected_terminal_output".into(),
-                source_object_id: Some(object_ref.token.clone()),
-                source_envelope_ids: Vec::new(),
-            },
-            digest_sha256: digest,
-            sensitivity: Sensitivity::Sensitive,
-            allowed_destinations: vec![destination.clone()],
-            retention: RetentionBoundary {
-                expires_at_unix_ms: Some(expires_at_unix_ms),
-                delete_with_run: false,
-            },
-        },
-        state: AttachmentState::Active,
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn update_object_context(
     connections: web::Data<SharedConnectionMap>,
@@ -735,57 +559,17 @@ pub async fn update_object_context(
         let now = chrono::Utc::now();
         let now_unix_ms = u64::try_from(now.timestamp_millis())
             .map_err(|_| transport_error("system clock predates the Unix epoch"))?;
-        let mutation = match &update.operation {
-            DeviceAssistantObjectContextOperation::AttachFile {
-                object_ref,
-                display_summary,
-            } => {
-                crate::agent_session_store::ObjectContextMutation::Attach(file_context_attachment(
-                    &update,
-                    object_ref,
-                    display_summary,
-                    &actor_id,
-                    &target_device_id,
-                    &destination,
-                    now_unix_ms,
-                )?)
-            }
-            DeviceAssistantObjectContextOperation::AttachTerminalOutput {
-                object_ref,
-                display_summary,
-            } => crate::agent_session_store::ObjectContextMutation::Attach(
-                terminal_context_attachment(
-                    &update,
-                    object_ref,
-                    display_summary,
-                    &actor_id,
-                    &target_device_id,
-                    &destination,
-                    now_unix_ms,
-                )?,
-            ),
-            DeviceAssistantObjectContextOperation::Detach { attachment_id } => {
-                crate::agent_session_store::ObjectContextMutation::Detach {
-                    attachment_id: attachment_id.clone(),
-                }
-            }
-            DeviceAssistantObjectContextOperation::RefreshFile {
-                stale_attachment_id,
-                object_ref,
-                display_summary,
-            } => crate::agent_session_store::ObjectContextMutation::Refresh {
-                stale_attachment_id: stale_attachment_id.clone(),
-                replacement: file_context_attachment(
-                    &update,
-                    object_ref,
-                    display_summary,
-                    &actor_id,
-                    &target_device_id,
-                    &destination,
-                    now_unix_ms,
-                )?,
+        let mutation = desk_diagnose_core::object_context::build_object_context_mutation(
+            &update,
+            desk_diagnose_core::object_context::ObjectContextBuild {
+                actor_id: &actor_id,
+                device_id: &target_device_id,
+                destination: &destination,
+                now_unix_ms,
+                attachment_id: &format!("context-{}", uuid::Uuid::new_v4()),
+                observation_id: &format!("selection-{}", uuid::Uuid::new_v4()),
             },
-        };
+        )?;
         let conversation_key = derive_conversation_key(
             &actor_id,
             &target_device_id,
