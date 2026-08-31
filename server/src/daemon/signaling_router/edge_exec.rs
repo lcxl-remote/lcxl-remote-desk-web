@@ -733,7 +733,6 @@ async fn dispatch_linux_privileged_exec_plan(
     });
 }
 
-#[cfg(target_os = "linux")]
 fn privileged_runtime_exceeds_local_ceiling(
     plan: &ExecPlan,
     policy: &crate::model::settings::AiExecutionPolicy,
@@ -1006,7 +1005,7 @@ pub(super) async fn handle_computer_action_inbound(
     use desk_ipc_protocol::message::ComputerActionPlanPayload;
 
     let reject = |ctx: &RouterContext, model: &SignalingModel, message: String| {
-        emit_standard_error_response(ctx, model, DeskErrorCode::PERMISSION_ERROR, &message);
+        emit_computer_action_rejected(ctx, model, &message);
     };
     let Some(authz) = ctx.inbound_authz.as_ref() else {
         reject(
@@ -1065,26 +1064,58 @@ pub(super) async fn handle_computer_action_inbound(
         connection_id: model.from_connection_id.clone(),
         plan,
     };
-    let Some(connection_id) = model.from_connection_id.as_deref() else {
-        emit_standard_error_response(
-            ctx,
-            model,
-            DeskErrorCode::SESSION_SELECTION_REQUIRED,
-            "Computer Action request has no selected desktop session",
-        );
-        return Ok(());
-    };
     if let Err(error) = ctx
         .worker_mgr
-        .send_to_connection_worker(connection_id, ServiceToWorker::ComputerActionPlan(payload))
+        .send_central_or_connection_worker(
+            model.from_connection_id.as_deref(),
+            ServiceToWorker::ComputerActionPlan(payload),
+        )
         .await
     {
-        emit_standard_error_response(
+        emit_computer_action_rejected(
             ctx,
             model,
-            DeskErrorCode::FEATURE_UNAVAILABLE,
-            &format!("Computer Action worker unavailable: {error}"),
+            "Computer Action worker unavailable or desktop session not selected",
         );
+        log::debug!("Computer Action worker handoff rejected: {error}");
     }
     Ok(())
+}
+
+/// A rejection inside the action handler is a request-specific completion,
+/// not an uncorrelated protocol Error. No worker has accepted the action.
+fn emit_computer_action_rejected(ctx: &RouterContext, model: &SignalingModel, message: &str) {
+    use desk_agent_protocol::computer_use::{
+        ComputerActionCompleted, ComputerActionResultClass, SealedComputerActionPlan,
+    };
+    let reply = match model.get_data::<SealedComputerActionPlan>() {
+        Ok(plan) => SignalingModel::success_response(
+            &model.request_id,
+            SignalingType::ComputerActionCompleted,
+            None,
+            model.from_connection_id.clone(),
+            Some(&ComputerActionCompleted {
+                work_id: plan.work_id,
+                action_request_id: plan.action_request_id,
+                execution_generation: plan.execution_generation,
+                result: ComputerActionResultClass::DefinitelyNotStarted,
+                facts: vec![],
+                message: Some(message.to_string()),
+                output: None,
+            }),
+        ),
+        Err(_) => SignalingModel::error(
+            &model.request_id,
+            SignalingType::ComputerActionCompleted,
+            None,
+            model.from_connection_id.clone(),
+            DeskErrorCode::PERMISSION_ERROR,
+            "Invalid sealed Computer Action plan",
+        ),
+    };
+    if let Ok(reply) = reply {
+        if let Ok(text) = serde_json::to_string(&reply) {
+            let _ = ctx.outbound_tx.send(text);
+        }
+    }
 }

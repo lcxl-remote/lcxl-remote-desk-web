@@ -1,5 +1,7 @@
 use super::*;
 
+mod computer_action;
+
 const TEST_CONNECTION_EPOCH: &str = "test-connection-epoch";
 
 /// Keep virtual-display test cases focused on their mode inputs while

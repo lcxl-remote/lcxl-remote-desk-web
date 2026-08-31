@@ -54,6 +54,8 @@ Personal Device Assistant shares a compiled policy revision with Manager, indepe
 
 Browser Providers use shared closed-input preflight: input size is bounded, the selected BrowserSurface must be unexpired, and the server derives action scope and risk. Generic form filling and element activation remain InputFallback; Gmail/Slack draft handoffs do not become send actions. Passing preflight is not execution authority: the existing grant, egress, durable dispatch, and target-device checks still apply.
 
+A centrally dispatched Computer Action does not require a browser to keep a remote-desktop connection open. Portable/DeskServer paths with an existing single worker can hand the action to that worker; session-targeted routing still requires an explicit binding and never guesses a desktop. Rejection inside the action handler before worker handoff reports definitely-not-started through `ComputerActionCompleted` correlated to the original request, rather than waiting for a timeout. This neither cancels other actions nor relaxes authorization, readiness, or local capability checks.
+
 ### Linux capability boundary
 
 On Linux, the Assistant advertises each capability independently. System information, process and network inspection, container inspection, terminal-output reads, and owner-confirmed `bash`/`sh` execution use the same thin-edge and confirmation boundaries as Windows and macOS. On a booted systemd host, it also provides `systemd` service status and bounded `journald` JSON queries; those two capabilities remain visibly unavailable when `systemctl`/`journalctl` or the systemd runtime is absent, and journal visibility is limited by the Desk Server process permissions.

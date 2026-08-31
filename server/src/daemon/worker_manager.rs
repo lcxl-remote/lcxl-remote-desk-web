@@ -2728,6 +2728,20 @@ impl WorkerManager {
         self.send_to_worker(msg).await
     }
 
+    /// Central actions have no browser peer address. Only the established
+    /// single-worker path permits that; resident workers still require the
+    /// connection's immutable session selection.
+    pub async fn send_central_or_connection_worker(
+        &self,
+        connection_id: Option<&str>,
+        msg: ServiceToWorker,
+    ) -> Result<(), String> {
+        match connection_id {
+            Some(connection_id) => self.send_to_connection_worker(connection_id, msg).await,
+            None => self.send_to_worker(msg).await,
+        }
+    }
+
     /// Route capture and human-input traffic through the currently active
     /// desktop of the connection's immutable session. Unlike
     /// `send_to_connection_worker`, this may select Winlogon, but it can never
@@ -3425,3 +3439,6 @@ mod incarnation_tests;
 
 #[cfg(test)]
 mod policy_tests;
+
+#[cfg(test)]
+mod central_routing_tests;

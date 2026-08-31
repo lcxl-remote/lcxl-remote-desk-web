@@ -50,6 +50,8 @@ AI 由**中心信令服务器**（“中心大脑”）编排。设备是**瘦�
 
 浏览器 Provider 使用两端共享的闭集输入预检：输入大小受限，选中 BrowserSurface 必须未过期，动作范围与风险由服务端派生。通用填表和元素激活仍按 InputFallback 处理，Gmail/Slack 草稿交接不会变成发送操作。预检通过不是执行授权，后续仍需原有 grant、外发检查、持久化派发与目标设备校验。
 
+中心下发的 Computer Action 不要求浏览器保持远程桌面连接：在已有单 worker 的便携/DeskServer 路径中，可以直接交给该 worker；启用多会话路由时仍必须有明确的会话绑定，不能猜选桌面。动作处理器在交付 worker 前拒绝请求时，使用原请求关联的 `ComputerActionCompleted` 报告“确定未开始”，而非等待超时；这不撤销其他动作，也不放宽授权、readiness 或本地能力限制。
+
 ### Linux 能力边界
 
 在 Linux 上，助手按能力逐项声明可用性。系统信息、进程与网络检查、容器检查、终端输出读取，以及所有者确认后的 `bash`/`sh` 执行，都沿用与 Windows、macOS 相同的瘦被控端和确认边界。在已经启动 systemd 的主机上，还可查询 `systemd` 服务状态和有界的 `journald` JSON 日志；如果缺少 systemd 运行时、`systemctl` 或 `journalctl`，对应两项能力会明确显示为不可用。日志可见范围仍受 Desk Server 进程自身权限限制。
