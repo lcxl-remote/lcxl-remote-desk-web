@@ -771,7 +771,9 @@ impl SignalBackgroundTaskStore {
                 .await
                 .map_err(agent_error)?;
             if matches!(outcome, EventAppend::Appended | EventAppend::AlreadyPresent)
-                && self.follow_up_completion(&sessions, &row, &now).await?
+                && self
+                    .follow_up_completion(&sessions, &row, &now, WorkKind::CapabilityProvider)
+                    .await?
             {
                 self.consume_delivery(&row.completion_event_id).await?;
             }
@@ -779,11 +781,12 @@ impl SignalBackgroundTaskStore {
         Ok(())
     }
 
-    async fn follow_up_completion(
+    pub(crate) async fn follow_up_completion(
         &self,
         sessions: &crate::agent_session_store::SignalAgentSessionStore,
         row: &agent_action_item::Model,
         now: &str,
+        work_kind: WorkKind,
     ) -> Result<bool, DbErr> {
         const MAX_AUTO_FOLLOW_UP_TURNS: u32 = 3;
         let Some(session) = sessions
@@ -821,12 +824,8 @@ impl SignalBackgroundTaskStore {
                 EventAppend::Busy
             ));
         }
-        match crate::agent_runtime::resume_completion_turn(
-            self.db.clone(),
-            session,
-            WorkKind::CapabilityProvider,
-        )
-        .await
+        match crate::agent_runtime::resume_completion_turn(self.db.clone(), session, work_kind)
+            .await
         {
             Ok(desk_diagnose_core::agent_loop::LoopOutcome::TurnBusy) => Ok(false),
             Ok(_) => {
@@ -856,7 +855,8 @@ impl SignalBackgroundTaskStore {
                     .await
                     .map_err(agent_error)?
                     .is_some_and(|latest| latest.automation_turns_used >= MAX_AUTO_FOLLOW_UP_TURNS);
-                if exhausted {
+                if exhausted || error.kind == desk_agent_protocol::AgentErrorKind::PermissionDenied
+                {
                     Ok(!matches!(
                         sessions
                             .prune_auto_trigger(
@@ -893,6 +893,13 @@ pub fn start_completion_publisher(db: DatabaseConnection) {
     actix_web::rt::spawn(async move {
         let store = SignalBackgroundTaskStore::new(db);
         loop {
+            if crate::capability_grant_store::SignalCapabilityGrantStore::new(store.db.clone())
+                .publish_computer_results_once()
+                .await
+                .is_err()
+            {
+                log::warn!("[computer-action] original completion scan failed");
+            }
             if let Err(error) = store.publish_once().await {
                 log::warn!("[capability-background] completion publisher failed: {error}");
             }
@@ -944,7 +951,7 @@ async fn load_task_row<C: sea_orm::ConnectionTrait>(
     Ok(row)
 }
 
-fn decode_record(row: &agent_action_item::Model) -> Result<BackgroundTaskRecord, DbErr> {
+pub(crate) fn decode_record(row: &agent_action_item::Model) -> Result<BackgroundTaskRecord, DbErr> {
     serde_json::from_str(&row.payload_json)
         .map_err(|error| DbErr::Custom(format!("decode background task: {error}")))
 }

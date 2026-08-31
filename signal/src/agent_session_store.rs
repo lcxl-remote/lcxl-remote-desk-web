@@ -1,5 +1,7 @@
 //! SQLite-backed agent sessions for the single-node OSS signal central brain.
 
+mod assistant_snapshot;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use desk_agent_protocol::capability_grant::CAPABILITY_GRANT_SCHEMA_VERSION;
@@ -685,36 +687,42 @@ impl SignalAgentSessionStore {
             .await
             .map_err(|e| internal(format!("load lapsed agent execution: {e}")))?;
         let now_text = now.to_rfc3339();
-        match task {
-            Some(task) => {
-                session.recover_session(
-                    RecoveryVerdict::OutcomeUnknown {
-                        tool_call_id: task.tool_call_id.clone(),
-                        action: ActionIdentity::agent_exec(
-                            task.id,
-                            task.exec_request_id.clone(),
-                            task.execution_generation.clone(),
-                        ),
-                    },
-                    now_text.clone(),
-                );
-                if task.status == crate::agent_exec_store::STATUS_DONE
-                    && let Some(result_text) = task.result_text
-                {
-                    session.apply_completion(
-                        &task.event_id,
-                        &task.execution_generation,
-                        &task.tool_call_id,
-                        &task.exec_request_id,
-                        result_text,
+        if !crate::capability_grant_store::SignalCapabilityGrantStore::new(self.db.clone())
+            .recover_computer_session(&mut session, &now_text)
+            .await
+            .map_err(|_| internal("recover original Computer Action failed"))?
+        {
+            match task {
+                Some(task) => {
+                    session.recover_session(
+                        RecoveryVerdict::OutcomeUnknown {
+                            tool_call_id: task.tool_call_id.clone(),
+                            action: ActionIdentity::agent_exec(
+                                task.id,
+                                task.exec_request_id.clone(),
+                                task.execution_generation.clone(),
+                            ),
+                        },
                         now_text.clone(),
                     );
+                    if task.status == crate::agent_exec_store::STATUS_DONE
+                        && let Some(result_text) = task.result_text
+                    {
+                        session.apply_completion(
+                            &task.event_id,
+                            &task.execution_generation,
+                            &task.tool_call_id,
+                            &task.exec_request_id,
+                            result_text,
+                            now_text.clone(),
+                        );
+                    }
                 }
+                // No durable task means no mutating command was dispatched. This is
+                // the normal crash window for a read-only tool between the persisted
+                // assistant call and its result, so it is safe to close as not-run.
+                None => session.recover_session(RecoveryVerdict::NotExecuted, now_text),
             }
-            // No durable task means no mutating command was dispatched. This is
-            // the normal crash window for a read-only tool between the persisted
-            // assistant call and its result, so it is safe to close as not-run.
-            None => session.recover_session(RecoveryVerdict::NotExecuted, now_text),
         }
         let new_version = row.version + 1;
         session.version = new_version;
@@ -1272,34 +1280,45 @@ impl SessionSeam for SignalAgentSessionStore {
                                         "load interrupted agent execution: {e}"
                                     )))
                                 })?;
-                        match task {
-                            Some(task) => {
-                                session.recover_session(
-                                    RecoveryVerdict::OutcomeUnknown {
-                                        tool_call_id: task.tool_call_id.clone(),
-                                        action: ActionIdentity::agent_exec(
-                                            task.id,
-                                            task.exec_request_id.clone(),
-                                            task.execution_generation.clone(),
-                                        ),
-                                    },
-                                    params.now.clone(),
-                                );
-                                if task.status == crate::agent_exec_store::STATUS_DONE
-                                    && let Some(result_text) = task.result_text
-                                {
-                                    session.apply_completion(
-                                        &task.event_id,
-                                        &task.execution_generation,
-                                        &task.tool_call_id,
-                                        &task.exec_request_id,
-                                        result_text,
+                        if !crate::capability_grant_store::SignalCapabilityGrantStore::new(
+                            self.db.clone(),
+                        )
+                        .recover_computer_session(&mut session, &params.now)
+                        .await
+                        .map_err(|_| {
+                            ClaimError::Backend(internal("recover original Computer Action failed"))
+                        })? {
+                            match task {
+                                Some(task) => {
+                                    session.recover_session(
+                                        RecoveryVerdict::OutcomeUnknown {
+                                            tool_call_id: task.tool_call_id.clone(),
+                                            action: ActionIdentity::agent_exec(
+                                                task.id,
+                                                task.exec_request_id.clone(),
+                                                task.execution_generation.clone(),
+                                            ),
+                                        },
                                         params.now.clone(),
                                     );
+                                    if task.status == crate::agent_exec_store::STATUS_DONE
+                                        && let Some(result_text) = task.result_text
+                                    {
+                                        session.apply_completion(
+                                            &task.event_id,
+                                            &task.execution_generation,
+                                            &task.tool_call_id,
+                                            &task.exec_request_id,
+                                            result_text,
+                                            params.now.clone(),
+                                        );
+                                    }
                                 }
+                                None => session.recover_session(
+                                    RecoveryVerdict::NotExecuted,
+                                    params.now.clone(),
+                                ),
                             }
-                            None => session
-                                .recover_session(RecoveryVerdict::NotExecuted, params.now.clone()),
                         }
                     }
                     if matches!(

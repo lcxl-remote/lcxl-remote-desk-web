@@ -21,8 +21,11 @@ use crate::entity::{
     agent_grant_reservation, agent_session,
 };
 
+pub(crate) mod computer_background;
 pub(crate) mod computer_binding;
 pub(crate) mod computer_completion;
+pub(crate) mod computer_delivery;
+pub(crate) mod computer_export;
 
 pub const GRANT_STATUS_ACTIVE: &str = "active";
 pub const GRANT_STATUS_REVOKED: &str = "revoked";
@@ -246,10 +249,19 @@ impl SignalCapabilityGrantStore {
         actor_id: &str,
         target_device_id: &str,
     ) -> Result<Vec<CapabilityGrant>, DbErr> {
+        Self::list_for_subject_on(&self.db, run_id, actor_id, target_device_id).await
+    }
+
+    pub(crate) async fn list_for_subject_on<C: sea_orm::ConnectionTrait>(
+        db: &C,
+        run_id: &str,
+        actor_id: &str,
+        target_device_id: &str,
+    ) -> Result<Vec<CapabilityGrant>, DbErr> {
         let rows = agent_capability_grant::Entity::find()
             .filter(agent_capability_grant::Column::RunId.eq(run_id))
             .filter(agent_capability_grant::Column::ActorId.eq(actor_id))
-            .all(&self.db)
+            .all(db)
             .await?;
         let mut grants = Vec::with_capacity(rows.len());
         for row in rows {

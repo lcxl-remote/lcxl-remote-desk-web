@@ -2,9 +2,19 @@
 //! Neither a binding nor acceptance is a new dispatch, grant, or task record.
 
 use super::*;
+use desk_agent_protocol::capability_provider::{CapabilityEffect, ExecutionPolicy};
 use desk_agent_protocol::computer_use::{ComputerActionStarted, SealedComputerActionPlan};
 use desk_diagnose_core::{action_result::ActionResultOrigin, chat::ToolCall};
 use sea_orm::DatabaseTransaction;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ComputerExecutionContract {
+    pub effect: CapabilityEffect,
+    pub policy: ExecutionPolicy,
+    pub foreground_budget_ms: u32,
+    pub chain_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -14,6 +24,12 @@ pub(crate) struct ComputerBinding {
     pub dispatch_sha256: String,
     pub plan: SealedComputerActionPlan,
     pub origin: ActionResultOrigin,
+    /// Absent on older bindings; never inferred retrospectively for promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ComputerExecutionContract>,
+    /// Original user-selected model sink; execution grants never imply export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_export: Option<super::computer_export::ComputerExportContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +141,26 @@ pub(super) fn validate_binding(
     binding.origin.validate().map_err(|_| invalid())?;
     let plan = &binding.plan;
     let origin = &binding.origin;
+    if let Some(export) = &binding.model_export {
+        export.validate()?;
+    }
+    if let Some(execution) = &binding.execution {
+        execution
+            .policy
+            .validate(plan.timeout_ms)
+            .map_err(|_| invalid())?;
+        if execution.effect.is_side_effecting() != work.is_side_effecting
+            || execution.foreground_budget_ms == 0
+            || execution.foreground_budget_ms > 8_000
+            || execution.chain_id.len() > 256
+            || execution.chain_id.chars().any(char::is_control)
+            || matches!(execution.policy, ExecutionPolicy::InlineOnly)
+            || matches!(execution.policy, ExecutionPolicy::Adaptive { foreground_budget_ms }
+                if foreground_budget_ms != execution.foreground_budget_ms)
+        {
+            return Err(invalid());
+        }
+    }
     if binding.schema_version != 1
         || binding.connection_id.trim().is_empty()
         || binding.dispatch_sha256
@@ -165,6 +201,7 @@ impl SignalCapabilityGrantStore {
         plan: &SealedComputerActionPlan,
         session: &PersistedAgentSession,
         call: &ToolCall,
+        model_policy: Option<&desk_diagnose_core::model_egress::ModelEgressPolicy>,
     ) -> Result<(), DbErr> {
         let txn = self.db.begin().await?;
         let result = async {
@@ -204,6 +241,26 @@ impl SignalCapabilityGrantStore {
                 dispatch_sha256: format!("{:x}", Sha256::digest(outbox.payload_json.as_bytes())),
                 plan: plan.clone(),
                 origin,
+                model_export: model_policy
+                    .map(|policy| {
+                        super::computer_export::ComputerExportContext::capture(
+                            policy,
+                            session,
+                            outbox.created_at.timestamp_millis(),
+                        )
+                    })
+                    .transpose()?,
+                execution: Some(ComputerExecutionContract {
+                    effect: capability.wire.effect,
+                    policy: capability.wire.execution_policy,
+                    foreground_budget_ms: match capability.wire.execution_policy {
+                        ExecutionPolicy::Adaptive {
+                            foreground_budget_ms,
+                        } => foreground_budget_ms,
+                        _ => 8_000,
+                    },
+                    chain_id: session.chain_id.clone(),
+                }),
             };
             validate_binding(&binding, &outbox, &work, &payload)?;
             let json = serde_json::to_string(&binding).map_err(|_| invalid())?;

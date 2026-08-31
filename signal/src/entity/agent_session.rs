@@ -15,6 +15,9 @@ pub struct Model {
     pub version: i64,
     pub lease_token: i64,
     pub lease_deadline: Option<DateTimeUtc>,
+    /// Presentation sequence/cache, independent of the running turn's CAS.
+    pub snapshot_seq: Option<i64>,
+    pub snapshot_fingerprint: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

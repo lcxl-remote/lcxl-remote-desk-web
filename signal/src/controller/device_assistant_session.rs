@@ -922,36 +922,16 @@ pub async fn get_device_assistant_session(
         (None, None) => return Ok(not_accessible()),
     };
     let snapshot = store
-        .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
+        .read_assistant_snapshot_for_subject(&session_id, &actor_id, &target_audience)
         .await
         .map_err(|error| {
             DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
         })?;
     match snapshot {
         Some(snapshot) => {
-            let background_tasks =
-                crate::agent_background_task_store::SignalBackgroundTaskStore::new(
-                    crate::db::get_db().clone(),
-                )
-                .list_for_run(&session_id)
-                .await
-                .map_err(|error| {
-                    DeskSignalError::new_custom_error(
-                        DeskErrorCode::SYSTEM_ERROR,
-                        &format!("load background tasks: {error}"),
-                    )
-                })?;
-            let capability_grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(
-                crate::db::get_db().clone(),
-            )
-            .list_for_subject(&session_id, &actor_id, &target_audience)
-            .await
-            .map_err(|error| {
-                DeskSignalError::new_custom_error(
-                    DeskErrorCode::SYSTEM_ERROR,
-                    &format!("load capability grants: {error}"),
-                )
-            })?;
+            let background_tasks = snapshot.background_tasks;
+            let capability_grants = snapshot.capability_grants;
+            let snapshot = snapshot.session;
             let evidence_summary =
                 build_evidence_summary(&snapshot.messages, &snapshot.context_attachments);
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(

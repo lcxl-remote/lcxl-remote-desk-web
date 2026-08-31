@@ -1,4 +1,5 @@
 use super::*;
+mod background;
 mod completion;
 mod wire;
 use crate::capability_grant_store::computer_binding::{
@@ -195,7 +196,7 @@ impl Fixture {
 
     async fn bind(&self) {
         self.store
-            .bind_computer_transport("host-original", &self.plan, &self.session, &self.call)
+            .bind_computer_transport("host-original", &self.plan, &self.session, &self.call, None)
             .await
             .unwrap();
     }
@@ -290,7 +291,8 @@ async fn original_transport_freezes_model_call_and_lineage_without_another_work_
                 "host-reconnected",
                 &fixture.plan,
                 &fixture.session,
-                &fixture.call
+                &fixture.call,
+                None
             )
             .await
             .is_err()
@@ -307,7 +309,13 @@ async fn missing_or_changed_original_identity_never_saves_acceptance() {
     assert!(
         fixture
             .store
-            .bind_computer_transport("host-original", &fixture.plan, &fixture.session, &call)
+            .bind_computer_transport(
+                "host-original",
+                &fixture.plan,
+                &fixture.session,
+                &call,
+                None
+            )
             .await
             .is_err()
     );
@@ -316,7 +324,13 @@ async fn missing_or_changed_original_identity_never_saves_acceptance() {
     assert!(
         fixture
             .store
-            .bind_computer_transport("host-original", &fixture.plan, &changed, &fixture.call)
+            .bind_computer_transport(
+                "host-original",
+                &fixture.plan,
+                &changed,
+                &fixture.call,
+                None
+            )
             .await
             .is_err()
     );
@@ -325,7 +339,13 @@ async fn missing_or_changed_original_identity_never_saves_acceptance() {
     assert!(
         fixture
             .store
-            .bind_computer_transport("host-original", &fixture.plan, &changed, &fixture.call)
+            .bind_computer_transport(
+                "host-original",
+                &fixture.plan,
+                &changed,
+                &fixture.call,
+                None
+            )
             .await
             .is_err()
     );

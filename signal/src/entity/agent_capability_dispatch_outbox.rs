@@ -22,6 +22,8 @@ pub struct Model {
     pub computer_binding_json: Option<String>,
     /// Explicit executor acceptance bound to the original transport generation.
     pub computer_acceptance_json: Option<String>,
+    /// Promotion of this original execution; never a second executable task.
+    pub computer_background_json: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

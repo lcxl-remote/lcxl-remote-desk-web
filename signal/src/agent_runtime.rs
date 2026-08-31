@@ -11,8 +11,11 @@ use desk_diagnose_core::seam::{
     ClaimTurnParams, HeartbeatGuard, LeaseHeartbeat, ModelRequest, ModelSeam, SessionSeam,
     ToolRunOutput, ToolSeam, TurnSink,
 };
-use desk_diagnose_core::session::{PersistedAgentSession, TriggerOrigin};
-use sea_orm::DatabaseConnection;
+use desk_diagnose_core::session::{
+    AgentSessionSurface, PersistedAgentSession, TriggerOrigin, WorkKind,
+};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sha2::{Digest, Sha256};
 
 use crate::ai_usage::{self, AiUsageDelta};
 use crate::model_dial::SignalModelSeam;
@@ -111,6 +114,100 @@ impl ModelSeam for MeteredSignalModel {
 
 struct CompletionOnlyTools;
 
+fn export_denied() -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::PermissionDenied,
+        message: "The completed result is saved, but its original model export authorization is no longer available.".into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    }
+}
+
+struct CompletionModel {
+    inner: crate::assistant_model::MeteredModel,
+    run_id: String,
+    actor_id: String,
+    device_id: String,
+    event_id: String,
+    export: crate::capability_grant_store::computer_export::ComputerExportContext,
+}
+
+#[async_trait::async_trait(?Send)]
+impl ModelSeam for CompletionModel {
+    fn model_egress_policy(
+        &self,
+    ) -> Result<Option<desk_diagnose_core::model_egress::ModelEgressPolicy>, AgentError> {
+        self.inner.model_egress_policy()
+    }
+
+    async fn context_policy(
+        &self,
+        requirements: desk_diagnose_core::model_capability::ModelRequirements,
+    ) -> Result<desk_diagnose_core::model_context::PinnedContextPolicy, AgentError> {
+        self.inner.context_policy(requirements).await
+    }
+
+    async fn call(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TurnSink,
+    ) -> Result<desk_diagnose_core::chat::ModelTurn, AgentError> {
+        // The initial context was loaded before claiming the turn. Recheck it
+        // immediately before every model call so newer input or a detach cannot
+        // reuse the old result's export selection through the claim race.
+        use crate::entity::agent_session;
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(&self.run_id))
+            .filter(agent_session::Column::ActorId.eq(&self.actor_id))
+            .filter(agent_session::Column::DeviceId.eq(&self.device_id))
+            .one(&self.inner.db)
+            .await
+            .map_err(|_| export_denied())?
+            .ok_or_else(export_denied)?;
+        let session =
+            PersistedAgentSession::decode_json(&row.state_json).map_err(|_| export_denied())?;
+        if session.version != row.version {
+            return Err(export_denied());
+        }
+        let current_config = model_provider::load(&self.inner.db)
+            .await
+            .map_err(|_| export_denied())?;
+        if current_config
+            .destination_identity()
+            .map_err(|_| export_denied())?
+            != self.inner.destination
+        {
+            return Err(export_denied());
+        }
+        let export =
+            crate::capability_grant_store::SignalCapabilityGrantStore::new(self.inner.db.clone())
+                .computer_completion_export(&session, &self.event_id, &self.inner.destination)
+                .await
+                .map_err(|_| export_denied())?;
+        if export != self.export {
+            return Err(export_denied());
+        }
+        let request = self
+            .inner
+            .model_egress_policy()?
+            .ok_or_else(export_denied)?
+            .authorize_request(request)
+            .map_err(|_| export_denied())?
+            .request;
+        // A historical replay/retention filter may omit the original tool
+        // group. Never call that a reaction to a result the model cannot see.
+        if !request
+            .messages
+            .iter()
+            .any(|message| message.message_id == self.event_id)
+        {
+            return Err(export_denied());
+        }
+        self.inner.call(request, sink).await
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl ToolSeam for CompletionOnlyTools {
     async fn run_read(
@@ -143,12 +240,52 @@ pub async fn resume_completion_turn(
         transport_error(format!("failed to load model provider config: {error}"))
     })?;
     let seam = SignalModelSeam::from_config(&config)?;
-    let model = MeteredSignalModel {
-        inner: seam,
-        db: db.clone(),
-        model_name: config.model.clone().unwrap_or_default(),
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    let model: Box<dyn ModelSeam> = if session.surface == AgentSessionSurface::DeviceAssistant {
+        // Legacy completions lacking an original export selection stay visible
+        // to the owner, but cannot mint new permission from an execution grant.
+        let pending = session
+            .pending_auto_triggers
+            .iter()
+            .find(|pending| pending.kind == work_kind && pending.chain_id == session.chain_id)
+            .filter(|_| work_kind == WorkKind::ComputerAction)
+            .ok_or_else(export_denied)?;
+        let destination = config.destination_identity().map_err(|_| export_denied())?;
+        let export = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+            .computer_completion_export(&session, &pending.event_id, &destination)
+            .await
+            .map_err(|_| export_denied())?;
+        Box::new(CompletionModel {
+            inner: crate::assistant_model::MeteredModel {
+                inner: seam,
+                db: db.clone(),
+                model_name: config.model.clone().unwrap_or_default(),
+                destination,
+                selected_source_tools: export.selected_source_tools.clone(),
+                export_authorization_id: format!(
+                    "completion-export-{:x}",
+                    Sha256::digest(
+                        format!("{}:{turn_id}", export.export_authorization_id).as_bytes()
+                    )
+                ),
+                permission_resume: false,
+                model_call_ordinal: std::sync::atomic::AtomicU64::new(0),
+            },
+            run_id: session.conversation_id.clone(),
+            actor_id: session.actor_id.clone(),
+            device_id: session.device_id.clone(),
+            event_id: pending.event_id.clone(),
+            export,
+        })
+    } else {
+        Box::new(MeteredSignalModel {
+            inner: seam,
+            db: db.clone(),
+            model_name: config.model.clone().unwrap_or_default(),
+        })
     };
-    let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db);
+    let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db)
+        .with_client_metadata(session.client_conversation_id.clone(), session.surface);
     let heartbeat = SignalStoreHeartbeat {
         store: sessions.clone(),
     };
@@ -159,7 +296,7 @@ pub async fn resume_completion_turn(
         device_id: session.device_id,
         policy_revision: session.policy_revision,
         current_pdp_scope: session.scope_snapshot,
-        turn_id: uuid::Uuid::new_v4().to_string(),
+        turn_id,
         request_id: session.current_request_id,
         connection_id: None,
         trigger_origin: TriggerOrigin::WorkCompletion { kind: work_kind },
@@ -169,7 +306,7 @@ pub async fn resume_completion_turn(
     let registry = Vec::new();
     let deps = LoopDeps {
         session_seam: &sessions,
-        model: &model,
+        model: model.as_ref(),
         tools: &tools,
         content_safety: desk_diagnose_core::content_safety::ContentSafetyMode::Disabled,
         registry: &registry,

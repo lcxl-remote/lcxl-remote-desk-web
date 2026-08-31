@@ -90,7 +90,7 @@ impl ModelEgressPolicy {
         let deselected_turns = request
             .messages
             .iter()
-            .filter(|message| message.role == ChatRole::Tool)
+            .filter(|message| is_provider_output(message))
             .filter_map(|message| {
                 let envelope = message.data_envelope.as_ref()?;
                 // Server-owned run-control results (for example the advisory
@@ -135,7 +135,13 @@ impl ModelEgressPolicy {
                     && !envelope
                         .allowed_destinations
                         .iter()
-                        .any(|destination| destination == &self.destination))
+                        .any(|destination| destination == &self.destination)
+                    // An original Provider receipt intentionally has no model
+                    // sink. An explicitly retained source selection still has
+                    // to pass ExportData below; it is not an old-model grant.
+                    && !(envelope.allowed_destinations.is_empty()
+                        && is_provider_output(message)
+                        && self.selected_source_tools.contains(&envelope.provenance.source_tool_name)))
                 .then_some(turn_id.clone())
             })
             .collect::<BTreeSet<_>>();
@@ -249,7 +255,7 @@ impl ModelEgressPolicy {
             {
                 source
             } else {
-                if message.role != ChatRole::Tool
+                if !is_provider_output(message)
                     || !self
                         .selected_source_tools
                         .contains(&source.provenance.source_tool_name)
@@ -610,6 +616,19 @@ impl std::fmt::Display for ModelEgressError {
 
 impl std::error::Error for ModelEgressError {}
 
+fn is_provider_output(message: &ChatMessage) -> bool {
+    message.role == ChatRole::Tool
+        || (message.role == ChatRole::UntrustedOutput
+            && message
+                .tool_call_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty())
+            && message
+                .background_task_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,6 +697,105 @@ mod tests {
             byte_cap: MAX_SINK_BYTES,
             omit_finite_retention_historical_turns: false,
         }
+    }
+
+    #[test]
+    fn fenced_background_output_needs_selected_source_labels_and_keeps_its_role() {
+        let mut output =
+            ChatMessage::untrusted_output("completion", "call", "task", "device result");
+        output.data_envelope = Some(envelope(
+            "receipt",
+            "browser_open_page",
+            output.text.as_bytes(),
+            Sensitivity::Sensitive,
+            vec![],
+        ));
+        let request = |message| ModelRequest::text_only(vec![message], ResponseFormatSpec::None);
+        let authorized = policy(&["browser_open_page"])
+            .authorize_request(request(output.clone()))
+            .unwrap();
+        assert_eq!(
+            authorized.request.messages[0].role,
+            ChatRole::UntrustedOutput
+        );
+        assert_eq!(authorized.request.messages[0].text, output.text);
+        assert_eq!(
+            authorized.request.messages[0]
+                .data_envelope
+                .as_ref()
+                .unwrap()
+                .allowed_destinations,
+            vec![destination()]
+        );
+        assert!(
+            policy(&[])
+                .authorize_request(request(output.clone()))
+                .is_err()
+        );
+        for change in 0..5 {
+            let mut invalid = output.clone();
+            match change {
+                0 => invalid.tool_call_id = None,
+                1 => invalid.background_task_id = None,
+                2 => invalid.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret,
+                3 => invalid.text.push_str("tampered"),
+                _ => {
+                    invalid
+                        .data_envelope
+                        .as_mut()
+                        .unwrap()
+                        .retention
+                        .expires_at_unix_ms = Some(99)
+                }
+            }
+            assert!(
+                policy(&["browser_open_page"])
+                    .authorize_request(request(invalid))
+                    .is_err(),
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_original_receipt_is_not_confused_with_a_changed_historical_model_sink() {
+        let mut receipt = ChatMessage::tool_result("completion", "call", "original result");
+        receipt.turn_id = Some("original-turn".into());
+        receipt.data_envelope = Some(envelope(
+            "receipt",
+            "browser_open_page",
+            receipt.text.as_bytes(),
+            Sensitivity::Sensitive,
+            vec![],
+        ));
+        let mut current = crate::model_message_labels::model_bound_user_message(
+            "current".into(),
+            "continue".into(),
+            destination(),
+        )
+        .unwrap();
+        current.turn_id = Some("current-turn".into());
+        let request = |receipt| {
+            ModelRequest::text_only(vec![receipt, current.clone()], ResponseFormatSpec::None)
+        };
+        let authorized = policy(&["browser_open_page"])
+            .authorize_request(request(receipt.clone()))
+            .unwrap();
+        assert_eq!(authorized.request.messages.len(), 2);
+        assert_eq!(authorized.request.messages[0].text, "original result");
+        let mut old_destination = destination();
+        if let DestinationIdentity::Model { model_id, .. } = &mut old_destination {
+            *model_id = "different-old-model".into();
+        }
+        receipt.data_envelope.as_mut().unwrap().allowed_destinations = vec![old_destination];
+        assert_eq!(
+            policy(&["browser_open_page"])
+                .authorize_request(request(receipt))
+                .unwrap()
+                .request
+                .messages,
+            vec![current]
+        );
     }
 
     #[test]

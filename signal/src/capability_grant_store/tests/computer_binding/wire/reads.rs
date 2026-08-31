@@ -174,9 +174,11 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
         "browser_wait_for",
         "browser_open_page",
         "browser_open_page_late",
+        "browser_open_page_background",
     ] {
         let mutating = name.starts_with("browser_open_page");
         let late = name == "browser_open_page_late";
+        let background = name == "browser_open_page_background";
         let foreground_closed = Arc::new(tokio::sync::Notify::new());
         let arguments = if name == "browser_take_snapshot" {
             json!({"page":page,"max_elements":10})
@@ -288,6 +290,9 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                     global_computer_action_pending().cancel(&completion.execution_generation);
                     foreground_closed.notified().await;
                 }
+                if background && reply.signaling_type == SignalingType::ComputerActionCompleted {
+                    foreground_closed.notified().await;
+                }
                 socket
                     .send(awc::ws::Message::Text(
                         serde_json::to_string(&reply).unwrap().into(),
@@ -332,10 +337,34 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                         image_data_url: None,
                     })
                 }
+                ExecOutcome::Dispatched(action) if background => {
+                    let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(
+                        fixture.store.db.clone(),
+                    )
+                    .read_assistant_snapshot_for_subject("run-1", "actor-1", "device-1")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    let task = snapshot
+                        .background_tasks
+                        .iter()
+                        .find(|task| task.task.task_id == action.action_request_id)
+                        .unwrap();
+                    assert_eq!(task.task.call_id, call.id);
+                    assert_eq!(
+                        task.state,
+                        desk_diagnose_core::dynamic_run::BackgroundTaskState::Running
+                    );
+                    foreground_closed.notify_one();
+                    Ok(desk_diagnose_core::seam::ToolRunOutput {
+                        content: "background".into(),
+                        image_data_url: None,
+                    })
+                }
                 other => panic!("unexpected mutation outcome: {other:?}"),
             }
         };
-        let (result, expected) = tokio::time::timeout(Duration::from_secs(5), async {
+        let (result, expected) = tokio::time::timeout(Duration::from_secs(15), async {
             tokio::try_join!(invoke, async {
                 Ok::<_, desk_agent_protocol::AgentError>(edge.await)
             })
@@ -343,7 +372,7 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
         .await
         .unwrap()
         .unwrap();
-        if !late {
+        if !late && !background {
             assert_eq!(
                 serde_json::from_str::<BrowserActionResult>(&result.content).unwrap(),
                 expected

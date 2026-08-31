@@ -7,6 +7,7 @@ pub mod agent_run_event_store;
 pub mod agent_runtime;
 pub mod agent_session_store;
 pub mod ai_usage;
+pub(crate) mod assistant_model;
 pub mod capability_grant_store;
 pub mod computer_use_readiness;
 pub mod control_authorizer;

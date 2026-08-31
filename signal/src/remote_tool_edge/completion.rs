@@ -3,6 +3,15 @@
 use super::*;
 use desk_agent_protocol::browser_control::{BrowserAction, BrowserActionOutcome};
 
+struct PendingWaitGuard(String);
+
+impl Drop for PendingWaitGuard {
+    fn drop(&mut self) {
+        // This removes a wake-up hint, never the durable work or native action.
+        global_computer_action_pending().cancel(&self.0);
+    }
+}
+
 impl SignalDeviceAssistantTools {
     pub(super) async fn finish_computer_action(
         &self,
@@ -13,8 +22,18 @@ impl SignalDeviceAssistantTools {
         sent: bool,
         mutating: bool,
     ) -> Result<ExecOutcome, AgentError> {
+        let _pending_guard = PendingWaitGuard(plan.execution_generation.clone());
+        let foreground_timeout = if mutating {
+            store
+                .computer_foreground_remaining(&plan.execution_generation)
+                .await
+                .map_err(|_| invalid())?
+                .min(self.timeout)
+        } else {
+            self.timeout
+        };
         let completed = if sent {
-            tokio::time::timeout(self.timeout, receiver)
+            tokio::time::timeout(foreground_timeout, receiver)
                 .await
                 .ok()
                 .and_then(Result::ok)
@@ -79,6 +98,27 @@ impl SignalDeviceAssistantTools {
                     },
                 });
             }
+        }
+        if mutating
+            && sent
+            && store
+                .promote_computer_background(
+                    &plan.execution_generation,
+                    &self.run_id,
+                    &self.actor_id,
+                    &self.target_device_id,
+                )
+                .await
+                .map_err(|_| invalid())?
+        {
+            return Ok(ExecOutcome::Dispatched(
+                desk_diagnose_core::session::ActionIdentity::new(
+                    plan.work_id.parse().map_err(|_| invalid())?,
+                    &plan.action_request_id,
+                    &plan.execution_generation,
+                    desk_diagnose_core::session::WorkKind::ComputerAction,
+                ),
+            ));
         }
         store
             .mark_dispatch_outcome_unknown(
@@ -518,4 +558,32 @@ fn browser_projection(
             })?
     };
     Ok(output_json)
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_a_foreground_future_releases_its_wakeup_registration() {
+        let generation = uuid::Uuid::new_v4().to_string();
+        let (sender, receiver) = oneshot::channel();
+        assert!(global_computer_action_pending().register(
+            generation.clone(),
+            "synthetic-host".into(),
+            sender
+        ));
+        let (ready, observed) = oneshot::channel();
+        let mut foreground = Box::pin(async move {
+            let _guard = PendingWaitGuard(generation);
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        tokio::select! {
+            _ = &mut foreground => unreachable!(),
+            _ = observed => {}
+        }
+        drop(foreground);
+        assert!(receiver.await.is_err());
+    }
 }

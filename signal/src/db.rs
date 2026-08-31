@@ -176,7 +176,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 8;
+const SIGNAL_SCHEMA_VERSION: i32 = 9;
 const MIGRATION_LOCK_TABLE: &str = "signal_schema_migration_lock";
 const LEGACY_TABLES: [&str; 8] = [
     "agent_exec_task",
@@ -242,6 +242,7 @@ pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbE
                 5 => migrate_v5_to_v6(&txn, &tables).await?,
                 6 => migrate_v6_to_v7(&txn, &tables).await?,
                 7 => migrate_v7_to_v8(&txn, &tables).await?,
+                8 => migrate_v8_to_v9(&txn, &tables).await?,
                 other => {
                     return Err(DbErr::Custom(format!(
                         "no signal database migration registered from version {other}"
@@ -636,6 +637,56 @@ async fn validate_v1_schema<C: ConnectionTrait>(
 }
 
 async fn validate_latest_schema<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v8_schema(db, tables).await?;
+    let session_columns = table_columns(db, "agent_session").await?;
+    if !session_columns.contains("snapshot_seq")
+        || !session_columns.contains("snapshot_fingerprint")
+    {
+        return Err(DbErr::Custom(
+            "signal schema v9 is missing session snapshot metadata".into(),
+        ));
+    }
+    if !table_columns(db, "agent_capability_dispatch_outbox")
+        .await?
+        .contains("computer_background_json")
+    {
+        return Err(DbErr::Custom(
+            "signal schema v9 is missing computer_background_json".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn migrate_v8_to_v9<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v8_schema(db, tables).await?;
+    let session_columns = table_columns(db, "agent_session").await?;
+    for (name, kind) in [
+        ("snapshot_seq", "INTEGER"),
+        ("snapshot_fingerprint", "TEXT"),
+    ] {
+        if !session_columns.contains(name) {
+            db.execute_unprepared(&format!(
+                "ALTER TABLE agent_session ADD COLUMN {name} {kind} NULL"
+            ))
+            .await?;
+        }
+    }
+    if !table_columns(db, "agent_capability_dispatch_outbox")
+        .await?
+        .contains("computer_background_json")
+    {
+        db.execute_unprepared("ALTER TABLE agent_capability_dispatch_outbox ADD COLUMN computer_background_json TEXT NULL").await?;
+    }
+    Ok(())
+}
+
+async fn validate_v8_schema<C: ConnectionTrait>(
     db: &C,
     tables: &HashSet<String>,
 ) -> Result<(), DbErr> {
@@ -1312,7 +1363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v8_missing_acceptance_column_fails_without_silent_repair() {
+    async fn latest_missing_acceptance_column_fails_without_silent_repair() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         initialize_schema(&db).await.unwrap();
         db.execute_unprepared(
@@ -1326,6 +1377,73 @@ mod tests {
             query_user_version(&db).await.unwrap(),
             SIGNAL_SCHEMA_VERSION
         );
+    }
+
+    #[tokio::test]
+    async fn v8_to_v9_adds_only_nullable_background_and_presentation_metadata() {
+        use sea_orm::{ActiveModelTrait, Set};
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_latest_schema(&db).await.unwrap();
+        let session = agent_session::ActiveModel {
+            conversation_id: Set("original-run".into()),
+            actor_id: Set("owner".into()),
+            device_id: Set("device".into()),
+            state_json: Set("{\"original\":true}".into()),
+            version: Set(42),
+            lease_token: Set(7),
+            lease_deadline: Set(Some(chrono::Utc::now())),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let outbox = agent_capability_dispatch_outbox::ActiveModel {
+            dispatch_id: Set("original-dispatch".into()),
+            call_id: Set("original-call".into()),
+            work_id: Set(1),
+            reservation_id: Set("original-reservation".into()),
+            generation: Set(1),
+            state: Set("sending".into()),
+            payload_json: Set("{\"original\":true}".into()),
+            payload_schema_version: Set(1),
+            computer_binding_json: Set(Some("original binding".into())),
+            computer_acceptance_json: Set(Some("original acceptance".into())),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        db.execute_unprepared("ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_background_json; ALTER TABLE agent_session DROP COLUMN snapshot_seq; ALTER TABLE agent_session DROP COLUMN snapshot_fingerprint; PRAGMA user_version = 8").await.unwrap();
+        initialize_schema(&db).await.unwrap();
+        initialize_schema(&db).await.unwrap();
+        assert_eq!(
+            query_user_version(&db).await.unwrap(),
+            SIGNAL_SCHEMA_VERSION
+        );
+        assert_eq!(
+            agent_session::Entity::find_by_id(session.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            session
+        );
+        assert_eq!(
+            agent_capability_dispatch_outbox::Entity::find_by_id(outbox.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            outbox
+        );
+        db.execute_unprepared("ALTER TABLE agent_session DROP COLUMN snapshot_seq")
+            .await
+            .unwrap();
+        assert!(initialize_schema(&db).await.is_err());
     }
 
     #[tokio::test]

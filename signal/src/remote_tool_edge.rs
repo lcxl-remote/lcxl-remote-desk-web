@@ -657,6 +657,7 @@ pub struct SignalDeviceAssistantTools {
     readiness_revision: u64,
     max_command_runtime_ms: u32,
     exec_tools: crate::agent_exec::SignalAgentTools,
+    model_egress_policy: Option<desk_diagnose_core::model_egress::ModelEgressPolicy>,
 }
 
 fn exact_selected_batch_file(roots: &[ObjectRef]) -> Result<ObjectRef, AgentError> {
@@ -778,7 +779,16 @@ impl SignalDeviceAssistantTools {
             readiness_revision,
             max_command_runtime_ms,
             exec_tools,
+            model_egress_policy: None,
         }
+    }
+
+    pub(crate) fn with_model_egress_policy(
+        mut self,
+        policy: Option<desk_diagnose_core::model_egress::ModelEgressPolicy>,
+    ) -> Self {
+        self.model_egress_policy = policy;
+        self
     }
 
     fn canonical_call_input(call: &ToolCall) -> Result<(String, String), AgentError> {
@@ -2300,7 +2310,7 @@ impl SignalDeviceAssistantTools {
                     false,
                 )
             })?;
-            store.bind_computer_transport(&self.target_connection_id, &plan, &session, call)
+            store.bind_computer_transport(&self.target_connection_id, &plan, &session, call, self.model_egress_policy.as_ref())
                 .await.map_err(|_| error(AgentErrorKind::Internal,
                     "failed to freeze original Computer Action transport", false, false))?;
             Ok::<_, AgentError>((target, generation, text, plan))
@@ -2942,7 +2952,13 @@ impl SignalDeviceAssistantTools {
         }));
         artifact_pre_send!(
             store
-                .bind_computer_transport(&self.target_connection_id, &plan, &session, call)
+                .bind_computer_transport(
+                    &self.target_connection_id,
+                    &plan,
+                    &session,
+                    call,
+                    self.model_egress_policy.as_ref()
+                )
                 .await
                 .map_err(|_| error(
                     AgentErrorKind::Internal,
@@ -3511,7 +3527,13 @@ impl SignalDeviceAssistantTools {
         if capability.wire.effect.is_side_effecting() {
             browser_pre_send!(
                 store
-                    .bind_computer_transport(&self.target_connection_id, &plan, &session, call)
+                    .bind_computer_transport(
+                        &self.target_connection_id,
+                        &plan,
+                        &session,
+                        call,
+                        self.model_egress_policy.as_ref()
+                    )
                     .await
                     .map_err(|_| error(
                         AgentErrorKind::Internal,
@@ -4060,7 +4082,13 @@ impl SignalDeviceAssistantTools {
             )
         })?;
         store
-            .bind_computer_transport(&self.target_connection_id, &plan, &session, call)
+            .bind_computer_transport(
+                &self.target_connection_id,
+                &plan,
+                &session,
+                call,
+                self.model_egress_policy.as_ref(),
+            )
             .await
             .map_err(|_| {
                 error(

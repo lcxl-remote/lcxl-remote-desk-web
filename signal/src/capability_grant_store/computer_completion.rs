@@ -271,8 +271,22 @@ impl SignalCapabilityGrantStore {
             }
             let binding = binding(&outbox, &work, &payload)?;
             let identity = identity(&work, &payload);
+            let running = super::computer_background::task_on(
+                &txn,
+                &work,
+                u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?,
+            )
+            .await?
+            .is_some_and(|task| {
+                matches!(
+                    task.state,
+                    desk_diagnose_core::dynamic_run::BackgroundTaskState::Running
+                        | desk_diagnose_core::dynamic_run::BackgroundTaskState::CancelRequested
+                )
+            });
             Ok(Some(match terminal_result(&outbox, work, &payload)? {
                 Some(original) => original.into_wait(),
+                None if running => WaitOutcome::StillRunning,
                 None => WaitOutcome::UnknownWithIdentity {
                     action: identity,
                     original_call_id: binding.origin.tool_call_id,
