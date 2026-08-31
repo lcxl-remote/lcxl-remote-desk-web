@@ -176,7 +176,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 9;
+const SIGNAL_SCHEMA_VERSION: i32 = 10;
 const MIGRATION_LOCK_TABLE: &str = "signal_schema_migration_lock";
 const LEGACY_TABLES: [&str; 8] = [
     "agent_exec_task",
@@ -243,6 +243,7 @@ pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbE
                 6 => migrate_v6_to_v7(&txn, &tables).await?,
                 7 => migrate_v7_to_v8(&txn, &tables).await?,
                 8 => migrate_v8_to_v9(&txn, &tables).await?,
+                9 => migrate_v9_to_v10(&txn, &tables).await?,
                 other => {
                     return Err(DbErr::Custom(format!(
                         "no signal database migration registered from version {other}"
@@ -276,6 +277,7 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, agent_capability_dispatch_outbox::Entity).await?;
     create_entity(db, &schema, model_egress_receipt::Entity).await?;
     create_entity(db, &schema, agent_run_event::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_permission_resume::Entity).await?;
 
     for index in [
         Index::create()
@@ -637,6 +639,57 @@ async fn validate_v1_schema<C: ConnectionTrait>(
 }
 
 async fn validate_latest_schema<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    let mut previous = tables.clone();
+    if !previous.remove("agent_permission_resume") {
+        return Err(DbErr::Custom(
+            "signal schema v10 is missing agent_permission_resume".into(),
+        ));
+    }
+    validate_v9_schema(db, &previous).await?;
+    let columns = table_columns(db, "agent_permission_resume").await?;
+    for required in [
+        "id",
+        "permission_id",
+        "decision_event_id",
+        "run_id",
+        "request_id",
+        "actor_id",
+        "device_id",
+        "input_revision",
+        "state",
+        "turn_id",
+        "version",
+        "created_at",
+        "updated_at",
+    ] {
+        if !columns.contains(required) {
+            return Err(DbErr::Custom(format!(
+                "signal schema v10 is missing agent_permission_resume.{required}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn migrate_v9_to_v10<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    validate_v9_schema(db, tables).await?;
+    // Historical decisions do not prove whether their volatile resume started.
+    // Add an empty fence table, never enqueue old decisions during migration.
+    create_entity(
+        db,
+        &Schema::new(db.get_database_backend()),
+        crate::entity::agent_permission_resume::Entity,
+    )
+    .await
+}
+
+async fn validate_v9_schema<C: ConnectionTrait>(
     db: &C,
     tables: &HashSet<String>,
 ) -> Result<(), DbErr> {
@@ -1172,7 +1225,7 @@ mod tests {
              DROP TABLE agent_action_item; \
              DROP TABLE model_probe_observation; \
              ALTER TABLE model_provider DROP COLUMN exec_approval_timeout_secs; \
-             PRAGMA user_version = 1",
+             DROP TABLE agent_permission_resume; PRAGMA user_version = 1",
         )
         .await
         .unwrap();
@@ -1217,7 +1270,7 @@ mod tests {
              VALUES (1, 'open_ai_chat_completions', 'test', 0, 'https://example.test', \
                'secret', 1, '{}', 'max_tokens', 512, 4096, 131072, 1, 1, 'json_object', \
                'confirm_each_action', 20, 40, '2026-08-21T00:00:00Z'); \
-             PRAGMA user_version = 2",
+             DROP TABLE agent_permission_resume; PRAGMA user_version = 2",
         )
         .await
         .unwrap();
@@ -1245,7 +1298,7 @@ mod tests {
              DROP TABLE agent_capability_grant; \
              DROP TABLE agent_run_event; \
              DROP TABLE model_egress_receipt; \
-             PRAGMA user_version = 4",
+             DROP TABLE agent_permission_resume; PRAGMA user_version = 4",
         )
         .await
         .unwrap();
@@ -1273,7 +1326,7 @@ mod tests {
              DROP TABLE agent_grant_reservation; \
              DROP TABLE agent_capability_grant; \
              DROP TABLE agent_run_event; \
-             PRAGMA user_version = 5",
+             DROP TABLE agent_permission_resume; PRAGMA user_version = 5",
         )
         .await
         .unwrap();
@@ -1300,7 +1353,7 @@ mod tests {
             "DROP TABLE agent_capability_dispatch_outbox; \
              DROP TABLE agent_grant_reservation; \
              DROP TABLE agent_capability_grant; \
-             PRAGMA user_version = 6",
+             DROP TABLE agent_permission_resume; PRAGMA user_version = 6",
         )
         .await
         .unwrap();
@@ -1342,7 +1395,7 @@ mod tests {
         db.execute_unprepared(
             "ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_binding_json; \
             ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_acceptance_json; \
-            PRAGMA user_version = 7",
+            DROP TABLE agent_permission_resume; PRAGMA user_version = 7",
         )
         .await
         .unwrap();
@@ -1417,7 +1470,7 @@ mod tests {
         .insert(&db)
         .await
         .unwrap();
-        db.execute_unprepared("ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_background_json; ALTER TABLE agent_session DROP COLUMN snapshot_seq; ALTER TABLE agent_session DROP COLUMN snapshot_fingerprint; PRAGMA user_version = 8").await.unwrap();
+        db.execute_unprepared("ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_background_json; ALTER TABLE agent_session DROP COLUMN snapshot_seq; ALTER TABLE agent_session DROP COLUMN snapshot_fingerprint; DROP TABLE agent_permission_resume; PRAGMA user_version = 8").await.unwrap();
         initialize_schema(&db).await.unwrap();
         initialize_schema(&db).await.unwrap();
         assert_eq!(

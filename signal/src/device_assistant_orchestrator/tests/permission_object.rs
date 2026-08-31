@@ -29,25 +29,59 @@ fn tool_reply(name: &str, arguments: serde_json::Value) -> String {
 
 #[actix_web::test]
 async fn original_input_permission_decision_resumes_model_and_reads_original_object() {
-    run_case(None).await;
+    run_case(None, ResumeMode::Direct).await;
 }
 
 #[actix_web::test]
 async fn changed_model_object_input_subject_or_decision_cannot_resume_or_read() {
     for change in ["model", "detach", "new_input", "subject", "decision"] {
-        run_case(Some(change)).await;
+        run_case(Some(change), ResumeMode::Direct).await;
     }
 }
 
 #[actix_web::test]
 async fn stale_readiness_or_legacy_input_cannot_restore_object_read_authority() {
     for change in ["readiness", "legacy"] {
-        run_case(Some(change)).await;
+        run_case(Some(change), ResumeMode::Direct).await;
     }
 }
 
-async fn run_case(change: Option<&str>) {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+#[actix_web::test]
+async fn scanner_recovers_committed_decision_once_with_original_model_and_object_read() {
+    run_case(None, ResumeMode::Scan).await;
+}
+
+#[actix_web::test]
+async fn scanner_rechecks_model_original_object_and_input_before_resuming() {
+    for change in ["model", "detach", "new_input"] {
+        run_case(Some(change), ResumeMode::Scan).await;
+    }
+}
+
+#[actix_web::test]
+async fn periodic_executor_discovers_a_committed_decision_without_controller_wakeup() {
+    run_case(None, ResumeMode::Loop).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResumeMode {
+    Direct,
+    Scan,
+    Loop,
+}
+
+async fn run_case(change: Option<&str>, mode: ResumeMode) {
+    let scanner = mode != ResumeMode::Direct;
+    let directory = tempfile::tempdir().unwrap();
+    let url = if scanner {
+        format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("resume.db").display()
+        )
+    } else {
+        "sqlite::memory:".into()
+    };
+    let db = Database::connect(&url).await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -130,7 +164,7 @@ async fn run_case(change: Option<&str>) {
                             terminal_connection_ids: Default::default(),
                             request_callback_map: Default::default(),
                             device_code: None,
-                            auth_context: AuthContext::token_auth(7, 1, RemoteDeskTypeEnum::Server),
+                            auth_context: AuthContext::token_auth(1, 1, RemoteDeskTypeEnum::Server),
                         };
                         map.write().await.insert(host, peer.clone());
                         notify.notify_one();
@@ -200,7 +234,7 @@ async fn run_case(change: Option<&str>) {
         .unwrap();
     let connections = web::Data::from(map.clone());
     let client_id = "permission-object";
-    let run_id = derive_conversation_key("7", "device", Some(client_id), "unused");
+    let run_id = derive_conversation_key("1", "device", Some(client_id), "unused");
     let reference = ObjectRef {
         token: "original-file".into(),
         snapshot_id: "worker".into(),
@@ -209,7 +243,7 @@ async fn run_case(change: Option<&str>) {
     };
     apply_object_context_update(
         db.clone(),
-        7,
+        1,
         "device".into(),
         &DeviceAssistantObjectContextUpdate {
             conversation_id: client_id.into(),
@@ -239,7 +273,7 @@ async fn run_case(change: Option<&str>) {
             "first".into(),
             "controller".into(),
             host.clone(),
-            7,
+            1,
             "device".into(),
             DeviceAssistantAsk {
                 question: "Inspect only my selected file".into(),
@@ -263,7 +297,7 @@ async fn run_case(change: Option<&str>) {
     };
     apply_object_context_update(
         db.clone(),
-        7,
+        1,
         "device".into(),
         &DeviceAssistantObjectContextUpdate {
             conversation_id: client_id.into(),
@@ -285,7 +319,7 @@ async fn run_case(change: Option<&str>) {
     sessions
         .decide_permission_request(
             &run_id,
-            "7",
+            "1",
             "device",
             &request.request_id,
             vec![PermissionDecisionItem {
@@ -311,7 +345,7 @@ async fn run_case(change: Option<&str>) {
         .await
         .unwrap();
     let grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
-        .list_for_subject(&run_id, "7", "device")
+        .list_for_subject(&run_id, "1", "device")
         .await
         .unwrap();
     assert_eq!(grants.len(), 1);
@@ -321,13 +355,71 @@ async fn run_case(change: Option<&str>) {
             &reference
         ))
     );
-    let resume = || {
+    let executor = crate::permission_resume_executor::SignalPermissionResumeExecutor::new(
+        if scanner {
+            Database::connect(&url).await.unwrap()
+        } else {
+            db.clone()
+        },
+        connections.clone(),
+    );
+    if scanner {
+        let original = map.write().await.remove(&host).unwrap();
+        assert_eq!(executor.scan_once(0).await.unwrap().attempted, 0);
+        map.write().await.insert(host.clone(), original.clone());
+        let mut duplicate = original;
+        duplicate.model.connection_id = format!("duplicate-{host}");
+        map.write()
+            .await
+            .insert(duplicate.model.connection_id.clone(), duplicate);
+        assert_eq!(executor.scan_once(0).await.unwrap().attempted, 0);
+        map.write().await.remove(&format!("duplicate-{host}"));
+        let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
+        let ready = cache.get_fresh(&host, Utc::now()).unwrap().readiness;
+        cache.remove_connection(&host);
+        assert_eq!(executor.scan_once(0).await.unwrap().attempted, 0);
+        cache.update(&host, ready, Utc::now()).unwrap();
+        let row = crate::entity::agent_permission_resume::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, "pending");
+    }
+    let resume = || async {
+        if mode == ResumeMode::Loop {
+            let runner = actix_web::rt::spawn(executor.clone().run());
+            let settled = tokio::time::timeout(Duration::from_secs(12), async {
+                loop {
+                    let row = crate::entity::agent_permission_resume::Entity::find()
+                        .one(&db)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if row.state == "settled" {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await;
+            runner.abort();
+            let _ = runner.await;
+            settled.unwrap();
+            return;
+        }
+        if scanner {
+            let (first, second) = tokio::join!(executor.scan_once(0), executor.scan_once(0));
+            first.unwrap();
+            second.unwrap();
+            return;
+        }
         resume_after_permission_decision(
             connections.clone(),
             db.clone(),
             format!("permission-resume-{}", request.request_id),
             host.clone(),
-            if change == Some("subject") { 8 } else { 7 },
+            if change == Some("subject") { 8 } else { 1 },
             "device".into(),
             run_id.clone(),
             if change == Some("decision") {
@@ -343,6 +435,7 @@ async fn run_case(change: Option<&str>) {
                 ..Default::default()
             },
         )
+        .await;
     };
 
     if matches!(change, Some("readiness" | "legacy")) {
@@ -381,7 +474,7 @@ async fn run_case(change: Option<&str>) {
                 .is_err()
         );
         let grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
-            .list_for_subject(&run_id, "7", "device")
+            .list_for_subject(&run_id, "1", "device")
             .await
             .unwrap();
         assert_eq!(grants[0].remaining_uses, 1);
@@ -409,7 +502,7 @@ async fn run_case(change: Option<&str>) {
             "detach" => {
                 apply_object_context_update(
                     db.clone(),
-                    7,
+                    1,
                     "device".into(),
                     &DeviceAssistantObjectContextUpdate {
                         conversation_id: client_id.into(),
@@ -431,7 +524,7 @@ async fn run_case(change: Option<&str>) {
                 crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone()).append_user_followup(
                     crate::agent_run_event_store::AppendUserFollowupParams {
                         event_id:"new-input".into(), run_id:run_id.clone(), client_conversation_id:Some(client_id.into()),
-                        actor_id:"7".into(), device_id:"device".into(), surface:AgentSessionSurface::DeviceAssistant,
+                        actor_id:"1".into(), device_id:"device".into(), surface:AgentSessionSurface::DeviceAssistant,
                         policy_revision:desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
                         current_scope:snapshot.scope_snapshot.clone(),
                         read_context:Some(crate::agent_run_event_store::ReadContextSelection {tool_names:vec![], expires_at:None, object_attachments:vec![]}),
@@ -579,6 +672,32 @@ async fn run_case(change: Option<&str>) {
             .len(),
         1
     );
+    if scanner {
+        let before = crate::entity::model_egress_receipt::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 3);
+        assert_eq!(executor.scan_once(0).await.unwrap().scanned, 0);
+        assert_eq!(
+            crate::entity::model_egress_receipt::Entity::find()
+                .all(&db)
+                .await
+                .unwrap(),
+            before
+        );
+        let row = crate::entity::agent_permission_resume::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, "settled");
+        let grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+            .list_for_subject(&run_id, "1", "device")
+            .await
+            .unwrap();
+        assert_eq!(grants[0].remaining_uses, 0);
+    }
     socket.send(awc::ws::Message::Close(None)).await.unwrap();
     drop(socket);
     map.write().await.clear();

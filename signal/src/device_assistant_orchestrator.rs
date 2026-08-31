@@ -1414,13 +1414,15 @@ async fn run_turn_inner(
             AgentSessionSurface::DeviceAssistant,
         )
         .with_context_selection(context_selection);
-    let sessions = if resume_conversation_id.is_some() {
-        sessions.with_expected_input_revision(
-            snapshot
-                .as_ref()
-                .expect("validated resume snapshot")
-                .input_revision,
-        )
+    let sessions = if let Some(resume) = &resume_conversation_id {
+        let snapshot = snapshot.as_ref().expect("validated resume snapshot");
+        sessions
+            .with_expected_input_revision(snapshot.input_revision)
+            .with_permission_resume(
+                resume.permission_request_id.clone(),
+                snapshot.seq,
+                capability_grants.clone(),
+            )
     } else {
         sessions
     };
@@ -1535,7 +1537,15 @@ async fn run_turn_inner(
             }
         };
     let clock = || chrono::Utc::now().to_rfc3339();
-    let turn_id = uuid::Uuid::new_v4().to_string();
+    let turn_id = resume_conversation_id.as_ref().map_or_else(
+        || uuid::Uuid::new_v4().to_string(),
+        |resume| {
+            crate::agent_session_store::permission_resume::turn_id(
+                &conversation_id,
+                &resume.permission_request_id,
+            )
+        },
+    );
     let (available_exec_shells, max_command_runtime_ms) = {
         let connections = connections.read().await;
         connections

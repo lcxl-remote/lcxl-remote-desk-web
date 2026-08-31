@@ -631,6 +631,13 @@ pub async fn run_with_hub(
 
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
     if startup_mode_has_signal_db(&startup_mode) {
+        actix_web::rt::spawn(
+            desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
+                desk_signal::db::get_db().clone(),
+                connection_map.clone(),
+            )
+            .run(),
+        );
         tokio::spawn(
             desk_signal::computer_cancel_dispatch::SignalComputerCancelDispatcher::new(
                 desk_signal::db::get_db().clone(),

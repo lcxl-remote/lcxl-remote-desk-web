@@ -10,6 +10,7 @@ async fn add_cleanup_tables(db: &DatabaseConnection) {
         schema.create_table_from_entity(ai_usage::Entity),
         schema.create_table_from_entity(agent_exec_task::Entity),
         schema.create_table_from_entity(agent_run_event::Entity),
+        schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
     ] {
         db.execute(&table).await.unwrap();
     }
@@ -33,6 +34,10 @@ async fn counts(db: &DatabaseConnection) -> Vec<u64> {
             .unwrap(),
         agent_exec_task::Entity::find().count(db).await.unwrap(),
         agent_run_event::Entity::find().count(db).await.unwrap(),
+        crate::entity::agent_permission_resume::Entity::find()
+            .count(db)
+            .await
+            .unwrap(),
     ]
 }
 
@@ -103,14 +108,32 @@ async fn expiry_deletes_original_results_with_run_or_rolls_back_every_related_re
     .insert(db)
     .await
     .unwrap();
-    assert_eq!(counts(db).await, vec![1; 7]);
+    crate::entity::agent_permission_resume::ActiveModel {
+        permission_id: Set("synthetic-permission".into()),
+        decision_event_id: Set("run-event".into()),
+        run_id: Set("run-1".into()),
+        request_id: Set("permission-1".into()),
+        actor_id: Set("actor-1".into()),
+        device_id: Set("device-1".into()),
+        input_revision: Set(1),
+        state: Set("settled".into()),
+        turn_id: Set(Some("synthetic-permission".into())),
+        version: Set(2),
+        created_at: Set(old),
+        updated_at: Set(old),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .unwrap();
+    assert_eq!(counts(db).await, vec![1; 8]);
 
     // Fail the last deletion, after every child row has been removed in the transaction.
     db.execute_raw(Statement::from_string(db.get_database_backend(),
         "CREATE TRIGGER refuse_retention BEFORE DELETE ON agent_session BEGIN SELECT RAISE(ABORT, 'synthetic retention failure'); END".to_owned(),
     )).await.unwrap();
     assert!(crate::usage_retention::cleanup_once(db, now).await.is_err());
-    assert_eq!(counts(db).await, vec![1; 7]);
+    assert_eq!(counts(db).await, vec![1; 8]);
     assert_eq!(work(&f).await, original);
     assert_eq!(f.outbox().await, outbox);
     assert!(
@@ -131,7 +154,7 @@ async fn expiry_deletes_original_results_with_run_or_rolls_back_every_related_re
         crate::usage_retention::cleanup_once(db, now).await.unwrap(),
         (0, 0, 0, 1)
     );
-    assert_eq!(counts(db).await, vec![0; 7]);
+    assert_eq!(counts(db).await, vec![0; 8]);
     assert!(
         f.store
             .read_computer_result(&f.plan.execution_generation, "run-1", "actor-1", "device-1")
@@ -139,7 +162,7 @@ async fn expiry_deletes_original_results_with_run_or_rolls_back_every_related_re
             .is_err()
     );
     assert!(observe(&f, &native).await.is_err());
-    assert_eq!(counts(db).await, vec![0; 7]);
+    assert_eq!(counts(db).await, vec![0; 8]);
     assert_eq!(
         crate::usage_retention::cleanup_once(db, now).await.unwrap(),
         (0, 0, 0, 0)

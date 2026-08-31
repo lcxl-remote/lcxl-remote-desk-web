@@ -3,6 +3,7 @@
 mod assistant_snapshot;
 mod object_context;
 mod permission_receipt;
+pub mod permission_resume;
 pub use object_context::UpdateObjectContext;
 pub use permission_receipt::PermissionDecisionOutcome;
 
@@ -42,6 +43,7 @@ pub struct SignalAgentSessionStore {
     surface: AgentSessionSurface,
     context_selection: Option<ContextSelectionClaim>,
     expected_input_revision: Option<u64>,
+    permission_resume: Option<permission_resume::ClaimBinding>,
 }
 
 /// Server-authoritative context selection frozen for one Device Assistant
@@ -65,6 +67,7 @@ impl SignalAgentSessionStore {
             surface: AgentSessionSurface::Unknown,
             context_selection: None,
             expected_input_revision: None,
+            permission_resume: None,
         }
     }
 
@@ -506,6 +509,7 @@ impl SignalAgentSessionStore {
                 .await
                 .map_err(|error| internal(format!("insert issued grant: {error}")))?;
             }
+            permission_resume::insert_pending(&txn, &session, &event).await?;
             txn.commit()
                 .await
                 .map_err(|error| internal(format!("commit permission decision: {error}")))?;
@@ -1104,6 +1108,14 @@ impl SessionSeam for SignalAgentSessionStore {
         &self,
         params: ClaimTurnParams,
     ) -> Result<PersistedAgentSession, ClaimError> {
+        if params.trigger_origin == desk_diagnose_core::session::TriggerOrigin::PermissionDecision {
+            return self.claim_permission_resume(params).await;
+        }
+        if self.permission_resume.is_some() {
+            return Err(ClaimError::Backend(internal(
+                "permission resume trigger mismatch",
+            )));
+        }
         let now = now_from(&params.now);
         for _ in 0..CLAIM_ATTEMPTS {
             match find(&self.db, &params.conversation_id)
@@ -1873,6 +1885,11 @@ mod tests {
         db.execute(&schema.create_table_from_entity(agent_run_event::Entity))
             .await
             .unwrap();
+        db.execute(
+            &schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
+        )
+        .await
+        .unwrap();
         db.execute(&schema.create_table_from_entity(agent_capability_grant::Entity))
             .await
             .unwrap();

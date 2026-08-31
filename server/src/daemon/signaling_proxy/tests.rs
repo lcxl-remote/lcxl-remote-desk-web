@@ -678,7 +678,6 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
                 .await
                 .expect("in-memory ledger"),
         ),
-        #[cfg(target_os = "linux")]
         pc_registry,
         admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,
         manager_credential_link: None,

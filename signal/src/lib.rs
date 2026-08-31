@@ -22,6 +22,7 @@ pub mod model;
 pub mod model_dial;
 pub mod model_egress_store;
 pub mod model_provider;
+pub mod permission_resume_executor;
 pub mod remote_access;
 pub mod remote_tool_edge;
 pub mod request_remote_authorizer;

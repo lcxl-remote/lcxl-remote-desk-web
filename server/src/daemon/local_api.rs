@@ -71,6 +71,13 @@ pub async fn run_local_api(
     let settings_data = web::Data::from(settings.clone());
     let settings_coordinator_data = web::Data::from(settings_coordinator);
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
+    actix_web::rt::spawn(
+        desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
+            desk_signal::db::get_db().clone(),
+            connection_map.clone(),
+        )
+        .run(),
+    );
     let tauri_is_admin_data = web::Data::new(Arc::clone(&tauri_bridge.tauri_is_admin));
 
     let validator: Arc<dyn NodeTokenValidator> = Arc::new(LocalNodeTokenValidator {

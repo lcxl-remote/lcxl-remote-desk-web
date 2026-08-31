@@ -116,12 +116,11 @@ pub(super) async fn requested_on(
     Ok(requested)
 }
 
-pub(super) async fn replay_on(
+pub(super) async fn decided_on(
     db: &impl ConnectionTrait,
     session: &PersistedAgentSession,
     request_id: &str,
-    decisions: &[PermissionDecisionItem],
-) -> Result<Option<PermissionRequestState>, AgentError> {
+) -> Result<Option<PermissionDecidedEvent>, AgentError> {
     let Some(row) = event_row(
         db,
         &session.conversation_id,
@@ -152,7 +151,22 @@ pub(super) async fn replay_on(
                     session.conversation_id, event.event.event_seq, request_id
                 ),
             )
-        || decisions.len() != event.items.len()
+    {
+        return Err(invalid());
+    }
+    Ok(Some(event))
+}
+
+pub(super) async fn replay_on(
+    db: &impl ConnectionTrait,
+    session: &PersistedAgentSession,
+    request_id: &str,
+    decisions: &[PermissionDecisionItem],
+) -> Result<Option<PermissionRequestState>, AgentError> {
+    let Some(event) = decided_on(db, session, request_id).await? else {
+        return Ok(None);
+    };
+    if decisions.len() != event.items.len()
         || !event.items.iter().all(|item| {
             decisions
                 .iter()

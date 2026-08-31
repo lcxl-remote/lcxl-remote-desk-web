@@ -3,6 +3,7 @@ pub mod agent_capability_dispatch_outbox;
 pub mod agent_capability_grant;
 pub mod agent_exec_task;
 pub mod agent_grant_reservation;
+pub mod agent_permission_resume;
 pub mod agent_run_event;
 pub mod agent_session;
 pub mod ai_usage;

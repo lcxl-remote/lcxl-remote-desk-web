@@ -286,6 +286,10 @@ async fn delete_expired_session_candidates(
             .filter(agent_run_event::Column::RunId.is_in(run_ids.clone()))
             .exec(&txn)
             .await?;
+        crate::entity::agent_permission_resume::Entity::delete_many()
+            .filter(crate::entity::agent_permission_resume::Column::RunId.is_in(run_ids.clone()))
+            .exec(&txn)
+            .await?;
         agent_action_item::Entity::delete_many()
             .filter(agent_action_item::Column::ConversationId.is_in(run_ids.clone()))
             .exec(&txn)
@@ -483,6 +487,7 @@ mod tests {
             schema.create_table_from_entity(agent_capability_grant::Entity),
             schema.create_table_from_entity(agent_grant_reservation::Entity),
             schema.create_table_from_entity(agent_run_event::Entity),
+            schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
         ] {
             db.execute(&stmt).await.unwrap();
         }

@@ -2,6 +2,7 @@
 use super::*;
 use actix_web::web;
 
+mod durable;
 mod http;
 
 async fn seed(db: DatabaseConnection) -> (SignalAgentSessionStore, Vec<PermissionDecisionItem>) {
@@ -321,7 +322,11 @@ async fn damaged_or_missing_original_facts_never_manufacture_a_receipt() {
 
 #[tokio::test]
 async fn decision_receipt_and_grants_rollback_together() {
-    for table in ["agent_run_event", "agent_capability_grant"] {
+    for table in [
+        "agent_run_event",
+        "agent_capability_grant",
+        "agent_permission_resume",
+    ] {
         let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
         store.db.execute_unprepared(&format!("CREATE TRIGGER reject_decision BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")).await.unwrap();
         let saved = state(&store).await;
