@@ -48,6 +48,7 @@ pub mod exec_classify;
 pub mod exec_tools;
 pub mod image_input;
 pub mod input_read_context;
+pub mod live_context;
 pub mod model_capability;
 pub mod model_context;
 pub mod model_egress;

@@ -3,9 +3,10 @@
 use actix_web::web;
 use desk_agent_protocol::agent_event::AgentEvent;
 use desk_agent_protocol::computer_use::ComputerUseReadiness;
+use desk_agent_protocol::data_lineage::DestinationIdentity;
+#[cfg(test)]
 use desk_agent_protocol::data_lineage::{
-    ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, DestinationIdentity,
-    RetentionBoundary, Sensitivity,
+    ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, RetentionBoundary,
 };
 use desk_agent_protocol::device_assistant::{
     DeviceAssistantAsk, DeviceAssistantContextUpdate, DeviceAssistantContextUpdated,
@@ -23,11 +24,7 @@ use desk_diagnose_core::capability_availability::{
 #[cfg(test)]
 use desk_diagnose_core::chat::ChatMessage;
 use desk_diagnose_core::chat::ChatRole;
-use desk_diagnose_core::context_attachment::{
-    AttachmentBounds, AttachmentObjectRef, AttachmentRuntimeBinding, AttachmentState,
-    CONTEXT_ATTACHMENT_SCHEMA_VERSION, ContextAttachment, ContextAttachmentKind,
-    MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_OBJECTS,
-};
+use desk_diagnose_core::context_attachment::ContextAttachmentKind;
 use desk_diagnose_core::conversation_key::{
     derive_conversation_key, is_valid_client_conversation_id,
 };
@@ -200,142 +197,20 @@ fn context_selection_claim(
     destination: &DestinationIdentity,
     now_unix_ms: u64,
 ) -> Result<crate::agent_session_store::ContextSelectionClaim, AgentError> {
-    let selected = selected_capability_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    for capability_id in &selected {
-        if !inventory
-            .iter()
-            .any(|item| item.capability_id == *capability_id && item.ready)
-        {
-            return Err(transport_error(format!(
-                "selected context capability is no longer ready: {capability_id}"
-            )));
-        }
-    }
-
-    let (incarnation, expires_at_unix_ms) = match readiness {
-        Some(readiness) => {
-            let expires_at = chrono::DateTime::parse_from_rfc3339(&readiness.expires_at)
-                .map_err(|_| transport_error("invalid context readiness expiry"))?
-                .timestamp_millis();
-            let expires_at_unix_ms = u64::try_from(expires_at)
-                .map_err(|_| transport_error("context readiness expiry predates Unix epoch"))?;
-            if expires_at_unix_ms <= now_unix_ms {
-                return Err(transport_error("selected context readiness expired"));
-            }
-            (
-                readiness.interactive_session_incarnation.clone(),
-                expires_at_unix_ms,
-            )
-        }
-        None if selected.is_empty() => ("unavailable".to_string(), now_unix_ms + 1),
-        None => return Err(transport_error("selected context Provider is unavailable")),
-    };
-
-    let runtime_bindings = inventory
-        .iter()
-        .filter(|item| item.ready)
-        .map(|item| AttachmentRuntimeBinding {
-            source_provider_id: item.provider_id.clone(),
-            source_capability_id: item.capability_id.clone(),
-            object_incarnation: incarnation.clone(),
-        })
-        .collect::<Vec<_>>();
-    let mut candidates = Vec::new();
-    for capability_id in selected_capability_ids {
-        // CurrentScreen is a sensitive one-turn grant. It controls tool
-        // exposure for this turn, but must never become durable session
-        // attachment metadata.
-        if capability_id == desk_diagnose_core::device_assistant::CURRENT_SCREEN_CAPABILITY_ID {
-            continue;
-        }
-        let capability = registry.capability(capability_id).ok_or_else(|| {
-            transport_error(format!(
-                "unknown selected context capability: {capability_id}"
-            ))
-        })?;
-        let provider = registry
-            .provider_for_capability(capability_id)
-            .ok_or_else(|| transport_error("selected context Provider is missing"))?;
-        let attachment_id = format!("context-{}", uuid::Uuid::new_v4());
-        let opaque_token = uuid::Uuid::new_v4().to_string();
-        let observation_id = format!("selection-{}", uuid::Uuid::new_v4());
-        let metadata = serde_json::to_vec(&serde_json::json!({
-            "provider_id": provider.wire.provider_id,
-            "capability_id": capability_id,
-            "interactive_session_incarnation": incarnation,
-        }))
-        .map_err(|error| transport_error(format!("encode context metadata: {error}")))?;
-        let digest = format!("{:x}", Sha256::digest(&metadata));
-        let client_request_id = format!(
-            "select-{:x}",
-            Sha256::digest(format!("{request_id}:{capability_id}").as_bytes())
-        );
-        candidates.push(ContextAttachment {
-            schema_version: CONTEXT_ATTACHMENT_SCHEMA_VERSION,
-            attachment_id: attachment_id.clone(),
-            client_request_id,
-            actor_id: actor_id.to_string(),
-            device_id: device_id.to_string(),
-            surface: AgentSessionSurface::DeviceAssistant,
-            // Today's selector binds the capability to the exact worker
-            // incarnation. More specific Office/file/range selectors replace
-            // this with their own immutable object kinds and incarnations.
-            kind: ContextAttachmentKind::InteractiveSession,
-            object_ref: AttachmentObjectRef {
-                opaque_token: opaque_token.clone(),
-                object_incarnation: incarnation.clone(),
-                source_provider_id: provider.wire.provider_id.clone(),
-                source_capability_id: capability_id.clone(),
-            },
-            bounds: AttachmentBounds {
-                max_bytes: capability
-                    .wire
-                    .limits
-                    .max_output_bytes
-                    .min(MAX_ATTACHMENT_BYTES),
-                max_objects: capability
-                    .wire
-                    .limits
-                    .max_objects
-                    .min(MAX_ATTACHMENT_OBJECTS),
-            },
-            display_summary: format!("{capability_id} on the current interactive session"),
-            created_at_unix_ms: now_unix_ms,
-            expires_at_unix_ms,
-            envelope: DataEnvelope {
-                schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-                envelope_id: format!("envelope-{attachment_id}"),
-                content: ContentRef::EphemeralObservation {
-                    observation_id,
-                    size_bytes: u64::try_from(metadata.len()).unwrap_or(u64::MAX),
-                    expires_at_unix_ms,
-                },
-                provenance: DataProvenance {
-                    source_provider_id: provider.wire.provider_id.clone(),
-                    source_tool_name: capability.wire.tool_name.clone(),
-                    source_object_id: Some(opaque_token),
-                    source_envelope_ids: Vec::new(),
-                },
-                digest_sha256: digest,
-                sensitivity: Sensitivity::UserContent,
-                allowed_destinations: vec![destination.clone()],
-                retention: RetentionBoundary {
-                    expires_at_unix_ms: Some(expires_at_unix_ms),
-                    delete_with_run: false,
-                },
-            },
-            state: AttachmentState::Active,
-        });
-    }
-    Ok(crate::agent_session_store::ContextSelectionClaim {
-        selected_capability_ids: selected_capability_ids.to_vec(),
-        runtime_bindings,
-        candidates,
-        now_unix_ms,
-    })
+    desk_diagnose_core::live_context::build_live_context(
+        desk_diagnose_core::live_context::LiveContextBuild {
+            registry,
+            inventory,
+            readiness,
+            selected_capability_ids,
+            request_id,
+            actor_id,
+            device_id,
+            destination,
+            now_unix_ms,
+        },
+        || uuid::Uuid::new_v4().to_string(),
+    )
 }
 
 fn transport_error(message: impl Into<String>) -> AgentError {
@@ -445,6 +320,26 @@ pub async fn update_context(
     update: DeviceAssistantContextUpdate,
 ) {
     let result = async {
+        desk_diagnose_core::live_context::validate_durable_update(&update)?;
+        let actor_id = actor_user_id.to_string();
+        let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+            .with_client_metadata(Some(update.conversation_id.clone()), AgentSessionSurface::DeviceAssistant);
+        let mut params = crate::agent_session_store::UpdateLiveContext {
+            run_id: derive_conversation_key(&actor_id, &target_device_id, Some(&update.conversation_id), &request_id),
+            actor_id: actor_id.clone(), device_id: target_device_id.clone(), update: update.clone(),
+            selection: None, created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Some(changed) = store.replay_live_context(&params).await? {
+            return Ok(changed);
+        }
+        if update.selected_capability_ids.is_empty() {
+            params.selection = Some(crate::agent_session_store::ContextSelectionClaim {
+                selected_capability_ids: vec![], runtime_bindings: vec![], candidates: vec![],
+                now_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
+            });
+            params.created_at = chrono::Utc::now().to_rfc3339();
+            return store.update_live_context(&params).await;
+        }
         let config = crate::model_provider::load(&db).await.map_err(|error| {
             transport_error(format!("failed to load model provider config: {error}"))
         })?;
@@ -468,7 +363,6 @@ pub async fn update_context(
                 "CurrentScreen is a one-turn sensitive selection and cannot be saved as durable context",
             ));
         }
-        let actor_id = actor_user_id.to_string();
         let selection = context_selection_claim(
             &registry,
             &inventory,
@@ -480,36 +374,9 @@ pub async fn update_context(
             &destination,
             now_unix_ms,
         )?;
-        let conversation_key = derive_conversation_key(
-            &actor_id,
-            &target_device_id,
-            Some(&update.conversation_id),
-            &request_id,
-        );
-        let scope = AgentScope {
-            granted: desk_diagnose_core::device_assistant::selected_context_capabilities(
-                &update.selected_capability_ids,
-            )
-            .map_err(transport_error)?,
-            mode: ExecutionMode::ReadOnly,
-            expires_at: None,
-            policy_name: Some("oss-device-assistant-read-only".into()),
-        };
-        let store = crate::agent_session_store::SignalAgentSessionStore::new(db)
-            .with_client_metadata(
-                Some(update.conversation_id.clone()),
-                AgentSessionSurface::DeviceAssistant,
-            )
-            .with_context_selection(selection);
-        store
-            .update_context_selection(
-                &conversation_key,
-                &actor_id,
-                &target_device_id,
-                scope,
-                &chrono::Utc::now().to_rfc3339(),
-            )
-            .await
+        params.selection = Some(selection);
+        params.created_at = chrono::Utc::now().to_rfc3339();
+        store.update_live_context(&params).await
     }
     .await;
 
@@ -536,6 +403,40 @@ pub async fn update_context(
     );
     if let Err(error) = send_frame(&browser, &frame).await {
         log::warn!("[device-assistant] failed to send context update: {error}");
+    }
+}
+
+pub(crate) async fn reject_live_context(
+    actor: &ConnectionState,
+    request: &SignalingModel,
+    message: String,
+) {
+    let payload = request.get_data::<serde_json::Value>().ok();
+    let selector = |name: &str| {
+        payload
+            .as_ref()
+            .and_then(|value| value.get(name))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty() && value.len() <= 256)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let ack = DeviceAssistantContextUpdated {
+        conversation_id: selector("conversation_id"),
+        client_request_id: selector("client_request_id"),
+        changed: false,
+        error: Some(message),
+    };
+    let frame = SignalingModel::new(
+        &request.request_id,
+        SignalingType::DeviceAssistantContextUpdated,
+        None,
+        Some(actor.model.connection_id.clone()),
+        serde_json::to_value(ack).ok(),
+        None,
+    );
+    if let Err(error) = send_frame(actor, &frame).await {
+        log::warn!("[device-assistant] failed to send context rejection: {error}");
     }
 }
 

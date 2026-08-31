@@ -1,28 +1,10 @@
-//! Real loopback transport through the OSS authorizer and object orchestrator.
-//! Cookie validation and device reference issuance use synthetic fixture inputs.
-
+//! Real OSS 638/639 loopback; authentication and desktop readiness are synthetic.
 use super::*;
-mod live_context;
-use crate::{
-    control_authorizer::SignalControlAuthorizer,
-    entity::{model_probe_observation, model_provider},
+use desk_agent_protocol::device_assistant::{
+    DeviceAssistantContextUpdate, DeviceAssistantContextUpdated,
 };
-use desk_agent_protocol::device_assistant::DeviceAssistantObjectContextUpdated;
-use desk_diagnose_core::model_profile::WireProtocol;
-use desk_signal_facade::{
-    model::{
-        auth_context::AuthContext,
-        connection::{ConnectionModel, ConnectionState, SharedConnectionMap},
-        signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType},
-        version::VersionInfo,
-    },
-    service::{ControlFrameAuthorizer, ControlFrameOutcome},
-};
-use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
-
 #[actix_web::test]
-async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() {
+async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     let store = memory().await;
     let schema = Schema::new(store.db.get_database_backend());
     for table in [
@@ -85,7 +67,7 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
                         // The object update is central metadata, not an edge call.
                         // A synthetic registered peer supplies the bound audience.
                         let mut target = actor.clone();
-                        target.model.connection_id = "host".into();
+                        target.model.connection_id = "live-context-host".into();
                         target.model.version_info = VersionInfo::new(
                             1,
                             1,
@@ -98,7 +80,7 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
                             AuthContext::token_auth(7, 1, RemoteDeskTypeEnum::Server);
                         {
                             let mut entries = map.write().await;
-                            entries.insert("host".into(), target);
+                            entries.insert("live-context-host".into(), target);
                             entries.insert("controller".into(), actor.clone());
                         }
                         actix_web::rt::spawn(async move {
@@ -109,7 +91,7 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
                                             serde_json::from_str(&text).unwrap();
                                         assert_eq!(
                                             frame.signaling_type,
-                                            SignalingType::UpdateDeviceAssistantObjectContext
+                                            SignalingType::UpdateDeviceAssistantContext
                                         );
                                         assert!(matches!(
                                             authorizer.authorize(&actor, &map, &frame).await,
@@ -141,16 +123,56 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
         .connect()
         .await
         .unwrap();
-    let original = params();
+    use desk_agent_protocol::{Capability, computer_use::*};
+    let now = Utc::now();
+    let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
+    cache
+        .update(
+            "live-context-host",
+            ComputerUseReadiness {
+                schema_version: COMPUTER_USE_SCHEMA_VERSION,
+                revision: 1,
+                observed_at: now.to_rfc3339(),
+                expires_at: (now + Duration::seconds(60)).to_rfc3339(),
+                server_api_version: desk_server_version::SERVER_API_VERSION,
+                os: "macos".into(),
+                interactive_session_incarnation: "live-worker".into(),
+                local_ceiling_revision: 1,
+                capabilities: [
+                    Capability::DesktopSessionInspect,
+                    Capability::DesktopUiInspect,
+                ]
+                .into_iter()
+                .map(|capability| ComputerUseCapabilityReadiness {
+                    capability,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::MacosAccessibility,
+                        version: "1".into(),
+                    },
+                    supported: true,
+                    ready: true,
+                    reason: None,
+                })
+                .collect(),
+                context_references: vec![],
+            },
+            now,
+        )
+        .unwrap();
+    let original = DeviceAssistantContextUpdate {
+        conversation_id: "client-conversation".into(),
+        client_request_id: "live-selection".into(),
+        selected_capability_ids: vec!["desktop.ui.inspect".into()],
+    };
 
     macro_rules! exchange {
         ($request:expr, $transport_id:expr) => {{
-            let update: &DeviceAssistantObjectContextUpdate = $request;
+            let update: &DeviceAssistantContextUpdate = $request;
             let frame = SignalingModel::new(
                 $transport_id,
-                SignalingType::UpdateDeviceAssistantObjectContext,
+                SignalingType::UpdateDeviceAssistantContext,
                 Some("untrusted-sender-is-ignored".into()),
-                Some("host".into()),
+                Some("live-context-host".into()),
                 Some(serde_json::to_value(update).unwrap()),
                 None,
             );
@@ -172,16 +194,16 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
             assert_eq!(reply.request_id, $transport_id);
             assert_eq!(
                 reply.signaling_type,
-                SignalingType::DeviceAssistantObjectContextUpdated
+                SignalingType::DeviceAssistantContextUpdated
             );
             assert_eq!(reply.to_connection_id.as_deref(), Some("controller"));
-            let ack: DeviceAssistantObjectContextUpdated = reply.get_data().unwrap();
+            let ack: DeviceAssistantContextUpdated = reply.get_data().unwrap();
             assert_eq!(ack.conversation_id, update.conversation_id);
             assert_eq!(ack.client_request_id, update.client_request_id);
             ack
         }};
     }
-    let first = exchange!(&original.update, "first-transport");
+    let first = exchange!(&original, "first-transport");
     assert!(first.changed && first.error.is_none());
     let saved = row(&store).await;
     let attachment = state(&store).await.context_attachments[0].clone();
@@ -196,40 +218,34 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
         .exec(&store.db)
         .await
         .unwrap();
-    let retry = exchange!(&original.update, "after-reconnect");
+    cache.remove_connection("live-context-host");
+    let retry = exchange!(&original, "after-reconnect");
     assert!(retry.changed && retry.error.is_none());
     assert_eq!(row(&store).await, saved);
 
-    let mut conflicting = original.update.clone();
-    if let DeviceAssistantObjectContextOperation::AttachFile {
-        display_summary, ..
-    } = &mut conflicting.operation
-    {
-        *display_summary = "changed-body".into();
-    }
+    let mut conflicting = original.clone();
+    conflicting.selected_capability_ids.clear();
     let rejected = exchange!(&conflicting, "conflict");
     assert!(!rejected.changed && rejected.error.is_some());
     assert_eq!(row(&store).await, saved);
 
-    let mut new_attach = original.update.clone();
+    let mut new_attach = original.clone();
     new_attach.client_request_id = "new-unconfigured-selection".into();
     let rejected = exchange!(&new_attach, "no-model");
     assert!(!rejected.changed && rejected.error.is_some());
     assert_eq!(row(&store).await, saved);
 
-    let detach = DeviceAssistantObjectContextUpdate {
+    let detach = DeviceAssistantContextUpdate {
         client_request_id: "detach".into(),
-        operation: DeviceAssistantObjectContextOperation::Detach {
-            attachment_id: attachment.attachment_id.clone(),
-        },
-        ..original.update.clone()
+        selected_capability_ids: vec![],
+        ..original.clone()
     };
     let detached = exchange!(&detach, "detach-without-model");
     assert!(detached.changed && detached.error.is_none());
     let saved = row(&store).await;
     let retry = exchange!(&detach, "detach-retry");
     assert!(retry.changed && retry.error.is_none());
-    let retry = exchange!(&original.update, "attach-retry-after-detach");
+    let retry = exchange!(&original, "attach-retry-after-detach");
     assert!(retry.changed && retry.error.is_none());
     assert_eq!(row(&store).await, saved);
     assert_eq!(events(&store).await.len(), 2);
@@ -247,21 +263,76 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
     anonymous.auth_context = AuthContext::anonymous(RemoteDeskTypeEnum::Browser);
     let frame = SignalingModel::new(
         "anonymous-retry",
-        SignalingType::UpdateDeviceAssistantObjectContext,
+        SignalingType::UpdateDeviceAssistantContext,
         None,
-        Some("host".into()),
-        Some(serde_json::to_value(&original.update).unwrap()),
+        Some("live-context-host".into()),
+        Some(serde_json::to_value(&original).unwrap()),
         None,
     );
     assert!(matches!(
         authorizer.authorize(&anonymous, &map, &frame).await,
-        ControlFrameOutcome::Reject { .. }
+        ControlFrameOutcome::Handled
     ));
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let awc::ws::Frame::Text(bytes) = reply else {
+        panic!("expected rejection")
+    };
+    let frame: SignalingModel = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(frame.request_id, "anonymous-retry");
+    assert_eq!(
+        frame.signaling_type,
+        SignalingType::DeviceAssistantContextUpdated
+    );
+    assert!(
+        frame
+            .get_data::<DeviceAssistantContextUpdated>()
+            .unwrap()
+            .error
+            .is_some()
+    );
+    let malformed = SignalingModel::new(
+        "malformed",
+        SignalingType::UpdateDeviceAssistantContext,
+        None,
+        Some("live-context-host".into()),
+        Some(
+            serde_json::json!({"conversation_id": original.conversation_id, "client_request_id":"malformed-client", "selected_capability_ids":42}),
+        ),
+        None,
+    );
+    socket
+        .send(awc::ws::Message::Text(
+            serde_json::to_string(&malformed).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let awc::ws::Frame::Text(bytes) = reply else {
+        panic!("expected rejection")
+    };
+    let frame: SignalingModel = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(frame.request_id, "malformed");
+    assert_eq!(
+        frame.signaling_type,
+        SignalingType::DeviceAssistantContextUpdated
+    );
+    let ack = frame.get_data::<DeviceAssistantContextUpdated>().unwrap();
+    assert_eq!(ack.client_request_id, "malformed-client");
+    assert!(ack.error.is_some());
     assert_eq!(row(&store).await, saved);
     socket.send(awc::ws::Message::Close(None)).await.unwrap();
     drop(socket);
     drop(anonymous);
     map.write().await.clear();
+    cache.remove_connection("live-context-host");
     handle.stop(true).await;
     server_task.await.unwrap().unwrap();
 }

@@ -184,14 +184,14 @@ async fn fresh_duplicate_object_has_a_durable_false_receipt_and_keeps_capability
                 &original.run_id,
                 "7",
                 "device",
-                state(&store).await.scope_snapshot,
-                &original.created_at
+                "clear-live-context",
+                &Utc::now().to_rfc3339()
             )
             .await
             .unwrap()
     );
     assert_eq!(state(&store).await.context_attachments, [attachment]);
-    assert_eq!(events(&store).await.len(), 2);
+    assert_eq!(events(&store).await.len(), 3);
 }
 
 #[tokio::test]

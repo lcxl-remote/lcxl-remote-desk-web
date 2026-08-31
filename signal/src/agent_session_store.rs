@@ -1,7 +1,9 @@
 //! SQLite-backed agent sessions for the single-node OSS signal central brain.
 
 mod assistant_snapshot;
+mod live_context;
 mod object_context;
+pub use live_context::UpdateLiveContext;
 mod permission_receipt;
 pub mod permission_resume;
 pub use object_context::UpdateObjectContext;
@@ -11,9 +13,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use desk_agent_protocol::capability_grant::CAPABILITY_GRANT_SCHEMA_VERSION;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
-use desk_diagnose_core::context_attachment::{
-    AttachmentRuntimeBinding, AttachmentState, ContextAttachment, ContextAttachmentKind,
-};
+use desk_diagnose_core::context_attachment::ContextAttachment;
+#[cfg(test)]
+use desk_diagnose_core::context_attachment::{AttachmentRuntimeBinding, AttachmentState};
 use desk_diagnose_core::dynamic_run::{
     AGENT_RUN_EVENT_SCHEMA_VERSION, PermissionRequestedEvent, TaskStatusUpdatedEvent,
 };
@@ -46,18 +48,7 @@ pub struct SignalAgentSessionStore {
     permission_resume: Option<permission_resume::ClaimBinding>,
 }
 
-/// Server-authoritative context selection frozen for one Device Assistant
-/// claim. Candidate attachment identities are minted once by the orchestrator;
-/// SQLite CAS retries reuse the exact same identities instead of duplicating
-/// refs. Runtime bindings include every currently-ready context capability so
-/// deselection is distinguishable from Provider unavailability.
-#[derive(Debug, Clone)]
-pub struct ContextSelectionClaim {
-    pub selected_capability_ids: Vec<String>,
-    pub runtime_bindings: Vec<AttachmentRuntimeBinding>,
-    pub candidates: Vec<ContextAttachment>,
-    pub now_unix_ms: u64,
-}
+pub use desk_diagnose_core::live_context::ContextSelectionClaim;
 
 impl SignalAgentSessionStore {
     pub fn new(db: DatabaseConnection) -> Self {
@@ -97,187 +88,44 @@ impl SignalAgentSessionStore {
         &self,
         session: &mut PersistedAgentSession,
     ) -> Result<bool, AgentError> {
-        let Some(selection) = &self.context_selection else {
-            return Ok(false);
-        };
-        let mut changed = false;
-        // CurrentScreen is deliberately ephemeral. Older builds briefly wrote
-        // attachment metadata for it; remove that metadata on the next claim as
-        // well as preventing new entries in the orchestrator.
-        let attachment_count = session.context_attachments.len();
-        session
-            .context_attachments
-            .retain(|attachment| attachment.kind != ContextAttachmentKind::CurrentScreen);
-        changed |= session.context_attachments.len() != attachment_count;
-        for attachment in session.context_attachments.iter_mut().filter(|attachment| {
-            attachment.kind == ContextAttachmentKind::InteractiveSession
-                && matches!(attachment.state, AttachmentState::Active)
-        }) {
-            if let Some(reason) =
-                attachment.stale_reason_against(selection.now_unix_ms, &selection.runtime_bindings)
-            {
-                attachment.mark_stale(reason);
-                changed = true;
+        match &self.context_selection {
+            Some(selection) => {
+                desk_diagnose_core::live_context::reconcile_live_context(session, selection)
             }
+            None => Ok(false),
         }
-
-        let selected = selection
-            .selected_capability_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>();
-        let detach = session
-            .context_attachments
-            .iter()
-            .filter(|attachment| {
-                matches!(attachment.state, AttachmentState::Active)
-                    && attachment.kind == ContextAttachmentKind::InteractiveSession
-                    && !selected.contains(attachment.object_ref.source_capability_id.as_str())
-            })
-            .map(|attachment| attachment.attachment_id.clone())
-            .collect::<Vec<_>>();
-        for attachment_id in detach {
-            changed |= session.detach_context(&attachment_id);
-        }
-
-        for candidate in &selection.candidates {
-            let already_active = session.context_attachments.iter().any(|attachment| {
-                matches!(attachment.state, AttachmentState::Active)
-                    && attachment.object_ref.source_provider_id
-                        == candidate.object_ref.source_provider_id
-                    && attachment.object_ref.source_capability_id
-                        == candidate.object_ref.source_capability_id
-                    && attachment.object_ref.object_incarnation
-                        == candidate.object_ref.object_incarnation
-            });
-            if !already_active {
-                changed |= session.attach_context(candidate.clone()).map_err(|error| {
-                    internal(format!("reconcile Device Assistant context: {error}"))
-                })?;
-            }
-        }
-        Ok(changed)
     }
 
-    /// Reconcile context independently from a model turn. This is the durable
-    /// add/remove event path used by the selector. It never takes a model lease
-    /// and refuses to race a live turn; the client may retry with the same
-    /// request identity after that turn settles.
+    #[cfg(test)]
+    /// Test fixture adapter for prepared live selections.
     pub async fn update_context_selection(
         &self,
         conversation_id: &str,
         actor_id: &str,
         device_id: &str,
-        current_scope: AgentScope,
+        client_request_id: &str,
         now: &str,
     ) -> Result<bool, AgentError> {
-        let now_dt = now_from(now);
-        for _ in 0..CLAIM_ATTEMPTS {
-            match find(&self.db, conversation_id)
-                .await
-                .map_err(|error| internal(format!("load context selection session: {error}")))?
-            {
-                Some(row) => {
-                    let mut session =
-                        PersistedAgentSession::decode_json(&row.state_json).map_err(|error| {
-                            internal(format!("decode context selection session: {error}"))
-                        })?;
-                    session.version = row.version;
-                    session
-                        .check_subject(actor_id, device_id)
-                        .map_err(|error| {
-                            internal(format!("context selection subject: {error:?}"))
-                        })?;
-                    session.check_surface(self.surface).map_err(|error| {
-                        internal(format!("context selection surface: {error:?}"))
-                    })?;
-                    if session.turn_state.is_active()
-                        && row
-                            .lease_deadline
-                            .is_some_and(|deadline| deadline >= now_dt)
-                    {
-                        return Err(transport("Device Assistant context is busy"));
-                    }
-                    session.adopt_client_metadata(
-                        self.client_conversation_id.as_deref(),
-                        self.surface,
-                    );
-                    let changed = self.reconcile_context_selection(&mut session)?;
-                    if !changed {
-                        return Ok(false);
-                    }
-                    let new_version = row.version + 1;
-                    session.version = new_version;
-                    let state_json = session.encode_json_for_storage().map_err(|error| {
-                        internal(format!("encode context selection session: {error}"))
-                    })?;
-                    let result = agent_session::Entity::update_many()
-                        .col_expr(agent_session::Column::StateJson, Expr::value(state_json))
-                        .col_expr(agent_session::Column::Version, Expr::value(new_version))
-                        .col_expr(agent_session::Column::UpdatedAt, Expr::value(now_dt))
-                        .filter(agent_session::Column::Id.eq(row.id))
-                        .filter(agent_session::Column::Version.eq(row.version))
-                        .exec(&self.db)
-                        .await
-                        .map_err(|error| {
-                            internal(format!("save context selection session: {error}"))
-                        })?;
-                    if result.rows_affected == 1 {
-                        return Ok(true);
-                    }
-                }
-                None => {
-                    let mut session = PersistedAgentSession::new(
-                        conversation_id.to_string(),
-                        actor_id.to_string(),
-                        device_id.to_string(),
-                        0,
-                        current_scope.clone(),
-                        now.to_string(),
-                    );
-                    session.adopt_client_metadata(
-                        self.client_conversation_id.as_deref(),
-                        self.surface,
-                    );
-                    let changed = self.reconcile_context_selection(&mut session)?;
-                    let state_json = session.encode_json_for_storage().map_err(|error| {
-                        internal(format!("encode new context selection session: {error}"))
-                    })?;
-                    let inserted = agent_session::ActiveModel {
-                        conversation_id: Set(session.conversation_id.clone()),
-                        actor_id: Set(session.actor_id.clone()),
-                        device_id: Set(session.device_id.clone()),
-                        state_json: Set(state_json),
-                        version: Set(0),
-                        lease_token: Set(0),
-                        lease_deadline: Set(None),
-                        created_at: Set(now_dt),
-                        updated_at: Set(now_dt),
-                        ..Default::default()
-                    }
-                    .insert(&self.db)
-                    .await;
-                    match inserted {
-                        Ok(_) => return Ok(changed),
-                        Err(_)
-                            if find(&self.db, conversation_id)
-                                .await
-                                .ok()
-                                .flatten()
-                                .is_some() =>
-                        {
-                            continue;
-                        }
-                        Err(error) => {
-                            return Err(internal(format!(
-                                "create context selection session: {error}"
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-        Err(transport("Device Assistant context update conflicted"))
+        let selection = self
+            .context_selection
+            .clone()
+            .ok_or_else(|| internal("Missing live context selection"))?;
+        self.update_live_context(&UpdateLiveContext {
+            run_id: conversation_id.into(),
+            actor_id: actor_id.into(),
+            device_id: device_id.into(),
+            update: desk_agent_protocol::device_assistant::DeviceAssistantContextUpdate {
+                conversation_id: self
+                    .client_conversation_id
+                    .clone()
+                    .ok_or_else(|| internal("Missing client conversation"))?,
+                client_request_id: client_request_id.into(),
+                selected_capability_ids: selection.selected_capability_ids.clone(),
+            },
+            selection: Some(selection),
+            created_at: now.into(),
+        })
+        .await
     }
 
     /// Read the persisted conversation for the browser's recoverable view.
@@ -2590,7 +2438,7 @@ mod tests {
         );
     }
 
-    fn context_selection(
+    pub(super) fn context_selection(
         selected: bool,
         candidate_id: &str,
         incarnation: &str,
@@ -2781,7 +2629,6 @@ mod tests {
                 "worker-1",
                 now_unix_ms,
             ));
-        let scope = claim("unused").current_pdp_scope;
 
         assert!(
             selected
@@ -2789,19 +2636,19 @@ mod tests {
                     "context-conversation",
                     "1",
                     "device-1",
-                    scope.clone(),
+                    "select-first",
                     &now,
                 )
                 .await
                 .unwrap()
         );
         assert!(
-            !selected
+            selected
                 .update_context_selection(
                     "context-conversation",
                     "1",
                     "device-1",
-                    scope.clone(),
+                    "select-first",
                     &now,
                 )
                 .await
@@ -2837,7 +2684,7 @@ mod tests {
                     "context-conversation",
                     "1",
                     "device-1",
-                    scope,
+                    "deselect",
                     &Utc::now().to_rfc3339(),
                 )
                 .await

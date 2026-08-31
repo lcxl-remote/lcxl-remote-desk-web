@@ -237,6 +237,20 @@ pub struct SignalControlAuthorizer {
 }
 
 impl SignalControlAuthorizer {
+    async fn reject_frame(
+        &self,
+        actor: &ConnectionState,
+        model: &SignalingModel,
+        code: DeskErrorCode,
+        message: String,
+    ) -> ControlFrameOutcome {
+        if model.signaling_type == SignalingType::UpdateDeviceAssistantContext {
+            crate::device_assistant_orchestrator::reject_live_context(actor, model, message).await;
+            ControlFrameOutcome::Handled
+        } else {
+            ControlFrameOutcome::Reject { code, message }
+        }
+    }
     pub fn new(db: DatabaseConnection, connection_map: web::Data<SharedConnectionMap>) -> Self {
         Self {
             db,
@@ -302,19 +316,27 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             // Actor must be a cookie-authenticated control end (the single
             // account); the server resolves this, the control end cannot fake it.
             let Some(actor_user_id) = actor_user_id(&actor.auth_context) else {
-                return ControlFrameOutcome::Reject {
-                    code: DeskErrorCode::PERMISSION_ERROR,
-                    message: "AI frames require an authenticated operator".to_string(),
-                };
+                return self
+                    .reject_frame(
+                        actor,
+                        model,
+                        DeskErrorCode::PERMISSION_ERROR,
+                        "AI frames require an authenticated operator".into(),
+                    )
+                    .await;
             };
 
             // Target device: resolved from the receiving connection's validated
             // state, never from a control-end self-report.
             let Some(to_id) = model.to_connection_id.clone() else {
-                return ControlFrameOutcome::Reject {
-                    code: DeskErrorCode::INVALID_PARAMS,
-                    message: "AI frame missing target connection".to_string(),
-                };
+                return self
+                    .reject_frame(
+                        actor,
+                        model,
+                        DeskErrorCode::INVALID_PARAMS,
+                        "AI frame missing target connection".into(),
+                    )
+                    .await;
             };
             let target_descriptor = {
                 let map = connection_map.read().await;
@@ -344,10 +366,9 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             let (audience, _, _) = match target_descriptor {
                 Ok(descriptor) => descriptor,
                 Err(reject) => {
-                    return ControlFrameOutcome::Reject {
-                        code: reject.code,
-                        message: reject.message.to_string(),
-                    };
+                    return self
+                        .reject_frame(actor, model, reject.code, reject.message.into())
+                        .await;
                 }
             };
 
@@ -477,38 +498,28 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                 SignalingType::UpdateDeviceAssistantContext => {
                     let update = match model.get_data::<DeviceAssistantContextUpdate>() {
                         Ok(update) => update,
-                        Err(error) => {
-                            return ControlFrameOutcome::Reject {
-                                code: DeskErrorCode::INVALID_PARAMS,
-                                message: format!(
-                                    "invalid DeviceAssistantContextUpdate payload: {error}"
-                                ),
-                            };
+                        Err(_) => {
+                            return self
+                                .reject_frame(
+                                    actor,
+                                    model,
+                                    DeskErrorCode::INVALID_PARAMS,
+                                    "Invalid Device Assistant live context selection".into(),
+                                )
+                                .await;
                         }
                     };
-                    if let Err(message) = update.validate() {
-                        return ControlFrameOutcome::Reject {
-                            code: DeskErrorCode::INVALID_PARAMS,
-                            message: message.into(),
-                        };
-                    }
-                    if !desk_diagnose_core::conversation_key::is_valid_client_conversation_id(
-                        &update.conversation_id,
-                    ) {
-                        return ControlFrameOutcome::Reject {
-                            code: DeskErrorCode::INVALID_PARAMS,
-                            message: "invalid Device Assistant conversation id".into(),
-                        };
-                    }
-                    if desk_diagnose_core::device_assistant::selected_context_capabilities(
-                        &update.selected_capability_ids,
-                    )
-                    .is_err()
+                    if let Err(error) =
+                        desk_diagnose_core::live_context::validate_durable_update(&update)
                     {
-                        return ControlFrameOutcome::Reject {
-                            code: DeskErrorCode::INVALID_PARAMS,
-                            message: "unknown or non-context Device Assistant capability".into(),
-                        };
+                        return self
+                            .reject_frame(
+                                actor,
+                                model,
+                                DeskErrorCode::INVALID_PARAMS,
+                                error.message,
+                            )
+                            .await;
                     }
                     actix_web::rt::spawn(crate::device_assistant_orchestrator::update_context(
                         self.connection_map.clone(),
