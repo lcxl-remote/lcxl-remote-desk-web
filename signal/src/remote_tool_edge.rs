@@ -46,9 +46,9 @@ use desk_agent_protocol::computer_use::{
     DocumentLiveBatchPatchAction, DocumentLivePatchAction, FileContentReadParams,
     FileMetadataInspectParams, FilePatchAction, LiveDocumentInspectParams, ObjectKind, ObjectRef,
     OfficeInspectParams, PresentationLiveBatchPatchAction, PresentationLivePatchAction,
-    RawInputAction, SealedComputerActionPlan, SpreadsheetFileInspectParams,
-    SpreadsheetLiveBatchPatchAction, SpreadsheetLivePatchAction, SpreadsheetMergePreviewParams,
-    TerminalOutputInspectParams, UiSemanticAction,
+    SealedComputerActionPlan, SpreadsheetFileInspectParams, SpreadsheetLiveBatchPatchAction,
+    SpreadsheetLivePatchAction, SpreadsheetMergePreviewParams, TerminalOutputInspectParams,
+    UiSemanticAction,
 };
 use desk_agent_protocol::data_lineage::{
     ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, DestinationIdentity,
@@ -1949,12 +1949,6 @@ impl SignalDeviceAssistantTools {
     ) -> Result<ExecOutcome, AgentError> {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct RawInputArgs {
-            target: ObjectRef,
-            action: RawInputAction,
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct SpreadsheetActionArgs {
             target: ObjectRef,
             action: SpreadsheetLivePatchAction,
@@ -2024,6 +2018,18 @@ impl SignalDeviceAssistantTools {
             } else {
                 None
             };
+        let shared_raw_input = if call.name == EXECUTE_CONFIRMED_RAW_INPUT_TOOL {
+            Some(
+                desk_diagnose_core::provider_preflight::RawInputCallPreflight::build(
+                    &self.provider_registry,
+                    ProductSurface::OssPersonalOwner,
+                    call,
+                    now_unix_ms,
+                )?,
+            )
+        } else {
+            None
+        };
         let (
             target_ref,
             authority_refs,
@@ -2059,21 +2065,12 @@ impl SignalDeviceAssistantTools {
                 )
             }
             EXECUTE_CONFIRMED_RAW_INPUT_TOOL => {
-                let args: RawInputArgs =
-                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                if args.target.object_kind != ObjectKind::Application {
-                    return Err(error(
-                        AgentErrorKind::InvalidInput,
-                        "raw input requires a fresh foreground application reference",
-                        false,
-                        true,
-                    ));
-                }
+                let input = shared_raw_input.as_ref().expect("raw-input preflight");
                 (
-                    args.target.clone(),
-                    vec![args.target],
-                    ComputerActionKind::RawInput(args.action),
-                    desk_agent_protocol::Capability::DesktopInputFallbackConfirmed,
+                    input.target().clone(),
+                    vec![input.target().clone()],
+                    ComputerActionKind::RawInput(input.action().clone()),
+                    input.required_capability(),
                     ComputerUseAdapterKind::WindowsRawInput,
                     "single raw-input fallback",
                 )
