@@ -1191,6 +1191,7 @@ fn create_text_artifact_tool() -> RegisteredTool {
                     },
                     "content_utf8": {
                         "type": "string",
+                        "minLength": 1,
                         "maxLength": 65536
                     }
                 },

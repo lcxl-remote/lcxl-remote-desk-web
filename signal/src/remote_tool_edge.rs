@@ -2658,7 +2658,7 @@ impl SignalDeviceAssistantTools {
             LocalDraft(LocalDraftArgs),
         }
 
-        let (args, required_capability, operation, orchestrator_grant) = match call.name.as_str() {
+        let (args, required_capability, _operation, orchestrator_grant) = match call.name.as_str() {
             "create_text_artifact_in_selected_directory" => (
                 ArtifactRequest::Text(serde_json::from_str(&call.arguments_json).map_err(
                     |decode_error| {
@@ -2812,6 +2812,31 @@ impl SignalDeviceAssistantTools {
                 true,
             ));
         }
+        let artifact_preflight =
+            desk_diagnose_core::provider_preflight::ArtifactCallPreflight::build(
+                &self.provider_registry,
+                ProductSurface::OssPersonalOwner,
+                call,
+                &self.selected_file_roots,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+                    error(
+                        AgentErrorKind::Internal,
+                        "system clock predates the Unix epoch",
+                        false,
+                        false,
+                    )
+                })?,
+            )?;
+        if artifact_preflight.required_capability() != required_capability
+            || artifact_preflight.target() != &selected_directories[0]
+        {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "artifact Provider authority does not match the selected directory",
+                false,
+                true,
+            ));
+        }
         let capability = self
             .provider_registry
             .capability_for_tool(&call.name)
@@ -2824,17 +2849,18 @@ impl SignalDeviceAssistantTools {
                     true,
                 )
             })?;
-        let provider = self
-            .provider_registry
-            .provider_for_capability(&capability.wire.capability_id)
-            .expect("registered artifact capability has a Provider");
         self.verify_current_readiness(capability).await?;
         let session = self.authoritative_session().await?;
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
-        let resource_scope = fresh_object_resource_scope(&selected_directories);
-        let operation_scope = vec![operation.to_string()];
-        let risk_tier = Self::capability_risk(capability, call)?;
+        if canonical_input_json != artifact_preflight.canonical_input_json() {
+            return Err(error(
+                AgentErrorKind::Internal,
+                "artifact Provider canonical inputs diverged",
+                false,
+                false,
+            ));
+        }
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
             error(
                 AgentErrorKind::Internal,
@@ -2847,30 +2873,23 @@ impl SignalDeviceAssistantTools {
             "capability-call-{:x}",
             Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
         );
-        let call_authority = CapabilityGrantCall {
+        let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
-            surface: ProductSurface::OssPersonalOwner,
             target_device_id: &self.target_device_id,
-            target_session_id: None,
-            provider_id: &provider.wire.provider_id,
-            capability_id: &capability.wire.capability_id,
-            tool_name: &call.name,
-            tool_schema_version: capability.wire.input_schema_version,
-            effect: capability.wire.effect,
-            risk_tier,
-            resource_scope: &resource_scope,
-            operation_scope: &operation_scope,
-            export_destinations: &[],
-            envelope_ids: &[],
-            content_digests_sha256: &[],
-            canonical_input_digest_sha256: &canonical_input_digest_sha256,
-            byte_count: canonical_input_json.len() as u64,
-            item_count: 1,
             policy_revision: self.policy_revision,
             readiness_revision: self.readiness_revision,
             now_unix_ms,
         };
+        let call_authority = artifact_preflight.grant_call(&subject)?;
+        if call_authority.canonical_input_digest_sha256 != canonical_input_digest_sha256 {
+            return Err(error(
+                AgentErrorKind::Internal,
+                "artifact Provider canonical digests diverged",
+                false,
+                false,
+            ));
+        }
         let store = SignalCapabilityGrantStore::new(self.db.clone());
         let grant_id = if let Some(existing) = store
             .prepared_grant_id(&server_call_id)
@@ -3012,7 +3031,7 @@ impl SignalDeviceAssistantTools {
                 })
         );
         let generation = dispatch_id.clone();
-        let (action, before_summary, after_intent, verification) = match args {
+        let (decoded_action, before_summary, after_intent, verification) = match args {
             ArtifactRequest::Text(args) => (
                 ComputerActionKind::File(FilePatchAction::CreateTextArtifact {
                     file_name: args.file_name,
@@ -3071,6 +3090,24 @@ impl SignalDeviceAssistantTools {
                 "re-render with shared trusted logic, reopen through the retained parent handle, and verify exact bytes plus SHA-256".into(),
             ),
         };
+        let action = ComputerActionKind::File(artifact_preflight.action().clone());
+        if action != decoded_action {
+            let dispatch_error = error(
+                AgentErrorKind::Internal,
+                "artifact Provider parsers produced different typed actions",
+                false,
+                false,
+            );
+            record_computer_action_pre_send_failure(
+                &store,
+                &dispatch_id,
+                &server_call_id,
+                now_unix_ms,
+                &dispatch_error,
+            )
+            .await?;
+            return Err(dispatch_error);
+        }
         let plan = SealedComputerActionPlan {
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: claimed.work_id.to_string(),
@@ -3080,7 +3117,7 @@ impl SignalDeviceAssistantTools {
             interactive_session_incarnation: readiness.readiness.interactive_session_incarnation,
             adapter: ComputerUseAdapterRef {
                 kind: ComputerUseAdapterKind::FileSystem,
-                version: desk_diagnose_core::device_assistant::FILE_ARTIFACT_ADAPTER_VERSION.into(),
+                version: artifact_preflight.adapter_version().into(),
             },
             approval_id: grant_id.clone(),
             approved_actor_id: self.actor_id.clone(),

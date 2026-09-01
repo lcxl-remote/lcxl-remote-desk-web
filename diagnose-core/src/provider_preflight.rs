@@ -33,6 +33,11 @@ mod semantic_raw_input;
 pub use semantic_raw_input::{RawInputCallPreflight, raw_input_from_call};
 mod semantic_iwork;
 pub use semantic_iwork::IworkCallPreflight;
+mod artifact;
+pub use artifact::{
+    ArtifactCallPreflight, DOCX_ARTIFACT_MEDIA_TYPE, TEXT_ARTIFACT_MEDIA_TYPE,
+    XLSX_ARTIFACT_MEDIA_TYPE, artifact_action_from_call,
+};
 pub mod read;
 
 /// Identity and clock resolved by the runtime, never deserialized from tool input.
