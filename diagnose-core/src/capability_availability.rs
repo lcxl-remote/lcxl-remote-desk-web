@@ -28,15 +28,67 @@ impl CapabilityAvailability {
     }
 }
 
-/// Build the stable inventory for one product surface. Central-only compiled
-/// capabilities are ready by construction. Every edge capability requires a
-/// fresh, exact readiness report from the currently live connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CentralCapabilityReadiness {
+    pub capability_id: String,
+    pub compiled: bool,
+    pub enabled: bool,
+    pub connected: bool,
+    pub ready: bool,
+    pub reason: Option<CapabilityBlockedReason>,
+}
+
+impl CentralCapabilityReadiness {
+    pub fn ready(capability_id: impl Into<String>) -> Self {
+        Self {
+            capability_id: capability_id.into(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        }
+    }
+
+    fn validate(&self) -> bool {
+        if self.ready {
+            self.compiled && self.enabled && self.connected && self.reason.is_none()
+        } else {
+            self.reason.is_some()
+        }
+    }
+}
+
+/// Build the stable inventory for one product surface. Every central capability
+/// requires an explicit runtime report from the hosting service. Every edge
+/// capability requires a fresh, exact report from the currently live connection.
 pub fn project_capability_availability(
     registry: &ProviderRegistry,
     surface: ProductSurface,
     now_unix_ms: u64,
+    central_readiness: impl IntoIterator<Item = CentralCapabilityReadiness>,
     readiness: impl IntoIterator<Item = CapabilityReadinessReport>,
 ) -> Result<Vec<CapabilityAvailability>, AvailabilityError> {
+    let mut central_reports = BTreeMap::new();
+    for report in central_readiness {
+        if !report.validate() {
+            return Err(AvailabilityError::InvalidReadiness(
+                report.capability_id.clone(),
+            ));
+        }
+        let capability = registry
+            .capability(&report.capability_id)
+            .ok_or_else(|| AvailabilityError::UnknownCapability(report.capability_id.clone()))?;
+        if capability.wire.execution_locality != ExecutionLocality::Central {
+            return Err(AvailabilityError::UnexpectedEdgeReadiness(
+                report.capability_id,
+            ));
+        }
+        let key = report.capability_id.clone();
+        if central_reports.insert(key.clone(), report).is_some() {
+            return Err(AvailabilityError::DuplicateReadiness(key));
+        }
+    }
     let mut reports = BTreeMap::new();
     for report in readiness {
         report
@@ -87,15 +139,23 @@ pub fn project_capability_availability(
                 continue;
             }
             let availability = if capability.wire.execution_locality == ExecutionLocality::Central {
-                CapabilityAvailability {
-                    provider_id: provider.wire.provider_id.clone(),
-                    capability_id: capability.wire.capability_id.clone(),
-                    tool_name: capability.tool_spec.name.clone(),
-                    compiled: true,
-                    enabled: true,
-                    connected: true,
-                    ready: true,
-                    reason: None,
+                if let Some(report) = central_reports.remove(&capability.wire.capability_id) {
+                    CapabilityAvailability {
+                        provider_id: provider.wire.provider_id.clone(),
+                        capability_id: capability.wire.capability_id.clone(),
+                        tool_name: capability.tool_spec.name.clone(),
+                        compiled: report.compiled,
+                        enabled: report.enabled,
+                        connected: report.connected,
+                        ready: report.ready,
+                        reason: report.reason,
+                    }
+                } else {
+                    unavailable(
+                        provider,
+                        capability,
+                        CapabilityBlockedReason::AdapterUnavailable,
+                    )
                 }
             } else if let Some(report) = reports.remove(&capability.wire.capability_id) {
                 if report.expires_at_unix_ms <= now_unix_ms {
@@ -126,6 +186,10 @@ pub fn project_capability_availability(
             inventory.push(availability);
         }
     }
+    debug_assert!(
+        central_reports.is_empty(),
+        "all known central readiness reports were projected"
+    );
     debug_assert!(
         reports.is_empty(),
         "all known readiness reports were projected"
@@ -224,6 +288,7 @@ pub enum AvailabilityError {
     UnknownCapability(String),
     DuplicateReadiness(String),
     UnexpectedCentralReadiness(String),
+    UnexpectedEdgeReadiness(String),
     AdapterMismatch(String),
     ProviderMismatch {
         capability_id: String,
@@ -250,6 +315,12 @@ impl fmt::Display for AvailabilityError {
                 write!(
                     f,
                     "central capability {capability} cannot accept edge readiness"
+                )
+            }
+            Self::UnexpectedEdgeReadiness(capability) => {
+                write!(
+                    f,
+                    "edge capability {capability} cannot accept central readiness"
                 )
             }
             Self::AdapterMismatch(capability) => {
@@ -288,8 +359,20 @@ mod tests {
     use super::*;
     use crate::device_assistant::{
         ACTION_PREVIEW_CAPABILITY_ID, DESKTOP_UI_CAPABILITY_ID, DESKTOP_UI_PROVIDER_ID,
+        WEB_RESEARCH_FETCH_CAPABILITY_ID, WEB_RESEARCH_SEARCH_CAPABILITY_ID,
         device_assistant_provider_registry,
     };
+
+    fn ready_central() -> Vec<CentralCapabilityReadiness> {
+        [
+            ACTION_PREVIEW_CAPABILITY_ID,
+            WEB_RESEARCH_FETCH_CAPABILITY_ID,
+            WEB_RESEARCH_SEARCH_CAPABILITY_ID,
+        ]
+        .into_iter()
+        .map(CentralCapabilityReadiness::ready)
+        .collect()
+    }
 
     fn ready_ui() -> CapabilityReadinessReport {
         CapabilityReadinessReport {
@@ -317,6 +400,7 @@ mod tests {
             &registry,
             ProductSurface::OssPersonalOwner,
             1_500,
+            ready_central(),
             Vec::new(),
         )
         .unwrap();
@@ -348,6 +432,7 @@ mod tests {
             &registry,
             ProductSurface::OssPersonalOwner,
             1_500,
+            ready_central(),
             vec![ready_ui()],
         )
         .unwrap();
@@ -358,6 +443,7 @@ mod tests {
             &registry,
             ProductSurface::OssPersonalOwner,
             2_000,
+            ready_central(),
             vec![ready_ui()],
         )
         .unwrap();
@@ -379,9 +465,43 @@ mod tests {
                 &registry,
                 ProductSurface::OssPersonalOwner,
                 1_500,
+                ready_central(),
                 vec![report]
             ),
             Err(AvailabilityError::AdapterMismatch(_))
         ));
+    }
+
+    #[test]
+    fn central_capabilities_require_an_explicit_host_report() {
+        let registry = device_assistant_provider_registry();
+        let inventory = project_capability_availability(
+            &registry,
+            ProductSurface::ManagerPersonalOwner,
+            1_500,
+            [CentralCapabilityReadiness::ready(
+                ACTION_PREVIEW_CAPABILITY_ID,
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            inventory.iter().any(|item| {
+                item.capability_id == ACTION_PREVIEW_CAPABILITY_ID && item.callable()
+            })
+        );
+        for capability_id in [
+            WEB_RESEARCH_FETCH_CAPABILITY_ID,
+            WEB_RESEARCH_SEARCH_CAPABILITY_ID,
+        ] {
+            assert!(inventory.iter().any(|item| {
+                item.capability_id == capability_id
+                    && !item.callable()
+                    && item.reason == Some(CapabilityBlockedReason::AdapterUnavailable)
+            }));
+        }
+        let tools = callable_tools(&registry, &inventory).unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "preview_computer_action");
     }
 }

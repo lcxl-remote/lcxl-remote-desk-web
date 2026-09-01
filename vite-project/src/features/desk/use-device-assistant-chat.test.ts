@@ -25,6 +25,8 @@ describe('useDeviceAssistantChat', () => {
             ok: true,
             json: async () => ({
                 data: {
+                    sessionId: 'session-1',
+                    seq: 1,
                     messages: [],
                     contextAttachments: [{
                         id: 'attachment-1',
@@ -56,9 +58,220 @@ describe('useDeviceAssistantChat', () => {
         ]);
     });
 
+    it('ignores an older durable snapshot that resolves after a newer one', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
+        const pending: Array<(response: {
+            ok: boolean;
+            json: () => Promise<unknown>;
+        }) => void> = [];
+        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(pending).toHaveLength(1);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(pending).toHaveLength(2);
+
+        await act(async () => {
+            pending[1]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-1',
+                        seq: 12,
+                        active: false,
+                        messages: [{ id: 'answer-12', role: 'assistant', text: 'newest answer' }],
+                        contextAttachments: [],
+                        backgroundTasks: [{
+                            taskId: 'task-1',
+                            callId: 'call-1',
+                            providerId: 'browser.control',
+                            capabilityId: 'browser.control.semantic',
+                            toolName: 'browser_take_snapshot',
+                            effect: 'read_device',
+                            state: 'succeeded',
+                            progressSequence: 12,
+                            supportsCancel: false,
+                            updatedAt: '2026-08-31T00:00:12Z',
+                        }],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('newest answer');
+        expect(result.current.backgroundTasks[0]?.state).toBe('succeeded');
+
+        await act(async () => {
+            pending[0]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-1',
+                        seq: 11,
+                        active: true,
+                        messages: [{ id: 'answer-11', role: 'assistant', text: 'older answer' }],
+                        contextAttachments: [],
+                        backgroundTasks: [{
+                            taskId: 'task-1',
+                            callId: 'call-1',
+                            providerId: 'browser.control',
+                            capabilityId: 'browser.control.semantic',
+                            toolName: 'browser_take_snapshot',
+                            effect: 'read_device',
+                            state: 'running',
+                            progressSequence: 11,
+                            supportsCancel: false,
+                            updatedAt: '2026-08-31T00:00:11Z',
+                        }],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(result.current.messages.at(-1)?.text).toBe('newest answer');
+        expect(result.current.backgroundTasks[0]?.state).toBe('succeeded');
+        expect(result.current.running).toBe(false);
+    });
+
+    it('isolates an old request after the selected conversation changes', async () => {
+        localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
+        const pending: Array<(response: {
+            ok: boolean;
+            json: () => Promise<unknown>;
+        }) => void> = [];
+        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(pending).toHaveLength(1);
+
+        await act(async () => {
+            window.dispatchEvent(new StorageEvent('storage', {
+                key: 'device-assistant-conversation:desk-1',
+                newValue: 'conversation-2',
+            }));
+            await Promise.resolve();
+        });
+        expect(pending).toHaveLength(2);
+
+        await act(async () => {
+            pending[1]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-2',
+                        seq: 1,
+                        active: false,
+                        messages: [{ id: 'new', role: 'assistant', text: 'new conversation' }],
+                        contextAttachments: [],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('new conversation');
+
+        await act(async () => {
+            pending[0]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-1',
+                        seq: 99,
+                        active: false,
+                        messages: [{ id: 'old', role: 'assistant', text: 'old conversation' }],
+                        contextAttachments: [],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('new conversation');
+    });
+
+    it('lets a later request move the watermark to a replacement server session', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
+        const pending: Array<(response: {
+            ok: boolean;
+            json: () => Promise<unknown>;
+        }) => void> = [];
+        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await act(async () => {
+            await Promise.resolve();
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(pending).toHaveLength(2);
+
+        await act(async () => {
+            pending[0]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'expired-session',
+                        seq: 40,
+                        active: false,
+                        messages: [{ id: 'old', role: 'assistant', text: 'expired session' }],
+                        contextAttachments: [],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('expired session');
+
+        await act(async () => {
+            pending[1]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'replacement-session',
+                        seq: 1,
+                        active: false,
+                        messages: [{ id: 'new', role: 'assistant', text: 'replacement session' }],
+                        contextAttachments: [],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('replacement session');
+    });
+
     it('discovers another tab conversation and polls its durable completion', async () => {
         vi.useFakeTimers();
         let snapshot = {
+            sessionId: 'session-1',
+            seq: 1,
             active: true,
             messages: [{ id: 'user-1', role: 'user', text: 'shared request' }],
             contextAttachments: [],
@@ -101,6 +314,8 @@ describe('useDeviceAssistantChat', () => {
 
         snapshot = {
             active: false,
+            sessionId: 'session-1',
+            seq: 2,
             messages: [
                 { id: 'user-1', role: 'user', text: 'shared request' },
                 { id: 'assistant-1', role: 'assistant', text: 'shared answer' },
@@ -135,6 +350,8 @@ describe('useDeviceAssistantChat', () => {
         vi.useFakeTimers();
         localStorage.setItem('device-assistant-conversation:device-1', 'shared-conversation');
         let snapshot = {
+            sessionId: 'session-1',
+            seq: 1,
             active: true,
             latestInputSeq: 3,
             handledInputSeq: 2,
@@ -199,6 +416,7 @@ describe('useDeviceAssistantChat', () => {
         first.unmount();
         snapshot = {
             ...snapshot,
+            seq: 2,
             active: false,
             handledInputSeq: 3,
             messages: [
@@ -233,6 +451,8 @@ describe('useDeviceAssistantChat', () => {
             ok: true,
             json: async () => ({
                 data: {
+                    sessionId: 'session-1',
+                    seq: 1,
                     active: false,
                     messages: [],
                     contextAttachments: [{
@@ -298,6 +518,8 @@ describe('useDeviceAssistantChat', () => {
             ok: true,
             json: async () => ({
                 data: {
+                    sessionId: 'session-1',
+                    seq: 1,
                     active: false,
                     messages: [],
                     contextAttachments: [{
@@ -599,6 +821,8 @@ describe('useDeviceAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        sessionId: 'session-1',
+                        seq: state === 'pending' ? 1 : 2,
                         active: false,
                         inputRevision: 3,
                         messages: [{ id: 'user-1', role: 'user', text: 'inspect it' }],
@@ -680,6 +904,8 @@ describe('useDeviceAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        sessionId: 'session-1',
+                        seq: revokedAtUnixMs ? 2 : 1,
                         active: false,
                         messages: [],
                         contextAttachments: [],
@@ -733,6 +959,8 @@ describe('useDeviceAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        sessionId: 'session-1',
+                        seq: unresolved ? 1 : 2,
                         active: false,
                         messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
                         contextAttachments: [],

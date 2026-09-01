@@ -2724,6 +2724,7 @@ dependencies = [
  "chrono",
  "clap",
  "desk-agent-protocol",
+ "desk-diagnose-core",
  "desk-utils",
  "futures",
  "futures-util",

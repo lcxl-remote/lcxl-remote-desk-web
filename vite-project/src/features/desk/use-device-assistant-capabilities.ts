@@ -12,12 +12,17 @@ export type CapabilityBlockedReason =
     | 'version_mismatch'
     | 'edge_disconnected'
     | 'adapter_unavailable'
+    | 'remote_debugging_disabled'
+    | 'browser_approval_required'
+    | 'browser_disconnected'
     | 'application_not_installed'
     | 'permission_missing'
     | 'office_bridge_not_paired'
     | 'no_active_document'
     | 'no_interactive_session'
+    | 'no_display_selected'
     | 'local_ceiling'
+    | 'model_incompatible'
     | 'busy';
 
 export type CapabilityInventoryEntry = {

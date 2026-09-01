@@ -137,6 +137,8 @@ type PersistedSnapshotMessage = {
 };
 
 type PersistedSnapshot = {
+    sessionId: string;
+    seq: number;
     active: boolean;
     latestInputSeq?: number;
     inputRevision?: number;
@@ -241,6 +243,14 @@ export function useDeviceAssistantChat({
     const contextRequest = useRef<string | null>(null);
     const contextTimer = useRef<number | null>(null);
     const conversationId = useRef<string | null>(null);
+    const snapshotEpoch = useRef(0);
+    const snapshotRequestOrder = useRef(0);
+    const snapshotWatermark = useRef<{
+        conversationId: string;
+        sessionId: string;
+        seq: number;
+        requestOrder: number;
+    } | null>(null);
     const lastSeq = useRef(-1);
     const previewArgs = useRef(new Map<string, string>());
 
@@ -248,6 +258,8 @@ export function useDeviceAssistantChat({
         expectedConversationId: string,
         showHydrating = false,
     ) => {
+        const expectedEpoch = snapshotEpoch.current;
+        const expectedRequestOrder = ++snapshotRequestOrder.current;
         if (showHydrating) setHydrating(true);
         try {
             const response = await fetch(
@@ -257,10 +269,38 @@ export function useDeviceAssistantChat({
             );
             const body = response.ok ? await response.json() : null;
             if (
-                conversationId.current !== expectedConversationId
+                snapshotEpoch.current !== expectedEpoch
+                || conversationId.current !== expectedConversationId
                 || !Array.isArray(body?.data?.messages)
             ) return;
             const snapshot = body.data as PersistedSnapshot;
+            if (
+                typeof snapshot.sessionId !== 'string'
+                || snapshot.sessionId.length === 0
+                || !Number.isSafeInteger(snapshot.seq)
+                || snapshot.seq < 0
+            ) return;
+            const watermark = snapshotWatermark.current;
+            if (
+                watermark
+                && (
+                    watermark.conversationId !== expectedConversationId
+                    || (
+                        watermark.sessionId === snapshot.sessionId
+                        && snapshot.seq < watermark.seq
+                    )
+                    || (
+                        watermark.sessionId !== snapshot.sessionId
+                        && expectedRequestOrder <= watermark.requestOrder
+                    )
+                )
+            ) return;
+            snapshotWatermark.current = {
+                conversationId: expectedConversationId,
+                sessionId: snapshot.sessionId,
+                seq: snapshot.seq,
+                requestOrder: expectedRequestOrder,
+            };
             const projected = projectPersistedSnapshot(snapshot);
             setAttachments(projected.attachments);
             setTaskStatusProjection(projected.taskStatusProjection);
@@ -305,7 +345,11 @@ export function useDeviceAssistantChat({
         } catch {
             // A transient poll failure must not erase the last durable view.
         } finally {
-            if (showHydrating && conversationId.current === expectedConversationId) {
+            if (
+                showHydrating
+                && snapshotEpoch.current === expectedEpoch
+                && conversationId.current === expectedConversationId
+            ) {
                 setHydrating(false);
             }
         }
@@ -318,6 +362,8 @@ export function useDeviceAssistantChat({
         } catch {
             stored = null;
         }
+        snapshotEpoch.current += 1;
+        snapshotWatermark.current = null;
         conversationId.current = stored;
         setMessages([]);
         setTools([]);
@@ -375,6 +421,8 @@ export function useDeviceAssistantChat({
             setPermissionUpdating(false);
             setGrantRevoking(null);
             setPendingInputCount(0);
+            snapshotEpoch.current += 1;
+            snapshotWatermark.current = null;
             conversationId.current = event.newValue;
             lastSeq.current = -1;
             previewArgs.current.clear();
@@ -499,6 +547,8 @@ export function useDeviceAssistantChat({
 
     const ensureConversation = useCallback(() => {
         if (!conversationId.current) {
+            snapshotEpoch.current += 1;
+            snapshotWatermark.current = null;
             conversationId.current = v4();
             try {
                 localStorage.setItem(
@@ -745,6 +795,8 @@ export function useDeviceAssistantChat({
         contextRequest.current = null;
         if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
         contextTimer.current = null;
+        snapshotEpoch.current += 1;
+        snapshotWatermark.current = null;
         conversationId.current = null;
         lastSeq.current = -1;
         previewArgs.current.clear();

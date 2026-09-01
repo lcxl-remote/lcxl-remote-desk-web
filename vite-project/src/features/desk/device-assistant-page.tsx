@@ -22,8 +22,14 @@ import {
 } from './use-device-assistant-observation';
 import { useDeviceAssistantChat } from './use-device-assistant-chat';
 import { useDeviceAssistantCapabilities } from './use-device-assistant-capabilities';
+import { groupCapabilityInventory } from './device-assistant-provider-inventory';
 import { useConfirmExec } from '../exec/use-confirm-exec';
 import { ExecLifecycle } from '../exec/exec-lifecycle';
+import {
+    type DeviceAssistantFeatureProfile,
+    OSS_DEVICE_ASSISTANT_FEATURES,
+    hasDeviceAssistantBrowserEntry,
+} from './device-assistant-features';
 
 const CURRENT_SCREEN_CAPABILITY_ID = 'screen.capture.current';
 
@@ -96,10 +102,12 @@ function DeviceAssistantWorkspace({
     deskId,
     stableDeviceId,
     localPairingAvailable,
+    featureProfile,
 }: {
     deskId: string;
     stableDeviceId: string;
     localPairingAvailable: boolean;
+    featureProfile: DeviceAssistantFeatureProfile;
 }) {
     const { t } = useTranslation();
     const { i18n } = useTranslation();
@@ -144,9 +152,10 @@ function DeviceAssistantWorkspace({
         capabilities.refresh();
     }, [capabilities.refresh, isConnected]);
 
-    const contextCapabilities = (capabilities.snapshot?.entries ?? []).filter(
-        (entry) => entry.context_selectable,
-    );
+    const contextCapabilities = featureProfile.object_context
+        ? (capabilities.snapshot?.entries ?? []).filter((entry) => entry.context_selectable)
+        : [];
+    const providerGroups = groupCapabilityInventory(capabilities.snapshot?.entries ?? []);
 
     useEffect(() => {
         const ready = new Set(
@@ -158,15 +167,18 @@ function DeviceAssistantWorkspace({
     }, [capabilities.snapshot]);
 
     useEffect(() => {
-        const restored = chat.attachments
+        const restored = featureProfile.object_context
+            ? chat.attachments
             .filter((attachment) =>
                 attachment.state === 'active' && attachment.kind === 'interactive_session',
             )
-            .map((attachment) => attachment.capabilityId);
+            .map((attachment) => attachment.capabilityId)
+            : [];
         setSelectedCapabilityIds([...new Set(restored)]);
-    }, [chat.attachments]);
+    }, [chat.attachments, featureProfile.object_context]);
 
     const toggleContext = (capabilityId: string) => {
+        if (!featureProfile.object_context) return;
         const next = selectedCapabilityIds.includes(capabilityId)
             ? selectedCapabilityIds.filter((id) => id !== capabilityId)
             : [...selectedCapabilityIds, capabilityId];
@@ -182,7 +194,8 @@ function DeviceAssistantWorkspace({
 
     const submit = (event: FormEvent) => {
         event.preventDefault();
-        if (chat.start(question, i18n.language, selectedCapabilityIds)) {
+        const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
+        if (chat.start(question, i18n.language, selectedContext)) {
             setQuestion('');
             setSelectedCapabilityIds((current) =>
                 current.filter((id) => id !== CURRENT_SCREEN_CAPABILITY_ID),
@@ -252,6 +265,19 @@ function DeviceAssistantWorkspace({
                 <AlertTitle>{t('pages.deviceAssistant.disclosureTitle')}</AlertTitle>
                 <AlertDescription>{t('pages.deviceAssistant.disclosure')}</AlertDescription>
             </Alert>
+            {[
+                featureProfile.permission_decision,
+                featureProfile.grant_revoke,
+                featureProfile.background_task_cancel,
+                featureProfile.object_context,
+            ].some((enabled) => !enabled) && (
+                <Alert data-testid="device-assistant-partial-support">
+                    <AlertTitle>{t('pages.deviceAssistant.partialSupportTitle')}</AlertTitle>
+                    <AlertDescription>
+                        {t('pages.deviceAssistant.partialSupportDescription')}
+                    </AlertDescription>
+                </Alert>
+            )}
             {localPairingAvailable && (
                 <Card data-testid="browser-extension-pairing">
                     <CardHeader>
@@ -317,6 +343,7 @@ function DeviceAssistantWorkspace({
                     </CardContent>
                 </Card>
             )}
+            {featureProfile.object_context && (
             <Card data-testid="device-assistant-context-selector">
                 <CardHeader>
                     <CardTitle className="text-base">{t('pages.deviceAssistant.contextTitle')}</CardTitle>
@@ -403,6 +430,7 @@ function DeviceAssistantWorkspace({
                     )}
                 </CardContent>
             </Card>
+            )}
             <Card>
                 <CardHeader>
                     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -471,6 +499,7 @@ function DeviceAssistantWorkspace({
                             <p className="break-all text-xs text-muted-foreground">
                                 {chat.unresolvedOutcome.workKind} · work {chat.unresolvedOutcome.workId} · {chat.unresolvedOutcome.executionId}
                             </p>
+                            {featureProfile.unknown_outcome_disposition && (
                             <Button
                                 variant="outline"
                                 size="sm"
@@ -480,6 +509,7 @@ function DeviceAssistantWorkspace({
                                 {chat.outcomeDisposing && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
                                 {t('pages.deviceAssistant.outcomeUnknownDispose')}
                             </Button>
+                            )}
                         </div>
                     )}
                     {chat.backgroundTasks.length > 0 && (
@@ -545,7 +575,8 @@ function DeviceAssistantWorkspace({
                                                 ?? item.exportDestinations.map((_, index) => index);
                                             return (
                                                 <div key={item.itemId} className="flex items-start gap-3 rounded border bg-background px-3 py-2">
-                                                    {request.state === 'pending' && (
+                                                    {featureProfile.permission_decision
+                                                        && request.state === 'pending' && (
                                                         <Checkbox
                                                             className="mt-0.5"
                                                             checked={approved}
@@ -567,7 +598,9 @@ function DeviceAssistantWorkspace({
                                                                 {[...item.resourceScope, ...item.operationScope].join(' · ')}
                                                             </p>
                                                         )}
-                                                        {request.state === 'pending' && approved && (
+                                                        {featureProfile.permission_decision
+                                                            && request.state === 'pending'
+                                                            && approved && (
                                                             <div className="mt-3 space-y-3 border-t pt-3">
                                                                 {item.resourceScope.length > 0 && (
                                                                     <div className="space-y-1">
@@ -691,7 +724,8 @@ function DeviceAssistantWorkspace({
                                             );
                                         })}
                                     </div>
-                                    {request.state === 'pending' && (
+                                    {featureProfile.permission_decision
+                                        && request.state === 'pending' && (
                                         <div className="space-y-2">
                                             <p className="text-xs text-muted-foreground">
                                                 {t('pages.deviceAssistant.permissionSelectionDescription')}
@@ -801,7 +835,7 @@ function DeviceAssistantWorkspace({
                                             )}
                                             {grant.revokedReason && <p className="break-all">{grant.revokedReason}</p>}
                                         </div>
-                                        {state === 'active' && (
+                                        {featureProfile.grant_revoke && state === 'active' && (
                                             <Button
                                                 type="button"
                                                 size="sm"
@@ -820,7 +854,7 @@ function DeviceAssistantWorkspace({
                             })}
                         </div>
                     )}
-                    {Object.entries(exec.entries).map(([row, entry]) => {
+                    {featureProfile.exec_pty && Object.entries(exec.entries).map(([row, entry]) => {
                         const rowIndex = Number(row);
                         return (
                             <div key={row} data-testid="device-assistant-exec">
@@ -961,32 +995,85 @@ function DeviceAssistantWorkspace({
                             </AlertDescription>
                         </Alert>
                     )}
-                    {capabilities.snapshot?.entries.map((entry) => (
-                        <div
-                            key={entry.capability.capability_id}
-                            className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2"
+                    {providerGroups.length === 0 && !capabilities.loading && !capabilities.error && (
+                        <p className="text-sm text-muted-foreground">
+                            {t('pages.deviceAssistant.capabilityEmpty')}
+                        </p>
+                    )}
+                    {providerGroups.map((group) => (
+                        <details
+                            key={group.providerId}
+                            className="rounded-md border"
+                            data-provider-state={group.state}
                         >
-                            <div>
-                                <p className="text-sm font-medium">{entry.capability.capability_id}</p>
-                                <p className="text-xs text-muted-foreground">
-                                    {entry.provider_id} · {entry.capability.execution_locality}
-                                </p>
+                            <summary className="cursor-pointer list-none px-3 py-3">
+                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                    <div>
+                                        <p className="text-sm font-medium">
+                                            {t(group.displayNameKey, { defaultValue: group.providerId })}
+                                        </p>
+                                        <p className="text-xs text-muted-foreground">
+                                            {group.providerId} · v{group.version} · {t(
+                                                'pages.deviceAssistant.providerReadyCount',
+                                                { ready: group.readyCount, total: group.entries.length },
+                                            )}
+                                        </p>
+                                    </div>
+                                    <div className="flex flex-wrap gap-1">
+                                        <Badge variant={group.compiled ? 'secondary' : 'outline'}>
+                                            {t('pages.deviceAssistant.providerBuiltIn')}: {t(
+                                                `pages.deviceAssistant.boolean.${String(group.compiled)}`,
+                                            )}
+                                        </Badge>
+                                        <Badge variant={group.enabled ? 'secondary' : 'outline'}>
+                                            {t('pages.deviceAssistant.providerEnabled')}: {t(
+                                                `pages.deviceAssistant.boolean.${String(group.enabled)}`,
+                                            )}
+                                        </Badge>
+                                        <Badge variant={group.connected ? 'secondary' : 'outline'}>
+                                            {t('pages.deviceAssistant.providerConnected')}: {t(
+                                                `pages.deviceAssistant.boolean.${String(group.connected)}`,
+                                            )}
+                                        </Badge>
+                                        <Badge variant={group.state === 'ready' ? 'default' : 'outline'}>
+                                            {t(`pages.deviceAssistant.providerState.${group.state}`)}
+                                        </Badge>
+                                    </div>
+                                </div>
+                            </summary>
+                            <div className="space-y-2 border-t p-3">
+                                {group.entries.map((entry) => (
+                                    <div
+                                        key={entry.capability.capability_id}
+                                        className="flex flex-wrap items-start justify-between gap-2 rounded-md bg-muted/40 px-3 py-2"
+                                    >
+                                        <div className="min-w-0">
+                                            <p className="break-all text-sm font-medium">
+                                                {entry.capability.capability_id}
+                                            </p>
+                                            <p className="break-all text-xs text-muted-foreground">
+                                                {entry.capability.tool_name} · {entry.capability.effect} · {entry.capability.execution_locality}
+                                            </p>
+                                        </div>
+                                        <div className="flex flex-wrap items-center justify-end gap-1">
+                                            {entry.context_selectable && (
+                                                <Badge variant="secondary">
+                                                    {t('pages.deviceAssistant.providerContextSelectable')}
+                                                </Badge>
+                                            )}
+                                            <Badge variant={entry.ready ? 'default' : 'outline'}>
+                                                {entry.ready
+                                                    ? t('pages.deviceAssistant.providerState.ready')
+                                                    : t(
+                                                        `pages.deviceAssistant.blockedReason.${entry.reason ?? 'unknown'}`,
+                                                        { defaultValue: entry.reason ?? t('pages.deviceAssistant.providerState.unavailable') },
+                                                    )}
+                                            </Badge>
+                                        </div>
+                                    </div>
+                                ))}
                             </div>
-                            <div className="flex flex-wrap gap-1">
-                                <Badge variant={entry.compiled ? 'secondary' : 'outline'}>
-                                    compiled: {String(entry.compiled)}
-                                </Badge>
-                                <Badge variant={entry.enabled ? 'secondary' : 'outline'}>
-                                    enabled: {String(entry.enabled)}
-                                </Badge>
-                                <Badge variant={entry.connected ? 'secondary' : 'outline'}>
-                                    connected: {String(entry.connected)}
-                                </Badge>
-                                <Badge variant={entry.ready ? 'default' : 'outline'}>
-                                    {entry.ready ? 'ready' : entry.reason ?? 'blocked'}
-                                </Badge>
-                            </div>
-                        </div>
+                        </details>
                     ))}
                 </CardContent>
             </Card>
@@ -1008,13 +1095,30 @@ function DeviceAssistantWorkspace({
     );
 }
 
-export default function DeviceAssistantPage() {
+export default function DeviceAssistantPage({
+    featureProfile = OSS_DEVICE_ASSISTANT_FEATURES,
+}: {
+    featureProfile?: DeviceAssistantFeatureProfile | null;
+}) {
     const { id: deskId } = useParams<{ id: string }>();
     const navigate = useNavigate();
     const { t } = useTranslation();
     const restricted = useRestrictedSession(deskId);
     const { data: connections, isLoading } = useListConnections();
     const connection = connections?.find((item: any) => item.connection_id === deskId);
+
+    if (!hasDeviceAssistantBrowserEntry(featureProfile)) {
+        return (
+            <div className="mx-auto max-w-3xl p-6">
+                <Alert>
+                    <AlertTitle>{t('pages.deviceAssistant.unavailableTitle')}</AlertTitle>
+                    <AlertDescription>
+                        {t('pages.deviceAssistant.unavailableDescription')}
+                    </AlertDescription>
+                </Alert>
+            </div>
+        );
+    }
 
     if (restricted.isRestricted) {
         return (
@@ -1060,6 +1164,7 @@ export default function DeviceAssistantPage() {
                 deskId={deskId}
                 stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
                 localPairingAvailable={!connection.device_id}
+                featureProfile={featureProfile}
             />
         </div>
     );

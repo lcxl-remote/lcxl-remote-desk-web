@@ -14,6 +14,7 @@ clap = ["dep:clap"]
 
 [dependencies]
 desk-agent-protocol = { workspace = true }
+desk-diagnose-core = { workspace = true }
 desk-utils = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true, optional = true }

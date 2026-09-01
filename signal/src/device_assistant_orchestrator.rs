@@ -19,7 +19,8 @@ use desk_diagnose_core::agent_loop::{
 };
 use desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
 use desk_diagnose_core::capability_availability::{
-    CapabilityAvailability, callable_tools, inventory_snapshot, project_capability_availability,
+    CapabilityAvailability, CentralCapabilityReadiness, callable_tools, inventory_snapshot,
+    project_capability_availability,
 };
 #[cfg(test)]
 use desk_diagnose_core::chat::ChatMessage;
@@ -29,7 +30,9 @@ use desk_diagnose_core::conversation_key::{
     derive_conversation_key, is_valid_client_conversation_id,
 };
 use desk_diagnose_core::device_assistant::{
-    build_device_assistant_system_message_with_catalog, device_assistant_provider_registry,
+    ACTION_PREVIEW_CAPABILITY_ID, WEB_RESEARCH_FETCH_CAPABILITY_ID,
+    WEB_RESEARCH_SEARCH_CAPABILITY_ID, build_device_assistant_system_message_with_catalog,
+    device_assistant_provider_registry,
 };
 use desk_diagnose_core::model_capability::{
     ModelCapabilities, apply_model_compatibility, filter_model_compatible_tools,
@@ -49,6 +52,17 @@ use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 
 use crate::model_dial::SignalModelSeam;
+
+pub(crate) fn oss_central_capability_readiness() -> Vec<CentralCapabilityReadiness> {
+    [
+        ACTION_PREVIEW_CAPABILITY_ID,
+        WEB_RESEARCH_FETCH_CAPABILITY_ID,
+        WEB_RESEARCH_SEARCH_CAPABILITY_ID,
+    ]
+    .into_iter()
+    .map(CentralCapabilityReadiness::ready)
+    .collect()
+}
 
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -174,6 +188,7 @@ async fn current_capability_projection(
         &provider_registry,
         desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
         generated_at_unix_ms,
+        oss_central_capability_readiness(),
         readiness,
     )
     .expect("validated Computer Use readiness must match the static Provider registry");

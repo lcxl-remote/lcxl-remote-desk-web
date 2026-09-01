@@ -1478,7 +1478,7 @@ export type DestinationIdentity = ({
 });
 
 /**
- * @description Server-side Device Assistant product features understood by a control end.\n\nThis profile advertises implementation support only. Authentication,\nownership, target readiness and grants are still checked for every request.
+ * @description Device Assistant product features implemented by one server target.\n\nAuthentication, ownership, target readiness and grants remain request-time\nchecks. Clients gate every optional control independently and treat an absent\nprofile as unsupported.
 */
 export type DeviceAssistantClientCapabilities = {
     /**
@@ -1531,6 +1531,7 @@ export type DeviceAssistantSessionSummaryDto = {
     */
     active: boolean;
     /**
+     * @description Validated client continuation intent.
      * @type string,null
     */
     conversationId?: string | null;
@@ -1548,6 +1549,7 @@ export type DeviceAssistantSessionSummaryDto = {
     */
     messageCount: number;
     /**
+     * @description Opaque server-side selector. Authorization is rechecked when it is used.
      * @type string
     */
     sessionId: string;
@@ -1734,10 +1736,12 @@ export type SnapshotMessageDto = {
     */
     backgroundTaskId?: string | null;
     /**
+     * @description Stable message id used to key and deduplicate rendered turns.
      * @type string
     */
     id: string;
     /**
+     * @description Wire role token. An `assistant` message is AI-generated.
      * @type string
     */
     role: string;
@@ -1975,6 +1979,7 @@ export type DeviceAssistantSessionSnapshotDto = {
     */
     latestInputSeq: number;
     /**
+     * @description The persisted conversation, oldest first.
      * @type array
     */
     messages: SnapshotMessageDto[];
@@ -1989,6 +1994,7 @@ export type DeviceAssistantSessionSnapshotDto = {
     */
     requestId?: string | null;
     /**
+     * @description Monotonic session-store snapshot version used for out-of-order reconciliation.
      * @type integer, int64
     */
     seq: number;
@@ -4350,6 +4356,7 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
         */
         latestInputSeq: number;
         /**
+         * @description The persisted conversation, oldest first.
          * @type array
         */
         messages: SnapshotMessageDto[];
@@ -4364,6 +4371,7 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
         */
         requestId?: string | null;
         /**
+         * @description Monotonic session-store snapshot version used for out-of-order reconciliation.
          * @type integer, int64
         */
         seq: number;

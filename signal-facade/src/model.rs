@@ -6,6 +6,7 @@ pub mod code_session;
 pub mod connection;
 pub mod credential_heartbeat;
 pub mod desk_settings;
+pub mod device_assistant;
 pub mod files;
 pub mod image_capture;
 pub mod media_capability;

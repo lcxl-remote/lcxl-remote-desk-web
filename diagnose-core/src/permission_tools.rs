@@ -34,6 +34,7 @@ use crate::registry::{RegisteredTool, ToolEffect};
 pub const REQUEST_CAPABILITY_GRANTS_TOOL_NAME: &str = "request_capability_grants";
 pub const MAX_REQUEST_TTL_SECONDS: u32 = 3_600;
 pub const MAX_REQUEST_USES: u32 = 16;
+pub const MAX_CAPABILITY_CATALOG_PROMPT_BYTES: usize = 16 * 1024;
 
 /// Render the current server-owned authorization projection for the model.
 ///
@@ -221,21 +222,39 @@ pub fn discoverable_catalog_prompt(
                         && item.capability_id == capability.wire.capability_id
                 });
                 let runtime_ready = availability.is_some_and(CapabilityAvailability::callable);
-                json!({
+                let mut entry = json!({
                     "provider_id": provider.wire.provider_id,
                     "capability_id": capability.wire.capability_id,
                     "tool_name": capability.tool_spec.name,
                     "effect": capability.wire.effect,
                     "execution_locality": capability.wire.execution_locality,
-                    "execution_policy": capability.wire.execution_policy,
-                    "supports_progress": capability.wire.supports_progress,
-                    "supports_cancel": capability.wire.supports_cancel,
                     "runtime_ready": runtime_ready,
                     "callable_now": runtime_ready && callable.contains(capability.tool_spec.name.as_str()),
                     "blocked_reason": availability.and_then(|item| item.reason),
-                    "description": capability.tool_spec.description,
-                    "input_schema": capability.tool_spec.parameters_schema,
-                })
+                });
+                if runtime_ready {
+                    let object = entry
+                        .as_object_mut()
+                        .expect("catalog entry is a JSON object");
+                    object.insert(
+                        "execution_policy".into(),
+                        json!(capability.wire.execution_policy),
+                    );
+                    object.insert(
+                        "supports_progress".into(),
+                        json!(capability.wire.supports_progress),
+                    );
+                    object.insert(
+                        "supports_cancel".into(),
+                        json!(capability.wire.supports_cancel),
+                    );
+                    object.insert("description".into(), json!(capability.tool_spec.description));
+                    object.insert(
+                        "input_schema".into(),
+                        capability.tool_spec.parameters_schema.clone(),
+                    );
+                }
+                entry
             })
         })
         .collect::<Vec<_>>();
@@ -1400,6 +1419,25 @@ mod tests {
         assert!(catalog.contains("\"callable_now\":true"));
         assert!(catalog.contains("\"tool_name\":\"inspect_office_selection\""));
         assert!(catalog.contains("\"blocked_reason\":\"office_bridge_not_paired\""));
+        let serialized = catalog
+            .split_once("<capability_catalog>")
+            .unwrap()
+            .1
+            .split_once("</capability_catalog>")
+            .unwrap()
+            .0;
+        let entries: Vec<serde_json::Value> = serde_json::from_str(serialized).unwrap();
+        let desktop_entry = entries
+            .iter()
+            .find(|entry| entry["tool_name"] == "inspect_desktop_session")
+            .unwrap();
+        let office_entry = entries
+            .iter()
+            .find(|entry| entry["tool_name"] == "inspect_office_selection")
+            .unwrap();
+        assert!(desktop_entry.get("input_schema").is_some());
+        assert!(office_entry.get("input_schema").is_none());
+        assert!(office_entry.get("description").is_none());
 
         let request = build_permission_request(
             &call(
@@ -1443,6 +1481,47 @@ mod tests {
             validate_request_availability(&request, &file_inventory, &[desktop.registered_tool()])
                 .unwrap_err();
         assert!(error.message.contains("not callable in this turn"));
+    }
+
+    #[test]
+    fn manager_catalog_keeps_unavailable_schemas_out_and_stays_within_budget() {
+        use crate::capability_availability::{
+            CentralCapabilityReadiness, project_capability_availability,
+        };
+        use crate::device_assistant::ACTION_PREVIEW_CAPABILITY_ID;
+
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let inventory = project_capability_availability(
+            &registry,
+            desk_agent_protocol::capability_provider::ProductSurface::ManagerPersonalOwner,
+            1,
+            [CentralCapabilityReadiness::ready(
+                ACTION_PREVIEW_CAPABILITY_ID,
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let callable =
+            crate::capability_availability::callable_tools(&registry, &inventory).unwrap();
+        let catalog = discoverable_catalog_prompt(&registry, &inventory, &callable);
+        assert!(catalog.len() <= MAX_CAPABILITY_CATALOG_PROMPT_BYTES);
+
+        let serialized = catalog
+            .split_once("<capability_catalog>")
+            .unwrap()
+            .1
+            .split_once("</capability_catalog>")
+            .unwrap()
+            .0;
+        let entries: Vec<serde_json::Value> = serde_json::from_str(serialized).unwrap();
+        let unavailable = entries
+            .iter()
+            .filter(|entry| entry["runtime_ready"] == false)
+            .collect::<Vec<_>>();
+        assert!(!unavailable.is_empty());
+        assert!(unavailable.iter().all(|entry| {
+            entry.get("input_schema").is_none() && entry.get("description").is_none()
+        }));
     }
 
     #[test]

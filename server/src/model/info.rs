@@ -1,3 +1,4 @@
+pub use desk_signal_facade::model::device_assistant::DeviceAssistantClientCapabilities;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -247,45 +248,6 @@ pub struct ServerInfo {
     /// Absence means unsupported so a newer client fails closed against an
     /// older server instead of inferring support from Provider inventory.
     pub device_assistant: Option<DeviceAssistantClientCapabilities>,
-}
-
-/// Server-side Device Assistant product features understood by a control end.
-///
-/// This profile advertises implementation support only. Authentication,
-/// ownership, target readiness and grants are still checked for every request.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, ToSchema)]
-pub struct DeviceAssistantClientCapabilities {
-    pub schema_version: u16,
-    pub turn_stream: bool,
-    pub capability_inventory: bool,
-    pub full_session_snapshot: bool,
-    pub permission_decision: bool,
-    pub grant_revoke: bool,
-    pub background_task_cancel: bool,
-    pub unknown_outcome_disposition: bool,
-    pub object_context: bool,
-    /// This server exposes the dedicated one-shot exec-PTY carrier surface.
-    /// Per-device/session readiness is still proven by a successful prepare.
-    pub exec_pty: bool,
-}
-
-impl DeviceAssistantClientCapabilities {
-    pub const SCHEMA_VERSION: u16 = 1;
-
-    pub const fn oss() -> Self {
-        Self {
-            schema_version: Self::SCHEMA_VERSION,
-            turn_stream: true,
-            capability_inventory: true,
-            full_session_snapshot: true,
-            permission_decision: true,
-            grant_revoke: true,
-            background_task_cancel: true,
-            unknown_outcome_disposition: true,
-            object_context: true,
-            exec_pty: true,
-        }
-    }
 }
 
 /// Runtime backend diagnostics.
