@@ -790,6 +790,20 @@ fn validate_selected_batch_destination(
     Ok(())
 }
 
+fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind> {
+    match action {
+        ComputerActionKind::Ui(_) => Some(ObjectKind::UiElement),
+        ComputerActionKind::RawInput(_) => Some(ObjectKind::Application),
+        ComputerActionKind::SpreadsheetLive(_) => Some(ObjectKind::Range),
+        ComputerActionKind::DocumentLive(_) => Some(ObjectKind::Document),
+        ComputerActionKind::PresentationLive(_) => Some(ObjectKind::Slide),
+        ComputerActionKind::SpreadsheetLiveBatch(_)
+        | ComputerActionKind::DocumentLiveBatch(_)
+        | ComputerActionKind::PresentationLiveBatch(_) => Some(ObjectKind::File),
+        _ => None,
+    }
+}
+
 impl SignalDeviceAssistantTools {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1987,6 +2001,29 @@ impl SignalDeviceAssistantTools {
                 true,
             )
         };
+        let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "system clock predates the Unix epoch",
+                false,
+                false,
+            )
+        })?;
+        let shared_iwork =
+            if desk_diagnose_core::provider_preflight::IworkCallPreflight::supports(&call.name) {
+                self.validate_original_objects().await?;
+                Some(
+                    desk_diagnose_core::provider_preflight::IworkCallPreflight::build(
+                        &self.provider_registry,
+                        ProductSurface::OssPersonalOwner,
+                        call,
+                        self.object_binding()?.original,
+                        now_unix_ms,
+                    )?,
+                )
+            } else {
+                None
+            };
         let (
             target_ref,
             authority_refs,
@@ -2166,23 +2203,23 @@ impl SignalDeviceAssistantTools {
                 ));
             }
         };
-        if target_ref.object_kind
-            != match required_capability {
-                desk_agent_protocol::Capability::DesktopUiActionConfirmed => ObjectKind::UiElement,
-                desk_agent_protocol::Capability::DesktopInputFallbackConfirmed => {
-                    ObjectKind::Application
-                }
-                desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed => ObjectKind::Range,
-                desk_agent_protocol::Capability::DocumentLivePatchConfirmed => ObjectKind::Document,
-                desk_agent_protocol::Capability::PresentationLivePatchConfirmed => {
-                    ObjectKind::Slide
-                }
-                _ => unreachable!(),
-            }
-        {
+        if semantic_action_target_kind(&computer_action) != Some(target_ref.object_kind) {
             return Err(error(
                 AgentErrorKind::InvalidInput,
                 "semantic action target kind does not match the selected Provider",
+                false,
+                true,
+            ));
+        }
+        if shared_iwork.as_ref().is_some_and(|preflight| {
+            preflight.target() != &target_ref
+                || preflight.action() != &computer_action
+                || preflight.required_capability() != required_capability
+                || preflight.adapter_kind() != adapter_kind
+        }) {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "iWork action no longer matches the original selected object",
                 false,
                 true,
             ));
@@ -2208,44 +2245,51 @@ impl SignalDeviceAssistantTools {
         let session = self.authoritative_session().await?;
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
-        let resource_scope = fresh_object_resource_scope(&authority_refs);
+        let resource_scope = shared_iwork.as_ref().map_or_else(
+            || fresh_object_resource_scope(&authority_refs),
+            |preflight| preflight.resource_scope().to_vec(),
+        );
         let operation_scope = vec!["use_selected_object".to_string()];
         let risk_tier = Self::capability_risk(capability, call)?;
-        let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
-            error(
-                AgentErrorKind::Internal,
-                "system clock predates the Unix epoch",
-                false,
-                false,
-            )
-        })?;
         let server_call_id = format!(
             "capability-call-{:x}",
             Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
         );
-        let call_authority = CapabilityGrantCall {
+        let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
-            surface: ProductSurface::OssPersonalOwner,
             target_device_id: &self.target_device_id,
-            target_session_id: None,
-            provider_id: &provider.wire.provider_id,
-            capability_id: &capability.wire.capability_id,
-            tool_name: &call.name,
-            tool_schema_version: capability.wire.input_schema_version,
-            effect: capability.wire.effect,
-            risk_tier,
-            resource_scope: &resource_scope,
-            operation_scope: &operation_scope,
-            export_destinations: &[],
-            envelope_ids: &[],
-            content_digests_sha256: &[],
-            canonical_input_digest_sha256: &canonical_input_digest_sha256,
-            byte_count: canonical_input_json.len() as u64,
-            item_count: 1,
             policy_revision: self.policy_revision,
             readiness_revision: self.readiness_revision,
             now_unix_ms,
+        };
+        let call_authority = if let Some(preflight) = &shared_iwork {
+            preflight.grant_call(&subject)?
+        } else {
+            CapabilityGrantCall {
+                actor_id: &self.actor_id,
+                run_id: &self.run_id,
+                surface: ProductSurface::OssPersonalOwner,
+                target_device_id: &self.target_device_id,
+                target_session_id: None,
+                provider_id: &provider.wire.provider_id,
+                capability_id: &capability.wire.capability_id,
+                tool_name: &call.name,
+                tool_schema_version: capability.wire.input_schema_version,
+                effect: capability.wire.effect,
+                risk_tier,
+                resource_scope: &resource_scope,
+                operation_scope: &operation_scope,
+                export_destinations: &[],
+                envelope_ids: &[],
+                content_digests_sha256: &[],
+                canonical_input_digest_sha256: &canonical_input_digest_sha256,
+                byte_count: canonical_input_json.len() as u64,
+                item_count: 1,
+                policy_revision: self.policy_revision,
+                readiness_revision: self.readiness_revision,
+                now_unix_ms,
+            }
         };
         let store = SignalCapabilityGrantStore::new(self.db.clone());
         let grant_id = if let Some(existing) = store
@@ -5377,6 +5421,17 @@ mod tests {
             .is_err()
         );
         assert!(validate_selected_batch_destination(&roots, &source).is_err());
+
+        let action = ComputerActionKind::DocumentLiveBatch(DocumentLiveBatchPatchAction {
+            output: BatchDocumentOutput {
+                destination_parent: destination,
+                native_file_name: "copy.pages".into(),
+            },
+            action: DocumentLivePatchAction::ReplaceBodyText {
+                text: "replacement".into(),
+            },
+        });
+        assert_eq!(semantic_action_target_kind(&action), Some(ObjectKind::File));
     }
 
     #[test]

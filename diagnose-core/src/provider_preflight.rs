@@ -29,6 +29,8 @@ mod browser_input;
 pub use browser_input::browser_action_from_call;
 mod semantic_ui;
 pub use semantic_ui::{UiCallPreflight, ui_action_from_call};
+mod semantic_iwork;
+pub use semantic_iwork::IworkCallPreflight;
 pub mod read;
 
 /// Identity and clock resolved by the runtime, never deserialized from tool input.
