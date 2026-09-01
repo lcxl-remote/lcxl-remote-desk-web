@@ -38,6 +38,8 @@ pub use artifact::{
     ArtifactCallPreflight, DOCX_ARTIFACT_MEDIA_TYPE, TEXT_ARTIFACT_MEDIA_TYPE,
     XLSX_ARTIFACT_MEDIA_TYPE, artifact_action_from_call,
 };
+mod communication;
+pub use communication::OutlookCallPreflight;
 pub mod read;
 
 /// Identity and clock resolved by the runtime, never deserialized from tool input.

@@ -36,6 +36,7 @@ pub mod capability_risk;
 pub mod chat;
 pub mod chunk;
 pub mod communication;
+pub mod communication_handoff;
 pub mod content_safety;
 pub mod context_attachment;
 pub mod conversation_key;

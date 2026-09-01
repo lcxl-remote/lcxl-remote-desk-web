@@ -365,3 +365,92 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
         assert!(evaluate(&call, &surface()).is_err());
     }
 }
+
+#[test]
+fn outlook_handoff_pins_application_destination_and_manual_compose_request() {
+    use desk_agent_protocol::{
+        capability_provider::CapabilityEffect,
+        communication::{COMMUNICATION_SCHEMA_VERSION, CommunicationSurfaceKind},
+        computer_use::ComputerActionKind,
+    };
+
+    let application = ObjectRef {
+        token: "opaque-outlook-application".into(),
+        snapshot_id: "outlook-snapshot".into(),
+        object_kind: ObjectKind::Application,
+        expires_at: "2026-08-30T00:01:00Z".into(),
+    };
+    let call = ToolCall {
+        id: "call".into(),
+        name: "prepare_outlook_new_draft_handoff".into(),
+        arguments_json: json!({"draft": {
+            "schema_version": COMMUNICATION_SCHEMA_VERSION,
+            "recipients": [{"role":"to","address":"alice@example.com","display_name":null}],
+            "subject":"Review", "body_plain_text":"Draft only", "attachment_labels":[]
+        }})
+        .to_string(),
+    };
+    let registry = crate::device_assistant::device_assistant_provider_registry();
+    for product in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let preflight = OutlookCallPreflight::build(
+            &registry,
+            product,
+            &call,
+            "server-call",
+            "run",
+            "device",
+            "interactive-session",
+            7,
+            &application,
+            now(),
+        )
+        .unwrap();
+        let subject = subject();
+        let authority = preflight.grant_call(&subject).unwrap();
+        assert_eq!(authority.effect, CapabilityEffect::WriteExternalDraft);
+        assert_eq!(authority.risk_tier, CapabilityRiskTier::R3);
+        assert_eq!(authority.operation_scope, ["use_selected_object"]);
+        assert_eq!(
+            authority.export_destinations,
+            [DestinationIdentity::EmailAccount {
+                account_id: crate::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID.into(),
+            }]
+        );
+        assert_eq!(preflight.target(), &application);
+        assert_eq!(preflight.request().call_id, "server-call");
+        assert_eq!(preflight.request().run_id, "run");
+        assert_eq!(
+            preflight.request().surface.kind,
+            CommunicationSurfaceKind::OutlookNewDesktop
+        );
+        assert!(matches!(
+            ComputerActionKind::Communication(preflight.request().clone()),
+            ComputerActionKind::Communication(_)
+        ));
+    }
+    for injected in ["send", "attachments", "export_destinations"] {
+        let mut bad = serde_json::from_str::<serde_json::Value>(&call.arguments_json).unwrap();
+        bad[injected] = json!(true);
+        let mut bad_call = call.clone();
+        bad_call.arguments_json = bad.to_string();
+        assert!(
+            OutlookCallPreflight::build(
+                &registry,
+                ProductSurface::ManagerPersonalOwner,
+                &bad_call,
+                "server-call",
+                "run",
+                "device",
+                "interactive-session",
+                7,
+                &application,
+                now(),
+            )
+            .is_err(),
+            "{injected}"
+        );
+    }
+}

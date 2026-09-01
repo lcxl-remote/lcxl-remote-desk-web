@@ -370,194 +370,27 @@ fn browser_projection(
     canonical_input_digest_sha256: &str,
     completion: &ComputerActionCompleted,
 ) -> Result<Option<String>, AgentError> {
-    let gmail_input: Option<GmailWebDraftHandoffInput> =
-        if tool_name == "prepare_gmail_web_draft_handoff" {
-            let input: GmailWebDraftHandoffInput =
-                serde_json::from_str(canonical_input).map_err(|_| invalid())?;
-            input.validate().map_err(|_| invalid())?;
-            Some(input)
-        } else {
-            None
-        };
-    let slack_input: Option<SlackWebDraftHandoffInput> =
-        if tool_name == "prepare_slack_web_message_handoff" {
-            let input: SlackWebDraftHandoffInput =
-                serde_json::from_str(canonical_input).map_err(|_| invalid())?;
-            input.validate().map_err(|_| invalid())?;
-            Some(input)
-        } else {
-            None
-        };
-    let server_call_id = &completion.action_request_id;
-    let browser_result = match &completion.output {
-        Some(ComputerActionOutput::Browser(result)) => Some(result.clone()),
-        _ => None,
-    };
-    // The exact communication read-back projection is shared with foreground delivery.
-    let output_json = if let Some(gmail) = gmail_input.as_ref() {
-        browser_result
-                .as_ref()
-                .and_then(|result| {
-                    (gmail_exact_attachment_readback(result, gmail)
-                        && result.page.adapter == gmail.page.adapter
-                        && result.page.page_id == gmail.page.page_id
-                        && result.page.page_incarnation == gmail.page.page_incarnation
-                        && result.page.origin == gmail.page.origin
-                        && result.page.document_revision > gmail.page.document_revision
-                        && gmail_exact_form_readback(result, gmail))
-                        .then(|| {
-                            let compose_digest = format!(
-                                "{:x}",
-                                Sha256::digest(
-                                    format!(
-                                        "{}:{}:{}:{}:{}",
-                                        result.page.page_incarnation,
-                                        gmail.to_field.element_id,
-                                        gmail.subject_field.element_id,
-                                        gmail.body_field.element_id,
-                                        server_call_id
-                                    )
-                                    .as_bytes(),
-                                )
-                            );
-                            CommunicationDraftHandoff {
-                                schema_version: COMMUNICATION_SCHEMA_VERSION,
-                                handoff_id: format!("gmail-handoff-{compose_digest}"),
-                                run_id: run_id.to_string(),
-                                surface: CommunicationSurfaceRef {
-                                    channel: CommunicationChannel::Email,
-                                    kind: communication_surface_kind(result.page.adapter.engine),
-                                    scope: CommunicationSurfaceScope::WebOrigin {
-                                        origin: result.page.origin.clone(),
-                                    },
-                                    device_id: result.page.adapter.device_id.clone(),
-                                    os_session_id: result.page.adapter.os_session_id.clone(),
-                                    adapter_id: desk_diagnose_core::device_assistant::GMAIL_WEB_ADAPTER_ID.into(),
-                                    adapter_version: desk_diagnose_core::device_assistant::GMAIL_WEB_ADAPTER_VERSION.into(),
-                                    profile_id: result.page.adapter.profile_incarnation.clone(),
-                                    account_id: desk_diagnose_core::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
-                                    revision: result.page.adapter.connection_revision,
-                                },
-                                compose_id: format!("gmail-compose-{compose_digest}"),
-                                prepared_payload_sha256: canonical_input_digest_sha256.to_string(),
-                                verification: CommunicationPrepareVerification::SemanticExact,
-                                readback_payload_sha256: Some(canonical_input_digest_sha256.to_string()),
-                                send_authority: CommunicationSendAuthority::ManualOnly,
-                                handed_off_at_unix_ms: result.completed_at_unix_ms,
-                            }
-                        })
-                })
-                .map(|handoff| {
-                    handoff.validate().map(|_| handoff).map_err(|validation_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("invalid Gmail handoff result: {validation_error}"),
-                            false,
-                            false,
-                        )
-                    })
-                })
-                .transpose()?
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|encode_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to encode Gmail handoff result: {encode_error}"),
-                        false,
-                        false,
-                    )
-                })?
-    } else if let Some(slack) = slack_input.as_ref() {
-        browser_result
-                .as_ref()
-                .and_then(|result| {
-                    (result.outcome
-                        == desk_agent_protocol::browser_control::BrowserActionOutcome::FormFilled
-                        && result.page.adapter == slack.page.adapter
-                        && result.page.page_id == slack.page.page_id
-                        && result.page.page_incarnation == slack.page.page_incarnation
-                        && result.page.origin == slack.page.origin
-                        && result.page.document_revision > slack.page.document_revision
-                        && slack_exact_form_readback(result, slack))
-                        .then(|| {
-                            let compose_digest = format!(
-                                "{:x}",
-                                Sha256::digest(
-                                    format!(
-                                        "{}:{}:{}",
-                                        result.page.page_incarnation,
-                                        slack.composer.element_id,
-                                        server_call_id
-                                    )
-                                    .as_bytes(),
-                                )
-                            );
-                            CommunicationDraftHandoff {
-                                schema_version: COMMUNICATION_SCHEMA_VERSION,
-                                handoff_id: format!("slack-handoff-{compose_digest}"),
-                                run_id: run_id.to_string(),
-                                surface: CommunicationSurfaceRef {
-                                    channel: CommunicationChannel::Chat,
-                                    kind: communication_surface_kind(result.page.adapter.engine),
-                                    scope: CommunicationSurfaceScope::WebOrigin {
-                                        origin: result.page.origin.clone(),
-                                    },
-                                    device_id: result.page.adapter.device_id.clone(),
-                                    os_session_id: result.page.adapter.os_session_id.clone(),
-                                    adapter_id: desk_diagnose_core::device_assistant::SLACK_WEB_ADAPTER_ID.into(),
-                                    adapter_version: desk_diagnose_core::device_assistant::SLACK_WEB_ADAPTER_VERSION.into(),
-                                    profile_id: result.page.adapter.profile_incarnation.clone(),
-                                    account_id: desk_diagnose_core::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
-                                    revision: result.page.adapter.connection_revision,
-                                },
-                                compose_id: format!("slack-compose-{compose_digest}"),
-                                prepared_payload_sha256: canonical_input_digest_sha256.to_string(),
-                                verification: CommunicationPrepareVerification::SemanticExact,
-                                readback_payload_sha256: Some(canonical_input_digest_sha256.to_string()),
-                                send_authority: CommunicationSendAuthority::ManualOnly,
-                                handed_off_at_unix_ms: result.completed_at_unix_ms,
-                            }
-                        })
-                })
-                .map(|handoff| {
-                    handoff.validate().map(|_| handoff).map_err(|validation_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("invalid Slack handoff result: {validation_error}"),
-                            false,
-                            false,
-                        )
-                    })
-                })
-                .transpose()?
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|encode_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to encode Slack handoff result: {encode_error}"),
-                        false,
-                        false,
-                    )
-                })?
-    } else {
-        browser_result
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|encode_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to encode browser result: {encode_error}"),
-                    false,
-                    false,
-                )
-            })?
-    };
-    Ok(output_json)
+    if let Some(handoff) = desk_diagnose_core::communication_handoff::project_web_draft_handoff(
+        tool_name,
+        run_id,
+        canonical_input,
+        canonical_input_digest_sha256,
+        completion,
+    )? {
+        return serde_json::to_string(&handoff)
+            .map(Some)
+            .map_err(|_| invalid());
+    }
+    completion
+        .output
+        .as_ref()
+        .and_then(|output| match output {
+            ComputerActionOutput::Browser(result) => Some(result),
+            _ => None,
+        })
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| invalid())
 }
 
 #[cfg(test)]

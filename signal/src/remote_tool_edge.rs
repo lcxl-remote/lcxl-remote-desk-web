@@ -19,12 +19,9 @@ use desk_agent_protocol::authz::{
 };
 #[cfg(test)]
 use desk_agent_protocol::browser_control::{
-    BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionRequest, BrowserMutationClass,
+    BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionRequest, BrowserActionResult,
+    BrowserElementRef, BrowserFormFieldReadback, BrowserFormReadbackKind, BrowserMutationClass,
     BrowserPageRef,
-};
-use desk_agent_protocol::browser_control::{
-    BrowserActionResult, BrowserElementRef, BrowserEngineKind, BrowserFormFieldReadback,
-    BrowserFormReadbackKind,
 };
 use desk_agent_protocol::capability_grant::{
     CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant, CapabilityGrantIssuer, CapabilityGrantLimits,
@@ -34,10 +31,8 @@ use desk_agent_protocol::capability_provider::{
     AuthorizationResourceKind, ExecutionLocality, ProductSurface,
 };
 use desk_agent_protocol::communication::{
-    COMMUNICATION_SCHEMA_VERSION, CommunicationChannel, CommunicationDraftHandoff,
-    CommunicationPrepareVerification, CommunicationSendAuthority, CommunicationSurfaceKind,
-    CommunicationSurfaceRef, CommunicationSurfaceScope, GmailWebDraftHandoffInput,
-    OutlookNewComposeHandoffRequest, OutlookNewDraftHandoffInput, SlackWebDraftHandoffInput,
+    CommunicationPrepareVerification, CommunicationSendAuthority, GmailWebDraftHandoffInput,
+    SlackWebDraftHandoffInput,
 };
 use desk_agent_protocol::computer_use::{
     BatchDocumentOutput, COMPUTER_USE_SCHEMA_VERSION, ComputerActionCompleted, ComputerActionKind,
@@ -120,6 +115,7 @@ fn browser_policy_auto_authorized(risk_tier: CapabilityRiskTier) -> bool {
     matches!(risk_tier, CapabilityRiskTier::R0 | CapabilityRiskTier::R1)
 }
 
+#[cfg(test)]
 fn exact_field_readback<'a>(
     result: &'a BrowserActionResult,
     expected: &BrowserElementRef,
@@ -135,6 +131,7 @@ fn exact_field_readback<'a>(
     matching.next().is_none().then_some(matched)
 }
 
+#[cfg(test)]
 fn gmail_exact_form_readback(
     result: &BrowserActionResult,
     gmail: &GmailWebDraftHandoffInput,
@@ -180,6 +177,7 @@ fn gmail_exact_form_readback(
     )
 }
 
+#[cfg(test)]
 fn gmail_exact_attachment_readback(
     result: &BrowserActionResult,
     gmail: &GmailWebDraftHandoffInput,
@@ -195,22 +193,6 @@ fn gmail_exact_attachment_readback(
                     || element.value.as_deref() == Some(attachment.artifact.file_name.as_str())
             })
         })
-}
-
-fn slack_exact_form_readback(
-    result: &BrowserActionResult,
-    slack: &SlackWebDraftHandoffInput,
-) -> bool {
-    result.form_readback.len() == 1
-        && exact_field_readback(result, &slack.composer, slack.body_plain_text.as_str())
-            .is_some_and(|readback| readback.kind == BrowserFormReadbackKind::ControlValue)
-}
-
-fn communication_surface_kind(engine: BrowserEngineKind) -> CommunicationSurfaceKind {
-    match engine {
-        BrowserEngineKind::ChromeExtension => CommunicationSurfaceKind::ChromeExtension,
-        BrowserEngineKind::ChromeDevtoolsMcp => CommunicationSurfaceKind::ChromeDevtoolsMcp,
-    }
 }
 
 fn decode_output(bytes: &[u8]) -> Result<RemoteToolOutput, AgentError> {
@@ -3913,37 +3895,6 @@ impl SignalDeviceAssistantTools {
             .provider_registry
             .provider_for_capability(&capability.wire.capability_id)
             .expect("registered Outlook capability has a Provider");
-        let args: OutlookNewDraftHandoffInput = serde_json::from_str(&call.arguments_json)
-            .map_err(|decode_error| {
-                error(
-                    AgentErrorKind::InvalidInput,
-                    format!("invalid Outlook handoff input: {decode_error}"),
-                    false,
-                    true,
-                )
-            })?;
-        args.validate().map_err(|validation_error| {
-            error(
-                AgentErrorKind::InvalidInput,
-                format!("invalid Outlook handoff draft: {validation_error}"),
-                false,
-                true,
-            )
-        })?;
-        for recipient in &args.draft.recipients {
-            if recipient.role == desk_agent_protocol::communication::RecipientRole::ChatDestination
-                || desk_diagnose_core::communication::canonicalize_email_address(&recipient.address)
-                    .is_err()
-            {
-                return Err(error(
-                    AgentErrorKind::InvalidInput,
-                    "Outlook handoff requires valid email To/Cc/Bcc recipients",
-                    false,
-                    true,
-                ));
-            }
-        }
-
         let session = self.authoritative_session().await?;
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
@@ -3959,93 +3910,56 @@ impl SignalDeviceAssistantTools {
             "capability-call-{:x}",
             Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
         );
-        let surface = CommunicationSurfaceRef {
-            channel: CommunicationChannel::Email,
-            kind: CommunicationSurfaceKind::OutlookNewDesktop,
-            scope: CommunicationSurfaceScope::DesktopApplication {
-                application_id: desk_diagnose_core::device_assistant::OUTLOOK_NEW_APPLICATION_ID
-                    .into(),
-            },
-            device_id: self.target_device_id.clone(),
-            os_session_id: interactive_session_incarnation.clone(),
-            adapter_id: desk_diagnose_core::device_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_ID.into(),
-            adapter_version:
-                desk_diagnose_core::device_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_VERSION.into(),
-            profile_id: interactive_session_incarnation.clone(),
-            account_id: desk_diagnose_core::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID
-                .into(),
-            revision: self.readiness_revision.max(1),
-        };
-        let request = OutlookNewComposeHandoffRequest {
-            schema_version: COMMUNICATION_SCHEMA_VERSION,
-            call_id: server_call_id.clone(),
-            run_id: self.run_id.clone(),
-            surface,
-            draft: args.draft,
-        };
-        request.validate().map_err(|validation_error| {
-            error(
-                AgentErrorKind::InvalidInput,
-                format!("invalid sealed Outlook handoff request: {validation_error}"),
-                false,
-                true,
-            )
-        })?;
-        if ComputerActionKind::Communication(request.clone()).required_capability()
-            != capability.required_capability
-        {
+        let evaluated = desk_diagnose_core::provider_preflight::OutlookCallPreflight::build(
+            &self.provider_registry,
+            ProductSurface::OssPersonalOwner,
+            call,
+            &server_call_id,
+            &self.run_id,
+            &self.target_device_id,
+            &interactive_session_incarnation,
+            self.readiness_revision,
+            &surface_ref,
+            now_unix_ms,
+        )?;
+        if evaluated.canonical_input_json() != canonical_input_json {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
-                "Outlook handoff action does not match the registered capability",
+                "Outlook canonical input changed during request sealing",
                 false,
-                true,
+                false,
             ));
         }
-
-        let resource_scope = fresh_object_resource_scope(std::slice::from_ref(&surface_ref));
-        let operation_scope = canonical_compiled_scope(
-            &capability.wire.authorization_hint.resources,
-            capability.wire.effect,
-        )
-        .ok_or_else(|| {
-            error(
-                AgentErrorKind::Internal,
-                "Outlook handoff Provider has no compiled authorization scope",
-                false,
-                false,
-            )
-        })?
-        .operations;
-        let destination = DestinationIdentity::EmailAccount {
-            account_id: desk_diagnose_core::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID
-                .into(),
-        };
-        let export_destinations = vec![destination.clone()];
-        let risk_tier = Self::capability_risk(capability, call)?;
-        let call_authority = CapabilityGrantCall {
+        let request = evaluated.request().clone();
+        let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
-            surface: ProductSurface::OssPersonalOwner,
             target_device_id: &self.target_device_id,
-            target_session_id: None,
-            provider_id: &provider.wire.provider_id,
-            capability_id: &capability.wire.capability_id,
-            tool_name: &call.name,
-            tool_schema_version: capability.wire.input_schema_version,
-            effect: capability.wire.effect,
-            risk_tier,
-            resource_scope: &resource_scope,
-            operation_scope: &operation_scope,
-            export_destinations: &export_destinations,
-            envelope_ids: &[],
-            content_digests_sha256: &[],
-            canonical_input_digest_sha256: &canonical_input_digest_sha256,
-            byte_count: canonical_input_json.len() as u64,
-            item_count: 1,
             policy_revision: self.policy_revision,
             readiness_revision: self.readiness_revision,
             now_unix_ms,
         };
+        let call_authority = evaluated.grant_call(&subject)?;
+        if call_authority.canonical_input_digest_sha256 != canonical_input_digest_sha256 {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Outlook canonical input digest changed during request sealing",
+                false,
+                false,
+            ));
+        }
+        let destination = call_authority
+            .export_destinations
+            .first()
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::Internal,
+                    "Outlook handoff has no fixed account destination",
+                    false,
+                    false,
+                )
+            })?;
         let store = SignalCapabilityGrantStore::new(self.db.clone());
         let grant_id = if let Some(existing) = store
             .prepared_grant_id(&server_call_id)
