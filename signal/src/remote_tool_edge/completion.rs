@@ -20,10 +20,10 @@ impl SignalDeviceAssistantTools {
         plan: &SealedComputerActionPlan,
         receiver: oneshot::Receiver<Result<ComputerActionCompleted, AgentError>>,
         sent: bool,
-        mutating: bool,
+        durable: bool,
     ) -> Result<ExecOutcome, AgentError> {
         let _pending_guard = PendingWaitGuard(plan.execution_generation.clone());
-        let foreground_timeout = if mutating {
+        let foreground_timeout = if durable {
             store
                 .computer_foreground_remaining(&plan.execution_generation)
                 .await
@@ -43,7 +43,7 @@ impl SignalDeviceAssistantTools {
         };
         global_computer_action_pending().cancel(&plan.execution_generation);
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| invalid())?;
-        if mutating {
+        if durable {
             if let Some(original) = store
                 .read_computer_result(
                     &plan.execution_generation,
@@ -99,7 +99,7 @@ impl SignalDeviceAssistantTools {
                 });
             }
         }
-        if mutating
+        if durable
             && sent
             && store
                 .promote_computer_background(
@@ -130,7 +130,7 @@ impl SignalDeviceAssistantTools {
             .await
             .map_err(|_| invalid())?;
         // A terminal observation can win between the timeout and unknown write.
-        if mutating
+        if durable
             && let Some(original) = store
                 .read_computer_result(
                     &plan.execution_generation,

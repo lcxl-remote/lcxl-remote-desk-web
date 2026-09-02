@@ -115,6 +115,10 @@ pub const BROWSER_OPEN_CAPABILITY_ID: &str = "browser.page.open";
 pub const BROWSER_NAVIGATE_CAPABILITY_ID: &str = "browser.page.navigate";
 pub const BROWSER_SNAPSHOT_CAPABILITY_ID: &str = "browser.page.snapshot";
 pub const BROWSER_WAIT_CAPABILITY_ID: &str = "browser.page.wait";
+/// A browser wait that outlives the inline result window becomes one durable
+/// task. Keep this aligned with the OSS and Manager foreground delivery gates;
+/// the remaining time is still bounded by `MAX_BROWSER_WAIT_MS`.
+pub const BROWSER_WAIT_FOREGROUND_BUDGET_MS: u32 = 8_000;
 pub const BROWSER_FILL_CAPABILITY_ID: &str = "browser.form.fill";
 pub const BROWSER_ACTIVATE_CAPABILITY_ID: &str = "browser.element.activate";
 pub const BROWSER_CONTEXT_CAPABILITY_IDS: [&str; 8] = [
@@ -1639,7 +1643,11 @@ fn browser_wait_tool() -> RegisteredTool {
                     "page": browser_page_schema(),
                     "element": browser_element_schema(),
                     "state": {"type": "string", "const": "present"},
-                    "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000}
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": desk_agent_protocol::browser_control::MAX_BROWSER_WAIT_MS
+                    }
                 },
                 "required": ["page", "element", "state", "timeout_ms"],
                 "additionalProperties": false
@@ -2017,6 +2025,18 @@ fn configure_command_execution(descriptor: &mut ProviderDescriptor) {
         };
         wire.limits.hard_timeout_ms = MAX_CAPABILITY_TIMEOUT_MS;
         wire.supports_progress = true;
+        wire.supports_cancel = true;
+    };
+    configure(&mut descriptor.wire.capabilities[0]);
+    configure(&mut descriptor.capabilities[0].wire);
+}
+
+fn configure_browser_wait_execution(descriptor: &mut ProviderDescriptor) {
+    let configure = |wire: &mut CapabilityWireDescriptor| {
+        wire.execution_policy = ExecutionPolicy::Adaptive {
+            foreground_budget_ms: BROWSER_WAIT_FOREGROUND_BUDGET_MS,
+        };
+        wire.limits.hard_timeout_ms = desk_agent_protocol::browser_control::MAX_BROWSER_WAIT_MS;
         wire.supports_cancel = true;
     };
     configure(&mut descriptor.wire.capabilities[0]);
@@ -2725,7 +2745,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
         vec![AuthorizationResourceKind::FreshObjectReference],
         browser_snapshot_tool(),
     );
-    let browser_wait = provider_for_tool(
+    let mut browser_wait = provider_for_tool(
         BROWSER_WAIT_PROVIDER_ID,
         BROWSER_WAIT_CAPABILITY_ID,
         "assistant.capability.browserWaitFor",
@@ -2738,6 +2758,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
         vec![AuthorizationResourceKind::FreshObjectReference],
         browser_wait_tool(),
     );
+    configure_browser_wait_execution(&mut browser_wait);
     let browser_fill = provider_for_tool(
         BROWSER_FILL_PROVIDER_ID,
         BROWSER_FILL_CAPABILITY_ID,
@@ -3462,6 +3483,36 @@ mod tests {
             ),
             desk_agent_protocol::capability_grant::CapabilityRiskTier::R3
         );
+    }
+
+    #[test]
+    fn browser_wait_descriptor_is_adaptive_cancelable_and_bounded() {
+        let providers = device_assistant_provider_registry();
+        let wait = providers
+            .capability(BROWSER_WAIT_CAPABILITY_ID)
+            .expect("browser wait capability");
+        assert_eq!(
+            wait.wire.execution_policy,
+            ExecutionPolicy::Adaptive {
+                foreground_budget_ms: BROWSER_WAIT_FOREGROUND_BUDGET_MS,
+            }
+        );
+        assert_eq!(
+            wait.wire.limits.hard_timeout_ms,
+            desk_agent_protocol::browser_control::MAX_BROWSER_WAIT_MS
+        );
+        assert!(!wait.wire.supports_progress);
+        assert!(wait.wire.supports_cancel);
+        assert_eq!(
+            wait.tool_spec.parameters_schema["properties"]["timeout_ms"]["maximum"],
+            desk_agent_protocol::browser_control::MAX_BROWSER_WAIT_MS
+        );
+
+        let snapshot = providers
+            .capability(BROWSER_SNAPSHOT_CAPABILITY_ID)
+            .expect("browser snapshot capability");
+        assert_eq!(snapshot.wire.execution_policy, ExecutionPolicy::InlineOnly);
+        assert!(!snapshot.wire.supports_cancel);
     }
 
     #[test]

@@ -206,9 +206,6 @@ impl SignalCapabilityGrantStore {
         let txn = self.db.begin().await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, &plan.execution_generation).await?;
-            if !work.is_side_effecting {
-                return Err(invalid());
-            }
             if stable_id(
                 "capability-call",
                 &format!("{}:{}:{}", work.conversation_id, work.turn_id, call.id),
@@ -228,6 +225,10 @@ impl SignalCapabilityGrantStore {
                 .capability_for_tool(&call.name)
                 .ok_or_else(invalid)?;
             if capability.wire.capability_id != payload.capability_id
+                || matches!(
+                    capability.wire.execution_policy,
+                    ExecutionPolicy::InlineOnly
+                )
                 || plan.actions.len() != 1
                 || plan.actions[0].action.required_capability() != capability.required_capability
             {
@@ -366,16 +367,17 @@ impl SignalCapabilityGrantStore {
         let txn = self.db.begin().await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, frame_request_id).await?;
-            if !work.is_side_effecting {
-                // Browser observation uses this transport but is still an
-                // inline read, not a background mutation or acceptance proof.
+            if !work.is_side_effecting && outbox.computer_binding_json.is_none() {
+                // Inline browser observations deliberately have no durable
+                // binding. An Adaptive observation (currently browser wait)
+                // does have one and follows the same original acceptance path
+                // without changing its read-only effect.
                 if !matches!(
                     payload.tool_name.as_str(),
                     "browser_take_snapshot" | "browser_wait_for"
                 ) || work.id.to_string() != started.work_id
                     || payload.call_id != started.action_request_id
                     || work.target_device_id != audience
-                    || outbox.computer_binding_json.is_some()
                     || outbox.computer_acceptance_json.is_some()
                 {
                     return Err(invalid());

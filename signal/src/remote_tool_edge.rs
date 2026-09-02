@@ -28,7 +28,7 @@ use desk_agent_protocol::capability_grant::{
     CapabilityGrantUsePolicy, CapabilityRiskTier,
 };
 use desk_agent_protocol::capability_provider::{
-    AuthorizationResourceKind, ExecutionLocality, ProductSurface,
+    AuthorizationResourceKind, ExecutionLocality, ExecutionPolicy, ProductSurface,
 };
 use desk_agent_protocol::communication::{
     CommunicationPrepareVerification, CommunicationSendAuthority, GmailWebDraftHandoffInput,
@@ -73,7 +73,9 @@ use desk_diagnose_core::device_assistant::{
 use desk_diagnose_core::permission_tools::canonical_tool_permission_input_json;
 use desk_diagnose_core::provider_registry::ProviderRegistry;
 use desk_diagnose_core::read_tools::build_read_operation;
-use desk_diagnose_core::seam::{ExecContext, ExecOutcome, ToolRunOutput, ToolSeam, WaitOutcome};
+use desk_diagnose_core::seam::{
+    ExecContext, ExecOutcome, ReadCompletion, ReadOutcome, ToolRunOutput, ToolSeam, WaitOutcome,
+};
 use desk_diagnose_core::sink_authorizer::{
     DefaultSinkAuthorizer, ExportDataAuthorization, SinkAuthorizer, SinkInput, authorize_export,
 };
@@ -3789,7 +3791,11 @@ impl SignalDeviceAssistantTools {
                 false,
             )
         }));
-        if capability.wire.effect.is_side_effecting() {
+        let durable = !matches!(
+            capability.wire.execution_policy,
+            ExecutionPolicy::InlineOnly
+        );
+        if durable {
             browser_pre_send!(
                 store
                     .bind_computer_transport(
@@ -3800,12 +3806,14 @@ impl SignalDeviceAssistantTools {
                         self.model_egress_policy.as_ref()
                     )
                     .await
-                    .map_err(|_| error(
-                        AgentErrorKind::Internal,
-                        "failed to freeze original Computer Action transport",
-                        false,
-                        false
-                    ))
+                    .map_err(|_| {
+                        error(
+                            AgentErrorKind::Internal,
+                            "failed to freeze original Computer Action transport",
+                            false,
+                            false,
+                        )
+                    })
             );
         }
         let (completion_tx, completion_rx) = oneshot::channel();
@@ -3831,15 +3839,8 @@ impl SignalDeviceAssistantTools {
             return Err(dispatch_error);
         }
         let sent = target.session.write().await.text(text).await.is_ok();
-        self.finish_computer_action(
-            &store,
-            call,
-            &plan,
-            completion_rx,
-            sent,
-            capability.wire.effect.is_side_effecting(),
-        )
-        .await
+        self.finish_computer_action(&store, call, &plan, completion_rx, sent, durable)
+            .await
     }
 
     async fn authorize_and_execute_outlook_handoff(
@@ -4879,6 +4880,12 @@ impl ToolSeam for SignalDeviceAssistantTools {
                     false,
                     true,
                 )),
+                ExecOutcome::Dispatched(_) => Err(error(
+                    AgentErrorKind::SessionUnavailable,
+                    "browser observation continues as a background task",
+                    false,
+                    true,
+                )),
                 _ => Err(error(
                     AgentErrorKind::Internal,
                     "browser observation returned an invalid execution state",
@@ -4920,6 +4927,117 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 );
         }
         result
+    }
+
+    fn read_requires_version(&self, call: &ToolCall) -> bool {
+        call.name == "browser_wait_for"
+    }
+
+    async fn run_read_versioned(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+        version: Option<&desk_diagnose_core::action_version::ActionVersion>,
+    ) -> ReadCompletion {
+        if call.name != "browser_wait_for" {
+            return ReadCompletion {
+                outcome: self.run_read(call).await.map(|output| ReadOutcome {
+                    output,
+                    ok: true,
+                    event_id: None,
+                    data_envelope: None,
+                    background_task: None,
+                }),
+                version_advance: None,
+            };
+        }
+        let outcome = match version {
+            Some(held)
+                if held.tool_call_id == call.id
+                    && ctx.assistant_turn_fence.as_ref() == Some(&held.turn_fence)
+                    && ctx.conversation_id == held.turn_fence.conversation_id
+                    && ctx.actor_id == held.turn_fence.actor_id
+                    && ctx.turn_id == held.turn_fence.turn_id =>
+            {
+                self.authorize_and_execute_browser(call).await
+            }
+            _ => Err(error(
+                AgentErrorKind::SessionUnavailable,
+                "browser wait action version is unavailable",
+                false,
+                false,
+            )),
+        }
+        .and_then(|outcome| match outcome {
+            ExecOutcome::Executed {
+                output,
+                event_id,
+                data_envelope,
+            } => Ok(ReadOutcome {
+                output,
+                ok: true,
+                event_id,
+                data_envelope,
+                background_task: None,
+            }),
+            ExecOutcome::Failed {
+                output,
+                event_id,
+                data_envelope,
+            } => Ok(ReadOutcome {
+                output,
+                ok: false,
+                event_id,
+                data_envelope,
+                background_task: None,
+            }),
+            ExecOutcome::Dispatched(action) => Ok(ReadOutcome {
+                output: ToolRunOutput {
+                    content: desk_diagnose_core::chat::background_task_running_result(
+                        &action.action_request_id,
+                    ),
+                    image_data_url: None,
+                },
+                ok: true,
+                event_id: None,
+                data_envelope: None,
+                background_task: Some(action),
+            }),
+            ExecOutcome::Rejected { reason } => Err(error(
+                AgentErrorKind::PermissionDenied,
+                reason.unwrap_or_else(|| "browser observation was rejected".into()),
+                false,
+                true,
+            )),
+            ExecOutcome::NotExecuted { reason } => Err(error(
+                AgentErrorKind::SessionUnavailable,
+                reason,
+                true,
+                true,
+            )),
+            ExecOutcome::Cancelled { reason } => Err(error(
+                AgentErrorKind::Cancelled,
+                reason.unwrap_or_else(|| "browser observation was cancelled".into()),
+                false,
+                true,
+            )),
+            ExecOutcome::ApprovalTimeout => Err(error(
+                AgentErrorKind::Timeout,
+                "browser observation permission expired",
+                false,
+                true,
+            )),
+            ExecOutcome::Unknown(_) => Err(error(
+                AgentErrorKind::SessionUnavailable,
+                "browser observation outcome is not available yet",
+                false,
+                true,
+            )),
+        });
+        ReadCompletion {
+            outcome,
+            version_advance: None,
+        }
     }
 
     async fn confirm_and_exec(

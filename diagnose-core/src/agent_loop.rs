@@ -1820,27 +1820,53 @@ async fn run_inner(
                             if read_requires_version {
                                 session.turn_state = TurnState::Running;
                             }
-                            let (out, ok, event_id, provided_envelope) = match completion.outcome {
-                                Ok(ReadOutcome {
-                                    output,
-                                    ok,
-                                    event_id,
-                                    data_envelope,
-                                }) => (output, ok, event_id, data_envelope),
-                                Err(e) => (
-                                    crate::seam::ToolRunOutput {
-                                        content: if e.safe_for_model {
-                                            format!("tool error: {}", e.message)
-                                        } else {
-                                            "tool error: the tool could not complete".into()
+                            let (out, ok, event_id, provided_envelope, background_task) =
+                                match completion.outcome {
+                                    Ok(ReadOutcome {
+                                        output,
+                                        ok,
+                                        event_id,
+                                        data_envelope,
+                                        background_task,
+                                    }) => (output, ok, event_id, data_envelope, background_task),
+                                    Err(e) => (
+                                        crate::seam::ToolRunOutput {
+                                            content: if e.safe_for_model {
+                                                format!("tool error: {}", e.message)
+                                            } else {
+                                                "tool error: the tool could not complete".into()
+                                            },
+                                            image_data_url: None,
                                         },
-                                        image_data_url: None,
-                                    },
-                                    false,
-                                    None,
-                                    None,
-                                ),
-                            };
+                                        false,
+                                        None,
+                                        None,
+                                        None,
+                                    ),
+                                };
+                            if let Some(action) = background_task {
+                                if !ok
+                                    || event_id.is_some()
+                                    || provided_envelope.is_some()
+                                    || out.image_data_url.is_some()
+                                {
+                                    return Err(invalid_original_result());
+                                }
+                                append_mutating_result(
+                                    deps,
+                                    session,
+                                    call,
+                                    ChatMessage::background_task_running(
+                                        mint(),
+                                        &call.id,
+                                        &action.action_request_id,
+                                    ),
+                                )?;
+                                session.execution_state = ExecutionState::Executing { action };
+                                finish_tool(session, &call.id, true, sink);
+                                deps.session_seam.save(session).await?;
+                                continue;
+                            }
                             // A model-visible tool error is still data produced by
                             // the selected source. Information-flow-enforced
                             // surfaces must label it before the next model call in

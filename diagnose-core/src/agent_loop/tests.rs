@@ -364,6 +364,71 @@ struct RecordingTools {
     calls: Rc<RefCell<Vec<String>>>,
     reply: String,
 }
+
+struct BackgroundReadTools {
+    version_seen: std::cell::Cell<bool>,
+    reads: Rc<RefCell<Vec<String>>>,
+}
+
+#[async_trait(?Send)]
+impl ToolSeam for BackgroundReadTools {
+    async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+        self.reads.borrow_mut().push(call.name.clone());
+        Ok(ToolRunOutput {
+            content: format!("{}: ok", call.name),
+            image_data_url: None,
+        })
+    }
+
+    fn read_requires_version(&self, call: &ToolCall) -> bool {
+        call.name == "long_read"
+    }
+
+    async fn run_read_versioned(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+        version: Option<&crate::action_version::ActionVersion>,
+    ) -> crate::seam::ReadCompletion {
+        if call.name != "long_read" {
+            return crate::seam::ReadCompletion {
+                outcome: self
+                    .run_read(call)
+                    .await
+                    .map(|output| crate::seam::ReadOutcome {
+                        output,
+                        ok: true,
+                        event_id: None,
+                        data_envelope: None,
+                        background_task: None,
+                    }),
+                version_advance: None,
+            };
+        }
+        let version = version.expect("adaptive remote read needs a persisted action fence");
+        assert_eq!(version.tool_call_id, call.id);
+        assert_eq!(ctx.assistant_turn_fence.as_ref(), Some(&version.turn_fence));
+        self.version_seen.set(true);
+        crate::seam::ReadCompletion {
+            outcome: Ok(crate::seam::ReadOutcome {
+                output: ToolRunOutput {
+                    content: crate::chat::background_task_running_result("read-task"),
+                    image_data_url: None,
+                },
+                ok: true,
+                event_id: None,
+                data_envelope: None,
+                background_task: Some(crate::session::ActionIdentity::new(
+                    17,
+                    "read-task",
+                    "read-execution",
+                    crate::session::WorkKind::ComputerAction,
+                )),
+            }),
+            version_advance: None,
+        }
+    }
+}
 #[async_trait(?Send)]
 impl ToolSeam for RecordingTools {
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
@@ -4110,6 +4175,79 @@ async fn streams_read_tool_lifecycle_events() {
             "finished:c1:true:sysinfo: ok".to_string(),
             "answer:done".to_string(),
         ]
+    );
+}
+
+#[tokio::test]
+async fn adaptive_read_closes_with_background_identity_and_keeps_followup_reads_available() {
+    let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
+    seeded.surface = crate::session::AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use("c1", "long_read"),
+                tool_use("c2", "read_sys"),
+                answer("status"),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let tools = BackgroundReadTools {
+        version_seen: std::cell::Cell::new(false),
+        reads: Rc::new(RefCell::new(vec![])),
+    };
+    let registry = vec![
+        read_tool("long_read", Capability::SystemInfo),
+        read_tool("read_sys", Capability::LogRecent),
+    ];
+    let clock = || "2026-08-31T00:00:00Z".to_string();
+    let log = Rc::new(RefCell::new(vec![]));
+    let mut sink = EventLog(log.clone());
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "wait for it"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("status".into()));
+    assert!(tools.version_seen.get());
+    assert_eq!(*tools.reads.borrow(), vec!["read_sys"]);
+    let saved = sess.inner.borrow();
+    let saved = saved.as_ref().unwrap();
+    assert!(matches!(
+        &saved.execution_state,
+        ExecutionState::Executing { action }
+            if action.work_id == 17
+                && action.action_request_id == "read-task"
+                && action.execution_id == "read-execution"
+    ));
+    let result = saved
+        .conversation
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("c1"))
+        .unwrap();
+    assert_eq!(result.background_task_id.as_deref(), Some("read-task"));
+    assert!(
+        requests.borrow()[1]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "read_sys")
+    );
+    assert!(
+        log.borrow().iter().any(|event| {
+            event.starts_with("finished:c1:true:") && event.ends_with(":read-task")
+        })
     );
 }
 

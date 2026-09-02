@@ -3,7 +3,7 @@ use crate::remote_tool_edge::{
     SignalDeviceAssistantTools, SignalRemoteToolPendingStore, global_computer_action_pending,
 };
 use desk_agent_protocol::{
-    Capability,
+    AgentErrorKind, Capability,
     authz::AuthorizedControlPayload,
     browser_control::{BrowserAction, BrowserActionResult},
     computer_use::{
@@ -16,7 +16,7 @@ use desk_signal_facade::model::connection::SharedConnectionMap;
 use serde_json::json;
 
 #[actix_web::test]
-async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acceptance() {
+async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
     let directory = tempfile::tempdir().unwrap();
     let fixture =
         Fixture::new_for_actor(file_db(&directory.path().join("read-tools.db")).await, "1").await;
@@ -173,13 +173,15 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
     for name in [
         "browser_take_snapshot",
         "browser_wait_for",
+        "browser_wait_for_background",
         "browser_open_page",
         "browser_open_page_late",
         "browser_open_page_background",
     ] {
         let mutating = name.starts_with("browser_open_page");
+        let waiting = name.starts_with("browser_wait_for");
         let late = name == "browser_open_page_late";
-        let background = name == "browser_open_page_background";
+        let background = name.ends_with("_background");
         let foreground_closed = Arc::new(tokio::sync::Notify::new());
         let arguments = if name == "browser_take_snapshot" {
             json!({"page":page,"max_elements":10})
@@ -190,9 +192,17 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
         };
         let call = ToolCall {
             id: name.into(),
-            name: if mutating { "browser_open_page" } else { name }.into(),
+            name: if mutating {
+                "browser_open_page"
+            } else if waiting {
+                "browser_wait_for"
+            } else {
+                name
+            }
+            .into(),
             arguments_json: arguments.to_string(),
         };
+        let durable = mutating || waiting;
         if mutating {
             // Retain a real approved scope and a persisted labelled proposal.
             // No test shortcut bypasses Prepare, DispatchIntent or send claim.
@@ -207,6 +217,8 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
             permission.grant_id = format!("grant-runtime-{name}");
             permission.remaining_uses = 1;
             fixture.store.issue(&permission).await.unwrap();
+        }
+        if durable {
             let row = agent_session::Entity::find()
                 .one(&fixture.store.db)
                 .await
@@ -353,7 +365,66 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
         };
         let invoke = async {
             if !mutating {
-                return tools.run_read(&call).await;
+                if !background {
+                    return tools.run_read(&call).await;
+                }
+                let error = tools.run_read(&call).await.unwrap_err();
+                assert_eq!(error.kind, AgentErrorKind::SessionUnavailable);
+                assert_eq!(
+                    error.message,
+                    "browser observation continues as a background task"
+                );
+                let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(
+                    fixture.store.db.clone(),
+                )
+                .read_assistant_snapshot_for_subject("run-1", "1", "device-1")
+                .await
+                .unwrap()
+                .unwrap();
+                let task = snapshot
+                    .background_tasks
+                    .iter()
+                    .find(|task| task.task.call_id == call.id)
+                    .unwrap();
+                assert_eq!(
+                    task.state,
+                    desk_diagnose_core::dynamic_run::BackgroundTaskState::Running
+                );
+                let work = agent_action_item::Entity::find()
+                    .filter(agent_action_item::Column::ActionRequestId.eq(&task.task.task_id))
+                    .one(&fixture.store.db)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let stopped = fixture
+                    .store
+                    .request_computer_background_cancel(
+                        &task.task.task_id,
+                        "run-1",
+                        "1",
+                        "device-1",
+                        "runtime-stop",
+                        "stop after foreground budget",
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    stopped.state,
+                    desk_diagnose_core::dynamic_run::BackgroundTaskState::CancelRequested
+                );
+                let dispatcher =
+                    crate::computer_cancel_dispatch::SignalComputerCancelDispatcher::new(
+                        fixture.store.db.clone(),
+                        connections.clone(),
+                    );
+                assert!(dispatcher.send_original(work.id).await.unwrap());
+                assert!(dispatcher.send_original(work.id).await.unwrap());
+                foreground_closed.notify_one();
+                return Ok(desk_diagnose_core::seam::ToolRunOutput {
+                    content: "background".into(),
+                    image_data_url: None,
+                });
             }
             let context = ExecContext {
                 assistant_turn_fence:
@@ -369,7 +440,8 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                 scope: fixture.session.scope_snapshot.clone(),
                 connection_id: None,
             };
-            match tools.confirm_and_exec(&call, &context).await? {
+            let outcome = tools.confirm_and_exec(&call, &context).await?;
+            match outcome {
                 ExecOutcome::Executed {
                     output,
                     event_id,
@@ -434,7 +506,7 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                         image_data_url: None,
                     })
                 }
-                other => panic!("unexpected mutation outcome: {other:?}"),
+                other => panic!("unexpected browser outcome: {other:?}"),
             }
         };
         let (result, expected) = tokio::time::timeout(Duration::from_secs(15), async {
@@ -451,7 +523,7 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
                 expected
             );
         }
-        if mutating {
+        if durable {
             let original = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let outbox = agent_capability_dispatch_outbox::Entity::find()
@@ -515,8 +587,8 @@ async fn actual_browser_read_tools_remain_inline_without_mutating_origin_or_acce
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(outbox.computer_binding_json.is_some(), mutating);
-        assert_eq!(outbox.computer_acceptance_json.is_some(), mutating);
+        assert_eq!(outbox.computer_binding_json.is_some(), durable);
+        assert_eq!(outbox.computer_acceptance_json.is_some(), durable);
         if let Some(json) = &outbox.computer_binding_json {
             let binding: ComputerBinding = serde_json::from_str(json).unwrap();
             assert_eq!(binding.origin.tool_call_id, call.id);

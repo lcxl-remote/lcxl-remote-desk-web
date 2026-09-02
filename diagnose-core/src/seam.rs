@@ -434,6 +434,10 @@ pub struct ReadOutcome {
     pub ok: bool,
     pub event_id: Option<String>,
     pub data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+    /// Present only when this exact read crossed its Adaptive foreground
+    /// budget after executor acceptance. The loop records the same durable
+    /// task identity used by mutation dispatches; this is not a second call.
+    pub background_task: Option<ExecIdentity>,
 }
 
 #[derive(Debug)]
@@ -550,6 +554,7 @@ pub trait ToolSeam {
                 ok: true,
                 event_id: None,
                 data_envelope: None,
+                background_task: None,
             }),
             version_advance: None,
         }
