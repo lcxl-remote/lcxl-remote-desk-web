@@ -49,9 +49,12 @@ pub struct PermissionGrantIssuanceContext<'a> {
     pub inventory: &'a [CapabilityAvailability],
     pub readiness_revision: u64,
     pub now_unix_ms: u64,
-    /// Server-issued, readiness-bound object references that are selected by
-    /// capability rather than by a persisted user attachment. The decision
-    /// payload can only narrow display scopes; it cannot inject these refs.
+    /// Current server-issued, readiness-bound object references selected by
+    /// capability rather than by a persisted user attachment. These resolve a
+    /// non-exact request's `selected:server_resolved` placeholder. A persisted
+    /// original live-read target or exact semantic-action target stays bound to
+    /// its own unexpired reference; the edge re-resolves and revalidates that
+    /// reference immediately before observing or mutating the application.
     pub implicit_fresh_object_refs: &'a [ObjectRef],
 }
 
@@ -147,12 +150,6 @@ pub fn build_permission_grants(
                     &requested.tool_name,
                     context.now_unix_ms,
                 )?;
-                if !context
-                    .implicit_fresh_object_refs
-                    .contains(&target.object_ref)
-                {
-                    return Err(internal("original live target is no longer current"));
-                }
                 Some((
                     vec![target.object_ref.clone()],
                     crate::input_read_context::live_read::expiry(original, target)?,
@@ -260,7 +257,20 @@ pub fn build_permission_grants(
         } else if capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::FreshObjectReference]
         {
-            let object_refs = if let Some((references, _)) = &original_read {
+            let exact_requested_scope = requested
+                .canonical_input_json
+                .as_ref()
+                .filter(|_| {
+                    !requested.resource_scope.is_empty()
+                        && requested
+                            .resource_scope
+                            .iter()
+                            .all(|scope| scope.starts_with("selected:sha256:"))
+                })
+                .map(|_| requested.resource_scope.clone());
+            let object_refs = if exact_requested_scope.is_some() {
+                Vec::new()
+            } else if let Some((references, _)) = &original_read {
                 references.clone()
             } else {
                 session
@@ -293,7 +303,9 @@ pub fn build_permission_grants(
                     )
                     .collect::<Vec<_>>()
             };
-            let exact = crate::capability_grant::fresh_object_resource_scope(&object_refs);
+            let exact = exact_requested_scope.unwrap_or_else(|| {
+                crate::capability_grant::fresh_object_resource_scope(&object_refs)
+            });
             if exact.is_empty() {
                 return Err(internal(
                     "approved permission has no exact active selected object",

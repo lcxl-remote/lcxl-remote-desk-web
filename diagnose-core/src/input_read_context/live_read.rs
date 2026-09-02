@@ -19,7 +19,10 @@ pub struct LiveReadTarget {
     pub tool_name: String,
     pub object_ref: ObjectRef,
     pub interactive_session_incarnation: String,
-    /// The original readiness deadline; refreshes cannot extend this input.
+    /// Frozen selection deadline. New captures bind this to the edge-issued
+    /// object reference rather than the short heartbeat lease; the field name
+    /// is retained for wire compatibility. Current readiness and incarnation
+    /// are still revalidated before every permission use and dispatch.
     pub readiness_expires_at_unix_ms: u64,
 }
 
@@ -102,7 +105,7 @@ pub fn capture(
             tool_name: name.clone(),
             object_ref: reference.object_ref.clone(),
             interactive_session_incarnation: readiness.interactive_session_incarnation.clone(),
-            readiness_expires_at_unix_ms: millis(&readiness.expires_at)?,
+            readiness_expires_at_unix_ms: millis(&reference.object_ref.expires_at)?,
         });
     }
     let mut captured = selection.clone();
@@ -116,16 +119,27 @@ pub fn target<'a>(
     name: &str,
     now: u64,
 ) -> Result<&'a LiveReadTarget, AgentError> {
-    validate_targets(selection)?;
-    let target = selection
-        .live_targets
-        .iter()
-        .find(|target| target.tool_name == name)
-        .ok_or_else(|| invalid("original live target is missing; submit a new input"))?;
+    let target = bound_target(selection, name)?;
     if expiry(selection, target)? <= now {
         return Err(invalid("original live target expired"));
     }
     Ok(target)
+}
+
+/// Return the immutable target binding without treating its short readiness
+/// lease as current authority. This is only an identity/incarnation anchor for
+/// a later semantic read result; callers must independently validate the fresh
+/// derived object reference and current authenticated readiness before use.
+pub fn bound_target<'a>(
+    selection: &'a ReadContextSelection,
+    name: &str,
+) -> Result<&'a LiveReadTarget, AgentError> {
+    validate_targets(selection)?;
+    selection
+        .live_targets
+        .iter()
+        .find(|target| target.tool_name == name)
+        .ok_or_else(|| invalid("original live target is missing; submit a new input"))
 }
 
 pub fn expiry(
@@ -141,8 +155,12 @@ pub fn expiry(
 }
 
 /// A current report may prove availability, but never replaces the old target.
-/// Empty legacy targets remain decodable; attempting a live read still requires
-/// `target`, which refuses to reconstruct a missing original reference.
+/// Heartbeats may rotate their short-lived token/snapshot while preserving the
+/// same interactive-session incarnation and semantic object kind. The edge
+/// still receives the frozen original reference and must resolve/revalidate it
+/// immediately before the read. Empty legacy targets remain decodable;
+/// attempting a live read still requires `target`, which refuses to reconstruct
+/// a missing original reference.
 pub fn validate_current(
     selection: &ReadContextSelection,
     readiness: Option<&ComputerUseReadiness>,
@@ -173,7 +191,8 @@ pub fn validate_current(
                 .iter()
                 .any(|entry| entry.capability == capability && entry.supported && entry.ready)
             || !readiness.context_references.iter().any(|reference| {
-                reference.capability == capability && reference.object_ref == original.object_ref
+                reference.capability == capability
+                    && reference.object_ref.object_kind == original.object_ref.object_kind
             })
         {
             return Err(invalid("original live target changed or is unavailable"));

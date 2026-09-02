@@ -97,13 +97,15 @@ pub struct PermissionDecisionItemBody {
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum PermissionItemDecisionBody {
     Approve {
-        #[serde(default)]
+        #[serde(alias = "resourceScope")]
         resource_scope: Vec<String>,
-        #[serde(default)]
+        #[serde(alias = "operationScope")]
         operation_scope: Vec<String>,
-        #[serde(default)]
+        #[serde(default, alias = "exportDestinations")]
         export_destinations: Vec<desk_agent_protocol::data_lineage::DestinationIdentity>,
+        #[serde(alias = "ttlSeconds")]
         ttl_seconds: u32,
+        #[serde(alias = "maxUses")]
         max_uses: u32,
     },
     Deny,
@@ -810,4 +812,45 @@ pub struct DeviceAssistantSessionSummaryDto {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAssistantSessionListDto {
     pub sessions: Vec<DeviceAssistantSessionSummaryDto>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_decision_accepts_mobile_camel_case_and_legacy_snake_case() {
+        for fields in [
+            serde_json::json!({
+                "resourceScope": ["selected:server_resolved"],
+                "operationScope": ["use_selected_object"],
+                "exportDestinations": [],
+                "ttlSeconds": 300,
+                "maxUses": 1
+            }),
+            serde_json::json!({
+                "resource_scope": ["selected:server_resolved"],
+                "operation_scope": ["use_selected_object"],
+                "export_destinations": [],
+                "ttl_seconds": 300,
+                "max_uses": 1
+            }),
+        ] {
+            let mut item = serde_json::json!({
+                "itemId": "inspect",
+                "decision": "approve"
+            });
+            item.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let body: PermissionDecisionBody = serde_json::from_value(serde_json::json!({
+                "connection": "host",
+                "conversation": "conversation",
+                "requestId": "permission",
+                "items": [item]
+            }))
+            .unwrap();
+            assert_eq!(body.items.len(), 1);
+        }
+    }
 }

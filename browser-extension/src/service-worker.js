@@ -274,11 +274,15 @@ export async function execute(action) {
     }
     const tabId = tabIdFromPage(action.page);
     await assertTabHostPermission(chrome, tabId, action.page.origin);
+    // Every non-open action is authorized against one exact page observation,
+    // not merely an origin. Re-read the descriptor immediately before the
+    // action so a same-origin navigation between approval and execution fails
+    // closed instead of applying the old grant to a different document.
+    const current = await sendToTab(tabId, { action: "describe_page" });
+    if (!samePageObservation(action.page, current.page)) {
+        throw new Error("stale_page_ref");
+    }
     if (action.action === "navigate_page") {
-        const current = await sendToTab(tabId, { action: "describe_page" });
-        if (!samePageObservation(action.page, current.page)) {
-            throw new Error("stale_page_ref");
-        }
         await assertHostPermissionForUrl(chrome, action.target.url);
         const updated = await chrome.tabs.update(tabId, { url: action.target.url, active: true });
         await waitForComplete(updated);

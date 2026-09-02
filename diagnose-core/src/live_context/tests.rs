@@ -1,6 +1,9 @@
 use super::*;
 use crate::context_attachment::AttachmentStaleReason;
-use desk_agent_protocol::{AgentScope, ExecutionMode};
+use desk_agent_protocol::{
+    AgentScope, Capability, ExecutionMode,
+    computer_use::{ComputerUseContextReference, ObjectKind, ObjectRef},
+};
 
 fn readiness() -> ComputerUseReadiness {
     ComputerUseReadiness {
@@ -121,6 +124,40 @@ fn live_metadata_keeps_original_destination_expiry_and_does_not_grant_tools() {
     assert!(session.scope_snapshot.granted.is_empty());
     assert_eq!(session.input_revision, 0);
     assert!(session.conversation.is_empty());
+}
+
+#[test]
+fn live_metadata_uses_matching_edge_reference_expiry_beyond_readiness_heartbeat() {
+    let mut readiness = readiness();
+    let reference_expiry = "2026-08-31T00:05:00Z";
+    readiness.context_references = vec![ComputerUseContextReference {
+        capability: Capability::PresentationLiveInspect,
+        object_ref: ObjectRef {
+            token: "keynote-token".into(),
+            snapshot_id: "keynote-snapshot".into(),
+            object_kind: ObjectKind::Slide,
+            expires_at: reference_expiry.into(),
+        },
+    }];
+    let selection = build(
+        &[crate::device_assistant::PRESENTATION_BATCH_INSPECT_CAPABILITY_ID.into()],
+        Some(&readiness),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(
+        selection.candidates[0].expires_at_unix_ms,
+        chrono::DateTime::parse_from_rfc3339(reference_expiry)
+            .unwrap()
+            .timestamp_millis() as u64
+    );
+    assert!(
+        selection.candidates[0].expires_at_unix_ms
+            > chrono::DateTime::parse_from_rfc3339(&readiness.expires_at)
+                .unwrap()
+                .timestamp_millis() as u64
+    );
 }
 
 #[test]

@@ -473,7 +473,8 @@ impl BrowserExtensionBroker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .surface
-            .clone()
+            .as_ref()
+            .map(|surface| super::renew_browser_surface_ref(surface))
     }
 
     fn attach(
@@ -625,7 +626,11 @@ impl BrowserExtensionBroker {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.surface.as_ref() != Some(surface) || state.connection.is_none() {
+        if state.surface.as_ref().is_none_or(|authoritative| {
+            !super::same_browser_surface_identity(surface, authoritative)
+        }) || !super::browser_surface_lease_is_current(surface)
+            || state.connection.is_none()
+        {
             return Err(BrowserExtensionBridgeError::StaleSurface);
         }
         if let Some(candidate) = extension_action_page(&request.action) {
@@ -1576,6 +1581,45 @@ mod tests {
             Err(BrowserExtensionBridgeError::StaleSurface)
         );
         broker.preflight(&new_surface, &request).unwrap();
+    }
+
+    #[test]
+    fn active_extension_renews_surface_lease_without_accepting_the_expired_copy() {
+        let broker = BrowserExtensionBroker::default();
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        broker
+            .attach("device-1", "session-1", &extension_hello(), sender)
+            .unwrap();
+        let expired = {
+            let mut state = broker.state.lock().unwrap();
+            let surface = state.surface.as_mut().unwrap();
+            surface.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+            surface.clone()
+        };
+        let renewed = broker.surface_ref().unwrap();
+        let request = BrowserActionRequest {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            call_id: "call-after-renewal".into(),
+            action: BrowserAction::OpenPage {
+                target: BrowserNavigationTarget {
+                    url: "https://mail.google.com/".into(),
+                    origin: BrowserOrigin {
+                        kind: BrowserOriginKind::Https,
+                        host_ascii: "mail.google.com".into(),
+                        port: 443,
+                    },
+                },
+            },
+        };
+
+        assert!(super::super::same_browser_surface_identity(
+            &expired, &renewed
+        ));
+        assert_eq!(
+            broker.preflight(&expired, &request),
+            Err(BrowserExtensionBridgeError::StaleSurface)
+        );
+        broker.preflight(&renewed, &request).unwrap();
     }
 
     #[test]

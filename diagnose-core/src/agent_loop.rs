@@ -45,8 +45,8 @@ use desk_agent_protocol::{AgentError, AgentErrorKind};
 use crate::chat::{ChatMessage, ChatRole, ModelTurnError, TurnDisposition, classify_model_turn};
 use crate::registry::{RegisteredTool, ToolEffect, exposed_tools, lookup_exposed};
 use crate::seam::{
-    ClaimError, ClaimTurnParams, ExecContext, ExecOutcome, ModelRequest, ModelSeam, SessionSeam,
-    ToolSeam, TurnSink, WaitOutcome,
+    ClaimError, ClaimTurnParams, ExecContext, ExecOutcome, ModelRequest, ModelSeam, ReadOutcome,
+    SessionSeam, ToolSeam, TurnSink, WaitOutcome,
 };
 use crate::session::{AgentSessionSurface, ExecutionState, SubjectMismatch, TurnState};
 
@@ -82,6 +82,18 @@ fn empty_end_turn_recovery_error() -> AgentError {
     AgentError {
         kind: AgentErrorKind::Internal,
         message: "the model ended twice without any answer or tool call; the bounded automatic recovery was exhausted".into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: Some(
+            desk_utils::error::DeskErrorCode::COPILOT_PROTOCOL_VIOLATION.code(),
+        ),
+    }
+}
+
+fn permission_continuation_recovery_error() -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::Internal,
+        message: "the model twice answered without invoking the exact tool made available by the owner's permission decision; the bounded automatic recovery was exhausted".into(),
         retryable: false,
         safe_for_model: true,
         error_code: Some(
@@ -1178,9 +1190,13 @@ async fn run_inner(
     let mut compression_attempted = false;
     let mut empty_end_turn_retries: u8 = 0;
     let mut truncated_turn_retries: u8 = 0;
+    let mut permission_protocol_retries: u8 = 0;
+    let mut post_tool_permission_protocol_retries: u8 = 0;
     // A permission decision resumes at the authorization boundary, not at the
     // beginning of the user's workflow. Keep a recency-edge checkpoint in
-    // model requests until the model proposes a real mutating Provider call.
+    // model requests until the model proposes the exact Provider call made
+    // available by the decision. Permissioned reads (for example browser
+    // snapshots) are included: an approval is never satisfied by prose alone.
     // This prevents weaker OpenAI-compatible models from re-running a read /
     // preview, minting a new ephemeral object reference, and stranding the
     // exact one-shot grant that the owner just approved. Once a mutating call
@@ -1340,6 +1356,30 @@ async fn run_inner(
                 )?;
                 messages.push(marker);
             }
+            if permission_continuation_pending && permission_protocol_retries > 0 {
+                // The first malformed/inconsistent provider response was never
+                // committed or dispatched. Make the single existing retry
+                // actionable for weaker structured-output models without
+                // widening its budget or the exact approved authority.
+                let marker_id = format!(
+                    "runtime-permission-protocol-retry-{turn_id}-{permission_protocol_retries}"
+                );
+                let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous permission-continuation response violated the tool-call protocol and was discarded before any action was recorded or executed. Return exactly one exposed tool call now, with no prose, no second JSON value, and no trailing characters. Copy approved_exact_input byte-for-byte as that tool's complete arguments; do not add, remove, reorder semantically, or infer fields. This notice grants no authority, and the server will still require the active exact grant and final validation.";
+                let parent = session
+                    .conversation
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == ChatRole::User)
+                    .and_then(|message| message.data_envelope.as_ref());
+                let mut marker = ChatMessage::system_event(&marker_id, marker_text);
+                marker.data_envelope = derive_internal_tool_result_envelope(
+                    parent,
+                    &marker_id,
+                    marker_text,
+                    "permission_protocol_retry",
+                )?;
+                messages.push(marker);
+            }
         }
         if empty_end_turn_retries > 0 {
             // Some reasoning-capable OpenAI-compatible providers can end a
@@ -1387,6 +1427,37 @@ async fn run_inner(
                 &marker_id,
                 marker_text,
                 "truncated_turn_retry",
+            )?;
+            messages.push(marker);
+        }
+        if post_tool_permission_protocol_retries > 0 {
+            // A malformed permission-planning call after a verified/read-back
+            // tool result has not been committed or dispatched. Give the model
+            // one bounded chance to rebuild only that JSON call from the current
+            // server-authored projections. This never replays the preceding tool
+            // and does not grant or widen authority.
+            let marker_id = format!(
+                "runtime-post-tool-permission-protocol-retry-{turn_id}-{post_tool_permission_protocol_retries}"
+            );
+            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous request_capability_grants call had invalid JSON arguments and was discarded before it was recorded or executed. Rebuild exactly one valid request_capability_grants call from the current capability catalog and CURRENT REUSABLE PROVIDER RESULTS. Copy complete opaque page and element references verbatim, keep the exact downstream tool input bounded, and do not repeat the preceding Provider action. This notice grants no authority; normal permission planning and final server validation remain authoritative.";
+            let parent = session
+                .conversation
+                .iter()
+                .rev()
+                // The recovery notice contains no Provider output bytes. It
+                // only points at separately projected, independently
+                // authorized context, so inherit the current user request's
+                // model destination instead of the preceding Provider
+                // receipt, whose empty destination is intentionally
+                // fail-closed until an explicit export is selected.
+                .find(|message| message.role == ChatRole::User)
+                .and_then(|message| message.data_envelope.as_ref());
+            let mut marker = ChatMessage::system_event(&marker_id, marker_text);
+            marker.data_envelope = derive_internal_tool_result_envelope(
+                parent,
+                &marker_id,
+                marker_text,
+                "post_tool_permission_protocol_retry",
             )?;
             messages.push(marker);
         }
@@ -1460,9 +1531,55 @@ async fn run_inner(
                 if deps.content_safety.is_enforced() {
                     sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
                 }
+                // A provider may transiently normalize an otherwise complete
+                // exact-action response with inconsistent stop metadata. Before
+                // classification no assistant message or action is durable, so a
+                // single retry is safe. Limit this recovery to an owner-approved
+                // permission continuation whose exposed exact tool set is already
+                // server-frozen; ordinary protocol violations still fail closed.
+                if permission_continuation_pending
+                    && !deps.permission_continuation_exact_tools.is_empty()
+                    && permission_protocol_retries < 1
+                {
+                    permission_protocol_retries += 1;
+                    continue;
+                }
+                let follows_tool_result = session.conversation.last().is_some_and(|message| {
+                    matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
+                });
+                let malformed_permission_plan = matches!(
+                    error,
+                    crate::chat::ModelTurnError::InvalidToolArguments { .. }
+                ) && turn.tool_calls.iter().any(|call| {
+                    call.name == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME
+                });
+                if session.surface == crate::session::AgentSessionSurface::DeviceAssistant
+                    && follows_tool_result
+                    && malformed_permission_plan
+                    && post_tool_permission_protocol_retries < 1
+                {
+                    post_tool_permission_protocol_retries += 1;
+                    continue;
+                }
                 return Ok(LoopOutcome::ProtocolError(error));
             }
         };
+        if permission_continuation_pending
+            && !deps.permission_continuation_exact_tools.is_empty()
+            && disposition == TurnDisposition::Answer
+            && turn.tool_calls.is_empty()
+        {
+            if deps.content_safety.is_enforced() {
+                sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
+            } else {
+                sink.on_turn_discarded();
+            }
+            if permission_protocol_retries >= 1 {
+                return Err(permission_continuation_recovery_error());
+            }
+            permission_protocol_retries += 1;
+            continue;
+        }
         if matches!(
             disposition,
             TurnDisposition::Discard | TurnDisposition::ContextWindowExceeded
@@ -1509,9 +1626,7 @@ async fn run_inner(
                 deps.permission_continuation_exact_tools
                     .iter()
                     .any(|name| name == &call.name)
-                    && exposed
-                        .iter()
-                        .any(|tool| tool.name() == call.name && tool.effect == ToolEffect::Mutating)
+                    && exposed.iter().any(|tool| tool.name() == call.name)
             })
         {
             permission_continuation_pending = false;
@@ -1669,8 +1784,49 @@ async fn run_inner(
                             // A read tool error is reported back as a tool result;
                             // the backend transport itself does not fail the turn.
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
-                            let (out, ok) = match deps.tools.run_read(call).await {
-                                Ok(out) => (out, true),
+                            let ctx = ExecContext {
+                                assistant_turn_fence:
+                                    crate::action_turn_fence::AssistantTurnFence::from_session(
+                                        session,
+                                    )?,
+                                conversation_id: session.conversation_id.clone(),
+                                turn_id: turn_id.to_string(),
+                                tool_call_id: call.id.clone(),
+                                actor_id: session.actor_id.clone(),
+                                policy_revision: session.policy_revision,
+                                scope: session.scope_snapshot.clone(),
+                                connection_id: session.active_control_connection_id.clone(),
+                            };
+                            let read_requires_version = deps.tools.read_requires_version(call);
+                            let version = if read_requires_version {
+                                // The remote Provider work transaction compares a
+                                // persisted action boundary. Reuse the existing
+                                // awaiting-action state without emitting a second
+                                // permission prompt: the exact read grant was
+                                // already compiled before this tool was exposed.
+                                session.turn_state = TurnState::AwaitingApproval;
+                                deps.session_seam.save(session).await?;
+                                crate::action_version::ActionVersion::capture(session, &call.id)?
+                            } else {
+                                None
+                            };
+                            let completion = deps
+                                .tools
+                                .run_read_versioned(call, &ctx, version.as_ref())
+                                .await;
+                            if let Some(advance) = completion.version_advance {
+                                advance.apply(session, version.as_ref())?;
+                            }
+                            if read_requires_version {
+                                session.turn_state = TurnState::Running;
+                            }
+                            let (out, ok, event_id, provided_envelope) = match completion.outcome {
+                                Ok(ReadOutcome {
+                                    output,
+                                    ok,
+                                    event_id,
+                                    data_envelope,
+                                }) => (output, ok, event_id, data_envelope),
                                 Err(e) => (
                                     crate::seam::ToolRunOutput {
                                         content: if e.safe_for_model {
@@ -1681,13 +1837,21 @@ async fn run_inner(
                                         image_data_url: None,
                                     },
                                     false,
+                                    None,
+                                    None,
                                 ),
                             };
                             // A model-visible tool error is still data produced by
                             // the selected source. Information-flow-enforced
                             // surfaces must label it before the next model call in
                             // exactly the same way as a successful read result.
-                            let mut data_envelope = deps.tools.read_data_envelope(call, &out)?;
+                            let mut data_envelope = match provided_envelope {
+                                Some(envelope) => {
+                                    envelope.validate().map_err(|_| invalid_original_result())?;
+                                    Some(envelope)
+                                }
+                                None => deps.tools.read_data_envelope(call, &out)?,
+                            };
                             bind_tool_input_envelopes(session, call, &mut data_envelope)?;
                             let failure = append_reviewed_tool_result(
                                 deps,
@@ -1731,6 +1895,9 @@ async fn run_inner(
                             // durable mutating task instead of treating the whole
                             // assistant batch as an unknown execution.
                             deps.session_seam.save(session).await?;
+                            if let Some(event_id) = event_id {
+                                let _ = deps.tools.ack_delivery(&event_id).await;
+                            }
                         }
                         ToolEffect::Mutating => {
                             if let Some(outcome) = run_mutating(
@@ -1894,10 +2061,13 @@ async fn run_inner(
                                     created_at.clone(),
                                 )
                             }).and_then(|request| {
-                                validate_browser_permission_references(
-                                    &session.conversation,
-                                    &request,
-                                )?;
+                                let providers = deps.provider_registry.ok_or_else(|| AgentError {
+                                    kind: AgentErrorKind::Internal,
+                                    message: "permission planning has no Provider catalog".into(),
+                                    retryable: false,
+                                    safe_for_model: false,
+                                    error_code: None,
+                                })?;
                                 let inventory = deps.capability_inventory.ok_or_else(|| AgentError {
                                     kind: AgentErrorKind::Internal,
                                     message: "permission planning has no live capability inventory".into(),
@@ -1905,8 +2075,10 @@ async fn run_inner(
                                     safe_for_model: false,
                                     error_code: None,
                                 })?;
-                                crate::permission_tools::validate_request_availability(
+                                validate_permission_request_availability(
+                                    &session.conversation,
                                     &request,
+                                    providers,
                                     inventory,
                                     deps.registry,
                                 )?;
@@ -2230,15 +2402,8 @@ fn current_unix_ms(clock: &dyn Fn() -> String) -> Result<u64, AgentError> {
 }
 
 fn verified_browser_result(message: &ChatMessage) -> Option<BrowserActionResult> {
-    if message.role != ChatRole::Tool {
+    if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
         return None;
-    }
-    if let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text)
-        && completion.result == ComputerActionResultClass::Verified
-        && let Some(ComputerActionOutput::Browser(result)) = completion.output
-        && result.validate().is_ok()
-    {
-        return Some(result);
     }
     let source_tool = message
         .data_envelope
@@ -2255,6 +2420,21 @@ fn verified_browser_result(message: &ChatMessage) -> Option<BrowserActionResult>
             | "browser_fill_form"
             | "browser_activate_element"
     ) {
+        return None;
+    }
+    if let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text)
+        && completion.result == ComputerActionResultClass::Verified
+        && let Some(ComputerActionOutput::Browser(result)) = completion.output
+        && result.validate().is_ok()
+    {
+        return Some(result);
+    }
+
+    // A foreground provider may return the BrowserActionResult directly. A
+    // background completion is appended later as fenced UntrustedOutput and
+    // must keep the full ComputerActionCompleted wrapper so arbitrary device
+    // bytes can never be promoted into a reusable opaque reference.
+    if message.role != ChatRole::Tool {
         return None;
     }
     let result = serde_json::from_str::<BrowserActionResult>(&message.text).ok()?;
@@ -2402,7 +2582,7 @@ fn reusable_provider_result_projection(
     let mut browser_envelopes = Vec::new();
     let mut seen_browser_pages = HashSet::new();
     for message in conversation.iter().rev() {
-        if message.role != ChatRole::Tool {
+        if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
             continue;
         }
         let Some(envelope) = message.data_envelope.as_ref() else {
@@ -2415,7 +2595,8 @@ fn reusable_provider_result_projection(
         {
             continue;
         }
-        if preview.is_none()
+        if message.role == ChatRole::Tool
+            && preview.is_none()
             && envelope.provenance.source_tool_name == "preview_spreadsheet_merge"
             && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.text)
             && let Some(preview_id) = value
@@ -2426,7 +2607,8 @@ fn reusable_provider_result_projection(
             preview = Some(serde_json::json!({"preview_id": preview_id}));
             preview_envelope = Some(envelope.clone());
         }
-        if web_search.is_none()
+        if message.role == ChatRole::Tool
+            && web_search.is_none()
             && envelope.provenance.source_tool_name == "search_public_web"
             && let Some(call_id) = message.tool_call_id.as_deref()
             && conversation.iter().any(|candidate| {
@@ -2490,7 +2672,7 @@ fn reusable_provider_result_projection(
                     .unwrap_or_default();
                 elements.sort_by_key(|element| {
                     let name = element.accessible_name.to_ascii_lowercase();
-                    let semantic_priority = [
+                    let semantic_priority = if [
                         "to recipients",
                         "subject",
                         "message body",
@@ -2501,8 +2683,11 @@ fn reusable_provider_result_projection(
                     ]
                     .iter()
                     .any(|needle| name.contains(needle))
-                    .then_some(0)
-                    .unwrap_or(1);
+                    {
+                        0
+                    } else {
+                        1
+                    };
                     let role_priority = match element.role {
                         BrowserElementRole::Textbox | BrowserElementRole::Combobox => 0,
                         BrowserElementRole::Button
@@ -2532,12 +2717,22 @@ fn reusable_provider_result_projection(
         return Ok(None);
     }
 
+    let browser_page_reference_present = !browser_results.is_empty();
     let payload = serde_json::to_string(&serde_json::json!({
         "schema_version": 1,
         "kind": "reusable_provider_result_registry",
         "spreadsheet_merge_preview": preview,
         "web_search": web_search,
         "browser_results": browser_results,
+        "browser_reference_delta": {
+            "page_reference_prerequisite_present": browser_page_reference_present,
+            "supersedes_turn_start_catalog_for_page_reference_only": browser_page_reference_present,
+            "exact_input_may_copy_page_for": [
+                "browser_navigate_page",
+                "browser_take_snapshot",
+                "browser_wait_for"
+            ]
+        },
     }))
     .map_err(|error| AgentError {
         kind: AgentErrorKind::Internal,
@@ -2547,7 +2742,7 @@ fn reusable_provider_result_projection(
         error_code: None,
     })?;
     let text = format!(
-        "CURRENT REUSABLE PROVIDER RESULTS (server authoritative bounded references; not a grant; copy opaque ids verbatim and never invent them): {payload}"
+        "CURRENT REUSABLE PROVIDER RESULTS (server authoritative bounded references; not a grant; copy opaque ids verbatim and never invent them): {payload}. This registry is emitted after the turn-start capability catalog. When browser_reference_delta.page_reference_prerequisite_present=true, it supersedes only an older catalog claim that the page-reference prerequisite is absent. If request_capability_grants is available and the named downstream browser tool is a registered permission candidate, request its exact permission using the complete copied page/input now; do not claim that no BrowserPageRef exists. Runtime readiness, the tool registry, grants, and final server validation remain authoritative and are not widened by this delta."
     );
     let mut projection = ChatMessage::system_event(message_id, &text);
     projection.data_envelope = derive_internal_tool_result_envelope(
@@ -2638,6 +2833,8 @@ fn validate_browser_permission_references(
         if !matches!(
             item.tool_name.as_str(),
             "browser_navigate_page"
+                | "browser_take_snapshot"
+                | "browser_wait_for"
                 | "browser_fill_form"
                 | "browser_activate_element"
                 | "prepare_gmail_web_draft_handoff"
@@ -2697,7 +2894,7 @@ fn validate_browser_permission_references(
             }
         }
         let grounded = conversation.iter().rev().any(|message| {
-            if message.role != ChatRole::Tool
+            if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
                 || message.data_envelope.as_ref().is_none_or(|envelope| {
                     envelope
                         .retention
@@ -2734,6 +2931,42 @@ fn validate_browser_permission_references(
         }
     }
     Ok(())
+}
+
+/// Validate a permission request against the turn-start callable set while
+/// allowing one narrow same-turn context transition: a verified browser result
+/// can supply the exact fresh page prerequisite for navigate/snapshot/wait after
+/// the initial catalog was frozen. The browser-reference validator runs first,
+/// so merely naming one of these tools never expands the candidate set. Runtime
+/// readiness and the compiled Provider registry are still checked normally.
+fn validate_permission_request_availability(
+    conversation: &[ChatMessage],
+    request: &crate::dynamic_run::PermissionRequest,
+    providers: &crate::provider_registry::ProviderRegistry,
+    inventory: &[crate::capability_availability::CapabilityAvailability],
+    turn_start_callable_tools: &[RegisteredTool],
+) -> Result<(), AgentError> {
+    validate_browser_permission_references(conversation, request)?;
+    let mut effective_callable_tools = turn_start_callable_tools.to_vec();
+    for item in &request.items {
+        if !matches!(
+            item.tool_name.as_str(),
+            "browser_navigate_page" | "browser_take_snapshot" | "browser_wait_for"
+        ) || effective_callable_tools
+            .iter()
+            .any(|tool| tool.name() == item.tool_name)
+        {
+            continue;
+        }
+        if let Some(capability) = providers.capability_for_tool(&item.tool_name) {
+            effective_callable_tools.push(capability.registered_tool());
+        }
+    }
+    crate::permission_tools::validate_request_availability(
+        request,
+        inventory,
+        &effective_callable_tools,
+    )
 }
 
 /// Emit a tool's terminal UI event from the authoritative result that was just

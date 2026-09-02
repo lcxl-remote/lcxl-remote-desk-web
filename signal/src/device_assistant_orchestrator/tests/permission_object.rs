@@ -72,14 +72,13 @@ async fn live_document_permission_resume_reads_the_frozen_target_over_real_trans
 }
 
 #[actix_web::test]
-async fn changed_live_target_worker_or_model_cannot_be_reselected_on_resume() {
-    for change in [
-        "live_target",
-        "live_worker",
-        "live_withdraw",
-        "model",
-        "new_input",
-    ] {
+async fn live_readiness_rotation_after_grant_fails_closed_without_device_read() {
+    run_case_with_live(Some("live_target"), ResumeMode::Direct, true).await;
+}
+
+#[actix_web::test]
+async fn changed_live_worker_selection_model_or_input_cannot_resume() {
+    for change in ["live_worker", "live_withdraw", "model", "new_input"] {
         run_case_with_live(Some(change), ResumeMode::Direct, true).await;
     }
 }
@@ -143,7 +142,10 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
         tool_reply(read_name, serde_json::json!({})),
         "data: {\"choices\":[{\"delta\":{\"content\":\"object-read-complete\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
     ];
-    if matches!(change, Some("readiness" | "legacy" | "live_after")) {
+    if matches!(
+        change,
+        Some("readiness" | "legacy" | "live_after" | "live_target")
+    ) {
         replies[2] = replies[2].replace("object-read-complete", "object-read-unavailable");
     }
     let capture = actix_web::rt::spawn(async move {
@@ -577,15 +579,21 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
     }
     if let Some(change) = change.filter(|change| *change != "live_after") {
         match change {
-            "live_target" | "live_worker" => {
+            "live_target" => {
+                // Rotation after issuance changes readiness_revision, so the old
+                // grant is stale even though the durable frozen target remains
+                // the only target that a future freshly-authorized call may use.
                 let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
                 let mut current = cache.get_fresh(&host, Utc::now()).unwrap().readiness;
                 current.revision += 1;
-                if change == "live_target" {
-                    current.context_references[0].object_ref.token = "other-live-document".into();
-                } else {
-                    current.interactive_session_incarnation = "other-worker".into();
-                }
+                current.context_references[0].object_ref.token = "other-live-document".into();
+                cache.update(&host, current, Utc::now()).unwrap();
+            }
+            "live_worker" => {
+                let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
+                let mut current = cache.get_fresh(&host, Utc::now()).unwrap().readiness;
+                current.revision += 1;
+                current.interactive_session_incarnation = "other-worker".into();
                 cache.update(&host, current, Utc::now()).unwrap();
             }
             "model" => {
@@ -666,24 +674,46 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                 .is_err(),
             "{change}: unexpected device read"
         );
-        assert_eq!(
-            crate::entity::model_egress_receipt::Entity::find()
-                .all(&db)
+        let receipt_count = crate::entity::model_egress_receipt::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .len();
+        let after = crate::entity::agent_session::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        if change == "live_target" {
+            assert_eq!(receipt_count, 3, "{change}: stale grant flow changed");
+            assert_ne!(after, before, "{change}: stale status was not reported");
+            let bodies = tokio::time::timeout(Duration::from_secs(5), capture)
                 .await
                 .unwrap()
-                .len(),
-            1,
-            "{change}: unexpected model request"
-        );
-        assert_eq!(
-            crate::entity::agent_session::Entity::find()
-                .one(&db)
+                .unwrap();
+            assert_eq!(bodies.len(), 3);
+            assert!(
+                bodies.iter().all(
+                    |body| !String::from_utf8_lossy(body).contains("synthetic-original-marker")
+                )
+            );
+            let grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+                .list_for_subject(&run_id, "1", "device")
                 .await
-                .unwrap()
-                .unwrap(),
-            before,
-            "{change}: unexpected resume mutation"
-        );
+                .unwrap();
+            assert_eq!(grants.len(), 1);
+            assert_eq!(grants[0].remaining_uses, 1);
+            assert_eq!(
+                latest_committed_answer(&sessions.read_snapshot(&run_id).await.unwrap().unwrap())
+                    .as_deref(),
+                Some("object-read-unavailable")
+            );
+        } else {
+            assert_eq!(receipt_count, 1, "{change}: unexpected model request");
+            assert_eq!(after, before, "{change}: unexpected resume mutation");
+            capture.abort();
+            let _ = capture.await;
+        }
         if change == "live_withdraw" {
             let grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
                 .list_for_subject(&run_id, "1", "device")
@@ -692,8 +722,6 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
             assert_eq!(grants.len(), 1);
             assert_eq!(grants[0].remaining_uses, 1);
         }
-        capture.abort();
-        let _ = capture.await;
         socket.send(awc::ws::Message::Close(None)).await.unwrap();
         drop(socket);
         map.write().await.clear();

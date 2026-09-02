@@ -723,7 +723,8 @@ impl BrowserDevtoolsBroker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .surface
-            .clone()
+            .as_ref()
+            .map(|surface| super::renew_browser_surface_ref(surface))
     }
 
     pub(super) async fn refresh(&self, context: &BrowserBrokerContext) {
@@ -886,7 +887,9 @@ impl BrowserDevtoolsBroker {
             .projection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if projection.surface.as_ref() != Some(surface)
+        if projection.surface.as_ref().is_none_or(|authoritative| {
+            !super::same_browser_surface_identity(surface, authoritative)
+        }) || !super::browser_surface_lease_is_current(surface)
             || !projection
                 .readiness
                 .as_ref()

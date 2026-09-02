@@ -523,20 +523,18 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                     if let (Some(audience), Ok(state)) = (
                         source.model.version_info.client_id.as_deref(),
                         model.get_data::<ComputerActionStateReport>(),
-                    ) {
-                        if self
-                            .store
-                            .accept_computer_cancel_state(
-                                source_id,
-                                audience,
-                                &model.request_id,
-                                &state,
-                            )
-                            .await
-                            .is_err()
-                        {
-                            log::warn!("[computer-action] rejected inconsistent stop observation");
-                        }
+                    ) && self
+                        .store
+                        .accept_computer_cancel_state(
+                            source_id,
+                            audience,
+                            &model.request_id,
+                            &state,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        log::warn!("[computer-action] rejected inconsistent stop observation");
                     }
                 }
                 SignalingType::ComputerActionStarted => {
@@ -2060,7 +2058,7 @@ impl SignalDeviceAssistantTools {
             "patch_live_spreadsheet_cell" => {
                 let args: SpreadsheetActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                if self.selected_live_spreadsheet.as_ref() != Some(&args.target) {
+                if shared_iwork.as_ref().map(|preflight| preflight.target()) != Some(&args.target) {
                     return Err(error(
                         AgentErrorKind::PermissionDenied,
                         "spreadsheet patch requires the exact current Numbers cell reference",
@@ -2080,7 +2078,7 @@ impl SignalDeviceAssistantTools {
             "replace_live_document_body" => {
                 let args: DocumentActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                if self.selected_live_document.as_ref() != Some(&args.target) {
+                if shared_iwork.as_ref().map(|preflight| preflight.target()) != Some(&args.target) {
                     return Err(error(
                         AgentErrorKind::PermissionDenied,
                         "document patch requires the exact current Pages document reference",
@@ -2102,7 +2100,7 @@ impl SignalDeviceAssistantTools {
             "patch_live_presentation_slide" => {
                 let args: PresentationActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                if self.selected_live_presentation.as_ref() != Some(&args.target) {
+                if shared_iwork.as_ref().map(|preflight| preflight.target()) != Some(&args.target) {
                     return Err(error(
                         AgentErrorKind::PermissionDenied,
                         "presentation patch requires the exact current Keynote slide reference",
@@ -3508,7 +3506,7 @@ impl SignalDeviceAssistantTools {
                     destination: destination.clone(),
                     max_sensitivity: Sensitivity::Sensitive,
                     expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
-                    max_bytes: capability.wire.limits.max_input_bytes as u64,
+                    max_bytes: capability.wire.limits.max_input_bytes,
                 },
                 now_unix_ms,
             )
@@ -4034,7 +4032,7 @@ impl SignalDeviceAssistantTools {
                 destination: destination.clone(),
                 max_sensitivity: Sensitivity::Sensitive,
                 expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
-                max_bytes: capability.wire.limits.max_input_bytes as u64,
+                max_bytes: capability.wire.limits.max_input_bytes,
             },
             now_unix_ms,
         )

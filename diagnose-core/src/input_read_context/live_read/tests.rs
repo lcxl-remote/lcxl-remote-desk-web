@@ -95,7 +95,7 @@ fn fresh_readiness_does_not_extend_the_original_deadline() {
     current.revision += 1;
     current.expires_at = "2026-08-31T00:03:00Z".into();
     validate_current(&selection, Some(&current), now()).unwrap();
-    let deadline = millis("2026-08-31T00:01:00Z").unwrap();
+    let deadline = millis("2026-08-31T00:02:00Z").unwrap();
     assert_eq!(
         expiry(&selection, &selection.live_targets[0]).unwrap(),
         deadline
@@ -108,22 +108,40 @@ fn fresh_readiness_does_not_extend_the_original_deadline() {
 }
 
 #[test]
-fn changed_worker_object_snapshot_expiry_and_unready_reports_are_rejected() {
+fn capture_uses_object_reference_deadline_not_short_heartbeat_lease() {
     let selection = captured();
-    for variant in 0..9 {
+    let captured_target = &selection.live_targets[0];
+
+    assert_eq!(
+        captured_target.readiness_expires_at_unix_ms,
+        millis(&captured_target.object_ref.expires_at).unwrap()
+    );
+    assert!(
+        captured_target.readiness_expires_at_unix_ms > millis(&readiness().expires_at).unwrap()
+    );
+    assert!(
+        target(
+            &selection,
+            TOOLS[0],
+            millis("2026-08-31T00:01:30Z").unwrap()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn changed_worker_kind_and_unready_reports_are_rejected() {
+    let selection = captured();
+    for variant in 0..7 {
         let mut current = readiness();
         match variant {
             0 => current.interactive_session_incarnation = "worker-2".into(),
-            1 => current.context_references[0].object_ref.token = "other-document".into(),
-            2 => current.context_references[0].object_ref.snapshot_id = "other-snapshot".into(),
-            3 => {
-                current.context_references[0].object_ref.expires_at = "2026-08-31T00:03:00Z".into()
-            }
-            4 => current.capabilities[0].ready = false,
-            5 => current.capabilities[0].supported = false,
-            6 => current.context_references.clear(),
-            7 => current.expires_at = "2026-08-31T00:00:01Z".into(),
-            8 => current.observed_at = "2026-08-31T00:00:32Z".into(),
+            1 => current.capabilities[0].ready = false,
+            2 => current.capabilities[0].supported = false,
+            3 => current.context_references.clear(),
+            4 => current.context_references[0].object_ref.object_kind = ObjectKind::File,
+            5 => current.expires_at = "2026-08-31T00:00:01Z".into(),
+            6 => current.observed_at = "2026-08-31T00:00:32Z".into(),
             _ => unreachable!(),
         }
         assert!(
@@ -132,6 +150,21 @@ fn changed_worker_object_snapshot_expiry_and_unready_reports_are_rejected() {
         );
     }
     assert!(validate_current(&selection, None, now()).is_err());
+}
+
+#[test]
+fn rotated_current_reference_is_accepted_with_same_incarnation_kind_and_ready_capability() {
+    let selection = captured();
+    let mut current = readiness();
+    current.revision += 1;
+    current.context_references[0].object_ref.token = "rotated-token".into();
+    current.context_references[0].object_ref.snapshot_id = "rotated-snapshot".into();
+    current.context_references[0].object_ref.expires_at = "2026-08-31T00:03:00Z".into();
+    validate_current(&selection, Some(&current), now()).unwrap();
+    assert_eq!(
+        target(&selection, TOOLS[0], now()).unwrap().object_ref,
+        readiness().context_references[0].object_ref
+    );
 }
 
 #[test]
@@ -276,7 +309,10 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
         )
         .unwrap();
         let labeled = binding.label(&call, &output, envelope.clone()).unwrap();
-        assert_eq!(labeled.allowed_destinations, [destination.clone()]);
+        assert_eq!(
+            labeled.allowed_destinations.as_slice(),
+            std::slice::from_ref(&destination)
+        );
         assert_eq!(
             labeled.retention.expires_at_unix_ms,
             Some(binding.expiry(&call).unwrap())
@@ -468,7 +504,7 @@ fn legacy_live_reads_cannot_bypass_the_original_object_fence() {
 }
 
 #[test]
-fn all_live_read_grants_use_original_references_and_deadlines_on_both_servers() {
+fn all_live_read_grants_survive_readiness_ref_rotation_on_both_servers() {
     use crate::{
         capability_availability::CapabilityAvailability,
         chat::ToolCall,
@@ -568,15 +604,20 @@ fn all_live_read_grants_use_original_references_and_deadlines_on_both_servers() 
             );
             assert_eq!(
                 grants[0].expires_at_unix_ms,
-                millis("2026-08-31T00:01:00Z").unwrap()
+                millis("2026-08-31T00:02:00Z").unwrap()
             );
-            let absent = PermissionGrantIssuanceContext {
+            let rotated = PermissionGrantIssuanceContext {
                 implicit_fresh_object_refs: std::slice::from_ref(&ambient),
                 ..context
             };
-            assert!(
-                build_permission_grants(&session, &request, &decisions, &absent, Some(&original))
-                    .is_err()
+            let rotated_grants =
+                build_permission_grants(&session, &request, &decisions, &rotated, Some(&original));
+            assert_eq!(
+                rotated_grants.unwrap()[0].resource_scope,
+                crate::capability_grant::fresh_object_resource_scope(std::slice::from_ref(
+                    &reference
+                )),
+                "{surface:?}/{name}"
             );
         }
     }

@@ -446,6 +446,52 @@ test("same-origin user navigation becomes stale before a typed navigate action",
     delete globalThis.chrome;
 });
 
+test("same-origin user navigation becomes stale before a snapshot read", async () => {
+    let snapshotReads = 0;
+    globalThis.chrome = extensionChrome({
+        tabs: {
+            ...extensionChrome().tabs,
+            get: async () => ({ id: 7, status: "complete", url: "https://example.com/new-document" }),
+            sendMessage: async (_tabId, message) => {
+                if (message.action.action === "take_snapshot") {
+                    snapshotReads += 1;
+                    return { ok: true, result: {} };
+                }
+                assert.equal(message.action.action, "describe_page");
+                return {
+                    ok: true,
+                    result: {
+                        page: {
+                            page_id: null,
+                            page_incarnation: "new-document",
+                            origin: { kind: "https", host_ascii: "example.com", port: 443 },
+                            document_revision: 1,
+                            url_sha256: "b".repeat(64)
+                        }
+                    }
+                };
+            }
+        }
+    });
+    const workerUrl = new URL("../src/service-worker.js?snapshot-stale-page-test", import.meta.url);
+    const { execute } = await import(workerUrl);
+    const action = {
+        action: "take_snapshot",
+        page: {
+            page_id: "tab-7",
+            page_incarnation: "old-document",
+            origin: { kind: "https", host_ascii: "example.com", port: 443 },
+            document_revision: 1,
+            url_sha256: "a".repeat(64)
+        },
+        max_elements: 16
+    };
+
+    await assert.rejects(() => execute(action), /stale_page_ref/u);
+    assert.equal(snapshotReads, 0);
+    delete globalThis.chrome;
+});
+
 test("an injected tab becomes unusable immediately after host permission revocation", async () => {
     let permissionChecks = 0;
     const chromeApi = {

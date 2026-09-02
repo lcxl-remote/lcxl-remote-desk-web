@@ -32,9 +32,18 @@ fn original(read_tool: &str, object_ref: ObjectRef) -> ReadContextSelection {
         live_targets: vec![LiveReadTarget {
             tool_name: read_tool.into(),
             object_ref,
-            interactive_session_incarnation: "worker-1".into(),
+            interactive_session_incarnation: "501:worker-1:7".into(),
             readiness_expires_at_unix_ms: 1_788_134_460_000,
         }],
+    }
+}
+
+fn derived_reference(kind: ObjectKind) -> ObjectRef {
+    ObjectRef {
+        token: "opaque-derived".into(),
+        snapshot_id: "worker-1:7:272".into(),
+        object_kind: kind,
+        expires_at: "2026-08-31T00:05:00Z".into(),
     }
 }
 
@@ -197,6 +206,129 @@ fn changed_or_missing_original_live_target_fails_closed() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn live_iwork_calls_accept_fresh_read_target_from_same_worker_incarnation() {
+    let frozen = reference(ObjectKind::Slide);
+    let derived = derived_reference(ObjectKind::Slide);
+    let call = ToolCall {
+        id: "call-keynote-derived".into(),
+        name: "patch_live_presentation_slide".into(),
+        arguments_json: serde_json::json!({
+            "target": derived,
+            "action": {"kind":"replace_slide_title","params":{"text":"E2E"}}
+        })
+        .to_string(),
+    };
+    let preflight = IworkCallPreflight::build(
+        &device_assistant_provider_registry(),
+        ProductSurface::ManagerPersonalOwner,
+        &call,
+        &original("inspect_live_presentation", frozen),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(preflight.target(), &derived);
+    assert_eq!(preflight.valid_until_unix_ms(), 1_788_134_700_000);
+    assert_eq!(
+        preflight.resource_scope(),
+        fresh_object_resource_scope(&[derived])
+    );
+}
+
+#[test]
+fn fresh_read_target_outlives_original_short_readiness_lease() {
+    let frozen = reference(ObjectKind::Slide);
+    let derived = derived_reference(ObjectKind::Slide);
+    let mut selection = original("inspect_live_presentation", frozen);
+    selection.live_targets[0].readiness_expires_at_unix_ms = NOW - 1;
+    let call = ToolCall {
+        id: "call-keynote-after-approval-delay".into(),
+        name: "patch_live_presentation_slide".into(),
+        arguments_json: serde_json::json!({
+            "target": derived,
+            "action": {"kind":"replace_slide_title","params":{"text":"E2E"}}
+        })
+        .to_string(),
+    };
+
+    let preflight = IworkCallPreflight::build(
+        &device_assistant_provider_registry(),
+        ProductSurface::ManagerPersonalOwner,
+        &call,
+        &selection,
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(preflight.target(), &derived);
+    assert_eq!(preflight.valid_until_unix_ms(), 1_788_134_700_000);
+}
+
+#[test]
+fn original_live_target_still_expires_with_original_readiness_lease() {
+    let frozen = reference(ObjectKind::Slide);
+    let mut selection = original("inspect_live_presentation", frozen.clone());
+    selection.live_targets[0].readiness_expires_at_unix_ms = NOW - 1;
+    let call = ToolCall {
+        id: "call-keynote-stale-original".into(),
+        name: "patch_live_presentation_slide".into(),
+        arguments_json: serde_json::json!({
+            "target": frozen,
+            "action": {"kind":"replace_slide_title","params":{"text":"E2E"}}
+        })
+        .to_string(),
+    };
+
+    assert!(
+        IworkCallPreflight::build(
+            &device_assistant_provider_registry(),
+            ProductSurface::ManagerPersonalOwner,
+            &call,
+            &selection,
+            NOW,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn live_iwork_calls_reject_untrusted_derived_targets() {
+    let frozen = reference(ObjectKind::Slide);
+    let base = derived_reference(ObjectKind::Slide);
+    for changed in 0..6 {
+        let mut target = base.clone();
+        match changed {
+            0 => target.snapshot_id = "other-worker:7:272".into(),
+            1 => target.snapshot_id = "worker-1:7:not-a-sequence".into(),
+            2 => target.object_kind = ObjectKind::Document,
+            3 => target.token.clear(),
+            4 => target.token = "x".repeat(4097),
+            5 => target.expires_at = "2026-08-31T00:05:02Z".into(),
+            _ => unreachable!(),
+        }
+        let call = ToolCall {
+            id: format!("call-keynote-invalid-{changed}"),
+            name: "patch_live_presentation_slide".into(),
+            arguments_json: serde_json::json!({
+                "target": target,
+                "action": {"kind":"replace_slide_title","params":{"text":"E2E"}}
+            })
+            .to_string(),
+        };
+        assert!(
+            IworkCallPreflight::build(
+                &device_assistant_provider_registry(),
+                ProductSurface::ManagerPersonalOwner,
+                &call,
+                &original("inspect_live_presentation", frozen.clone()),
+                NOW,
+            )
+            .is_err(),
+            "invalid derived target case {changed} was accepted"
+        );
+    }
 }
 
 #[test]

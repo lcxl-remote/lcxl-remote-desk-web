@@ -11,9 +11,8 @@
 //! Apple Events uses `AEDeterminePermissionToAutomateTarget(..., false)`.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -51,12 +50,17 @@ pub enum AutomationPermissionState {
 
 struct AutomationPermissionRequest {
     ask_user_if_needed: bool,
-    reply: Option<mpsc::Sender<AutomationPermissionState>>,
+}
+
+#[derive(Default)]
+struct AutomationPermissionWorkerState {
+    in_flight: bool,
+    waiters: Vec<mpsc::Sender<AutomationPermissionState>>,
 }
 
 struct AutomationPermissionWorker {
     sender: SyncSender<AutomationPermissionRequest>,
-    busy: Arc<AtomicBool>,
+    state: Arc<Mutex<AutomationPermissionWorkerState>>,
 }
 
 impl AutomationPermissionWorker {
@@ -65,41 +69,49 @@ impl AutomationPermissionWorker {
         operation: impl Fn(bool) -> AutomationPermissionState + Send + 'static,
     ) -> Option<Self> {
         let (sender, receiver) = mpsc::sync_channel::<AutomationPermissionRequest>(1);
-        let busy = Arc::new(AtomicBool::new(false));
-        let worker_busy = Arc::clone(&busy);
+        let state = Arc::new(Mutex::new(AutomationPermissionWorkerState::default()));
+        let worker_state = Arc::clone(&state);
         thread::Builder::new()
             .name(name.to_owned())
             .spawn(move || {
                 while let Ok(request) = receiver.recv() {
                     let result = operation(request.ask_user_if_needed);
-                    worker_busy.store(false, Ordering::Release);
-                    if let Some(reply) = request.reply {
+                    let waiters = {
+                        let mut state = worker_state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        state.in_flight = false;
+                        std::mem::take(&mut state.waiters)
+                    };
+                    for reply in waiters {
                         let _ = reply.send(result);
                     }
                 }
             })
             .ok()?;
-        Some(Self { sender, busy })
+        Some(Self { sender, state })
     }
 
     fn begin(&self, ask_user_if_needed: bool) -> Option<Receiver<AutomationPermissionState>> {
-        if self
-            .busy
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return None;
-        }
         let (reply, receiver) = mpsc::channel();
-        let request = AutomationPermissionRequest {
-            ask_user_if_needed,
-            reply: Some(reply),
+        let should_start = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.waiters.push(reply);
+            if state.in_flight {
+                false
+            } else {
+                state.in_flight = true;
+                true
+            }
         };
-        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
-            self.sender.try_send(request)
+        if should_start
+            && matches!(
+                self.sender
+                    .try_send(AutomationPermissionRequest { ask_user_if_needed }),
+                Err(TrySendError::Full(_) | TrySendError::Disconnected(_))
+            )
         {
-            self.busy.store(false, Ordering::Release);
-            return None;
+            self.fail_waiters();
         }
         Some(receiver)
     }
@@ -111,21 +123,35 @@ impl AutomationPermissionWorker {
     }
 
     fn request(&self) {
-        if self
-            .busy
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-        let request = AutomationPermissionRequest {
-            ask_user_if_needed: true,
-            reply: None,
+        let should_start = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.in_flight {
+                false
+            } else {
+                state.in_flight = true;
+                true
+            }
         };
-        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
-            self.sender.try_send(request)
+        if should_start
+            && matches!(
+                self.sender.try_send(AutomationPermissionRequest {
+                    ask_user_if_needed: true
+                }),
+                Err(TrySendError::Full(_) | TrySendError::Disconnected(_))
+            )
         {
-            self.busy.store(false, Ordering::Release);
+            self.fail_waiters();
+        }
+    }
+
+    fn fail_waiters(&self) {
+        let waiters = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.in_flight = false;
+            std::mem::take(&mut state.waiters)
+        };
+        for reply in waiters {
+            let _ = reply.send(AutomationPermissionState::Failed);
         }
     }
 }
@@ -411,7 +437,7 @@ mod tests {
             worker.query(Duration::from_millis(30)),
             AutomationPermissionState::Failed
         );
-        assert!(retry_started.elapsed() < Duration::from_millis(30));
+        assert!(retry_started.elapsed() < Duration::from_millis(100));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         thread::sleep(Duration::from_millis(220));
@@ -420,6 +446,33 @@ mod tests {
             AutomationPermissionState::Granted
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn concurrent_automation_queries_share_the_in_flight_result() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let worker = Arc::new(
+            AutomationPermissionWorker::spawn("test-automation-coalescing", move |_| {
+                worker_calls.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(80));
+                AutomationPermissionState::Granted
+            })
+            .unwrap(),
+        );
+        let first_worker = Arc::clone(&worker);
+        let first = thread::spawn(move || first_worker.query(Duration::from_millis(500)));
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while calls.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            worker.query(Duration::from_millis(500)),
+            AutomationPermissionState::Granted
+        );
+        assert_eq!(first.join().unwrap(), AutomationPermissionState::Granted);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

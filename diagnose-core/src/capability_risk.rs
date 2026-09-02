@@ -1,7 +1,8 @@
 //! Closed, server-owned Capability Provider risk classifier.
 
 use desk_agent_protocol::{
-    capability_grant::CapabilityRiskTier, capability_provider::CapabilityEffect,
+    capability_grant::CapabilityRiskTier,
+    capability_provider::{CapabilityDataCategory, CapabilityDataPolicy, CapabilityEffect},
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -61,6 +62,38 @@ pub const fn elevate_risk(
     } else {
         classified
     }
+}
+
+/// Minimum risk derivable from an immutable Provider descriptor before exact
+/// call arguments are known. Call-specific classifiers may only elevate it.
+pub fn classify_provider_descriptor_floor(
+    effect: CapabilityEffect,
+    data_policy: &CapabilityDataPolicy,
+) -> CapabilityRiskTier {
+    let sensitive_content = data_policy.reads.iter().any(|category| {
+        matches!(
+            category,
+            CapabilityDataCategory::UiSemanticTree
+                | CapabilityDataCategory::OfficeSelection
+                | CapabilityDataCategory::FileContent
+                | CapabilityDataCategory::TerminalOutput
+                | CapabilityDataCategory::ScreenPixels
+                | CapabilityDataCategory::LogContent
+                | CapabilityDataCategory::CommandOutput
+                | CapabilityDataCategory::ExternalContent
+                | CapabilityDataCategory::CommunicationContent
+                | CapabilityDataCategory::LiveDocumentContent
+        )
+    });
+    classify_capability_risk(
+        effect,
+        CapabilityRiskSignals {
+            sensitive_content,
+            external_egress: data_policy.may_export_data,
+            destructive_or_overwrite: false,
+            unpredictable_input: false,
+        },
+    )
 }
 
 #[cfg(test)]

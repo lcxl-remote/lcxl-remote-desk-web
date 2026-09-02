@@ -17,6 +17,56 @@ fn unavailable() -> AgentError {
     )
 }
 
+const MAX_OBJECT_REF_COMPONENT_BYTES: usize = 4096;
+const MAX_DERIVED_OBJECT_REF_TTL_MS: u64 = 300_000;
+
+fn object_ref_expiry(reference: &ObjectRef, now_unix_ms: u64) -> Result<u64, AgentError> {
+    chrono::DateTime::parse_from_rfc3339(&reference.expires_at)
+        .ok()
+        .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
+        .filter(|expiry| {
+            *expiry > now_unix_ms
+                && *expiry <= now_unix_ms.saturating_add(MAX_DERIVED_OBJECT_REF_TTL_MS)
+        })
+        .ok_or_else(unavailable)
+}
+
+/// A live mutation may use either the frozen input reference or the fresh
+/// reference returned by its matching semantic read. The latter is accepted
+/// only when its snapshot is from the same worker incarnation; the edge still
+/// has to resolve the opaque token immediately before applying the action.
+fn live_mutation_expiry(
+    selection: &ReadContextSelection,
+    frozen: &crate::input_read_context::live_read::LiveReadTarget,
+    target: &ObjectRef,
+    expected_kind: ObjectKind,
+    now_unix_ms: u64,
+) -> Result<u64, AgentError> {
+    if target == &frozen.object_ref {
+        return live_read::expiry(selection, frozen);
+    }
+    if target.object_kind != expected_kind
+        || [target.token.as_str(), target.snapshot_id.as_str()]
+            .iter()
+            .any(|value| value.trim().is_empty() || value.len() > MAX_OBJECT_REF_COMPONENT_BYTES)
+    {
+        return Err(unavailable());
+    }
+    let (_, worker_incarnation) = frozen
+        .interactive_session_incarnation
+        .split_once(':')
+        .ok_or_else(unavailable)?;
+    target
+        .snapshot_id
+        .strip_prefix(worker_incarnation)
+        .and_then(|suffix| suffix.strip_prefix(':'))
+        .filter(|suffix| !suffix.is_empty() && !suffix.contains(':'))
+        .and_then(|suffix| suffix.parse::<u64>().ok())
+        .filter(|sequence| *sequence > 0)
+        .ok_or_else(unavailable)?;
+    object_ref_expiry(target, now_unix_ms)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpreadsheetActionArgs {
@@ -157,25 +207,33 @@ impl IworkCallPreflight {
             "patch_live_spreadsheet_cell" => {
                 let args: SpreadsheetActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                let frozen = live_read::target(original, "inspect_live_spreadsheet", now_unix_ms)?;
-                if frozen.object_ref != args.target {
-                    return Err(unavailable());
-                }
+                let frozen = live_read::bound_target(original, "inspect_live_spreadsheet")?;
+                let expiry = live_mutation_expiry(
+                    original,
+                    frozen,
+                    &args.target,
+                    ObjectKind::Range,
+                    now_unix_ms,
+                )?;
                 (
                     args.target.clone(),
                     vec![args.target],
                     ComputerActionKind::SpreadsheetLive(args.action),
                     ComputerUseAdapterKind::IworkNumbers,
-                    live_read::expiry(original, frozen)?,
+                    expiry,
                 )
             }
             "replace_live_document_body" => {
                 let args: DocumentActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                let frozen = live_read::target(original, "inspect_live_document", now_unix_ms)?;
-                if frozen.object_ref != args.target {
-                    return Err(unavailable());
-                }
+                let frozen = live_read::bound_target(original, "inspect_live_document")?;
+                let expiry = live_mutation_expiry(
+                    original,
+                    frozen,
+                    &args.target,
+                    ObjectKind::Document,
+                    now_unix_ms,
+                )?;
                 (
                     args.target.clone(),
                     vec![args.target],
@@ -183,22 +241,26 @@ impl IworkCallPreflight {
                         text: args.text,
                     }),
                     ComputerUseAdapterKind::IworkPages,
-                    live_read::expiry(original, frozen)?,
+                    expiry,
                 )
             }
             "patch_live_presentation_slide" => {
                 let args: PresentationActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                let frozen = live_read::target(original, "inspect_live_presentation", now_unix_ms)?;
-                if frozen.object_ref != args.target {
-                    return Err(unavailable());
-                }
+                let frozen = live_read::bound_target(original, "inspect_live_presentation")?;
+                let expiry = live_mutation_expiry(
+                    original,
+                    frozen,
+                    &args.target,
+                    ObjectKind::Slide,
+                    now_unix_ms,
+                )?;
                 (
                     args.target.clone(),
                     vec![args.target],
                     ComputerActionKind::PresentationLive(args.action),
                     ComputerUseAdapterKind::IworkKeynote,
-                    live_read::expiry(original, frozen)?,
+                    expiry,
                 )
             }
             "patch_selected_numbers_copy" => {

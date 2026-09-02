@@ -45,6 +45,93 @@ pub mod windows_uia_observer;
 /// the exact filesystem/browser object before use.
 pub(super) const PERMISSION_FLOW_TTL_SECONDS: i64 = 30 * 60;
 
+/// Return a fresh short-lived lease for a browser connection whose stable
+/// identity is owned by the worker. The connection token and snapshot remain
+/// unchanged, so reconnecting the adapter still invalidates every prior lease.
+pub(super) fn renew_browser_surface_ref(
+    surface: &desk_agent_protocol::computer_use::ObjectRef,
+) -> desk_agent_protocol::computer_use::ObjectRef {
+    let mut renewed = surface.clone();
+    renewed.expires_at =
+        (chrono::Utc::now() + chrono::Duration::seconds(PERMISSION_FLOW_TTL_SECONDS)).to_rfc3339();
+    renewed
+}
+
+/// Compare only the worker-issued browser connection identity. Lease expiry is
+/// checked separately so readiness heartbeats may refresh it without weakening
+/// the token/snapshot fence across adapter reconnects.
+pub(super) fn same_browser_surface_identity(
+    left: &desk_agent_protocol::computer_use::ObjectRef,
+    right: &desk_agent_protocol::computer_use::ObjectRef,
+) -> bool {
+    use desk_agent_protocol::computer_use::ObjectKind;
+
+    left.object_kind == ObjectKind::BrowserSurface
+        && right.object_kind == ObjectKind::BrowserSurface
+        && left.token == right.token
+        && left.snapshot_id == right.snapshot_id
+}
+
+/// Accept only a currently valid lease issued within this worker's configured
+/// lifetime. This rejects expired references and callers that try to extend an
+/// otherwise valid connection identity arbitrarily far into the future.
+pub(super) fn browser_surface_lease_is_current(
+    surface: &desk_agent_protocol::computer_use::ObjectRef,
+) -> bool {
+    use desk_agent_protocol::computer_use::ObjectKind;
+
+    if surface.object_kind != ObjectKind::BrowserSurface {
+        return false;
+    }
+    let now = chrono::Utc::now();
+    chrono::DateTime::parse_from_rfc3339(&surface.expires_at)
+        .ok()
+        .map(|expiry| expiry.with_timezone(&chrono::Utc))
+        .is_some_and(|expiry| {
+            expiry > now && expiry <= now + chrono::Duration::seconds(PERMISSION_FLOW_TTL_SECONDS)
+        })
+}
+
+#[cfg(test)]
+mod browser_surface_lease_tests {
+    use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
+
+    use super::{
+        browser_surface_lease_is_current, renew_browser_surface_ref, same_browser_surface_identity,
+    };
+
+    fn surface(expires_at: String) -> ObjectRef {
+        ObjectRef {
+            token: "browser-token".into(),
+            snapshot_id: "browser-connection-7".into(),
+            object_kind: ObjectKind::BrowserSurface,
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn renewal_keeps_connection_identity_and_replaces_only_the_lease() {
+        let expired = surface((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
+        let renewed = renew_browser_surface_ref(&expired);
+
+        assert!(same_browser_surface_identity(&expired, &renewed));
+        assert!(!browser_surface_lease_is_current(&expired));
+        assert!(browser_surface_lease_is_current(&renewed));
+    }
+
+    #[test]
+    fn lease_validation_rejects_reconnects_and_caller_extensions() {
+        let current = renew_browser_surface_ref(&surface(String::new()));
+        let mut reconnected = current.clone();
+        reconnected.snapshot_id = "browser-connection-8".into();
+        assert!(!same_browser_surface_identity(&current, &reconnected));
+
+        let mut extended = current;
+        extended.expires_at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(!browser_surface_lease_is_current(&extended));
+    }
+}
+
 use std::sync::Arc;
 use std::time::Instant;
 

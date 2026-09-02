@@ -113,7 +113,29 @@ pub fn fresh_object_resource_scope(
 ) -> Vec<String> {
     let mut scope = object_refs
         .iter()
-        .filter_map(|object_ref| serde_json::to_vec(object_ref).ok())
+        .filter_map(|object_ref| {
+            if object_ref.object_kind
+                == desk_agent_protocol::computer_use::ObjectKind::BrowserSurface
+            {
+                #[derive(serde::Serialize)]
+                struct BrowserSurfaceAuthority<'a> {
+                    schema: &'static str,
+                    token: &'a str,
+                    snapshot_id: &'a str,
+                    object_kind: &'a desk_agent_protocol::computer_use::ObjectKind,
+                }
+
+                serde_json::to_vec(&BrowserSurfaceAuthority {
+                    schema: "browser-surface-authority/v1",
+                    token: &object_ref.token,
+                    snapshot_id: &object_ref.snapshot_id,
+                    object_kind: &object_ref.object_kind,
+                })
+                .ok()
+            } else {
+                serde_json::to_vec(object_ref).ok()
+            }
+        })
         .map(|encoded| format!("selected:sha256:{:x}", Sha256::digest(encoded)))
         .collect::<Vec<_>>();
     scope.sort();
@@ -355,6 +377,45 @@ mod tests {
         assert_eq!(
             exact_command_resource_scope(&digest('a')),
             vec![format!("command_input:sha256:{}", digest('a'))]
+        );
+    }
+
+    #[test]
+    fn browser_surface_authority_ignores_only_the_renewable_lease() {
+        use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
+
+        let first = ObjectRef {
+            token: "browser-token".into(),
+            snapshot_id: "browser-connection-7".into(),
+            object_kind: ObjectKind::BrowserSurface,
+            expires_at: "2026-09-02T14:00:00Z".into(),
+        };
+        let mut renewed = first.clone();
+        renewed.expires_at = "2026-09-02T14:30:00Z".into();
+        assert_eq!(
+            fresh_object_resource_scope(std::slice::from_ref(&first)),
+            fresh_object_resource_scope(std::slice::from_ref(&renewed))
+        );
+
+        renewed.snapshot_id = "browser-connection-8".into();
+        assert_ne!(
+            fresh_object_resource_scope(std::slice::from_ref(&first)),
+            fresh_object_resource_scope(std::slice::from_ref(&renewed))
+        );
+        renewed = first.clone();
+        renewed.token = "replacement-browser-token".into();
+        assert_ne!(
+            fresh_object_resource_scope(std::slice::from_ref(&first)),
+            fresh_object_resource_scope(std::slice::from_ref(&renewed))
+        );
+
+        let mut file = first;
+        file.object_kind = ObjectKind::File;
+        let mut extended_file = file.clone();
+        extended_file.expires_at = "2026-09-02T14:30:00Z".into();
+        assert_ne!(
+            fresh_object_resource_scope(std::slice::from_ref(&file)),
+            fresh_object_resource_scope(std::slice::from_ref(&extended_file))
         );
     }
 

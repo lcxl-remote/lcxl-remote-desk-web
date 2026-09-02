@@ -43,9 +43,6 @@ impl ActionResultOrigin {
         let capability = registry
             .capability_for_tool(&call.name)
             .ok_or_else(invalid)?;
-        if !capability.wire.effect.is_side_effecting() {
-            return Err(invalid());
-        }
         let provider = registry
             .provider_for_capability(&capability.wire.capability_id)
             .ok_or_else(invalid)?;
@@ -58,7 +55,7 @@ impl ActionResultOrigin {
                     && message.tool_calls.iter().any(|candidate| {
                         candidate.id == call.id
                             && candidate.name == call.name
-                            && candidate.arguments_json == call.arguments_json
+                            && same_json(&candidate.arguments_json, &call.arguments_json)
                     })
             })
             .and_then(|message| message.data_envelope.as_ref())
@@ -236,6 +233,13 @@ impl ActionResultOrigin {
     }
 }
 
+fn same_json(left: &str, right: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(left)
+        .ok()
+        .zip(serde_json::from_str::<serde_json::Value>(right).ok())
+        .is_some_and(|(left, right)| left == right)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionResultReceipt {
@@ -361,6 +365,14 @@ mod tests {
         let (mut session, call) = prepared();
         let registry = crate::device_assistant::device_assistant_provider_registry();
         let origin = ActionResultOrigin::capture(&registry, &session, &call).unwrap();
+        let reformatted = ToolCall {
+            arguments_json: " {\n } ".into(),
+            ..call.clone()
+        };
+        assert_eq!(
+            origin,
+            ActionResultOrigin::capture(&registry, &session, &reformatted).unwrap()
+        );
         assert_eq!(origin.tool_name, "browser_open_page");
         assert!(origin.ephemeral);
         assert_eq!(origin.sensitivity, Sensitivity::Secret);

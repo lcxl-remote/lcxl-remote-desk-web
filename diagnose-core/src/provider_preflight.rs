@@ -18,7 +18,7 @@ use crate::{
     capability_grant::{
         CapabilityGrantCall, canonical_compiled_scope, fresh_object_resource_scope,
     },
-    capability_risk::{CapabilityRiskSignals, classify_capability_risk},
+    capability_risk::elevate_risk,
     chat::ToolCall,
     permission_tools::canonical_tool_permission_input_json,
     provider_registry::{CapabilityDescriptor, ProviderRegistry},
@@ -225,31 +225,15 @@ pub fn classify_provider_call(
                 })
             )
         );
-    let sensitive_content = capability.wire.data_policy.reads.iter().any(|category| {
-        matches!(
-            category,
-            CapabilityDataCategory::UiSemanticTree
-                | CapabilityDataCategory::OfficeSelection
-                | CapabilityDataCategory::FileContent
-                | CapabilityDataCategory::TerminalOutput
-                | CapabilityDataCategory::ScreenPixels
-                | CapabilityDataCategory::LogContent
-                | CapabilityDataCategory::CommandOutput
-                | CapabilityDataCategory::ExternalContent
-                | CapabilityDataCategory::CommunicationContent
-                | CapabilityDataCategory::LiveDocumentContent
-        ) || (*category == CapabilityDataCategory::ProcessMetadata
-            && process_command_line_requested)
-    });
-    Ok(classify_capability_risk(
+    let floor = crate::capability_risk::classify_provider_descriptor_floor(
         capability.wire.effect,
-        CapabilityRiskSignals {
-            sensitive_content,
-            external_egress: capability.wire.data_policy.may_export_data,
-            destructive_or_overwrite: false,
-            unpredictable_input: false,
-        },
-    ))
+        &capability.wire.data_policy,
+    );
+    Ok(if process_command_line_requested {
+        elevate_risk(floor, CapabilityRiskTier::R1)
+    } else {
+        floor
+    })
 }
 
 fn unavailable() -> AgentError {

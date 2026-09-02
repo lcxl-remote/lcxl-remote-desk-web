@@ -675,19 +675,34 @@ async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
         form_readback: Vec::new(),
         completed_at_unix_ms: 101,
     };
-    let result_text = serde_json::to_string(&result).unwrap();
-    let mut tool_result = ChatMessage::tool_result(
-        "browser-result-followup",
+    let completion_text = serde_json::json!({
+        "work_id": "13",
+        "action_request_id": "browser-call-followup",
+        "execution_generation": "generation-browser-call-followup",
+        "result": "verified",
+        "facts": [{
+            "index": 0,
+            "changed": true,
+            "verified": true,
+            "summary": "browser action completed with bounded semantic read-back"
+        }],
+        "message": "browser adapter returned a typed, page-bound result",
+        "output": {"kind": "browser", "value": result}
+    })
+    .to_string();
+    let mut tool_result = ChatMessage::untrusted_output(
+        "browser-background-result-followup",
         "browser-call-followup",
-        result_text.clone(),
+        "browser-call-followup",
+        completion_text.clone(),
     );
     tool_result.data_envelope = Some(DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: "browser-result-envelope-followup".into(),
         content: ContentRef::ImmutableBlob {
             blob_id: "browser-result-blob-followup".into(),
-            sha256: format!("{:x}", Sha256::digest(result_text.as_bytes())),
-            size_bytes: result_text.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(completion_text.as_bytes())),
+            size_bytes: completion_text.len() as u64,
             media_type: "application/json".into(),
         },
         provenance: DataProvenance {
@@ -696,7 +711,7 @@ async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
             source_object_id: Some("browser-call-followup".into()),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: format!("{:x}", Sha256::digest(result_text.as_bytes())),
+        digest_sha256: format!("{:x}", Sha256::digest(completion_text.as_bytes())),
         sensitivity: Sensitivity::Sensitive,
         allowed_destinations: Vec::new(),
         retention: RetentionBoundary {
@@ -712,6 +727,15 @@ async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
             name: "browser_open_page".into(),
             arguments_json: r#"{"target":{"url":"https://mail.google.com/mail/u/0/"}}"#.into(),
         }],
+    ));
+    seeded.conversation.push(ChatMessage::tool_result(
+        "browser-dispatched-followup",
+        "browser-call-followup",
+        serde_json::json!({
+            "status": "background_running",
+            "background_task_id": "browser-call-followup"
+        })
+        .to_string(),
     ));
     seeded.conversation.push(tool_result);
     let sess = MemSession {
@@ -770,6 +794,16 @@ async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
         .find(|message| message.text.contains("CURRENT REUSABLE PROVIDER RESULTS"))
         .expect("ordinary user follow-up must receive the bounded provider result registry");
     assert!(projection.text.contains("gmail-page-after-compression"));
+    assert!(
+        projection
+            .text
+            .contains("\"page_reference_prerequisite_present\":true")
+    );
+    assert!(
+        projection
+            .text
+            .contains("do not claim that no BrowserPageRef exists")
+    );
     assert!(!projection.text.contains("raw page title"));
     assert!(
         projection
@@ -2645,6 +2679,364 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
         "observation must be restored after the approved mutation is proposed"
     );
     assert_eq!(*scripted.reads.borrow(), vec!["inspect"]);
+}
+
+#[tokio::test]
+async fn exact_permission_resume_retries_one_precommit_protocol_error() {
+    use crate::session::{AgentSessionSurface, TriggerOrigin};
+
+    let sess = MemSession::default();
+    let requests = Rc::new(RefCell::new(vec![]));
+    let invalid = ModelTurn {
+        stop_reason: StopReason::EndTurn,
+        tool_calls: vec![ToolCall {
+            id: "invalid".into(),
+            name: "exact_action".into(),
+            arguments_json: "{}".into(),
+        }],
+        provider_meta: ProviderResponseMeta {
+            stop_reason: StopReason::EndTurn,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new([invalid, tool_use("c1", "exact_action"), answer("done")].into()),
+        requests: requests.clone(),
+    };
+    let scripted = tools(vec![ExecOutcome::Executed {
+        data_envelope: None,
+        output: ToolRunOutput {
+            content: "action completed".into(),
+            image_data_url: None,
+        },
+        event_id: None,
+    }]);
+    let registry = vec![mutating_tool(
+        "exact_action",
+        Capability::ShellExecConfirmed,
+    )];
+    let exact_tools = vec!["exact_action".to_string()];
+    let clock = || "2026-08-30T12:00:00Z".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    seeded.conversation.push(ChatMessage::text(
+        "owner-requirement",
+        ChatRole::User,
+        "execute the approved action",
+    ));
+    *sess.inner.borrow_mut() = Some(seeded);
+
+    let mut resume_claim = exec_claim();
+    resume_claim.trigger_origin = TriggerOrigin::PermissionDecision;
+    let mut loop_deps = exec_deps(&sess, &model, &scripted, &registry, &clock);
+    loop_deps.permission_continuation_exact_tools = &exact_tools;
+    let outcome = resume_agent_turn_after_permission(
+        &loop_deps,
+        resume_claim,
+        ChatMessage::text(
+            "permission-decision",
+            ChatRole::User,
+            "trusted permission decision bridge",
+        ),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    assert_eq!(*scripted.exec_calls.borrow(), vec!["c1"]);
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 3);
+    let recovery = requests[1].messages.last().unwrap();
+    assert_eq!(recovery.role, ChatRole::SystemEvent);
+    assert!(recovery.text.contains("no trailing characters"));
+    assert!(recovery.text.contains("approved_exact_input byte-for-byte"));
+    assert!(
+        !requests[2]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("no trailing characters")),
+        "the permission protocol recovery marker must disappear after the approved action is proposed"
+    );
+}
+
+#[tokio::test]
+async fn exact_permission_resume_retries_one_answer_without_invoking_the_approved_tool() {
+    use crate::session::{AgentSessionSurface, TriggerOrigin};
+
+    let sess = MemSession::default();
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                answer("I should call the approved tool now."),
+                tool_use("c1", "exact_action"),
+                answer("done"),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let scripted = tools(vec![ExecOutcome::Executed {
+        data_envelope: None,
+        output: ToolRunOutput {
+            content: "action completed".into(),
+            image_data_url: None,
+        },
+        event_id: None,
+    }]);
+    let registry = vec![mutating_tool(
+        "exact_action",
+        Capability::ShellExecConfirmed,
+    )];
+    let exact_tools = vec!["exact_action".to_string()];
+    let clock = || "2026-08-30T12:00:00Z".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    seeded.conversation.push(ChatMessage::text(
+        "owner-requirement",
+        ChatRole::User,
+        "execute the approved action",
+    ));
+    *sess.inner.borrow_mut() = Some(seeded);
+
+    let mut resume_claim = exec_claim();
+    resume_claim.trigger_origin = TriggerOrigin::PermissionDecision;
+    let mut loop_deps = exec_deps(&sess, &model, &scripted, &registry, &clock);
+    loop_deps.permission_continuation_exact_tools = &exact_tools;
+    let outcome = resume_agent_turn_after_permission(
+        &loop_deps,
+        resume_claim,
+        ChatMessage::text(
+            "permission-decision",
+            ChatRole::User,
+            "trusted permission decision bridge",
+        ),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    assert_eq!(*scripted.exec_calls.borrow(), vec!["c1"]);
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1]
+            .messages
+            .last()
+            .unwrap()
+            .text
+            .contains("Return exactly one exposed tool call now")
+    );
+    assert!(
+        sess.inner
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .conversation
+            .iter()
+            .all(|message| message.text != "I should call the approved tool now.")
+    );
+}
+
+#[tokio::test]
+async fn exact_permissioned_read_clears_the_continuation_checkpoint_after_the_call() {
+    use crate::session::{AgentSessionSurface, TriggerOrigin};
+
+    let sess = MemSession::default();
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use("c1", "exact_read"),
+                tool_use("c2", "inspect"),
+                answer("verified"),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let calls = Rc::new(RefCell::new(vec![]));
+    let recording = RecordingTools {
+        calls: calls.clone(),
+        reply: "ok".into(),
+    };
+    let registry = vec![
+        read_tool("exact_read", Capability::SystemInfo),
+        read_tool("inspect", Capability::LogRecent),
+    ];
+    let exact_tools = vec!["exact_read".to_string()];
+    let clock = || "2026-08-30T12:00:00Z".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    seeded.conversation.push(ChatMessage::text(
+        "owner-requirement",
+        ChatRole::User,
+        "run the approved read and then inspect",
+    ));
+    *sess.inner.borrow_mut() = Some(seeded);
+
+    let mut resume_claim = claim();
+    resume_claim.trigger_origin = TriggerOrigin::PermissionDecision;
+    let mut loop_deps = deps(&sess, &model, &recording, &registry, &clock);
+    loop_deps.permission_continuation_exact_tools = &exact_tools;
+    let outcome = resume_agent_turn_after_permission(
+        &loop_deps,
+        resume_claim,
+        ChatMessage::text(
+            "permission-decision",
+            ChatRole::User,
+            "trusted permission decision bridge",
+        ),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("verified".into()));
+    assert_eq!(*calls.borrow(), vec!["exact_read", "inspect"]);
+    let requests = requests.borrow();
+    assert_eq!(
+        requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["exact_read"]
+    );
+    assert!(requests[1].tools.iter().any(|tool| tool.name == "inspect"));
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .all(|message| !message.text.contains("PERMISSION CONTINUATION CHECKPOINT"))
+    );
+}
+
+#[tokio::test]
+async fn device_assistant_retries_one_malformed_permission_plan_after_tool_result() {
+    use crate::session::AgentSessionSurface;
+    use desk_agent_protocol::data_lineage::{
+        DATA_ENVELOPE_SCHEMA_VERSION, DestinationIdentity, RetentionBoundary, Sensitivity,
+    };
+
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use("read", "sysinfo"),
+                tool_use_args(
+                    "malformed-plan",
+                    crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                    "{\"items\":[",
+                ),
+                answer("recovered"),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "read completed".into(),
+    };
+    let registry = vec![
+        read_tool("sysinfo", Capability::SystemInfo),
+        RegisteredTool {
+            spec: ToolSpec {
+                name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+                description: "request permission".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+            },
+            required_capability: Capability::SystemInfo,
+            effect: ToolEffect::RunProjection,
+        },
+    ];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let destination = DestinationIdentity::Model {
+        connection_id: "gateway".into(),
+        connection_revision: 1,
+        model_id: "model".into(),
+        profile_revision: 1,
+    };
+    let mut user = ChatMessage::text("user", ChatRole::User, "inspect, then request permission");
+    let user_digest = format!("{:x}", Sha256::digest(user.text.as_bytes()));
+    user.data_envelope = Some(DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "current-user-envelope".into(),
+        content: ContentRef::ImmutableBlob {
+            blob_id: "current-user-content".into(),
+            sha256: user_digest.clone(),
+            size_bytes: user.text.len() as u64,
+            media_type: "text/plain;charset=utf-8".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: "test-user".into(),
+            source_tool_name: "send-message".into(),
+            source_object_id: Some("user".into()),
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256: user_digest,
+        sensitivity: Sensitivity::UserContent,
+        allowed_destinations: vec![destination.clone()],
+        retention: RetentionBoundary {
+            expires_at_unix_ms: None,
+            delete_with_run: false,
+        },
+    });
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        user,
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("recovered".into()));
+    assert_eq!(*tools.calls.borrow(), vec!["sysinfo"]);
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 3);
+    let marker = requests[2].messages.last().unwrap();
+    assert_eq!(marker.role, ChatRole::SystemEvent);
+    assert!(marker.text.contains("invalid JSON arguments"));
+    assert!(
+        marker
+            .text
+            .contains("do not repeat the preceding Provider action")
+    );
+    let marker_envelope = marker.data_envelope.as_ref().unwrap();
+    assert_eq!(marker_envelope.allowed_destinations, vec![destination]);
+    assert_eq!(
+        marker_envelope.provenance.source_envelope_ids,
+        vec!["current-user-envelope"]
+    );
 }
 
 #[tokio::test]
@@ -5345,11 +5737,23 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
         form_readback: Vec::new(),
         completed_at_unix_ms: 43,
     };
-    let mut browser = ChatMessage::tool_result(
-        "browser-result",
-        "browser-call-1",
-        serde_json::to_string(&browser_result).unwrap(),
-    );
+    let browser_completion = serde_json::json!({
+        "work_id": "15",
+        "action_request_id": "browser-call-1",
+        "execution_generation": "generation-browser-call-1",
+        "result": "verified",
+        "facts": [{
+            "index": 0,
+            "changed": true,
+            "verified": true,
+            "summary": "browser action completed with bounded semantic read-back"
+        }],
+        "message": "browser adapter returned a typed, page-bound result",
+        "output": {"kind": "browser", "value": browser_result}
+    })
+    .to_string();
+    let mut browser =
+        ChatMessage::tool_result("browser-result", "browser-call-1", browser_completion);
     let mut browser_result_envelope = envelope(
         "browser-envelope",
         "browser_open_page",
@@ -5439,6 +5843,17 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
     assert!(projection.text.contains("page-gmail-1"));
     assert!(projection.text.contains("To recipients"));
     assert!(projection.text.contains("Message Body"));
+    assert!(
+        projection
+            .text
+            .contains("\"page_reference_prerequisite_present\":true")
+    );
+    assert!(
+        projection
+            .text
+            .contains("supersedes only an older catalog claim")
+    );
+    assert!(projection.text.contains("browser_take_snapshot"));
     assert!(!projection.text.contains("must not be replayed"));
     assert!(!projection.text.contains("raw page title"));
     let projected = projection.data_envelope.unwrap();
@@ -5599,6 +6014,85 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
             &request_for(serde_json::to_string(&exact).unwrap()),
         )
         .is_ok()
+    );
+
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let snapshot_descriptor = providers
+        .capability(crate::device_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID)
+        .unwrap();
+    let snapshot_provider = providers
+        .provider_for_capability(crate::device_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID)
+        .unwrap();
+    let mut snapshot_request =
+        request_for(serde_json::json!({"page": page.clone(), "max_elements": 64}).to_string());
+    snapshot_request.items[0].item_id = "take-snapshot".into();
+    snapshot_request.items[0].provider_id = snapshot_provider.wire.provider_id.clone();
+    snapshot_request.items[0].tool_name = "browser_take_snapshot".into();
+    snapshot_request.items[0].expected_effect = snapshot_descriptor.wire.effect;
+    let snapshot_inventory = [crate::capability_availability::CapabilityAvailability {
+        provider_id: snapshot_provider.wire.provider_id.clone(),
+        capability_id: snapshot_descriptor.wire.capability_id.clone(),
+        tool_name: snapshot_descriptor.tool_spec.name.clone(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    assert!(
+        validate_permission_request_availability(
+            std::slice::from_ref(&browser_result),
+            &snapshot_request,
+            &providers,
+            &snapshot_inventory,
+            &[],
+        )
+        .is_ok(),
+        "a verified fresh page result must satisfy the same-turn snapshot candidate prerequisite"
+    );
+    assert!(
+        validate_permission_request_availability(
+            &[],
+            &snapshot_request,
+            &providers,
+            &snapshot_inventory,
+            &[],
+        )
+        .unwrap_err()
+        .message
+        .contains("must copy its exact page and element references"),
+        "the dynamic candidate must remain closed without verified browser evidence"
+    );
+
+    let background_completion = serde_json::json!({
+        "work_id": "13",
+        "action_request_id": "browser-call",
+        "execution_generation": "generation-browser-call",
+        "result": "verified",
+        "facts": [{
+            "index": 0,
+            "changed": true,
+            "verified": true,
+            "summary": "browser action completed with bounded semantic read-back"
+        }],
+        "message": "browser adapter returned a typed, page-bound result",
+        "output": {"kind": "browser", "value": completion}
+    })
+    .to_string();
+    let mut background_result = ChatMessage::untrusted_output(
+        "browser-background-result",
+        "browser-call",
+        "browser-call",
+        background_completion,
+    );
+    background_result.data_envelope = browser_result.data_envelope.clone();
+    assert!(
+        validate_browser_permission_references(
+            std::slice::from_ref(&background_result),
+            &request_for(serde_json::to_string(&exact).unwrap()),
+        )
+        .is_ok(),
+        "a verified, source-labelled background completion must ground the exact next action"
     );
 
     let mut rewritten = exact;

@@ -322,7 +322,12 @@ impl ComputerUseBroker {
         surface: &ObjectRef,
         request: &BrowserActionRequest,
     ) -> Result<(), BrowserProviderError> {
-        if self.browser_extension.surface_ref().as_ref() == Some(surface) {
+        if self
+            .browser_extension
+            .surface_ref()
+            .as_ref()
+            .is_some_and(|candidate| super::same_browser_surface_identity(candidate, surface))
+        {
             self.browser_extension
                 .preflight(surface, request)
                 .map_err(BrowserProviderError::Extension)
@@ -338,7 +343,12 @@ impl ComputerUseBroker {
         surface: &ObjectRef,
         request: &BrowserActionRequest,
     ) -> Result<BrowserActionResult, BrowserProviderError> {
-        if self.browser_extension.surface_ref().as_ref() == Some(surface) {
+        if self
+            .browser_extension
+            .surface_ref()
+            .as_ref()
+            .is_some_and(|candidate| super::same_browser_surface_identity(candidate, surface))
+        {
             self.browser_extension
                 .execute(surface, request)
                 .await

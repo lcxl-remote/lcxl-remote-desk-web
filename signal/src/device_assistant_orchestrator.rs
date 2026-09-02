@@ -959,15 +959,8 @@ async fn run_turn_inner(
     let selected_live_spreadsheet = live_ref("inspect_live_spreadsheet");
     let selected_live_document = live_ref("inspect_live_document");
     let selected_live_presentation = live_ref("inspect_live_presentation");
-    let selected_browser_surface = readiness.as_ref().and_then(|readiness| {
-        readiness
-            .context_references
-            .iter()
-            .find(|reference| {
-                reference.capability == desk_agent_protocol::Capability::BrowserPageObserve
-            })
-            .map(|reference| reference.object_ref.clone())
-    });
+    let selected_browser_surface =
+        desk_diagnose_core::device_assistant::browser_surface_context(readiness.as_ref());
     let selected_outlook_surface = readiness.as_ref().and_then(|readiness| {
         readiness
             .context_references
@@ -1086,18 +1079,10 @@ async fn run_turn_inner(
     }
     if selected_browser_surface.is_some() {
         selected_source_tools.extend(
-            [
-                "browser_open_page",
-                "browser_navigate_page",
-                "browser_take_snapshot",
-                "browser_wait_for",
-                "browser_fill_form",
-                "browser_activate_element",
-                "prepare_gmail_web_draft_handoff",
-                "prepare_slack_web_message_handoff",
-            ]
-            .into_iter()
-            .map(str::to_string),
+            desk_diagnose_core::device_assistant::BROWSER_CONTEXT_CAPABILITY_IDS
+                .into_iter()
+                .filter_map(|capability_id| provider_registry.capability(capability_id))
+                .map(|capability| capability.wire.tool_name.clone()),
         );
     }
     if selected_outlook_surface.is_some() {
@@ -1239,19 +1224,8 @@ async fn run_turn_inner(
             .push(desk_diagnose_core::device_assistant::TERMINAL_OUTPUT_CAPABILITY_ID.into());
     }
     if selected_browser_surface.is_some() {
-        selected_tool_capability_ids.extend(
-            [
-                desk_diagnose_core::device_assistant::BROWSER_OPEN_CAPABILITY_ID,
-                desk_diagnose_core::device_assistant::BROWSER_NAVIGATE_CAPABILITY_ID,
-                desk_diagnose_core::device_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID,
-                desk_diagnose_core::device_assistant::BROWSER_WAIT_CAPABILITY_ID,
-                desk_diagnose_core::device_assistant::BROWSER_FILL_CAPABILITY_ID,
-                desk_diagnose_core::device_assistant::BROWSER_ACTIVATE_CAPABILITY_ID,
-                desk_diagnose_core::device_assistant::GMAIL_WEB_HANDOFF_CAPABILITY_ID,
-                desk_diagnose_core::device_assistant::SLACK_WEB_HANDOFF_CAPABILITY_ID,
-            ]
-            .into_iter()
-            .map(str::to_string),
+        desk_diagnose_core::device_assistant::extend_browser_context_capability_ids(
+            &mut selected_tool_capability_ids,
         );
     }
     if selected_outlook_surface.is_some() {
@@ -1421,12 +1395,7 @@ async fn run_turn_inner(
         granted.push(desk_agent_protocol::Capability::TerminalOutputRead);
     }
     if selected_browser_surface.is_some() {
-        granted.extend([
-            desk_agent_protocol::Capability::BrowserPageObserve,
-            desk_agent_protocol::Capability::BrowserPageNavigateConfirmed,
-            desk_agent_protocol::Capability::BrowserInputFallbackConfirmed,
-            desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed,
-        ]);
+        desk_diagnose_core::device_assistant::extend_browser_context_capabilities(&mut granted);
     }
     if selected_outlook_surface.is_some() {
         granted.push(desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed);

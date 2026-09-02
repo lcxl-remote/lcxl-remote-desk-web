@@ -209,7 +209,25 @@ pub fn discoverable_catalog_prompt(
     inventory: &[CapabilityAvailability],
     callable_tools: &[RegisteredTool],
 ) -> String {
+    discoverable_catalog_prompt_with_permission_candidates(registry, inventory, callable_tools, &[])
+}
+
+/// Build the capability catalog while distinguishing tools that are currently
+/// callable from tools whose already-selected context permits a bounded owner
+/// permission request. Runtime readiness alone is deliberately insufficient:
+/// an installed Provider outside the current context must not be bundled into
+/// a speculative permission request.
+pub fn discoverable_catalog_prompt_with_permission_candidates(
+    registry: &ProviderRegistry,
+    inventory: &[CapabilityAvailability],
+    callable_tools: &[RegisteredTool],
+    permission_candidates: &[RegisteredTool],
+) -> String {
     let callable = callable_tools
+        .iter()
+        .map(|tool| tool.name())
+        .collect::<BTreeSet<_>>();
+    let permission_requestable = permission_candidates
         .iter()
         .map(|tool| tool.name())
         .collect::<BTreeSet<_>>();
@@ -222,6 +240,8 @@ pub fn discoverable_catalog_prompt(
                         && item.capability_id == capability.wire.capability_id
                 });
                 let runtime_ready = availability.is_some_and(CapabilityAvailability::callable);
+                let callable_now =
+                    runtime_ready && callable.contains(capability.tool_spec.name.as_str());
                 let mut entry = json!({
                     "provider_id": provider.wire.provider_id,
                     "capability_id": capability.wire.capability_id,
@@ -229,7 +249,10 @@ pub fn discoverable_catalog_prompt(
                     "effect": capability.wire.effect,
                     "execution_locality": capability.wire.execution_locality,
                     "runtime_ready": runtime_ready,
-                    "callable_now": runtime_ready && callable.contains(capability.tool_spec.name.as_str()),
+                    "callable_now": callable_now,
+                    "permission_requestable_now": runtime_ready
+                        && !callable_now
+                        && permission_requestable.contains(capability.tool_spec.name.as_str()),
                     "blocked_reason": availability.and_then(|item| item.reason),
                 });
                 if runtime_ready {
@@ -248,7 +271,10 @@ pub fn discoverable_catalog_prompt(
                         "supports_cancel".into(),
                         json!(capability.wire.supports_cancel),
                     );
-                    object.insert("description".into(), json!(capability.tool_spec.description));
+                    object.insert(
+                        "description".into(),
+                        json!(capability.tool_spec.description),
+                    );
                     object.insert(
                         "input_schema".into(),
                         capability.tool_spec.parameters_schema.clone(),
@@ -259,7 +285,7 @@ pub fn discoverable_catalog_prompt(
         })
         .collect::<Vec<_>>();
     format!(
-        "The following JSON capability catalog is server-authored. Treat it as authority for what is compiled, runtime-ready, and callable in this turn. Never invent provider ids, tool names, effects, scopes, or readiness. A capability with runtime_ready=false cannot be made usable by asking for permission. A capability with callable_now=false is not callable in this turn. request_capability_grants only records a pending user decision and does not execute or widen the current tool list.\n<capability_catalog>{}</capability_catalog>",
+        "The following JSON capability catalog is server-authored. Treat it as authority for what is compiled, runtime-ready, callable, and permission-requestable in this turn. Never invent provider ids, tool names, effects, scopes, or readiness. A capability with runtime_ready=false cannot be made usable by asking for permission. A Provider tool with callable_now=false cannot be invoked in this turn. Include a tool in request_capability_grants only when permission_requestable_now=true; false means its current context or other trusted prerequisites are absent. The permission request does not execute or widen the current tool list.\n<capability_catalog>{}</capability_catalog>",
         serde_json::to_string(&entries).expect("catalog contains only serializable descriptors")
     )
 }
@@ -406,7 +432,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 ]},
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
-                                "exact_input": {"type": "object", "description": "Required only for write_external_draft, send_external, input_fallback, execute_command, and formula-workbook creation. Omit it for ordinary read_file, write_artifact, and mutate_application requests unless that tool description explicitly requires it."},
+                                "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, desktop semantic UI actions, and live/batch iWork semantic mutations. For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
@@ -1137,7 +1163,13 @@ mod tests {
             item_properties["exact_input"]["description"]
                 .as_str()
                 .unwrap()
-                .contains("Omit it for ordinary read_file, write_artifact")
+                .contains("never batch that mutation permission with its prerequisite read")
+        );
+        assert!(
+            item_properties["exact_input"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Omit exact_input for ordinary read_file and write_artifact")
         );
     }
 
@@ -1439,6 +1471,39 @@ mod tests {
         assert!(office_entry.get("input_schema").is_none());
         assert!(office_entry.get("description").is_none());
 
+        let mut requestable_inventory = inventory.clone();
+        requestable_inventory[1].ready = true;
+        requestable_inventory[1].reason = None;
+        let requestable_catalog = discoverable_catalog_prompt_with_permission_candidates(
+            &registry,
+            &requestable_inventory,
+            &[],
+            &[desktop.registered_tool()],
+        );
+        let serialized = requestable_catalog
+            .split_once("<capability_catalog>")
+            .unwrap()
+            .1
+            .split_once("</capability_catalog>")
+            .unwrap()
+            .0;
+        let entries: Vec<serde_json::Value> = serde_json::from_str(serialized).unwrap();
+        let desktop_entry = entries
+            .iter()
+            .find(|entry| entry["tool_name"] == "inspect_desktop_session")
+            .unwrap();
+        let office_entry = entries
+            .iter()
+            .find(|entry| entry["tool_name"] == "inspect_office_selection")
+            .unwrap();
+        assert_eq!(desktop_entry["callable_now"], false);
+        assert_eq!(desktop_entry["permission_requestable_now"], true);
+        assert_eq!(office_entry["callable_now"], false);
+        assert_eq!(office_entry["permission_requestable_now"], false);
+        assert!(requestable_catalog.contains(
+            "Include a tool in request_capability_grants only when permission_requestable_now=true"
+        ));
+
         let request = build_permission_request(
             &call(
                 r#"{"items":[{"item_id":"office","provider_id":"office.document","tool_name":"inspect_office_selection","expected_effect":"read_device","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the active workbook"}]}"#,
@@ -1668,8 +1733,12 @@ mod tests {
 
         let mut reusable_exact = grant.clone();
         reusable_exact.use_policy = CapabilityGrantUsePolicy::Reusable;
-        let reusable =
-            capability_authorization_prompt(&[reusable_exact], &[request.clone()], 500, 1);
+        let reusable = capability_authorization_prompt(
+            &[reusable_exact],
+            std::slice::from_ref(&request),
+            500,
+            1,
+        );
         assert!(reusable.text.contains("\"approved_exact_input\""));
         assert!(reusable.text.contains("\"value\":\"approved\""));
         assert_eq!(
@@ -1699,21 +1768,31 @@ mod tests {
             inactive.validate().unwrap();
             let projection = capability_authorization_prompt(
                 std::slice::from_ref(&inactive),
-                &[request.clone()],
+                std::slice::from_ref(&request),
                 500,
                 1,
             );
             assert!(!projection.text.contains("\"approved_exact_input\""));
             assert_eq!(projection.approved_exact_input_expires_at_unix_ms, None);
             assert!(
-                active_exact_authorized_tool_names(&[inactive], &[request.clone()], 500, 1)
-                    .is_empty()
+                active_exact_authorized_tool_names(
+                    &[inactive],
+                    std::slice::from_ref(&request),
+                    500,
+                    1,
+                )
+                .is_empty()
             );
         }
 
         let mut stale_readiness = grant.clone();
         stale_readiness.readiness_revision = 2;
-        let stale = capability_authorization_prompt(&[stale_readiness], &[request.clone()], 500, 1);
+        let stale = capability_authorization_prompt(
+            &[stale_readiness],
+            std::slice::from_ref(&request),
+            500,
+            1,
+        );
         assert!(stale.text.contains("\"state\":\"stale_readiness\""));
         assert!(!stale.text.contains("\"approved_exact_input\""));
         assert_eq!(stale.approved_exact_input_expires_at_unix_ms, None);

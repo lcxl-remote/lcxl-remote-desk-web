@@ -424,6 +424,24 @@ pub struct ExecCompletion {
     pub version_advance: Option<crate::action_version::ActionVersionAdvance>,
 }
 
+/// One read result plus any durable session-version advance committed by the
+/// runtime while dispatching it. Most read seams are immediate and return no
+/// advance; a remote Provider may use the same crash-safe work/receipt path as
+/// mutations without misclassifying the operation's effect.
+#[derive(Debug)]
+pub struct ReadOutcome {
+    pub output: ToolRunOutput,
+    pub ok: bool,
+    pub event_id: Option<String>,
+    pub data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+}
+
+#[derive(Debug)]
+pub struct ReadCompletion {
+    pub outcome: Result<ReadOutcome, AgentError>,
+    pub version_advance: Option<crate::action_version::ActionVersionAdvance>,
+}
+
 /// The result of a model actively waiting on a background task via
 /// [`wait_for_task`](ToolSeam::wait_for_task). Unlike the passive completion
 /// notification the publisher injects, waiting returns an explicit status to
@@ -508,6 +526,34 @@ pub trait ToolSeam {
     /// Run a read-only tool call and return its redacted result. The loop has
     /// already validated that the call names an exposed read tool.
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError>;
+
+    /// Whether this read is dispatched through a durable remote Provider path
+    /// and therefore needs the same persisted action-version fence as a
+    /// confirmed mutation. Immediate/local reads keep the default `false`.
+    fn read_requires_version(&self, _call: &ToolCall) -> bool {
+        false
+    }
+
+    /// Version-aware read execution for runtimes whose remote Provider dispatch
+    /// commits durable preparation/receipt state. The default preserves the
+    /// existing immediate-read contract.
+    async fn run_read_versioned(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+        version: Option<&crate::action_version::ActionVersion>,
+    ) -> ReadCompletion {
+        let _ = (ctx, version);
+        ReadCompletion {
+            outcome: self.run_read(call).await.map(|output| ReadOutcome {
+                output,
+                ok: true,
+                event_id: None,
+                data_envelope: None,
+            }),
+            version_advance: None,
+        }
+    }
 
     /// Produce source metadata for one successful read result before it is
     /// persisted or considered for model export. Default `None` keeps existing

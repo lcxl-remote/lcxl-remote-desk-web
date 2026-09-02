@@ -110,7 +110,7 @@ pub fn build_live_context(
         }
     }
 
-    let (incarnation, expires_at_unix_ms) = match readiness {
+    let (incarnation, readiness_expires_at_unix_ms) = match readiness {
         Some(readiness) => {
             let expires_at = chrono::DateTime::parse_from_rfc3339(&readiness.expires_at)
                 .map_err(|_| invalid("invalid context readiness expiry"))?
@@ -154,6 +154,32 @@ pub fn build_live_context(
         let provider = registry
             .provider_for_capability(capability_id)
             .ok_or_else(|| invalid("selected context Provider is missing"))?;
+        // The readiness report is a heartbeat (currently 25 seconds), while
+        // its edge-issued context reference is deliberately long enough to
+        // survive model latency. A durable selection is metadata rather than
+        // execution authority, so bind its lifetime to that exact reference
+        // when one exists. Turn intake still freezes and revalidates current
+        // readiness plus the original object reference before any live read.
+        let expires_at_unix_ms = match readiness.and_then(|readiness| {
+            readiness
+                .context_references
+                .iter()
+                .find(|reference| reference.capability == capability.required_capability)
+        }) {
+            Some(reference) => {
+                let expiry = chrono::DateTime::parse_from_rfc3339(&reference.object_ref.expires_at)
+                    .map_err(|_| invalid("invalid selected context reference expiry"))?
+                    .timestamp_millis();
+                let expiry = u64::try_from(expiry).map_err(|_| {
+                    invalid("selected context reference expiry predates Unix epoch")
+                })?;
+                if expiry <= now_unix_ms {
+                    return Err(invalid("selected context reference expired"));
+                }
+                expiry
+            }
+            None => readiness_expires_at_unix_ms,
+        };
         let attachment_id = format!("context-{}", fresh_id());
         let opaque_token = fresh_id();
         let observation_id = format!("selection-{}", fresh_id());
