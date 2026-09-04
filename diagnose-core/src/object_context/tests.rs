@@ -17,16 +17,19 @@ fn update(kind: ObjectKind) -> DeviceAssistantObjectContextUpdate {
         object_kind: kind,
         expires_at: "2030-01-01T00:00:00Z".into(),
     };
-    let operation = if kind == ObjectKind::TerminalOutput {
-        DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+    let operation = match kind {
+        ObjectKind::TerminalOutput => DeviceAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref,
             display_summary: "Selected output".into(),
-        }
-    } else {
-        DeviceAssistantObjectContextOperation::AttachFile {
+        },
+        ObjectKind::Window => DeviceAssistantObjectContextOperation::AttachWindow {
+            object_ref,
+            display_summary: "Selected window".into(),
+        },
+        _ => DeviceAssistantObjectContextOperation::AttachFile {
             object_ref,
             display_summary: "Selected file".into(),
-        }
+        },
     };
     DeviceAssistantObjectContextUpdate {
         conversation_id: "client-conversation".into(),
@@ -98,6 +101,12 @@ fn selections_keep_original_refs_bounds_destination_and_metadata_digest() {
             ContextAttachmentKind::TerminalSessionRef,
             32768,
             8,
+        ),
+        (
+            ObjectKind::Window,
+            ContextAttachmentKind::WindowSelection,
+            CURRENT_SCREEN_MAX_OUTPUT_BYTES,
+            1,
         ),
     ] {
         let value = attachment(kind);
@@ -227,6 +236,48 @@ fn duplicate_object_does_not_bypass_subject_or_request_conflict_checks() {
         );
         assert_eq!(session.context_attachments, vec![original.clone()]);
     }
+}
+
+#[test]
+fn selecting_another_window_atomically_replaces_the_previous_focus() {
+    let mut session = session();
+    let first = attachment(ObjectKind::Window);
+    apply_object_mutation(&mut session, &ObjectContextMutation::Attach(first.clone())).unwrap();
+    session
+        .begin_focus_epoch(1, [first.attachment_id.clone()])
+        .unwrap();
+
+    let mut request = update(ObjectKind::Window);
+    request.client_request_id = "select-second-window".into();
+    let DeviceAssistantObjectContextOperation::AttachWindow { object_ref, .. } =
+        &mut request.operation
+    else {
+        unreachable!()
+    };
+    object_ref.token = "second-window-ref".into();
+    object_ref.snapshot_id = "generation-2".into();
+    let ObjectContextMutation::Attach(second) = build(&request, "attachment-2", 2).unwrap() else {
+        unreachable!()
+    };
+
+    assert!(
+        apply_object_mutation(&mut session, &ObjectContextMutation::Attach(second.clone()))
+            .unwrap()
+    );
+    assert!(matches!(
+        session.context_attachments[0].state,
+        AttachmentState::Stale {
+            reason: AttachmentStaleReason::ObjectChanged
+        }
+    ));
+    assert!(matches!(
+        session.context_attachments[1].state,
+        AttachmentState::Active
+    ));
+    assert_eq!(
+        session.focus_epoch.selected_attachment_ids,
+        vec![second.attachment_id]
+    );
 }
 
 #[test]

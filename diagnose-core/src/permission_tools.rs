@@ -20,7 +20,7 @@ use crate::capability_grant::{
     exact_external_url_resource_scope, fresh_object_resource_scope,
 };
 use crate::chat::{ToolCall, ToolSpec};
-use crate::device_assistant::DUCKDUCKGO_HTML_CONNECTOR_ID;
+use crate::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID;
 use crate::dynamic_run::{
     GrantRequestItem, MAX_PERMISSION_REASON_BYTES, MAX_PERMISSION_REQUEST_ITEMS,
     MAX_PERMISSION_SCOPE_VALUES, PERMISSION_REQUEST_SCHEMA_VERSION, PermissionRequest,
@@ -35,6 +35,20 @@ pub const REQUEST_CAPABILITY_GRANTS_TOOL_NAME: &str = "request_capability_grants
 pub const MAX_REQUEST_TTL_SECONDS: u32 = 3_600;
 pub const MAX_REQUEST_USES: u32 = 16;
 pub const MAX_CAPABILITY_CATALOG_PROMPT_BYTES: usize = 16 * 1024;
+
+/// Content-free baseline measurements for the current capability projection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CapabilityCatalogMetrics {
+    pub registry_count: u64,
+    pub runtime_ready_count: u64,
+    pub callable_count: u64,
+    pub permission_candidate_count: u64,
+    pub catalog_utf8_bytes: u64,
+    pub detail_min_utf8_bytes: u64,
+    pub detail_p50_utf8_bytes: u64,
+    pub detail_p95_utf8_bytes: u64,
+    pub detail_max_utf8_bytes: u64,
+}
 
 /// Render the current server-owned authorization projection for the model.
 ///
@@ -55,11 +69,17 @@ pub fn capability_authorization_prompt(
     grants: &[CapabilityGrant],
     permission_requests: &[PermissionRequest],
     now_unix_ms: u64,
+    current_input_revision: u64,
     current_readiness_revision: u64,
 ) -> CapabilityAuthorizationPrompt {
     let mut approved_exact_input_expires_at_unix_ms: Option<u64> = None;
     let mut entries = Vec::with_capacity(grants.len());
-    for grant in grants {
+    // Older epochs remain in the audit store, but they are neither authority nor
+    // useful model context for the current requirement.
+    for grant in grants
+        .iter()
+        .filter(|grant| grant.input_revision == current_input_revision)
+    {
         let mut state = if grant.revoked_at_unix_ms.is_some() {
             "revoked"
         } else if grant.expires_at_unix_ms <= now_unix_ms {
@@ -128,6 +148,7 @@ pub fn active_exact_authorized_tool_names(
     grants: &[CapabilityGrant],
     permission_requests: &[PermissionRequest],
     now_unix_ms: u64,
+    current_input_revision: u64,
     current_readiness_revision: u64,
 ) -> Vec<String> {
     grants
@@ -136,6 +157,7 @@ pub fn active_exact_authorized_tool_names(
             grant.revoked_at_unix_ms.is_none()
                 && grant.expires_at_unix_ms > now_unix_ms
                 && grant.remaining_uses > 0
+                && grant.input_revision == current_input_revision
                 && grant.readiness_revision == current_readiness_revision
                 && grant.canonical_input_digest_sha256.is_some()
                 && approved_exact_input(grant, permission_requests).is_some()
@@ -154,10 +176,11 @@ fn approved_exact_input(
     permission_requests
         .iter()
         .filter(|request| {
-            matches!(
-                request.state,
-                PermissionRequestState::Approved | PermissionRequestState::PartiallyApproved
-            )
+            request.input_revision == grant.input_revision
+                && matches!(
+                    request.state,
+                    PermissionRequestState::Approved | PermissionRequestState::PartiallyApproved
+                )
         })
         .flat_map(|request| &request.items)
         .find_map(|item| {
@@ -204,6 +227,7 @@ fn exact_input_matches_current_contract(tool_name: &str, value: &serde_json::Val
 /// supplies edge readiness. `callable_now` is derived from the final per-turn
 /// model registry, so an installed-but-unselected capability is never presented
 /// as directly callable.
+#[cfg(test)]
 pub fn discoverable_catalog_prompt(
     registry: &ProviderRegistry,
     inventory: &[CapabilityAvailability],
@@ -217,12 +241,27 @@ pub fn discoverable_catalog_prompt(
 /// permission request. Runtime readiness alone is deliberately insufficient:
 /// an installed Provider outside the current context must not be bundled into
 /// a speculative permission request.
+#[cfg(test)]
 pub fn discoverable_catalog_prompt_with_permission_candidates(
     registry: &ProviderRegistry,
     inventory: &[CapabilityAvailability],
     callable_tools: &[RegisteredTool],
     permission_candidates: &[RegisteredTool],
 ) -> String {
+    let entries =
+        capability_catalog_entries(registry, inventory, callable_tools, permission_candidates);
+    format!(
+        "The following JSON capability catalog is server-authored. Treat it as authority for what is compiled, runtime-ready, callable, and permission-requestable in this turn. Never invent provider ids, tool names, effects, scopes, or readiness. A capability with runtime_ready=false cannot be made usable by asking for permission. A Provider tool with callable_now=false cannot be invoked in this turn. Include a tool in request_capability_grants only when permission_requestable_now=true; false means its current context or other trusted prerequisites are absent. The permission request does not execute or widen the current tool list.\n<capability_catalog>{}</capability_catalog>",
+        serde_json::to_string(&entries).expect("catalog contains only serializable descriptors")
+    )
+}
+
+pub(crate) fn capability_catalog_entries(
+    registry: &ProviderRegistry,
+    inventory: &[CapabilityAvailability],
+    callable_tools: &[RegisteredTool],
+    permission_candidates: &[RegisteredTool],
+) -> Vec<serde_json::Value> {
     let callable = callable_tools
         .iter()
         .map(|tool| tool.name())
@@ -231,7 +270,7 @@ pub fn discoverable_catalog_prompt_with_permission_candidates(
         .iter()
         .map(|tool| tool.name())
         .collect::<BTreeSet<_>>();
-    let entries = registry
+    registry
         .providers()
         .flat_map(|provider| {
             provider.capabilities.iter().map(|capability| {
@@ -242,19 +281,31 @@ pub fn discoverable_catalog_prompt_with_permission_candidates(
                 let runtime_ready = availability.is_some_and(CapabilityAvailability::callable);
                 let callable_now =
                     runtime_ready && callable.contains(capability.tool_spec.name.as_str());
-                let mut entry = json!({
-                    "provider_id": provider.wire.provider_id,
-                    "capability_id": capability.wire.capability_id,
-                    "tool_name": capability.tool_spec.name,
-                    "effect": capability.wire.effect,
-                    "execution_locality": capability.wire.execution_locality,
-                    "runtime_ready": runtime_ready,
-                    "callable_now": callable_now,
-                    "permission_requestable_now": runtime_ready
-                        && !callable_now
-                        && permission_requestable.contains(capability.tool_spec.name.as_str()),
-                    "blocked_reason": availability.and_then(|item| item.reason),
-                });
+                let mut entry = if runtime_ready {
+                    json!({
+                        "provider_id": provider.wire.provider_id,
+                        "capability_id": capability.wire.capability_id,
+                        "tool_name": capability.tool_spec.name,
+                        "effect": capability.wire.effect,
+                        "execution_locality": capability.wire.execution_locality,
+                        "runtime_ready": true,
+                        "callable_now": callable_now,
+                        "permission_requestable_now": !callable_now
+                            && permission_requestable.contains(capability.tool_spec.name.as_str()),
+                        "blocked_reason": null,
+                    })
+                } else {
+                    // An unavailable capability cannot be called or requested.
+                    // Keep only the identity and reason; detailed policy/schema
+                    // is loaded on demand after readiness changes.
+                    json!({
+                        "provider_id": provider.wire.provider_id,
+                        "capability_id": capability.wire.capability_id,
+                        "tool_name": capability.tool_spec.name,
+                        "runtime_ready": false,
+                        "blocked_reason": availability.and_then(|item| item.reason),
+                    })
+                };
                 if runtime_ready {
                     let object = entry
                         .as_object_mut()
@@ -283,11 +334,56 @@ pub fn discoverable_catalog_prompt_with_permission_candidates(
                 entry
             })
         })
+        .collect()
+}
+
+/// Measure the exact current catalog serializer without retaining descriptor or
+/// tool content in the returned value.
+pub fn capability_catalog_metrics(
+    registry: &ProviderRegistry,
+    inventory: &[CapabilityAvailability],
+    callable_tools: &[RegisteredTool],
+    permission_candidates: &[RegisteredTool],
+) -> CapabilityCatalogMetrics {
+    let entries =
+        capability_catalog_entries(registry, inventory, callable_tools, permission_candidates);
+    let mut detail_sizes = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("runtime_ready")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .map(|entry| {
+            u64::try_from(
+                serde_json::to_vec(entry)
+                    .expect("capability detail is serializable")
+                    .len(),
+            )
+            .unwrap_or(u64::MAX)
+        })
         .collect::<Vec<_>>();
-    format!(
-        "The following JSON capability catalog is server-authored. Treat it as authority for what is compiled, runtime-ready, callable, and permission-requestable in this turn. Never invent provider ids, tool names, effects, scopes, or readiness. A capability with runtime_ready=false cannot be made usable by asking for permission. A Provider tool with callable_now=false cannot be invoked in this turn. Include a tool in request_capability_grants only when permission_requestable_now=true; false means its current context or other trusted prerequisites are absent. The permission request does not execute or widen the current tool list.\n<capability_catalog>{}</capability_catalog>",
-        serde_json::to_string(&entries).expect("catalog contains only serializable descriptors")
-    )
+    detail_sizes.sort_unstable();
+    let percentile = |numerator: usize, denominator: usize| {
+        if detail_sizes.is_empty() {
+            return 0;
+        }
+        let last = detail_sizes.len() - 1;
+        detail_sizes[last.saturating_mul(numerator) / denominator]
+    };
+    CapabilityCatalogMetrics {
+        registry_count: u64::try_from(entries.len()).unwrap_or(u64::MAX),
+        runtime_ready_count: u64::try_from(detail_sizes.len()).unwrap_or(u64::MAX),
+        callable_count: u64::try_from(callable_tools.len()).unwrap_or(u64::MAX),
+        permission_candidate_count: u64::try_from(permission_candidates.len()).unwrap_or(u64::MAX),
+        // The production prompt no longer contains the legacy full catalog.
+        catalog_utf8_bytes: 0,
+        detail_min_utf8_bytes: detail_sizes.first().copied().unwrap_or(0),
+        detail_p50_utf8_bytes: percentile(50, 100),
+        detail_p95_utf8_bytes: percentile(95, 100),
+        detail_max_utf8_bytes: detail_sizes.last().copied().unwrap_or(0),
+    }
 }
 
 /// Permission requests must be grounded in the same fresh edge readiness used
@@ -466,6 +562,16 @@ pub fn build_permission_request(
     if params.items.is_empty() || params.items.len() > MAX_PERMISSION_REQUEST_ITEMS {
         return Err(invalid("permission batch size is out of bounds"));
     }
+    if params
+        .items
+        .iter()
+        .any(|item| item.expected_effect == CapabilityEffect::SendExternal)
+        && params.items.len() != 1
+    {
+        return Err(invalid(
+            "SendExternal must be requested separately as one exact one-shot confirmation",
+        ));
+    }
 
     let mut items = Vec::with_capacity(params.items.len());
     for item in params.items {
@@ -539,6 +645,10 @@ pub fn build_permission_request(
             == crate::device_assistant::GMAIL_WEB_HANDOFF_CAPABILITY_ID;
         let exact_slack_handoff = capability.wire.capability_id
             == crate::device_assistant::SLACK_WEB_HANDOFF_CAPABILITY_ID;
+        let exact_gmail_send =
+            capability.wire.capability_id == crate::device_assistant::GMAIL_WEB_SEND_CAPABILITY_ID;
+        let exact_slack_send =
+            capability.wire.capability_id == crate::device_assistant::SLACK_WEB_SEND_CAPABILITY_ID;
         let exact_browser_navigation = matches!(
             capability.wire.capability_id.as_str(),
             crate::device_assistant::BROWSER_OPEN_CAPABILITY_ID
@@ -696,6 +806,30 @@ pub fn build_permission_request(
                 .validate()
                 .map_err(|error| invalid(format!("validate Slack Web handoff input: {error}")))?;
         }
+        if exact_gmail_send {
+            let canonical = canonical_input_json
+                .as_deref()
+                .ok_or_else(|| invalid("Gmail Web exact send requires exact_input"))?;
+            let input: desk_agent_protocol::communication::GmailWebExactSendInput =
+                serde_json::from_str(canonical).map_err(|error| {
+                    invalid(format!("decode Gmail Web exact send input: {error}"))
+                })?;
+            crate::communication::verify_gmail_web_exact_send_input(&input).map_err(|error| {
+                invalid(format!("validate Gmail Web exact send input: {error}"))
+            })?;
+        }
+        if exact_slack_send {
+            let canonical = canonical_input_json
+                .as_deref()
+                .ok_or_else(|| invalid("Slack Web exact send requires exact_input"))?;
+            let input: desk_agent_protocol::communication::SlackWebExactSendInput =
+                serde_json::from_str(canonical).map_err(|error| {
+                    invalid(format!("decode Slack Web exact send input: {error}"))
+                })?;
+            crate::communication::verify_slack_web_exact_send_input(&input).map_err(|error| {
+                invalid(format!("validate Slack Web exact send input: {error}"))
+            })?;
+        }
         if (exact_external_url || exact_external_query || exact_command)
             && canonical_input_digest_sha256.is_none()
         {
@@ -780,7 +914,7 @@ pub fn build_permission_request(
             export_destinations: if exact_external_query {
                 vec![
                     desk_agent_protocol::data_lineage::DestinationIdentity::WebResearch {
-                        connector_id: DUCKDUCKGO_HTML_CONNECTOR_ID.into(),
+                        connector_id: BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
                     },
                 ]
             } else if exact_outlook_handoff {
@@ -798,6 +932,20 @@ pub fn build_permission_request(
                     },
                 ]
             } else if exact_slack_handoff {
+                vec![
+                    desk_agent_protocol::data_lineage::DestinationIdentity::ChatAccount {
+                        account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                            .into(),
+                    },
+                ]
+            } else if exact_gmail_send {
+                vec![
+                    desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
+                        account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                            .into(),
+                    },
+                ]
+            } else if exact_slack_send {
                 vec![
                     desk_agent_protocol::data_lineage::DestinationIdentity::ChatAccount {
                         account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
@@ -1120,7 +1268,7 @@ mod tests {
             item.export_destinations,
             vec![
                 desk_agent_protocol::data_lineage::DestinationIdentity::WebResearch {
-                    connector_id: crate::device_assistant::DUCKDUCKGO_HTML_CONNECTOR_ID.into(),
+                    connector_id: crate::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
                 }
             ]
         );
@@ -1569,7 +1717,12 @@ mod tests {
         let callable =
             crate::capability_availability::callable_tools(&registry, &inventory).unwrap();
         let catalog = discoverable_catalog_prompt(&registry, &inventory, &callable);
-        assert!(catalog.len() <= MAX_CAPABILITY_CATALOG_PROMPT_BYTES);
+        assert!(
+            catalog.len() <= MAX_CAPABILITY_CATALOG_PROMPT_BYTES,
+            "catalog bytes {} exceed {}",
+            catalog.len(),
+            MAX_CAPABILITY_CATALOG_PROMPT_BYTES
+        );
 
         let serialized = catalog
             .split_once("<capability_catalog>")
@@ -1590,6 +1743,52 @@ mod tests {
     }
 
     #[test]
+    fn catalog_metrics_measure_the_real_serializer_without_content() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let inventory = registry
+            .providers()
+            .flat_map(|provider| {
+                provider
+                    .capabilities
+                    .iter()
+                    .map(|capability| CapabilityAvailability {
+                        provider_id: provider.wire.provider_id.clone(),
+                        capability_id: capability.wire.capability_id.clone(),
+                        tool_name: capability.tool_spec.name.clone(),
+                        compiled: true,
+                        enabled: true,
+                        connected: true,
+                        ready: true,
+                        reason: None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let callable = registry.registered_tools();
+        let permission_candidates = callable
+            .iter()
+            .filter(|tool| tool.effect != ToolEffect::ReadOnly)
+            .cloned()
+            .collect::<Vec<_>>();
+        let metrics =
+            capability_catalog_metrics(&registry, &inventory, &callable, &permission_candidates);
+        assert_eq!(metrics.registry_count, inventory.len() as u64);
+        assert_eq!(metrics.runtime_ready_count, inventory.len() as u64);
+        assert_eq!(metrics.callable_count, callable.len() as u64);
+        assert_eq!(
+            metrics.permission_candidate_count,
+            permission_candidates.len() as u64
+        );
+        assert_eq!(metrics.catalog_utf8_bytes, 0);
+        assert!(metrics.detail_min_utf8_bytes > 0);
+        assert!(metrics.detail_min_utf8_bytes <= metrics.detail_p50_utf8_bytes);
+        assert!(metrics.detail_p50_utf8_bytes <= metrics.detail_p95_utf8_bytes);
+        assert!(metrics.detail_p95_utf8_bytes <= metrics.detail_max_utf8_bytes);
+        let debug = format!("{metrics:?}");
+        assert!(!debug.contains("inspect_desktop_session"));
+        assert!(!debug.contains("input_schema"));
+    }
+
+    #[test]
     fn authorization_projection_overrides_stale_pending_history_without_grant_ids() {
         use desk_agent_protocol::capability_grant::{
             CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrantIssuer, CapabilityGrantLimits,
@@ -1602,6 +1801,7 @@ mod tests {
             grant_id: "secret-grant-id".into(),
             actor_id: "owner".into(),
             run_id: "run".into(),
+            input_revision: 1,
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: "device".into(),
             target_session_id: None,
@@ -1632,7 +1832,7 @@ mod tests {
             revoked_at_unix_ms: None,
             revoked_reason: None,
         };
-        let prompt = capability_authorization_prompt(&[grant], &[], 500, 1);
+        let prompt = capability_authorization_prompt(std::slice::from_ref(&grant), &[], 500, 1, 1);
         assert!(prompt.text.contains("\"state\":\"active\""));
         assert!(prompt.text.contains("inspect_office_selection"));
         assert!(!prompt.text.contains("secret-grant-id"));
@@ -1642,6 +1842,10 @@ mod tests {
                 .contains("supersedes any older assistant statement")
         );
         assert_eq!(prompt.approved_exact_input_expires_at_unix_ms, None);
+
+        let stale_focus = capability_authorization_prompt(&[grant], &[], 500, 2, 1);
+        assert!(!stale_focus.text.contains("inspect_office_selection"));
+        assert_eq!(stale_focus.approved_exact_input_expires_at_unix_ms, None);
     }
 
     #[test]
@@ -1659,6 +1863,7 @@ mod tests {
             grant_id: "secret-exact-grant-id".into(),
             actor_id: "owner".into(),
             run_id: "run".into(),
+            input_revision: 1,
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: "device".into(),
             target_session_id: None,
@@ -1716,6 +1921,7 @@ mod tests {
             std::slice::from_ref(&request),
             500,
             1,
+            1,
         );
         assert!(active.text.contains("\"approved_exact_input\""));
         assert!(active.text.contains("\"value\":\"approved\""));
@@ -1727,8 +1933,20 @@ mod tests {
                 std::slice::from_ref(&request),
                 500,
                 1,
+                1,
             ),
             vec!["browser_activate_element"]
+        );
+
+        assert!(
+            active_exact_authorized_tool_names(
+                std::slice::from_ref(&grant),
+                std::slice::from_ref(&request),
+                500,
+                2,
+                1,
+            )
+            .is_empty()
         );
 
         let mut reusable_exact = grant.clone();
@@ -1737,6 +1955,7 @@ mod tests {
             &[reusable_exact],
             std::slice::from_ref(&request),
             500,
+            1,
             1,
         );
         assert!(reusable.text.contains("\"approved_exact_input\""));
@@ -1771,6 +1990,7 @@ mod tests {
                 std::slice::from_ref(&request),
                 500,
                 1,
+                1,
             );
             assert!(!projection.text.contains("\"approved_exact_input\""));
             assert_eq!(projection.approved_exact_input_expires_at_unix_ms, None);
@@ -1779,6 +1999,7 @@ mod tests {
                     &[inactive],
                     std::slice::from_ref(&request),
                     500,
+                    1,
                     1,
                 )
                 .is_empty()
@@ -1791,6 +2012,7 @@ mod tests {
             &[stale_readiness],
             std::slice::from_ref(&request),
             500,
+            1,
             1,
         );
         assert!(stale.text.contains("\"state\":\"stale_readiness\""));
@@ -1810,7 +2032,7 @@ mod tests {
         legacy_request.items[0].canonical_input_json = Some(legacy_flat.into());
         legacy_request.items[0].canonical_input_digest_sha256 = Some(legacy_digest);
         let incompatible =
-            capability_authorization_prompt(&[legacy_grant], &[legacy_request], 500, 1);
+            capability_authorization_prompt(&[legacy_grant], &[legacy_request], 500, 1, 1);
         assert!(
             incompatible
                 .text
@@ -1825,7 +2047,7 @@ mod tests {
         let registry = crate::device_assistant::device_assistant_provider_registry();
         let request = build_permission_request(
             &call(
-                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_new_draft_handoff","expected_effect":"write_external_draft","resource_scope":[],"operation_scope":[],"export_destinations":[],"exact_input":{"draft":{"schema_version":3,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":5,"reason":"Prepare a manual Outlook draft"}]}"#,
+                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_new_draft_handoff","expected_effect":"write_external_draft","resource_scope":[],"operation_scope":[],"export_destinations":[],"exact_input":{"draft":{"schema_version":4,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":5,"reason":"Prepare a manual Outlook draft"}]}"#,
             ),
             &registry,
             "permission-outlook".into(),
@@ -1847,7 +2069,7 @@ mod tests {
 
         let invalid = build_permission_request(
             &call(
-                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_new_draft_handoff","expected_effect":"write_external_draft","exact_input":{"schema_version":3,"draft":{"schema_version":3,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Prepare a manual Outlook draft"}]}"#,
+                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_new_draft_handoff","expected_effect":"write_external_draft","exact_input":{"schema_version":4,"draft":{"schema_version":4,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Prepare a manual Outlook draft"}]}"#,
             ),
             &registry,
             "permission-outlook-invalid".into(),
@@ -2050,5 +2272,103 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn exact_external_send_permission_is_separate_exact_and_one_shot() {
+        use crate::{
+            communication::test_support::{gmail_exact_send_input, slack_exact_send_input},
+            device_assistant::{
+                GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID, GMAIL_WEB_SEND_PROVIDER_ID,
+                SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID, SLACK_WEB_SEND_PROVIDER_ID,
+            },
+        };
+        use desk_agent_protocol::data_lineage::DestinationIdentity;
+
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        for (tool_name, provider_id, input, expected_destination) in [
+            (
+                "send_gmail_web_exact",
+                GMAIL_WEB_SEND_PROVIDER_ID,
+                serde_json::to_value(gmail_exact_send_input()).unwrap(),
+                DestinationIdentity::EmailAccount {
+                    account_id: GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                },
+            ),
+            (
+                "send_slack_web_exact",
+                SLACK_WEB_SEND_PROVIDER_ID,
+                serde_json::to_value(slack_exact_send_input()).unwrap(),
+                DestinationIdentity::ChatAccount {
+                    account_id: SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                },
+            ),
+        ] {
+            let item = serde_json::json!({
+                "item_id": "send",
+                "provider_id": provider_id,
+                "tool_name": tool_name,
+                "expected_effect": "send_external",
+                "resource_scope": ["forged:resource"],
+                "operation_scope": ["forged_operation"],
+                "export_destinations": [{"kind":"email_account","account_id":"forged"}],
+                "exact_input": input,
+                "suggested_ttl_seconds": 600,
+                "suggested_max_uses": 99,
+                "reason": "Send the exact reviewed payload"
+            });
+            let request = build_permission_request(
+                &call(&serde_json::json!({"items":[item.clone()]}).to_string()),
+                &registry,
+                format!("permission-{tool_name}"),
+                1,
+                "2026-09-03T00:00:00Z".into(),
+            )
+            .unwrap();
+            let stored = &request.items[0];
+            assert_eq!(stored.expected_effect, CapabilityEffect::SendExternal);
+            assert_eq!(stored.suggested_max_uses, 1);
+            assert_eq!(stored.operation_scope, ["use_selected_object"]);
+            assert_eq!(stored.export_destinations, [expected_destination]);
+            assert!(stored.canonical_input_json.is_some());
+            assert!(stored.canonical_input_digest_sha256.is_some());
+
+            let mut missing = item.clone();
+            missing.as_object_mut().unwrap().remove("exact_input");
+            assert!(
+                build_permission_request(
+                    &call(&serde_json::json!({"items":[missing]}).to_string()),
+                    &registry,
+                    "permission-missing".into(),
+                    1,
+                    "2026-09-03T00:00:00Z".into(),
+                )
+                .is_err()
+            );
+
+            let mixed = serde_json::json!({
+                "items": [
+                    item,
+                    {
+                        "item_id":"inspect",
+                        "provider_id":"desktop.session",
+                        "tool_name":"inspect_desktop_session",
+                        "expected_effect":"read_device",
+                        "suggested_ttl_seconds":60,
+                        "suggested_max_uses":1,
+                        "reason":"Inspect"
+                    }
+                ]
+            });
+            let error = build_permission_request(
+                &call(&mixed.to_string()),
+                &registry,
+                "permission-mixed".into(),
+                1,
+                "2026-09-03T00:00:00Z".into(),
+            )
+            .unwrap_err();
+            assert!(error.message.contains("must be requested separately"));
+        }
     }
 }

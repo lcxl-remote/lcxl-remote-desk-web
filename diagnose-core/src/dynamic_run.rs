@@ -25,6 +25,9 @@ pub const TASK_STATUS_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const PERMISSION_REQUEST_SCHEMA_VERSION: u16 = 1;
 pub const BACKGROUND_TASK_SCHEMA_VERSION: u16 = 1;
 pub const MAX_TASK_STATUS_ITEMS: usize = 128;
+/// Owner/model projections retain a bounded task window even when one
+/// conversation is reused indefinitely. Durable work/audit rows are unchanged.
+pub const MAX_BACKGROUND_TASKS_IN_PROJECTION: usize = 64;
 pub const MAX_PERMISSION_REQUESTS: usize = 16;
 pub const MAX_PERMISSION_REQUEST_ITEMS: usize = 16;
 pub const MAX_PERMISSION_SCOPE_VALUES: usize = 32;
@@ -347,6 +350,32 @@ impl BackgroundTaskRecord {
         self.updated_at = updated_at;
         Ok(())
     }
+}
+
+/// Prefer actionable work, then the current focus epoch, then the most recently
+/// updated records. The returned order is chronological for stable rendering.
+pub fn bounded_background_task_projection(
+    mut records: Vec<BackgroundTaskRecord>,
+    current_input_revision: u64,
+) -> Vec<BackgroundTaskRecord> {
+    records.sort_by(|left, right| {
+        left.state
+            .is_terminal()
+            .cmp(&right.state.is_terminal())
+            .then_with(|| {
+                (right.task.input_revision == current_input_revision)
+                    .cmp(&(left.task.input_revision == current_input_revision))
+            })
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| right.task.task_id.cmp(&left.task.task_id))
+    });
+    records.truncate(MAX_BACKGROUND_TASKS_IN_PROJECTION);
+    records.sort_by(|left, right| {
+        left.updated_at
+            .cmp(&right.updated_at)
+            .then_with(|| left.task.task_id.cmp(&right.task.task_id))
+    });
+    records
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1014,8 +1043,9 @@ mod tests {
         };
         update.validate().unwrap();
         let json = serde_json::to_value(update).unwrap();
-        assert!(json.to_string().find("grant_id").is_none());
-        assert!(json.to_string().find("execution_id").is_none());
+        let encoded = json.to_string();
+        assert!(!encoded.contains("grant_id"));
+        assert!(!encoded.contains("execution_id"));
     }
 
     fn permission_request() -> PermissionRequest {
@@ -1184,5 +1214,57 @@ mod tests {
         assert_eq!(record.task.call_id, "call-1");
         assert_eq!(record.task.generation, 1);
         assert_eq!(record.result_envelope_ids, vec!["result-envelope-1"]);
+    }
+
+    #[test]
+    fn background_projection_is_bounded_and_keeps_actionable_work() {
+        let records = (0..100)
+            .map(|index| {
+                let running = index < 2;
+                BackgroundTaskRecord {
+                    schema_version: BACKGROUND_TASK_SCHEMA_VERSION,
+                    task: CapabilityTaskRef {
+                        task_id: format!("task-{index:03}"),
+                        call_id: format!("call-{index:03}"),
+                        run_id: "run-1".into(),
+                        provider_id: "file.workspace".into(),
+                        capability_id: "file.report.create".into(),
+                        input_revision: if index % 2 == 0 { 7 } else { 6 },
+                        generation: 1,
+                    },
+                    turn_id: format!("turn-{index:03}"),
+                    tool_name: "create_report".into(),
+                    canonical_input_digest_sha256: "a".repeat(64),
+                    effect: CapabilityEffect::WriteArtifact,
+                    execution_policy: ExecutionPolicy::Adaptive {
+                        foreground_budget_ms: 5_000,
+                    },
+                    supports_cancel: true,
+                    state: if running {
+                        BackgroundTaskState::Running
+                    } else {
+                        BackgroundTaskState::Succeeded
+                    },
+                    progress_sequence: u64::from(!running),
+                    started_at: format!("2026-08-26T00:{:02}:00Z", index % 60),
+                    updated_at: format!("2026-08-26T01:{:02}:00Z", index % 60),
+                    terminal_at: (!running).then(|| format!("2026-08-26T01:{:02}:00Z", index % 60)),
+                    cancel_request_id: None,
+                    result_envelope_ids: Vec::new(),
+                }
+            })
+            .collect();
+        let projected = bounded_background_task_projection(records, 7);
+        assert_eq!(projected.len(), MAX_BACKGROUND_TASKS_IN_PROJECTION);
+        assert!(
+            projected
+                .iter()
+                .any(|record| record.task.task_id == "task-000")
+        );
+        assert!(
+            projected
+                .iter()
+                .any(|record| record.task.task_id == "task-001")
+        );
     }
 }

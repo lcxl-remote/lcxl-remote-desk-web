@@ -1222,6 +1222,7 @@ mod tests {
                 height: 1,
                 dpi_x: 96,
                 dpi_y: 96,
+                window: None,
                 image: vec![137, 80, 78, 71, 1, 2, 3],
                 truncated: false,
             },

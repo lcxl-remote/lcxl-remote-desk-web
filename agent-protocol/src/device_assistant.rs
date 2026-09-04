@@ -12,6 +12,44 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::computer_use::{ObjectKind, ObjectRef};
 
+/// Device-owned product switch projected to trusted central orchestrators.
+///
+/// The device is the only authority for this value. Central services may cache
+/// the latest observed snapshot for routing and UI, but may never synthesize a
+/// newer revision or treat their cache as desired state.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceAssistantSettings {
+    /// Monotonic device-local revision. Revision zero is the initial state.
+    pub revision: u64,
+    /// The one product-level Device Assistant switch. Defaults fail closed.
+    pub enabled: bool,
+}
+
+/// Compare-and-set request accepted by the device-local settings endpoint.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceAssistantSettingsUpdate {
+    /// Revision returned by the most recent authoritative device read.
+    pub expected_revision: u64,
+    /// Exact desired product-switch value.
+    pub enabled: bool,
+}
+
 /// Browser to central brain: one owner-authenticated Device Assistant turn.
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
@@ -107,6 +145,10 @@ pub enum DeviceAssistantObjectContextOperation {
         object_ref: ObjectRef,
         display_summary: String,
     },
+    AttachWindow {
+        object_ref: ObjectRef,
+        display_summary: String,
+    },
     Detach {
         attachment_id: String,
     },
@@ -136,6 +178,10 @@ impl DeviceAssistantObjectContextUpdate {
                 object_ref,
                 display_summary,
             } => validate_terminal_selection(object_ref, display_summary),
+            DeviceAssistantObjectContextOperation::AttachWindow {
+                object_ref,
+                display_summary,
+            } => validate_window_selection(object_ref, display_summary),
             DeviceAssistantObjectContextOperation::Detach { attachment_id } => {
                 validate_wire_id(attachment_id, "invalid Device Assistant attachment id")
             }
@@ -152,6 +198,31 @@ impl DeviceAssistantObjectContextUpdate {
             }
         }
     }
+}
+
+fn validate_window_selection(
+    object_ref: &ObjectRef,
+    display_summary: &str,
+) -> Result<(), &'static str> {
+    if object_ref.object_kind != ObjectKind::Window {
+        return Err("Device Assistant window selection requires an edge-issued window reference");
+    }
+    validate_wire_id(
+        &object_ref.token,
+        "invalid Device Assistant window reference token",
+    )?;
+    validate_wire_id(
+        &object_ref.snapshot_id,
+        "invalid Device Assistant window snapshot id",
+    )?;
+    validate_wire_id(
+        &object_ref.expires_at,
+        "invalid Device Assistant window reference expiry",
+    )?;
+    if display_summary.trim().is_empty() || display_summary.len() > 512 {
+        return Err("invalid Device Assistant window display summary");
+    }
+    Ok(())
 }
 
 fn validate_terminal_selection(
@@ -388,6 +459,39 @@ mod tests {
                 ..object_ref
             },
             display_summary: "not terminal output".into(),
+        };
+        assert!(invalid_kind.validate().is_err());
+    }
+
+    #[test]
+    fn window_attachment_update_accepts_only_an_edge_window_reference() {
+        let object_ref = ObjectRef {
+            token: "edge-window-token".into(),
+            snapshot_id: "worker-1:10".into(),
+            object_kind: ObjectKind::Window,
+            expires_at: "2026-08-25T20:00:00Z".into(),
+        };
+        let update = DeviceAssistantObjectContextUpdate {
+            conversation_id: "assistant-1".into(),
+            client_request_id: "window-change-1".into(),
+            operation: DeviceAssistantObjectContextOperation::AttachWindow {
+                object_ref: object_ref.clone(),
+                display_summary: "Calculator — Main Window".into(),
+            },
+        };
+        update.validate().unwrap();
+        let value = serde_json::to_value(&update).unwrap();
+        assert_eq!(value["operation"]["kind"], "attach_window");
+        assert!(value["operation"].get("window_handle").is_none());
+        assert!(value["operation"].get("process_id").is_none());
+
+        let mut invalid_kind = update;
+        invalid_kind.operation = DeviceAssistantObjectContextOperation::AttachWindow {
+            object_ref: ObjectRef {
+                object_kind: ObjectKind::UiElement,
+                ..object_ref
+            },
+            display_summary: "not a window".into(),
         };
         assert!(invalid_kind.validate().is_err());
     }

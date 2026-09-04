@@ -750,6 +750,51 @@ pub(super) async fn fleet_exec_valid_plan_without_worker_reports_dispatch_failed
     assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+pub(super) async fn assistant_switch_rejects_agentic_exec_without_blocking_fleet_exec() {
+    let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+    ctx.settings.write().await.device_assistant.enabled = false;
+    ctx.inbound_authz = Some(authz_block(
+        vec![Capability::ShellExecConfirmed],
+        vec![],
+        ExecutionMode::ConfirmEachAction,
+        desk_agent_protocol::RiskLevel::High,
+    ));
+
+    let input = agentic_input("Get-Service -Name Spooler", None, 5_000);
+    let plan = agentic_plan_from_input(&input, &[], "assistant-off");
+    handle_edge_exec_request_inbound(&ctx, &agentic_exec_model("assistant-off", &plan, &input))
+        .await
+        .unwrap();
+
+    match read_fleet_result(&mut rx).disposition {
+        EdgeExecDisposition::RejectedBeforeDispatch { error } => {
+            assert_eq!(error.kind, AgentErrorKind::UnsupportedCapability);
+            assert!(error.message.contains("Device Assistant is disabled"));
+        }
+        other => panic!("expected assistant switch rejection, got {other:?}"),
+    }
+
+    let template = fleet_template();
+    ctx.command_templates.replace(
+        vec![template.clone()],
+        desk_agent_protocol::command_template::COMMAND_TEMPLATE_SYNC_EPOCH,
+        Some(1),
+    );
+    let plan = fleet_plan(&template, "fleet-still-enabled");
+    handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("fleet-still-enabled", &plan))
+        .await
+        .unwrap();
+
+    match read_fleet_result(&mut rx).disposition {
+        EdgeExecDisposition::DispatchFailedBeforeWorker { error } => {
+            assert!(error.message.contains("worker unavailable"), "{error:?}");
+        }
+        other => panic!("expected fleet dispatch attempt, got {other:?}"),
+    }
+    assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
+}
+
 // ====== Agentic exec PEP (re-classification) ======
 
 /// A shell `ExecInput` with the caller's own limits / cwd, mirroring what the

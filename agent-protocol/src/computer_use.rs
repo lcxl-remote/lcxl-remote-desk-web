@@ -178,6 +178,17 @@ pub struct UiNodeProjection {
     pub supported_actions: Vec<UiSemanticActionKind>,
 }
 
+/// A short-lived window reference surfaced only so the authenticated owner can
+/// choose the exact window that a later screenshot may contain. The title is
+/// display metadata; only `object_ref` is authoritative.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct UiWindowProjection {
+    pub object_ref: ObjectRef,
+    pub title: Option<String>,
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
@@ -185,6 +196,11 @@ pub struct UiInspectOutput {
     pub snapshot_id: String,
     pub adapter: ComputerUseAdapterRef,
     pub nodes: Vec<UiNodeProjection>,
+    /// macOS AX windows that the owner may explicitly attach to Device
+    /// Assistant context. Empty on adapters that do not implement a window
+    /// selector.
+    #[serde(default)]
+    pub owner_selectable_windows: Vec<UiWindowProjection>,
     pub truncated: bool,
 }
 

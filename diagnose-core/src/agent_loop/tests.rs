@@ -210,6 +210,44 @@ struct ScriptModel {
     requests: Rc<RefCell<Vec<ModelRequest>>>,
 }
 
+struct ProjectionMetricsModel {
+    metrics: Rc<RefCell<Vec<crate::seam::ModelRequestProjectionMetrics>>>,
+}
+
+// Agent-loop fixtures exercise complete provider requests, including the
+// server-authored system prompt and API tool specifications. Keep their normal
+// window realistic; tests that need a deliberately tight checkpoint window use
+// CompressionScriptModel below.
+const TEST_MODEL_CONTEXT_BYTES: usize = crate::MIN_MODEL_CONTEXT_BYTES * 16;
+const PROJECTION_TEST_MODEL_CONTEXT_BYTES: usize = crate::MIN_MODEL_CONTEXT_BYTES * 8;
+
+#[async_trait(?Send)]
+impl ModelSeam for ProjectionMetricsModel {
+    async fn context_policy(
+        &self,
+        _requirements: crate::model_capability::ModelRequirements,
+    ) -> Result<crate::model_context::PinnedContextPolicy, AgentError> {
+        crate::model_context::PinnedContextPolicy::window(
+            SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test"),
+            1,
+            PROJECTION_TEST_MODEL_CONTEXT_BYTES,
+        )
+        .map_err(model_context_error)
+    }
+
+    fn on_model_request_projected(&self, metrics: crate::seam::ModelRequestProjectionMetrics) {
+        self.metrics.borrow_mut().push(metrics);
+    }
+
+    async fn call(
+        &self,
+        _request: ModelRequest,
+        _sink: &mut dyn TurnSink,
+    ) -> Result<ModelTurn, AgentError> {
+        Ok(answer("done"))
+    }
+}
+
 /// A checkpoint-capable scripted model used to prove that compression is an
 /// inline provider call, not a model→tool step or a user-visible stream.
 struct CompressionScriptModel {
@@ -217,6 +255,7 @@ struct CompressionScriptModel {
     requests: Rc<RefCell<Vec<ModelRequest>>>,
     audits: Rc<RefCell<Vec<crate::seam::ContextCompressionAuditOutcome>>>,
     source: SourceContextKey,
+    max_context_bytes: usize,
 }
 
 struct NoopHeartbeatGuard;
@@ -246,7 +285,7 @@ impl ModelSeam for CompressionScriptModel {
         crate::model_context::PinnedContextPolicy::checkpoint_summary(
             self.source.clone(),
             1,
-            crate::MIN_MODEL_CONTEXT_BYTES * 4,
+            self.max_context_bytes,
             1,
         )
         .map_err(model_context_error)
@@ -302,7 +341,7 @@ impl ModelSeam for ScriptModel {
         crate::model_context::PinnedContextPolicy::window(
             SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test"),
             1,
-            crate::MIN_MODEL_CONTEXT_BYTES,
+            TEST_MODEL_CONTEXT_BYTES,
         )
         .map_err(|error| AgentError {
             kind: desk_agent_protocol::AgentErrorKind::Internal,
@@ -342,7 +381,7 @@ impl ModelSeam for SupersedingModel {
         crate::model_context::PinnedContextPolicy::window(
             SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test"),
             1,
-            crate::MIN_MODEL_CONTEXT_BYTES,
+            TEST_MODEL_CONTEXT_BYTES,
         )
         .map_err(model_context_error)
     }
@@ -595,6 +634,8 @@ fn deps<'a>(
         registry,
         provider_registry: None,
         capability_inventory: None,
+        capability_permission_candidates: &[],
+        capability_catalog_metrics: None,
         permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
@@ -643,6 +684,243 @@ async fn answers_without_tools() {
     assert_eq!(s.conversation.len(), 2);
     // The model was offered the granted read tool.
     assert_eq!(model.requests.borrow()[0].tools.len(), 1);
+}
+
+#[tokio::test]
+async fn conversation_history_is_explicit_bounded_and_charged_to_current_focus() {
+    use desk_agent_protocol::data_lineage::DestinationIdentity;
+
+    let destination = DestinationIdentity::Model {
+        connection_id: "gateway".into(),
+        connection_revision: 1,
+        model_id: "model".into(),
+        profile_revision: 1,
+    };
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-09-03T00:00:00Z",
+    );
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    seeded.focus_epoch.input_revision = 1;
+    for (id, role, text) in [
+        ("u-old", ChatRole::User, "older question"),
+        ("a-old", ChatRole::Assistant, "older answer"),
+    ] {
+        let mut message = crate::model_message_labels::model_bound_user_message(
+            id.into(),
+            text.into(),
+            destination.clone(),
+        )
+        .unwrap();
+        message.role = role;
+        seeded.conversation.push(message);
+    }
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args(
+                    "history-1",
+                    crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME,
+                    r#"{"limit":2}"#,
+                ),
+                answer("history loaded"),
+            ]
+            .into(),
+        ),
+        requests,
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        reply: "unused".into(),
+    };
+    let registry = crate::conversation_history::conversation_history_tool_registry();
+    let clock = || "2026-09-03T00:00:01Z".to_string();
+
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("u-current", ChatRole::User, "unrelated current question"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("history loaded".into()));
+    assert!(tools.calls.borrow().is_empty());
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.focus_epoch.history_lookup_calls, 1);
+    assert!(stored.focus_epoch.history_result_bytes > 0);
+    let history_result = stored
+        .conversation
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("history-1"))
+        .expect("persisted bounded history result");
+    assert!(history_result.text.contains("older question"));
+    assert!(history_result.text.contains("older answer"));
+    assert!(!history_result.text.contains("unrelated current question"));
+    assert_eq!(
+        history_result
+            .data_envelope
+            .as_ref()
+            .unwrap()
+            .provenance
+            .source_envelope_ids
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn capability_discovery_replaces_working_set_without_persisting_schema() {
+    use desk_agent_protocol::capability_provider::CapabilityBlockedReason;
+
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let target = providers
+        .capability_for_tool("read_system_info")
+        .expect("system info descriptor")
+        .registered_tool();
+    let inventory = providers
+        .providers()
+        .flat_map(|provider| {
+            provider.capabilities.iter().map(|capability| {
+                let ready = capability.tool_spec.name == target.name();
+                crate::capability_availability::CapabilityAvailability {
+                    provider_id: provider.wire.provider_id.clone(),
+                    capability_id: capability.wire.capability_id.clone(),
+                    tool_name: capability.tool_spec.name.clone(),
+                    compiled: true,
+                    enabled: true,
+                    connected: ready,
+                    ready,
+                    reason: (!ready).then_some(CapabilityBlockedReason::AdapterUnavailable),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        AgentScope {
+            granted: vec![target.required_capability],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        "2026-09-03T00:00:00Z",
+    );
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    seeded.focus_epoch.input_revision = 1;
+    seeded.capability_disclosure.focus_input_revision = 1;
+    seeded.capability_disclosure.updated_input_revision = 1;
+    seeded.capability_disclosure.loaded_tool_names = vec!["search_public_web".into()];
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args(
+                    "load-1",
+                    crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME,
+                    r#"{"tool_names":["read_system_info"]}"#,
+                ),
+                answer("ready"),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        reply: "unused".into(),
+    };
+    let mut registry = vec![target];
+    registry.extend(crate::capability_disclosure::capability_discovery_tool_registry());
+    let clock = || "2026-09-03T00:00:01Z".to_string();
+    let deps = LoopDeps {
+        session_seam: &sess,
+        model: &model,
+        tools: &tools,
+        content_safety: crate::content_safety::ContentSafetyMode::Disabled,
+        registry: &registry,
+        provider_registry: Some(&providers),
+        capability_inventory: Some(&inventory),
+        capability_permission_candidates: &[],
+        capability_catalog_metrics: None,
+        permission_continuation_exact_tools: &[],
+        response_format: ResponseFormatSpec::None,
+        system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
+        max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
+        max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
+        clock: &clock,
+        heartbeat: None,
+    };
+    let outcome = run_agent_turn(
+        &deps,
+        ClaimTurnParams {
+            current_pdp_scope: AgentScope {
+                granted: vec![Capability::SystemInfo],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            ..claim()
+        },
+        ChatMessage::text("u", ChatRole::User, "load system information capability"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("ready".into()));
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .all(|tool| tool.name != "read_system_info")
+    );
+    assert!(
+        requests[1]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "read_system_info")
+    );
+    assert!(requests.iter().all(|request| {
+        !request.messages[0].text.contains("\"input_schema\"")
+            && !request.messages[0].text.contains("\"description\"")
+    }));
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(
+        stored.capability_disclosure.loaded_tool_names,
+        ["read_system_info"]
+    );
+    let receipt = stored
+        .conversation
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("load-1"))
+        .expect("short discovery receipt");
+    assert_eq!(receipt.text, r#"{"loaded":["read_system_info"]}"#);
+    assert!(!receipt.text.contains("input_schema"));
 }
 
 #[tokio::test]
@@ -738,6 +1016,7 @@ async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
         page: page.clone(),
         snapshot: None,
         form_readback: Vec::new(),
+        send_receipt: None,
         completed_at_unix_ms: 101,
     };
     let completion_text = serde_json::json!({
@@ -1248,6 +1527,122 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
 }
 
 #[tokio::test]
+async fn permission_planning_rejects_a_candidate_not_loaded_in_the_current_focus() {
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let target = providers
+        .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+        .unwrap()
+        .registered_tool();
+    let mut registry = vec![target];
+    registry.extend(crate::permission_tools::permission_planning_tool_registry());
+    registry.extend(crate::capability_disclosure::capability_discovery_tool_registry());
+    let inventory = [
+        crate::capability_availability::CapabilityAvailability {
+            provider_id: "desktop.session".into(),
+            capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
+            tool_name: "inspect_desktop_session".into(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        },
+        crate::capability_availability::CapabilityAvailability {
+            provider_id: providers
+                .provider_for_capability(
+                    &providers
+                        .capability_for_tool("read_system_info")
+                        .unwrap()
+                        .wire
+                        .capability_id,
+                )
+                .unwrap()
+                .wire
+                .provider_id
+                .clone(),
+            capability_id: providers
+                .capability_for_tool("read_system_info")
+                .unwrap()
+                .wire
+                .capability_id
+                .clone(),
+            tool_name: "read_system_info".into(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        },
+    ];
+    let mut initial = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-09-03T00:00:00Z",
+    );
+    initial.surface = AgentSessionSurface::DeviceAssistant;
+    initial.latest_input_seq = 1;
+    initial.input_revision = 1;
+    initial.focus_epoch.input_revision = 1;
+    initial.capability_disclosure.focus_input_revision = 1;
+    initial.capability_disclosure.updated_input_revision = 1;
+    initial.capability_disclosure.loaded_tool_names = vec!["read_system_info".into()];
+    let sess = MemSession {
+        inner: RefCell::new(Some(initial)),
+        ..Default::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args(
+                    "load-other",
+                    crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME,
+                    r#"{"tool_names":["read_system_info"]}"#,
+                ),
+                tool_use_args(
+                    "permission-call",
+                    crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                    r#"{"items":[{"item_id":"inspect","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","resource_scope":["target:device"],"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
+                ),
+                answer("I need to load that capability first."),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "must not run".into(),
+    };
+    let clock = || "2026-09-03T00:00:01Z".to_string();
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.provider_registry = Some(&providers);
+    loop_deps.capability_inventory = Some(&inventory);
+
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "inspect the desktop session"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        LoopOutcome::Answered("I need to load that capability first.".into())
+    );
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert!(stored.permission_requests.is_empty());
+    assert!(stored.conversation.iter().any(|message| {
+        message.role == ChatRole::Tool && message.text.contains("not loaded in the current focus")
+    }));
+}
+
+#[tokio::test]
 async fn permission_planning_reuses_settled_equivalent_request_without_new_pending_item() {
     let providers = crate::device_assistant::device_assistant_provider_registry();
     let prior_call = ToolCall {
@@ -1393,6 +1788,7 @@ async fn compression_precedes_main_call_and_counts_tokens_but_not_steps() {
         requests: requests.clone(),
         audits: audits.clone(),
         source,
+        max_context_bytes: crate::MIN_MODEL_CONTEXT_BYTES * 4,
     };
     let tools = RecordingTools {
         calls: Rc::new(RefCell::new(vec![])),
@@ -1493,6 +1889,139 @@ async fn compression_precedes_main_call_and_counts_tokens_but_not_steps() {
 }
 
 #[tokio::test]
+async fn checkpoint_compression_preserves_disclosure_selection_without_summarizing_schema() {
+    use desk_agent_protocol::capability_provider::CapabilityBlockedReason;
+
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let target = providers
+        .capability_for_tool("browser_open_page")
+        .expect("browser descriptor")
+        .registered_tool();
+    let inventory = providers
+        .providers()
+        .flat_map(|provider| {
+            provider.capabilities.iter().map(|capability| {
+                let ready = capability.tool_spec.name == target.name();
+                crate::capability_availability::CapabilityAvailability {
+                    provider_id: provider.wire.provider_id.clone(),
+                    capability_id: capability.wire.capability_id.clone(),
+                    tool_name: capability.tool_spec.name.clone(),
+                    compiled: true,
+                    enabled: true,
+                    connected: ready,
+                    ready,
+                    reason: (!ready).then_some(CapabilityBlockedReason::AdapterUnavailable),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut existing = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-09-03T00:00:00Z",
+    );
+    existing.surface = AgentSessionSurface::DeviceAssistant;
+    existing.input_revision = 1;
+    existing.latest_input_seq = 1;
+    existing.focus_epoch.input_revision = 1;
+    existing.capability_disclosure.reset_for_input(1);
+    existing.capability_disclosure.loaded_tool_names = vec![target.name().into()];
+    existing.conversation = vec![
+        ChatMessage::text("old-a", ChatRole::User, "a".repeat(35_000)),
+        ChatMessage::text("old-b", ChatRole::Assistant, "b".repeat(30_000)),
+    ];
+    let sess = MemSession {
+        inner: RefCell::new(Some(existing)),
+        ..Default::default()
+    };
+    let source =
+        SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
+    let compression_turn = ModelTurn {
+        text: serde_json::json!({
+            "goals": [{"text": "old goal", "source_message_ids": ["old-a"]}],
+            "historical_constraints": [], "reported_observations": [],
+            "completed_actions": [], "unresolved_questions": [], "next_steps": [],
+            "important_identifiers": [], "omitted_evidence": []
+        })
+        .to_string(),
+        stop_reason: StopReason::EndTurn,
+        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let model = CompressionScriptModel {
+        turns: RefCell::new([Ok(compression_turn), Ok(answer("done"))].into()),
+        requests: requests.clone(),
+        audits: Rc::new(RefCell::new(Vec::new())),
+        source,
+        max_context_bytes: TEST_MODEL_CONTEXT_BYTES,
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        reply: "unused".into(),
+    };
+    let registry = crate::capability_disclosure::capability_discovery_tool_registry();
+    let permission_candidates = vec![target];
+    let clock = || "2026-09-03T00:00:01Z".to_string();
+    let loop_deps = LoopDeps {
+        session_seam: &sess,
+        model: &model,
+        tools: &tools,
+        content_safety: crate::content_safety::ContentSafetyMode::Disabled,
+        registry: &registry,
+        provider_registry: Some(&providers),
+        capability_inventory: Some(&inventory),
+        capability_permission_candidates: &permission_candidates,
+        capability_catalog_metrics: None,
+        permission_continuation_exact_tools: &[],
+        response_format: ResponseFormatSpec::None,
+        system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
+        max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
+        max_same_tool_per_turn: crate::MAX_SAME_TOOL_PER_TURN,
+        clock: &clock,
+        heartbeat: None,
+    };
+
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("current", ChatRole::User, "continue"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].use_case,
+        crate::model_profile::ModelUseCase::ContextCompression
+    );
+    let compressed_request = serde_json::to_string(&requests[0].messages).unwrap();
+    assert!(!compressed_request.contains("loaded_capability_details"));
+    assert!(!compressed_request.contains("browser_open_page"));
+    assert!(
+        requests[1].messages[0]
+            .text
+            .contains("loaded_capability_details")
+    );
+    assert!(requests[1].messages[0].text.contains("browser_open_page"));
+    assert_eq!(
+        sess.inner
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .capability_disclosure
+            .loaded_tool_names,
+        ["browser_open_page"]
+    );
+}
+
+#[tokio::test]
 async fn checkpoint_survives_main_call_failure_and_is_reused_by_the_next_turn() {
     use desk_agent_protocol::AgentErrorKind;
 
@@ -1543,6 +2072,7 @@ async fn checkpoint_survives_main_call_failure_and_is_reused_by_the_next_turn() 
         requests: failed_requests.clone(),
         audits: Rc::new(RefCell::new(Vec::new())),
         source: source.clone(),
+        max_context_bytes: crate::MIN_MODEL_CONTEXT_BYTES * 4,
     };
     let tools = RecordingTools {
         calls: Rc::new(RefCell::new(vec![])),
@@ -1585,6 +2115,7 @@ async fn checkpoint_survives_main_call_failure_and_is_reused_by_the_next_turn() 
         requests: reused_requests.clone(),
         audits: Rc::new(RefCell::new(Vec::new())),
         source,
+        max_context_bytes: crate::MIN_MODEL_CONTEXT_BYTES * 4,
     };
     let mut second_claim = claim();
     second_claim.turn_id = "turn-2".into();
@@ -1630,8 +2161,8 @@ async fn a_second_compression_need_in_the_same_turn_fails_without_redial() {
         "2026-06-19T00:00:00Z",
     );
     existing.conversation = vec![
-        ChatMessage::text("old-a", ChatRole::User, "a".repeat(9000)),
-        ChatMessage::text("middle", ChatRole::User, "m".repeat(6000)),
+        ChatMessage::text("old-a", ChatRole::User, "a".repeat(14_000)),
+        ChatMessage::text("middle", ChatRole::User, "m".repeat(5000)),
     ];
     *sess.inner.borrow_mut() = Some(existing);
 
@@ -1656,10 +2187,11 @@ async fn a_second_compression_need_in_the_same_turn_fails_without_redial() {
         requests: requests.clone(),
         audits: audits.clone(),
         source,
+        max_context_bytes: crate::MIN_MODEL_CONTEXT_BYTES * 6,
     };
     let tools = RecordingTools {
         calls: Rc::new(RefCell::new(vec![])),
-        reply: "x".repeat(8000),
+        reply: "x".repeat(12_000),
     };
     let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
     let clock = || "2026-06-20T00:00:01Z".to_string();
@@ -1667,7 +2199,7 @@ async fn a_second_compression_need_in_the_same_turn_fails_without_redial() {
     let error = run_agent_turn(
         &deps(&sess, &model, &tools, &registry, &clock),
         claim(),
-        ChatMessage::text("current", ChatRole::User, "c".repeat(3000)),
+        ChatMessage::text("current", ChatRole::User, "c".repeat(4000)),
         &mut sink,
     )
     .await
@@ -1737,6 +2269,7 @@ async fn rejected_compression_summary_records_usage_but_no_checkpoint_or_notice(
         requests: requests.clone(),
         audits: audits.clone(),
         source,
+        max_context_bytes: crate::MIN_MODEL_CONTEXT_BYTES * 4,
     };
     let tools = RecordingTools {
         calls: Rc::new(RefCell::new(vec![])),
@@ -1850,6 +2383,7 @@ async fn unhealthy_lease_prevents_compression_dial_and_checkpoint_commit() {
             "test",
             "test",
         ),
+        max_context_bytes: crate::MIN_MODEL_CONTEXT_BYTES * 4,
     };
     let tools = RecordingTools {
         calls: Rc::new(RefCell::new(vec![])),
@@ -1932,6 +2466,80 @@ async fn runs_read_tool_then_answers() {
     assert_eq!(s.conversation[2].role, ChatRole::Tool);
     assert_eq!(s.conversation[2].tool_call_id.as_deref(), Some("c1"));
     assert_eq!(s.current_turn_steps, 2);
+}
+
+#[tokio::test]
+async fn pending_visual_verification_withdraws_targeting_but_keeps_observation() {
+    let visual_scope = AgentScope {
+        granted: vec![
+            Capability::ScreenCaptureCurrent,
+            Capability::DesktopUiInspect,
+            Capability::AssistantActionPreview,
+        ],
+        mode: ExecutionMode::ConfirmEachAction,
+        expires_at: None,
+        policy_name: None,
+    };
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        visual_scope.clone(),
+        "2026-09-03T00:00:00Z",
+    );
+    seeded.adopt_client_metadata(
+        Some("client"),
+        crate::session::AgentSessionSurface::DeviceAssistant,
+    );
+    seeded.pending_visual_verification = Some(crate::visual_evidence::VisualVerificationFence {
+        focus_input_revision: 0,
+        source_tool_call_id: "screen-1".into(),
+        source_assistant_message_id: "assistant-1".into(),
+    });
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let model = ScriptModel {
+        turns: RefCell::new([answer("observe again")].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let registry = vec![
+        read_tool("read_current_screen", Capability::ScreenCaptureCurrent),
+        read_tool("inspect_desktop_ui", Capability::DesktopUiInspect),
+        read_tool(
+            "preview_computer_action",
+            Capability::AssistantActionPreview,
+        ),
+    ];
+    let mut visual_claim = claim();
+    visual_claim.current_pdp_scope = visual_scope;
+    let clock = || "2026-09-03T00:00:01Z".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        visual_claim,
+        ChatMessage::text("u", ChatRole::User, "continue"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+
+    let requests = requests.borrow();
+    let names = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"read_current_screen"));
+    assert!(names.contains(&"inspect_desktop_ui"));
+    assert!(!names.contains(&"preview_computer_action"));
 }
 
 /// A failed selected read still produces model-visible data. The information-
@@ -2399,7 +3007,7 @@ async fn follow_up_turn_continues_conversation() {
 }
 
 /// A tight context budget trims old history out of the model request while the
-/// system prompt (prepended on top, not counted) and the newest message stay.
+/// system prompt, tool specifications and newest message remain accounted for.
 #[tokio::test]
 async fn trims_history_to_budget() {
     let sess = MemSession::default();
@@ -2447,6 +3055,245 @@ async fn trims_history_to_budget() {
     assert!(
         msgs.iter().any(|m| m.text == "recent"),
         "the newest message is kept"
+    );
+}
+
+#[tokio::test]
+async fn projection_metrics_capture_long_session_growth_but_bounded_model_input() {
+    let mut observed = Vec::new();
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let inventory = providers
+        .providers()
+        .flat_map(|provider| {
+            provider.capabilities.iter().map(|capability| {
+                crate::capability_availability::CapabilityAvailability {
+                    provider_id: provider.wire.provider_id.clone(),
+                    capability_id: capability.wire.capability_id.clone(),
+                    tool_name: capability.tool_spec.name.clone(),
+                    compiled: true,
+                    enabled: true,
+                    connected: true,
+                    ready: true,
+                    reason: None,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let provider_tools = providers.registered_tools();
+    let mut registry = provider_tools.clone();
+    registry.extend(crate::capability_disclosure::capability_discovery_tool_registry());
+    registry.extend(crate::permission_tools::permission_planning_tool_registry());
+    registry.extend(crate::task_status_tools::task_status_tool_registry());
+    let mut granted = provider_tools
+        .iter()
+        .map(|tool| tool.required_capability)
+        .collect::<Vec<_>>();
+    granted.sort_by_key(|capability| *capability as u16);
+    granted.dedup();
+    let broad_scope = AgentScope {
+        granted,
+        mode: ExecutionMode::ConfirmEachAction,
+        expires_at: None,
+        policy_name: None,
+    };
+    let mixed = [
+        "R0 system information",
+        "Pages iWork inspection",
+        "browser form interaction",
+        "permission approve or deny",
+        "background completion",
+        "outcome unknown reconciliation",
+    ];
+    for history_messages in [100_usize, 1_000] {
+        let sess = MemSession::default();
+        let mut session = PersistedAgentSession::new(
+            "conv",
+            "actor",
+            "device",
+            1,
+            broad_scope.clone(),
+            "2026-09-03T00:00:00Z",
+        );
+        session.surface = AgentSessionSurface::DeviceAssistant;
+        session.input_revision = 1;
+        session.latest_input_seq = 1;
+        session.focus_epoch.input_revision = 1;
+        for index in 0..history_messages {
+            session.conversation.push(ChatMessage::text(
+                format!("history-{index:04}"),
+                if index % 2 == 0 {
+                    ChatRole::User
+                } else {
+                    ChatRole::Assistant
+                },
+                format!(
+                    "{}: bounded historical payload {}",
+                    mixed[index % mixed.len()],
+                    "x".repeat(160)
+                ),
+            ));
+        }
+        let mut unknown_call = ChatMessage::assistant_tool_calls(
+            "unknown-call-message",
+            "",
+            vec![ToolCallRef {
+                id: "unknown-call".into(),
+                name: "execute_confirmed_command".into(),
+                arguments_json: r#"{"schema_version":1,"shell":"bash","command":"printf safe","timeout_ms":1000}"#.into(),
+            }],
+        );
+        unknown_call.replay_disposition = Some(ReplayDisposition::NotRequired {
+            source_context_key: SourceContextKey::derive(
+                WireProtocol::OpenAiChatCompletions,
+                "test",
+                "test",
+                "test",
+            ),
+        });
+        session.conversation.push(unknown_call);
+        session.conversation.push(ChatMessage::tool_result(
+            "unknown-placeholder",
+            "unknown-call",
+            OUTCOME_UNKNOWN_PLACEHOLDER,
+        ));
+        session.execution_state = ExecutionState::OutcomeUnknown {
+            action: crate::session::ActionIdentity::agent_exec(
+                41,
+                "unknown-request",
+                "unknown-execution",
+            ),
+            placeholder_message_id: "unknown-placeholder".into(),
+            since: "2026-09-03T00:00:01Z".into(),
+        };
+        session
+            .pending_auto_triggers
+            .push(crate::session::PendingWorkTrigger {
+                work_id: 42,
+                kind: crate::session::WorkKind::AgentExec,
+                execution_id: "background-execution".into(),
+                tool_call_id: "background-call".into(),
+                event_id: "background-event".into(),
+                chain_id: "old-chain".into(),
+                resolution_org_id: None,
+                since: "2026-09-03T00:00:02Z".into(),
+            });
+        session
+            .permission_requests
+            .push(crate::dynamic_run::PermissionRequest {
+                schema_version: crate::dynamic_run::PERMISSION_REQUEST_SCHEMA_VERSION,
+                request_id: "permission-old".into(),
+                input_revision: 1,
+                state: crate::dynamic_run::PermissionRequestState::Pending,
+                items: vec![crate::dynamic_run::GrantRequestItem {
+                    item_id: "read-file".into(),
+                    provider_id: "file.read".into(),
+                    tool_name: "read_selected_text_file".into(),
+                    expected_effect:
+                        desk_agent_protocol::capability_provider::CapabilityEffect::ReadFile,
+                    resource_scope: Vec::new(),
+                    operation_scope: Vec::new(),
+                    export_destinations: Vec::new(),
+                    canonical_input_json: None,
+                    canonical_input_digest_sha256: None,
+                    suggested_ttl_seconds: 300,
+                    suggested_max_uses: 1,
+                    reason: "read selected file".into(),
+                }],
+                created_at: "2026-09-03T00:00:03Z".into(),
+            });
+        *sess.inner.borrow_mut() = Some(session);
+
+        let metrics = Rc::new(RefCell::new(Vec::new()));
+        let model = ProjectionMetricsModel {
+            metrics: Rc::clone(&metrics),
+        };
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(vec![])),
+            reply: "unused".into(),
+        };
+        let clock = || "2026-09-03T00:00:04Z".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+        loop_deps.provider_registry = Some(&providers);
+        loop_deps.capability_inventory = Some(&inventory);
+        loop_deps.capability_permission_candidates = &provider_tools;
+        loop_deps.capability_catalog_metrics =
+            Some(crate::permission_tools::capability_catalog_metrics(
+                &providers,
+                &inventory,
+                &provider_tools,
+                &provider_tools,
+            ));
+        run_agent_turn(
+            &loop_deps,
+            ClaimTurnParams {
+                current_pdp_scope: broad_scope.clone(),
+                ..claim()
+            },
+            ChatMessage::text("current-input", ChatRole::User, "current requirement"),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        let metric = metrics.borrow()[0];
+        assert_eq!(metric.context_attachment_count, 0);
+        assert_eq!(metric.permission_request_count, 1);
+        assert_eq!(metric.pending_work_trigger_count, 1);
+        assert_eq!(metric.unresolved_execution_fact_count, 1);
+        assert!(metric.loaded_capability_count <= 8);
+        assert!(metric.capability_index_utf8_bytes <= 8 * 1024);
+        assert!(metric.loaded_capability_detail_utf8_bytes <= 32 * 1024);
+        let stored = sess.inner.borrow();
+        let json = stored.as_ref().unwrap().encode_json_for_storage().unwrap();
+        let restored = PersistedAgentSession::decode_json(&json).unwrap();
+        assert!(matches!(
+            restored.execution_state,
+            ExecutionState::OutcomeUnknown { .. }
+        ));
+        assert_eq!(restored.permission_requests.len(), 1);
+        assert_eq!(restored.pending_auto_triggers.len(), 1);
+        observed.push(metric);
+    }
+
+    let short = observed[0];
+    let long = observed[1];
+    assert_eq!(short.advertised_tool_count, long.advertised_tool_count);
+    assert_eq!(
+        short.advertised_tool_json_bytes,
+        long.advertised_tool_json_bytes
+    );
+    assert!(
+        long.message_json_bytes <= short.message_json_bytes.saturating_add(256),
+        "the provider-bound window must remain bounded: short={short:?} long={long:?}"
+    );
+    assert_eq!(short.capability_catalog_utf8_bytes, 0);
+    assert_eq!(
+        short.capability_index_utf8_bytes,
+        long.capability_index_utf8_bytes
+    );
+    assert_eq!(
+        short.loaded_capability_detail_utf8_bytes,
+        long.loaded_capability_detail_utf8_bytes
+    );
+    assert_eq!(short.loaded_capability_count, long.loaded_capability_count);
+    assert_eq!(long.capability_registry_count, 49);
+    assert!(long.conversation_message_count > short.conversation_message_count);
+    assert!(long.session_snapshot_json_bytes > short.session_snapshot_json_bytes);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "history_messages": [100, 1000],
+            "model_message_json_bytes": [short.message_json_bytes, long.message_json_bytes],
+            "advertised_tool_count": [short.advertised_tool_count, long.advertised_tool_count],
+            "advertised_tool_json_bytes": [short.advertised_tool_json_bytes, long.advertised_tool_json_bytes],
+            "capability_index_utf8_bytes": [short.capability_index_utf8_bytes, long.capability_index_utf8_bytes],
+            "loaded_capability_detail_utf8_bytes": [short.loaded_capability_detail_utf8_bytes, long.loaded_capability_detail_utf8_bytes],
+            "session_snapshot_json_bytes": [short.session_snapshot_json_bytes, long.session_snapshot_json_bytes],
+            "permission_request_count": [short.permission_request_count, long.permission_request_count],
+            "pending_work_trigger_count": [short.pending_work_trigger_count, long.pending_work_trigger_count],
+            "unresolved_execution_fact_count": [short.unresolved_execution_fact_count, long.unresolved_execution_fact_count],
+        }))
+        .unwrap()
     );
 }
 
@@ -2584,6 +3431,8 @@ fn exec_deps<'a>(
         registry,
         provider_registry: None,
         capability_inventory: None,
+        capability_permission_candidates: &[],
+        capability_catalog_metrics: None,
         permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
@@ -2744,6 +3593,105 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
         "observation must be restored after the approved mutation is proposed"
     );
     assert_eq!(*scripted.reads.borrow(), vec!["inspect"]);
+}
+
+/// Progressive disclosure must not insert its discovery tool into the narrow
+/// authorization-boundary request. The exact approved Provider tool remains
+/// pinned even when the ordinary working set is rebuilt.
+#[tokio::test]
+async fn exact_provider_permission_resume_omits_capability_discovery() {
+    use crate::session::{AgentSessionSurface, TriggerOrigin};
+
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let exact = providers
+        .capability_for_tool("read_system_info")
+        .expect("system info Provider capability")
+        .registered_tool();
+    let inventory = vec![crate::capability_availability::CapabilityAvailability {
+        provider_id: providers
+            .provider_for_capability(
+                &providers
+                    .capability_for_tool(exact.name())
+                    .unwrap()
+                    .wire
+                    .capability_id,
+            )
+            .unwrap()
+            .wire
+            .provider_id
+            .clone(),
+        capability_id: providers
+            .capability_for_tool(exact.name())
+            .unwrap()
+            .wire
+            .capability_id
+            .clone(),
+        tool_name: exact.name().into(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let mut registry = vec![exact];
+    registry.extend(crate::capability_disclosure::capability_discovery_tool_registry());
+    let exact_tools = vec!["read_system_info".to_string()];
+
+    let sess = MemSession::default();
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([tool_use("read-exact", "read_system_info"), answer("done")].into()),
+        requests: requests.clone(),
+    };
+    let scripted = tools(vec![]);
+    let clock = || "2026-09-03T00:00:01Z".to_string();
+    let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    seeded.focus_epoch.input_revision = 1;
+    seeded.conversation.push(ChatMessage::text(
+        "owner-requirement",
+        ChatRole::User,
+        "read the approved system information",
+    ));
+    *sess.inner.borrow_mut() = Some(seeded);
+
+    let mut resume_claim = exec_claim();
+    resume_claim.trigger_origin = TriggerOrigin::PermissionDecision;
+    let mut loop_deps = exec_deps(&sess, &model, &scripted, &registry, &clock);
+    loop_deps.provider_registry = Some(&providers);
+    loop_deps.capability_inventory = Some(&inventory);
+    loop_deps.permission_continuation_exact_tools = &exact_tools;
+
+    let outcome = resume_agent_turn_after_permission(
+        &loop_deps,
+        resume_claim,
+        ChatMessage::text(
+            "permission-decision",
+            ChatRole::User,
+            "trusted permission decision bridge",
+        ),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    assert_eq!(*scripted.reads.borrow(), vec!["read_system_info"]);
+    assert_eq!(
+        requests.borrow()[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read_system_info"]
+    );
+    assert!(
+        requests.borrow()[0].tools.iter().all(
+            |tool| tool.name != crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME
+        )
+    );
 }
 
 #[tokio::test]
@@ -3967,6 +4915,8 @@ async fn mutating_backend_error_fails_turn() {
         registry: &reg,
         provider_registry: None,
         capability_inventory: None,
+        capability_permission_candidates: &[],
+        capability_catalog_metrics: None,
         permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
@@ -4069,6 +5019,8 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
         registry: &reg,
         provider_registry: None,
         capability_inventory: None,
+        capability_permission_candidates: &[],
+        capability_catalog_metrics: None,
         permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
@@ -5066,6 +6018,8 @@ async fn rejected_tool_image_is_not_persisted_and_remaining_calls_are_paired() {
         registry: &registry,
         provider_registry: None,
         capability_inventory: None,
+        capability_permission_candidates: &[],
+        capability_catalog_metrics: None,
         permission_continuation_exact_tools: &[],
         response_format: ResponseFormatSpec::None,
         system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
@@ -5873,6 +6827,7 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
         page: page.clone(),
         snapshot: None,
         form_readback: Vec::new(),
+        send_receipt: None,
         completed_at_unix_ms: 43,
     };
     let browser_completion = serde_json::json!({
@@ -5942,6 +6897,7 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
             captured_at_unix_ms: 45,
         }),
         form_readback: Vec::new(),
+        send_receipt: None,
         completed_at_unix_ms: 46,
     };
     let mut gmail = ChatMessage::tool_result(
@@ -6093,6 +7049,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
             captured_at_unix_ms: 950,
         }),
         form_readback: Vec::new(),
+        send_receipt: None,
         completed_at_unix_ms: 975,
     };
     let mut browser_result = ChatMessage::tool_result(

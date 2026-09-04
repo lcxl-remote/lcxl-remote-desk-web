@@ -1499,14 +1499,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 2);
-        let requests = dispatcher.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[0], requests[1],
-            "retry bytes and identity stay exact"
-        );
-        assert_eq!(requests[1].request_id, "cancel-stable-1");
-        drop(requests);
+        {
+            let requests = dispatcher.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests[0], requests[1],
+                "retry bytes and identity stay exact"
+            );
+            assert_eq!(requests[1].request_id, "cancel-stable-1");
+        }
 
         let events = agent_run_event::Entity::find()
             .filter(agent_run_event::Column::RunId.eq("run-1"))

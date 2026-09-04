@@ -31,6 +31,7 @@ pub mod agentic_prompt;
 pub mod assistant_policy;
 pub mod browser_control;
 pub mod capability_availability;
+pub mod capability_disclosure;
 pub mod capability_grant;
 pub mod capability_risk;
 pub mod chat;
@@ -39,6 +40,7 @@ pub mod communication;
 pub mod communication_handoff;
 pub mod content_safety;
 pub mod context_attachment;
+pub mod conversation_history;
 pub mod conversation_key;
 pub mod data_policy;
 pub mod device_assistant;
@@ -47,6 +49,7 @@ pub mod dynamic_run;
 pub mod edge_registry;
 pub mod exec_classify;
 pub mod exec_tools;
+pub mod focus_epoch;
 pub mod image_input;
 pub mod input_read_context;
 pub mod live_context;
@@ -80,7 +83,9 @@ pub mod terminal_complete;
 pub mod terminal_copilot;
 mod text_parse;
 pub mod trim;
+pub mod visual_evidence;
 pub mod wait_tools;
+pub mod web_research;
 
 /// Default model context budget when `max_context_bytes` is unset (128 KB).
 ///

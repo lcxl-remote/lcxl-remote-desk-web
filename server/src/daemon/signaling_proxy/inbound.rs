@@ -21,6 +21,7 @@ pub(super) fn is_trusted_central_only(t: SignalingType) -> bool {
             | SignalingType::InvokeRemoteTool
             | SignalingType::SupportCodeIssued
             | SignalingType::RevokeAccessGrant
+            | SignalingType::UpdateDeviceAssistantSettings
     )
 }
 

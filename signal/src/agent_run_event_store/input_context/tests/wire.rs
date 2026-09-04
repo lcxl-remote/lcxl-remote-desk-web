@@ -247,6 +247,7 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
                 grant_id: "owner-approved-metadata-read".into(),
                 actor_id: "7".into(),
                 run_id: "run".into(),
+                input_revision: receipt.input_revision,
                 surface: desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
                 target_device_id: "device".into(),
                 target_session_id: None,

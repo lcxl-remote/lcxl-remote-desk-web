@@ -193,7 +193,30 @@
         element.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
+    function gmailExistingCommittedRecipient(element, value) {
+        if (!isGmail() || roleOf(element) !== "combobox") return null;
+        const compose = element.closest("[role='dialog']");
+        if (!compose) return null;
+        const candidates = compose.querySelectorAll("[email],[data-hovercard-id]");
+        for (const candidate of candidates) {
+            const committed = candidate.getAttribute("email") || candidate.getAttribute("data-hovercard-id") || candidate.textContent;
+            if (boundedText(committed, 64 * 1024) === value) {
+                return { compose, candidate };
+            }
+        }
+        return null;
+    }
+
     async function gmailCommittedRecipient(element, value) {
+        const existing = gmailExistingCommittedRecipient(element, value);
+        if (existing) {
+            return {
+                source_element_id: registerElement(existing.candidate),
+                container_element_id: registerElement(existing.compose),
+                kind: "committed_text",
+                value
+            };
+        }
         if (!isGmail() || roleOf(element) !== "combobox") return null;
         const compose = element.closest("[role='dialog']");
         if (!compose) return null;
@@ -250,8 +273,108 @@
     function isReviewedSendControl(element) {
         if (!isGmail() && !isSlack()) return false;
         const name = accessibleName(element).toLocaleLowerCase();
-        return element.getAttribute("type") === "submit" ||
-            /^(send|send now|发送|发送此邮件|post|send message)$/u.test(name);
+        return /^(send|send now|发送|发送此邮件|post|send message)$/u.test(name);
+    }
+
+    function exactFieldStillMatches(field) {
+        const element = resolveElement(field.element);
+        if (currentValue(element) === field.value) return true;
+        return Boolean(gmailExistingCommittedRecipient(element, field.value));
+    }
+
+    function attachmentStillPresent(sendControl, fileName) {
+        const container = sendControl.closest("[role='dialog']") || sendControl.closest("form");
+        if (!container) return false;
+        return [...container.querySelectorAll("[aria-label],[title],[data-tooltip],span,div")]
+            .some((candidate) => {
+                const labels = ["aria-label", "title", "data-tooltip"]
+                    .map((attribute) => boundedText(candidate.getAttribute(attribute), 1024))
+                    .filter(Boolean);
+                if (labels.some((label) => label === fileName || label.includes(fileName))) {
+                    return true;
+                }
+                return boundedText(candidate.textContent, 1024) === fileName;
+            });
+    }
+
+    function visibleTextMatches(selectors, expected) {
+        return [...document.querySelectorAll(selectors)].some((element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return style.visibility !== "hidden" && style.display !== "none" &&
+                rect.width > 0 && rect.height > 0 && boundedText(element.textContent, 64 * 1024) === expected;
+        });
+    }
+
+    function gmailAcknowledged() {
+        return [...document.querySelectorAll("[role='status'],[role='alert']")]
+            .some((element) => /^(message sent|邮件已发送|消息已发送)/iu.test(boundedText(element.textContent, 1024)));
+    }
+
+    async function reviewedSendReceipt(activation, outcome, evidence) {
+        const observedAt = Date.now();
+        const providerReceiptId = outcome === "sent"
+            ? `${activation.site}-ui-${(await sha256(`${activation.idempotency_key}:${observedAt}`)).slice(0, 48)}`
+            : null;
+        return {
+            schema_version: 4,
+            snapshot_id: activation.snapshot_id,
+            snapshot_sha256: activation.payload_sha256,
+            idempotency_key: activation.idempotency_key,
+            outcome,
+            provider_receipt_id: providerReceiptId,
+            evidence,
+            observed_at_unix_ms: observedAt
+        };
+    }
+
+    async function executeReviewedSend(element, activation) {
+        const siteMatches = (activation.site === "gmail_web" && isGmail()) ||
+            (activation.site === "slack_web" && isSlack());
+        const preconditionsMatch = siteMatches && isReviewedSendControl(element) &&
+            activation.fields.every(exactFieldStillMatches) &&
+            activation.attachment_file_names.every((name) => attachmentStillPresent(element, name));
+        if (!preconditionsMatch) {
+            return {
+                send_receipt: await reviewedSendReceipt(
+                    activation,
+                    "definitely_not_sent",
+                    "precondition_rejected_before_activation"
+                ),
+                snapshot: await snapshot(64)
+            };
+        }
+
+        const approvedBody = activation.fields[activation.fields.length - 1].value;
+        element.click();
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+            const acknowledged = activation.site === "gmail_web"
+                ? gmailAcknowledged()
+                : visibleTextMatches(
+                    "[data-qa*='message'],[data-testid*='message'],[role='listitem']",
+                    approvedBody
+                );
+            if (acknowledged) {
+                return {
+                    send_receipt: await reviewedSendReceipt(
+                        activation,
+                        "sent",
+                        "provider_ui_acknowledgement"
+                    ),
+                    snapshot: await snapshot(64)
+                };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        return {
+            send_receipt: await reviewedSendReceipt(
+                activation,
+                "outcome_unknown",
+                "receipt_not_observed_after_activation"
+            ),
+            snapshot: await snapshot(64)
+        };
     }
 
     function decodeBase64(value) {
@@ -325,7 +448,7 @@
             {
                 const element = resolveElement(action.element);
                 if (action.activation_class?.kind === "send_external") {
-                    throw new Error("exact_send_not_available");
+                    return executeReviewedSend(element, action.activation_class);
                 }
                 if (isReviewedSendControl(element)) {
                     throw new Error("send_control_not_available");

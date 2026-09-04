@@ -15,7 +15,7 @@ use crate::session::AgentSessionSurface;
 pub const CONTEXT_ATTACHMENT_SCHEMA_VERSION: u16 = 1;
 pub const MAX_CONTEXT_ATTACHMENTS: usize = 32;
 pub const MAX_ATTACHMENT_DISPLAY_SUMMARY_BYTES: usize = 512;
-pub const MAX_ATTACHMENT_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_ATTACHMENT_BYTES: u64 = 12 * 1024 * 1024;
 pub const MAX_ATTACHMENT_OBJECTS: u32 = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +31,7 @@ pub enum ContextAttachmentKind {
     File,
     DirectorySelection,
     TerminalSessionRef,
+    WindowSelection,
     CurrentScreen,
     ExternalSourceSet,
 }
@@ -200,7 +201,8 @@ impl ContextAttachment {
                 ContextAttachmentKind::Device
                 | ContextAttachmentKind::InteractiveSession
                 | ContextAttachmentKind::ActiveApplication
-                | ContextAttachmentKind::UiSelection => AttachmentStaleReason::WorkerRespawned,
+                | ContextAttachmentKind::UiSelection
+                | ContextAttachmentKind::WindowSelection => AttachmentStaleReason::WorkerRespawned,
                 ContextAttachmentKind::OfficeDocument
                 | ContextAttachmentKind::Worksheet
                 | ContextAttachmentKind::Range => AttachmentStaleReason::DocumentChanged,

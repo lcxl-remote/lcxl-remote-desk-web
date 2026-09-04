@@ -42,6 +42,34 @@ pub struct ModelRequest {
     pub caller_output_hard_cap: Option<i64>,
 }
 
+/// Content-free size and cardinality measurements captured immediately before
+/// an agent model request. Text, ids, tool names, arguments, paths and provider
+/// errors are intentionally unrepresentable here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelRequestProjectionMetrics {
+    pub message_count: u64,
+    pub message_json_bytes: u64,
+    pub advertised_tool_count: u64,
+    pub advertised_tool_json_bytes: u64,
+    pub capability_registry_count: u64,
+    pub runtime_ready_count: u64,
+    pub permission_candidate_count: u64,
+    pub capability_catalog_utf8_bytes: u64,
+    pub capability_index_utf8_bytes: u64,
+    pub loaded_capability_detail_utf8_bytes: u64,
+    pub loaded_capability_count: u64,
+    /// Provider tools that passed the current authority/execution-state gate
+    /// before progressive-disclosure working-set filtering.
+    pub authorized_provider_tool_count: u64,
+    pub conversation_message_count: u64,
+    pub session_snapshot_json_bytes: u64,
+    pub context_attachment_count: u64,
+    pub task_status_item_count: u64,
+    pub permission_request_count: u64,
+    pub pending_work_trigger_count: u64,
+    pub unresolved_execution_fact_count: u64,
+}
+
 impl ModelRequest {
     /// A tool-free request (the single-turn diagnose shape): no tools advertised,
     /// the model is free to answer in text.
@@ -124,6 +152,15 @@ pub trait TurnSink {
         background_task_id: Option<&str>,
     ) {
         let _ = (call_id, ok, output, background_task_id);
+    }
+
+    /// A pixel observation that was accepted for this exact tool result. The
+    /// preview is live-owner-only; durable snapshots carry metadata without it.
+    fn on_visual_evidence(
+        &mut self,
+        evidence: &desk_agent_protocol::visual_evidence::VisualEvidenceFrame,
+    ) {
+        let _ = evidence;
     }
 
     /// The planning turn durably created a permission request and paused before
@@ -325,6 +362,10 @@ pub trait ModelSeam {
     /// fail-open: audit storage failure cannot alter a committed checkpoint or
     /// replace the stable compression error selected by the loop.
     async fn audit_context_compression(&self, _outcome: ContextCompressionAuditOutcome) {}
+
+    /// Observe the bounded, content-free shape of an agent request. The callback
+    /// must be fail-open and must never attach user or tool content to telemetry.
+    fn on_model_request_projected(&self, _metrics: ModelRequestProjectionMetrics) {}
 
     async fn call(
         &self,

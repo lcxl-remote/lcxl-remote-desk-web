@@ -83,6 +83,190 @@ pub(super) fn read_response(rx: &mut broadcast::Receiver<String>) -> SignalingMo
     serde_json::from_str::<SignalingModel>(&text).expect("response not valid JSON")
 }
 
+fn assistant_candidate(
+    name: &str,
+    generation: u64,
+) -> crate::daemon::session_target::SessionCandidate {
+    crate::daemon::session_target::SessionCandidate {
+        session: desk_ipc_protocol::message::SessionKey {
+            platform_session_id: name.to_string(),
+            session_generation: generation,
+        },
+        display_name: name.to_string(),
+        session_type: Some("wayland".to_string()),
+        seat: Some("seat0".to_string()),
+        foreground: true,
+        remote_desktop_ready: false,
+        terminal_ready: false,
+        file_ready: false,
+        assistant_ready: true,
+    }
+}
+
+fn select_assistant_session_model(
+    request_id: &str,
+    connection_id: &str,
+    target_id: Option<String>,
+) -> SignalingModel {
+    SignalingModel::new(
+        request_id,
+        SignalingType::SelectDeviceAssistantSession,
+        Some(connection_id.to_string()),
+        None,
+        Some(
+            serde_json::to_value(
+                desk_signal_facade::model::signal::SelectDeviceAssistantSessionData {
+                    session_target_id: target_id,
+                },
+            )
+            .unwrap(),
+        ),
+        None,
+    )
+}
+
+#[tokio::test]
+pub(super) async fn assistant_session_selection_succeeds_for_portable_worker() {
+    let (ctx, mut outbound_rx) = make_ctx_with_rx().await;
+    let model = select_assistant_session_model("assistant-portable", "controller-1", None);
+
+    route(&model, &ctx).await.expect("selection route");
+    let response = read_response(&mut outbound_rx);
+    assert_eq!(
+        response.signaling_type,
+        SignalingType::DeviceAssistantSessionSelected
+    );
+    assert_eq!(
+        response
+            .response_state
+            .as_ref()
+            .expect("success state")
+            .error_code,
+        DeskErrorCode::SUCCESS.code()
+    );
+    let data: desk_signal_facade::model::signal::DeviceAssistantSessionSelectedData =
+        response.get_data().expect("selected payload");
+    assert_eq!(data.revision, 0);
+    assert!(data.target.is_none());
+    assert!(ctx.worker_mgr.connection_target("controller-1").is_none());
+}
+
+#[tokio::test]
+pub(super) async fn assistant_session_selection_auto_binds_the_only_ready_target() {
+    let (ctx, mut outbound_rx) = make_ctx_with_rx().await;
+    ctx.worker_mgr.enable_session_targeting_for_test();
+    let candidate = assistant_candidate("session-a", 7);
+    let expected_session = candidate.session.clone();
+    ctx.worker_mgr.session_targets().upsert(candidate);
+    let model = select_assistant_session_model("assistant-single", "controller-1", None);
+
+    route(&model, &ctx).await.expect("selection route");
+    let response = read_response(&mut outbound_rx);
+    assert_eq!(
+        response
+            .response_state
+            .as_ref()
+            .expect("success state")
+            .error_code,
+        DeskErrorCode::SUCCESS.code()
+    );
+    let data: desk_signal_facade::model::signal::DeviceAssistantSessionSelectedData =
+        response.get_data().expect("selected payload");
+    assert_eq!(
+        data.target.expect("selected target").display_name,
+        "session-a"
+    );
+    assert_eq!(
+        ctx.worker_mgr.connection_target("controller-1"),
+        Some(expected_session)
+    );
+}
+
+#[tokio::test]
+pub(super) async fn assistant_session_selection_lists_multiple_ready_targets() {
+    let (ctx, mut outbound_rx) = make_ctx_with_rx().await;
+    ctx.worker_mgr.enable_session_targeting_for_test();
+    ctx.worker_mgr
+        .session_targets()
+        .upsert(assistant_candidate("session-a", 1));
+    ctx.worker_mgr
+        .session_targets()
+        .upsert(assistant_candidate("session-b", 1));
+    let model = select_assistant_session_model("assistant-many", "controller-1", None);
+
+    route(&model, &ctx).await.expect("selection route");
+    let response = read_response(&mut outbound_rx);
+    assert_eq!(
+        response
+            .response_state
+            .as_ref()
+            .expect("selection error")
+            .error_code,
+        DeskErrorCode::SESSION_SELECTION_REQUIRED.code()
+    );
+    let data: desk_signal_facade::model::signal::SessionTargetListData =
+        response.get_data().expect("safe target list");
+    assert_eq!(data.targets.len(), 2);
+    assert!(data.targets.iter().all(|target| target.assistant_ready));
+    assert!(ctx.worker_mgr.connection_target("controller-1").is_none());
+}
+
+#[tokio::test]
+pub(super) async fn assistant_session_selection_rejects_stale_target() {
+    let (ctx, mut outbound_rx) = make_ctx_with_rx().await;
+    ctx.worker_mgr.enable_session_targeting_for_test();
+    let candidate = assistant_candidate("session-a", 1);
+    let session = candidate.session.clone();
+    let target_id = ctx.worker_mgr.session_targets().upsert(candidate);
+    assert!(ctx.worker_mgr.session_targets().remove(&session));
+    let model = select_assistant_session_model("assistant-stale", "controller-1", Some(target_id));
+
+    route(&model, &ctx).await.expect("selection route");
+    let response = read_response(&mut outbound_rx);
+    assert_eq!(
+        response.response_state.expect("stale error").error_code,
+        DeskErrorCode::SESSION_TARGET_STALE.code()
+    );
+    assert!(ctx.worker_mgr.connection_target("controller-1").is_none());
+}
+
+#[tokio::test]
+pub(super) async fn assistant_session_binding_cannot_move_to_another_live_session() {
+    let (ctx, mut outbound_rx) = make_ctx_with_rx().await;
+    ctx.worker_mgr.enable_session_targeting_for_test();
+    let first = assistant_candidate("session-a", 1);
+    let first_session = first.session.clone();
+    let first_id = ctx.worker_mgr.session_targets().upsert(first);
+    let second_id = ctx
+        .worker_mgr
+        .session_targets()
+        .upsert(assistant_candidate("session-b", 1));
+
+    route(
+        &select_assistant_session_model("assistant-first", "controller-1", Some(first_id)),
+        &ctx,
+    )
+    .await
+    .expect("first selection");
+    let _ = read_response(&mut outbound_rx);
+    route(
+        &select_assistant_session_model("assistant-second", "controller-1", Some(second_id)),
+        &ctx,
+    )
+    .await
+    .expect("second selection");
+    let response = read_response(&mut outbound_rx);
+
+    assert_eq!(
+        response.response_state.expect("immutable error").error_code,
+        DeskErrorCode::SESSION_TARGET_STALE.code()
+    );
+    assert_eq!(
+        ctx.worker_mgr.connection_target("controller-1"),
+        Some(first_session)
+    );
+}
+
 pub(super) fn make_change_display_settings_model(
     request_id: &str,
     payload: ChangeDisplaySettingsPayload,

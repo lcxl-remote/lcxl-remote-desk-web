@@ -347,6 +347,9 @@ fn support_code_issued_is_trusted_central_only() {
     // A `RevokeAccessGrant` is likewise server-originated (regeneration teardown);
     // confining it stops a bare relay forging a teardown of a live session.
     assert!(is_trusted_central_only(SignalingType::RevokeAccessGrant));
+    assert!(is_trusted_central_only(
+        SignalingType::UpdateDeviceAssistantSettings
+    ));
     // Alongside the other central→daemon plumbing.
     assert!(is_trusted_central_only(SignalingType::SyncCommandBlocklist));
     // The host→manager support frames are NOT gated here (they egress, never
@@ -684,6 +687,7 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         exec_pty_link: None,
         outbound_tx: outbound_tx.clone(),
         settings,
+        settings_coordinator: Arc::clone(&settings_coordinator),
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
             &settings_coordinator,
         )),

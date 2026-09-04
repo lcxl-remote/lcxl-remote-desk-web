@@ -142,8 +142,83 @@ fn desktop_ui_limits_narrow_request_and_count_returned_nodes() {
             version: "1".into(),
         },
         nodes: vec![node.clone(), node],
+        owner_selectable_windows: vec![],
         truncated: false,
     }));
     assert!(validate_output(&registry, &ui_call, &ui_output, &limit(4096, 1)).is_err());
     validate_output(&registry, &ui_call, &ui_output, &limit(4096, 2)).unwrap();
+}
+
+#[test]
+fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
+    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let search_call = ToolCall {
+        id: "search-1".into(),
+        name: crate::web_research::WEB_SEARCH_TOOL_NAME.into(),
+        arguments_json: serde_json::json!({"query":"Rust language","max_results":2}).to_string(),
+    };
+    let search = ToolRunOutput {
+        content: serde_json::json!({
+            "schema_version": 1,
+            "web_search_call_id": "search-1",
+            "untrusted_external_content": true,
+            "connector": {
+                "connector_id": crate::web_research::BRAVE_WEB_SEARCH_CONNECTOR_ID,
+                "display_name": "Brave Web Search",
+                "requires_api_key": true,
+                "experimental": false
+            },
+            "query_sha256": format!("{:x}", sha2::Sha256::digest(b"Rust language")),
+            "searched_at": "2026-08-28T00:00:00Z",
+            "response_sha256": "a".repeat(64),
+            "response_bytes": 100,
+            "result_count": 2,
+            "results": [
+                {"title":"Rust","url":"https://www.rust-lang.org/","snippet":"Language","published_at":null},
+                {"title":"Book","url":"https://doc.rust-lang.org/book/","snippet":"Book","published_at":null}
+            ]
+        })
+        .to_string(),
+        image_data_url: None,
+    };
+    assert!(validate_output(&registry, &search_call, &search, &limit(4096, 1)).is_err());
+    validate_output(&registry, &search_call, &search, &limit(4096, 2)).unwrap();
+    let mut forged: serde_json::Value = serde_json::from_str(&search.content).unwrap();
+    forged["connector"]["connector_id"] = serde_json::json!("model_selected");
+    assert!(
+        validate_output(
+            &registry,
+            &search_call,
+            &ToolRunOutput {
+                content: forged.to_string(),
+                image_data_url: None
+            },
+            &limit(4096, 2)
+        )
+        .is_err()
+    );
+
+    let fetch_call = ToolCall {
+        id: "fetch-1".into(),
+        name: crate::web_research::WEB_FETCH_TOOL_NAME.into(),
+        arguments_json: serde_json::json!({"url":"https://example.com/"}).to_string(),
+    };
+    let fetch = ToolRunOutput {
+        content: serde_json::json!({
+            "schema_version": 1,
+            "untrusted_external_content": true,
+            "requested_url": "https://example.com/",
+            "final_url": "https://example.com/page",
+            "title": "Example",
+            "published_at": null,
+            "fetched_at": "2026-08-28T00:00:00Z",
+            "content_type": "text/html",
+            "body_bytes": 100,
+            "sha256": "b".repeat(64),
+            "excerpt": "Example body"
+        })
+        .to_string(),
+        image_data_url: None,
+    };
+    validate_output(&registry, &fetch_call, &fetch, &limit(4096, 1)).unwrap();
 }

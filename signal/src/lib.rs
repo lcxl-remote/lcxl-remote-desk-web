@@ -14,6 +14,7 @@ pub mod computer_use_readiness;
 pub mod control_authorizer;
 pub mod controller;
 pub mod db;
+pub mod device_assistant_gate;
 pub mod device_assistant_orchestrator;
 pub mod entity;
 pub mod error;

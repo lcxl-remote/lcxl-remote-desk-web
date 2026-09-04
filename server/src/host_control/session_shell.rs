@@ -23,7 +23,8 @@ pub const MAX_SESSION_CWD_BYTES: usize = 64 * 1024;
 /// Hard host-local bound for concurrently trusted desktop-session shells. One
 /// logical session already has a single-leader constraint below; this protects
 /// the daemon and resident-worker pool across many distinct sessions/seats.
-pub const MAX_SESSION_SHELL_REGISTRATIONS: usize = 32;
+pub const MAX_SESSION_SHELL_REGISTRATIONS: usize =
+    crate::daemon::worker_manager::MAX_RESIDENT_SESSION_WORKERS;
 pub const MAX_HOST_CONTROL_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SESSION_LABEL_BYTES: usize = 256;
 const MAX_APP_VERSION_BYTES: usize = 128;

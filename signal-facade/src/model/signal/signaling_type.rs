@@ -476,6 +476,21 @@ pub enum SignalingType {
     #[wincode(tag = 641)]
     DeviceAssistantObjectContextUpdated = 641,
 
+    /// Trusted central → host: compare-and-set the device-owned product switch.
+    /// Delivery is not success: the central waits for a later connection-time
+    /// revision/value projection before acknowledging the owner request.
+    #[wincode(tag = 642)]
+    UpdateDeviceAssistantSettings = 642,
+
+    /// Owner control end → host: resolve and freeze the Device Assistant's
+    /// opaque session target on the current signaling connection.
+    #[wincode(tag = 643)]
+    SelectDeviceAssistantSession = 643,
+
+    /// Host → owner control end: selected target, or a stable 0/N/stale error.
+    #[wincode(tag = 644)]
+    DeviceAssistantSessionSelected = 644,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,

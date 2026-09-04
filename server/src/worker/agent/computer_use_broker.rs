@@ -31,6 +31,7 @@ use desk_agent_protocol::computer_use::{
     DesktopSessionInspectParams, MAX_COMPUTER_USE_INSPECT_BYTES, MAX_COMPUTER_USE_INSPECT_NODES,
     ObjectKind, ObjectRef, OfficeInspectOutput, OfficeInspectParams, OfficeSelectionProjection,
     RawInputAction, UiInspectOutput, UiInspectParams, UiNodeProjection, UiSemanticAction,
+    UiWindowProjection,
 };
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability, ScreenCaptureParams};
 #[cfg(target_os = "macos")]
@@ -98,6 +99,11 @@ pub(crate) enum ResolvedObject {
         process_started_at: Option<u64>,
     },
     UiElement {
+        process_id: u32,
+        image_path: String,
+        fingerprint: String,
+    },
+    Window {
         process_id: u32,
         image_path: String,
         fingerprint: String,
@@ -294,6 +300,48 @@ impl ComputerUseBroker {
     ) -> Result<ScreenCapturePermit, AgentError> {
         validate_screen_selection(params, selected_display)?;
         ensure_screen_capture_safe()?;
+        let window_region = if let Some(window) = params.window.as_ref() {
+            if window.object_kind != ObjectKind::Window {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "window capture requires an edge-issued Window reference",
+                    false,
+                ));
+            }
+            let ResolvedObject::Window {
+                process_id,
+                image_path,
+                fingerprint,
+            } = self.resolve_ref(window)?
+            else {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "window capture reference resolved to an incompatible object",
+                    false,
+                ));
+            };
+            #[cfg(target_os = "macos")]
+            {
+                Some(
+                    super::macos_accessibility_observer::resolve_window_capture_region(
+                        process_id,
+                        &image_path,
+                        &fingerprint,
+                    )?,
+                )
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (process_id, image_path, fingerprint);
+                return Err(error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "owner-selected window capture is currently available only on macOS",
+                    false,
+                ));
+            }
+        } else {
+            None
+        };
         let now = StdInstant::now();
         let mut gate = self.screen_capture_gate.lock().map_err(|_| {
             error(
@@ -306,6 +354,7 @@ impl ComputerUseBroker {
         drop(gate);
         Ok(ScreenCapturePermit {
             broker: Arc::clone(self),
+            window_region,
         })
     }
 
@@ -2401,6 +2450,12 @@ impl ComputerUseBroker {
                 && process_id == application.process_id
                 && path_eq(&image_path, &application.image_path)
                 && process_started_at == application.process_started_at => {}
+            Some(ResolvedObject::Window {
+                process_id,
+                image_path,
+                ..
+            }) if process_id == application.process_id
+                && path_eq(&image_path, &application.image_path) => {}
             None => {}
             Some(_) => {
                 return Err(error(
@@ -2421,11 +2476,32 @@ impl ComputerUseBroker {
             self.current_incarnation_nonce()
         );
         let mut nodes = Vec::with_capacity(collected.nodes.len());
+        let mut owner_selectable_windows = Vec::new();
         // Reserve a conservative envelope budget for snapshot/adapter JSON;
         // each projection is measured exactly before insertion.
         let mut encoded_bytes = 512usize;
         let mut truncated = collected.truncated;
         for node in collected.nodes {
+            #[cfg(target_os = "macos")]
+            let window_projection = if node.role == "AXWindow" || node.role.starts_with("AXWindow/")
+            {
+                let object_ref = self.issue_ref(
+                    &snapshot_id,
+                    &incarnation,
+                    ObjectKind::Window,
+                    ResolvedObject::Window {
+                        process_id: application.process_id,
+                        image_path: application.image_path.clone(),
+                        fingerprint: node.fingerprint.clone(),
+                    },
+                )?;
+                Some(UiWindowProjection {
+                    object_ref,
+                    title: node.name.clone(),
+                })
+            } else {
+                None
+            };
             let object_ref = self.issue_ref(
                 &snapshot_id,
                 &incarnation,
@@ -2453,13 +2529,34 @@ impl ComputerUseBroker {
                     true,
                 )
             })?;
-            let additional = projection_bytes.len() + usize::from(!nodes.is_empty());
+            #[cfg(target_os = "macos")]
+            let window_bytes = window_projection
+                .as_ref()
+                .map(|window| serde_json::to_vec(window))
+                .transpose()
+                .map_err(|_| {
+                    error(
+                        AgentErrorKind::Internal,
+                        &format!("cannot encode a {adapter_name} window projection"),
+                        true,
+                    )
+                })?
+                .map_or(0, |bytes| {
+                    bytes.len() + usize::from(!owner_selectable_windows.is_empty())
+                });
+            #[cfg(not(target_os = "macos"))]
+            let window_bytes = 0usize;
+            let additional = projection_bytes.len() + usize::from(!nodes.is_empty()) + window_bytes;
             if encoded_bytes.saturating_add(additional) > params.max_bytes as usize {
                 truncated = true;
                 break;
             }
             encoded_bytes += additional;
             nodes.push(projection);
+            #[cfg(target_os = "macos")]
+            if let Some(window) = window_projection {
+                owner_selectable_windows.push(window);
+            }
         }
         let mut output = UiInspectOutput {
             snapshot_id,
@@ -2468,6 +2565,7 @@ impl ComputerUseBroker {
                 version: adapter_version.into(),
             },
             nodes,
+            owner_selectable_windows,
             truncated,
         };
         loop {
@@ -2483,7 +2581,7 @@ impl ComputerUseBroker {
             if encoded_len <= params.max_bytes as usize {
                 return Ok(output);
             }
-            if output.nodes.pop().is_none() {
+            if output.nodes.pop().is_none() && output.owner_selectable_windows.pop().is_none() {
                 return Err(error(
                     AgentErrorKind::OutputLimitExceeded,
                     "the desktop UI inspection byte budget is too small for its response envelope",
@@ -2743,6 +2841,15 @@ impl ComputerUseBroker {
 
 pub(crate) struct ScreenCapturePermit {
     broker: Arc<ComputerUseBroker>,
+    window_region: Option<super::collectors::screen_capture::WindowCaptureRegion>,
+}
+
+impl ScreenCapturePermit {
+    pub(crate) fn window_region(
+        &self,
+    ) -> Option<super::collectors::screen_capture::WindowCaptureRegion> {
+        self.window_region
+    }
 }
 
 impl Drop for ScreenCapturePermit {
@@ -3814,10 +3921,18 @@ mod tests {
     #[test]
     fn screen_capture_is_bound_to_the_owner_selected_display() {
         let selected = r"\\.\DISPLAY2";
-        validate_screen_selection(&ScreenCaptureParams { display: None }, selected).unwrap();
+        validate_screen_selection(
+            &ScreenCaptureParams {
+                display: None,
+                window: None,
+            },
+            selected,
+        )
+        .unwrap();
         validate_screen_selection(
             &ScreenCaptureParams {
                 display: Some(selected.into()),
+                window: None,
             },
             selected,
         )
@@ -3832,6 +3947,7 @@ mod tests {
             validate_screen_selection(
                 &ScreenCaptureParams {
                     display: Some(r"\\.\DISPLAY1".into()),
+                    window: None,
                 },
                 selected,
             )

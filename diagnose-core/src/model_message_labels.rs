@@ -13,6 +13,7 @@ use desk_agent_protocol::{
     },
 };
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 pub fn model_bound_user_message(
     message_id: String,
@@ -103,7 +104,8 @@ pub fn read_result_envelope(
         },
         digest_sha256: format!("{:x}", Sha256::digest(&payload)),
         sensitivity: match capability.wire.capability_id.as_str() {
-            crate::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID => Sensitivity::Public,
+            crate::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
+            | crate::device_assistant::WEB_RESEARCH_SEARCH_CAPABILITY_ID => Sensitivity::Public,
             crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID
             | crate::device_assistant::SYSTEM_INFO_CAPABILITY_ID
             | crate::device_assistant::SYSTEM_NETWORK_CAPABILITY_ID
@@ -176,6 +178,95 @@ pub fn internal_tool_result_envelope(
         digest_sha256: digest,
         sensitivity: parent.sensitivity,
         allowed_destinations: parent.allowed_destinations.clone(),
+        retention,
+    };
+    envelope.validate().map_err(|_| invalid_label())?;
+    Ok(Some(envelope))
+}
+
+/// A history page is a deterministic projection of several older message
+/// envelopes plus the model's current tool call. Its authority is the strict
+/// intersection of every input destination, its sensitivity is the maximum,
+/// and its retention is the most restrictive input boundary. This makes a
+/// model/profile switch or expired source fail at the ordinary egress gate.
+pub fn conversation_history_result_envelope(
+    parent: Option<&DataEnvelope>,
+    source_messages: &[ChatMessage],
+    call_id: &str,
+    content: &str,
+) -> Result<Option<DataEnvelope>, AgentError> {
+    let mut inputs = Vec::new();
+    if let Some(parent) = parent {
+        inputs.push(parent);
+    }
+    inputs.extend(
+        source_messages
+            .iter()
+            .filter_map(|message| message.data_envelope.as_ref()),
+    );
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    for input in &inputs {
+        input.validate().map_err(|_| invalid_label())?;
+    }
+    let mut source_envelope_ids = inputs
+        .iter()
+        .map(|input| input.envelope_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if source_envelope_ids.len() > desk_agent_protocol::data_lineage::MAX_LINEAGE_ITEMS {
+        return Err(invalid_label());
+    }
+    source_envelope_ids.sort();
+    let sensitivity = inputs
+        .iter()
+        .map(|input| input.sensitivity)
+        .max()
+        .unwrap_or(Sensitivity::Sensitive);
+    let retention = inputs
+        .iter()
+        .skip(1)
+        .fold(inputs[0].retention, |current, input| {
+            current.most_restrictive(input.retention)
+        });
+    let mut allowed = inputs[0]
+        .allowed_destinations
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for input in inputs.iter().skip(1) {
+        let destinations = input
+            .allowed_destinations
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        allowed = allowed.intersection(&destinations).cloned().collect();
+    }
+    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+    let envelope = DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: format!(
+            "history-result-{:x}",
+            Sha256::digest(format!("{call_id}:{digest}").as_bytes())
+        ),
+        content: ContentRef::ImmutableBlob {
+            blob_id: format!("history-content-{:x}", Sha256::digest(digest.as_bytes())),
+            sha256: digest.clone(),
+            size_bytes: content.len() as u64,
+            media_type: "application/json".into(),
+        },
+        provenance: DataProvenance {
+            source_provider_id: crate::dynamic_run::RUN_CONTROL_PROVIDER_ID.into(),
+            source_tool_name: crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME
+                .into(),
+            source_object_id: None,
+            source_envelope_ids,
+        },
+        digest_sha256: digest,
+        sensitivity,
+        allowed_destinations: allowed.into_iter().collect(),
         retention,
     };
     envelope.validate().map_err(|_| invalid_label())?;
@@ -321,5 +412,51 @@ mod tests {
         assert_eq!(envelope.allowed_destinations, vec![destination]);
         assert_eq!(envelope.sensitivity, Sensitivity::UserContent);
         assert_eq!(envelope.provenance.source_tool_name, "send-message");
+    }
+
+    #[test]
+    fn history_result_intersects_destinations_and_keeps_restrictive_retention() {
+        fn destination(model_id: &str) -> DestinationIdentity {
+            DestinationIdentity::Model {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                model_id: model_id.into(),
+                profile_revision: 1,
+            }
+        }
+
+        let model_a = destination("model-a");
+        let model_b = destination("model-b");
+        let mut first =
+            model_bound_user_message("first".into(), "first question".into(), model_a.clone())
+                .unwrap();
+        first.data_envelope.as_mut().unwrap().allowed_destinations = vec![model_a.clone(), model_b];
+        first.data_envelope.as_mut().unwrap().retention = RetentionBoundary {
+            expires_at_unix_ms: Some(500),
+            delete_with_run: false,
+        };
+        let mut second =
+            model_bound_user_message("second".into(), "second question".into(), model_a.clone())
+                .unwrap();
+        second.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Sensitive;
+        second.data_envelope.as_mut().unwrap().retention = RetentionBoundary {
+            expires_at_unix_ms: Some(300),
+            delete_with_run: true,
+        };
+
+        let envelope = conversation_history_result_envelope(
+            None,
+            &[first, second],
+            "history-call",
+            r#"{"messages":[]}"#,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(envelope.allowed_destinations, vec![model_a]);
+        assert_eq!(envelope.sensitivity, Sensitivity::Sensitive);
+        assert_eq!(envelope.retention.expires_at_unix_ms, Some(300));
+        assert!(envelope.retention.delete_with_run);
+        assert_eq!(envelope.provenance.source_envelope_ids.len(), 2);
     }
 }

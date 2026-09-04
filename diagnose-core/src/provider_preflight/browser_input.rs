@@ -5,9 +5,12 @@ use crate::chat::ToolCall;
 use desk_agent_protocol::browser_control::{
     BROWSER_CONTROL_SCHEMA_VERSION, BrowserAction, BrowserActionRequest, BrowserActivationClass,
     BrowserElementRef, BrowserFormField, BrowserMutationClass, BrowserNavigationTarget,
-    BrowserPageRef, BrowserWaitState,
+    BrowserPageRef, BrowserReviewedSendSite, BrowserWaitState,
 };
-use desk_agent_protocol::communication::{GmailWebDraftHandoffInput, SlackWebDraftHandoffInput};
+use desk_agent_protocol::communication::{
+    GmailWebDraftHandoffInput, GmailWebExactSendInput, SlackWebDraftHandoffInput,
+    SlackWebExactSendInput,
+};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
 pub fn browser_action_from_call(
@@ -152,6 +155,70 @@ pub fn browser_action_from_call(
                     page: args.page,
                     fields,
                     mutation_class: BrowserMutationClass::WriteExternalDraft,
+                },
+            }
+        }
+        "send_gmail_web_exact" => {
+            let args: GmailWebExactSendInput = serde_json::from_str(&call.arguments_json)
+                .map_err(|error| decode(&error.to_string()))?;
+            crate::communication::verify_gmail_web_exact_send_input(&args)
+                .map_err(|error| decode(&error.to_string()))?;
+            let snapshot = args
+                .handoff
+                .send_payload_snapshot
+                .as_ref()
+                .expect("verified Gmail send has a payload snapshot");
+            BrowserAction::ActivateElement {
+                page: args.page,
+                element: args.send_control,
+                activation_class: BrowserActivationClass::SendExternal {
+                    payload_sha256: snapshot.canonical_payload_sha256.clone(),
+                    snapshot_id: snapshot.snapshot_id.clone(),
+                    idempotency_key: crate::communication::send_idempotency_key(snapshot)
+                        .map_err(|error| decode(&error.to_string()))?,
+                    site: BrowserReviewedSendSite::GmailWeb,
+                    fields: vec![
+                        BrowserFormField {
+                            element: args.to_field,
+                            value: args.draft.recipients[0].address.clone(),
+                        },
+                        BrowserFormField {
+                            element: args.subject_field,
+                            value: args.draft.subject,
+                        },
+                        BrowserFormField {
+                            element: args.body_field,
+                            value: args.draft.body_plain_text,
+                        },
+                    ],
+                    attachment_file_names: args.draft.attachment_labels,
+                },
+            }
+        }
+        "send_slack_web_exact" => {
+            let args: SlackWebExactSendInput = serde_json::from_str(&call.arguments_json)
+                .map_err(|error| decode(&error.to_string()))?;
+            crate::communication::verify_slack_web_exact_send_input(&args)
+                .map_err(|error| decode(&error.to_string()))?;
+            let snapshot = args
+                .handoff
+                .send_payload_snapshot
+                .as_ref()
+                .expect("verified Slack send has a payload snapshot");
+            BrowserAction::ActivateElement {
+                page: args.page,
+                element: args.send_control,
+                activation_class: BrowserActivationClass::SendExternal {
+                    payload_sha256: snapshot.canonical_payload_sha256.clone(),
+                    snapshot_id: snapshot.snapshot_id.clone(),
+                    idempotency_key: crate::communication::send_idempotency_key(snapshot)
+                        .map_err(|error| decode(&error.to_string()))?,
+                    site: BrowserReviewedSendSite::SlackWeb,
+                    fields: vec![BrowserFormField {
+                        element: args.composer,
+                        value: args.body_plain_text,
+                    }],
+                    attachment_file_names: Vec::new(),
                 },
             }
         }

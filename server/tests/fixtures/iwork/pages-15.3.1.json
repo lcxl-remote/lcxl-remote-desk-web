@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "application": "pages",
+  "bundle_id": "com.apple.Pages",
+  "team_id": "JCRTNEU7GK",
+  "version": "15.3.1",
+  "sdef_sha256": "412e6fb4959ad8486e4d8ce0a5ce93de22a3cdbfb460e7fd21d87000ed860fb3",
+  "reviewed_surface": ["document", "password_protected", "body_text", "save", "export"]
+}

@@ -161,6 +161,7 @@ fn live_iwork_calls_bind_exact_original_objects_and_authority() {
                 .grant_call(&ProviderCallSubject {
                     actor_id: "actor",
                     run_id: "run",
+                    input_revision: 1,
                     target_device_id: "device",
                     policy_revision: crate::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
                     readiness_revision: 1,

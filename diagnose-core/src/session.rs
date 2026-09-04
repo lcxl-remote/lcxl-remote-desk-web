@@ -30,10 +30,11 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 5;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_PENDING_AUTO_TRIGGERS: usize = 64;
 
 /// Durable mutation families sharing the same approval, dispatch-generation and
 /// completion semantics. This discriminator is persisted with every action
@@ -427,7 +428,7 @@ pub struct PendingWorkTrigger {
     pub tool_call_id: String,
     pub event_id: String,
     pub chain_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub resolution_org_id: Option<i64>,
     /// When the entry was enqueued (RFC3339 UTC). The earliest `since` across the
     /// set is denormalized into an indexed column so the executor can find sessions
@@ -453,11 +454,20 @@ pub struct PersistedAgentSession {
     #[serde(default)]
     pub surface: AgentSessionSurface,
     /// Version of persisted conversation/replay/context semantics. Fresh
-    /// sessions always write version 1; storage adapters explicitly upgrade
-    /// legacy version 0 before saving.
+    /// sessions always write the current schema version. This unreleased
+    /// Device Assistant state intentionally has no legacy compatibility path.
     #[serde(default)]
     pub conversation_schema_version: u16,
     pub conversation: Vec<crate::chat::ChatMessage>,
+    /// Bounded state owned by the current Device Assistant user-input epoch.
+    /// Permission, dispatch, work and receipt facts remain independent durable
+    /// state and are not deleted when this state resets.
+    #[serde(default)]
+    pub focus_epoch: crate::focus_epoch::FocusEpochState,
+    /// Bounded, names-only working set for the current Device Assistant input
+    /// revision. Descriptors and authority are deliberately not persisted here.
+    #[serde(default)]
+    pub capability_disclosure: crate::capability_disclosure::CapabilityDisclosureState,
     #[serde(default)]
     pub model_context_state: ModelContextState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -466,6 +476,14 @@ pub struct PersistedAgentSession {
     /// terminal, Office, UI and screen bytes never enter session JSON.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_attachments: Vec<ContextAttachment>,
+    /// Bounded metadata for screen pixels shown to the model/owner. Live preview
+    /// bytes are stripped from every storage projection.
+    #[serde(default)]
+    pub visual_evidence: Vec<desk_agent_protocol::visual_evidence::VisualEvidenceFrame>,
+    /// Present after the model receives a screenshot and cleared only by a
+    /// later assistant step's fresh semantic/screen observation.
+    #[serde(default)]
+    pub pending_visual_verification: Option<crate::visual_evidence::VisualVerificationFence>,
 
     // ---- Persistent security subject (validated each follow-up; never rebinds) ----
     pub actor_id: String,
@@ -631,6 +649,7 @@ impl PersistedAgentSession {
         let mut projection = self.clone();
         projection.enforce_replay_storage_limits();
         crate::image_input::strip_session_images(&mut projection.conversation);
+        crate::visual_evidence::strip_previews(&mut projection.visual_evidence);
         serde_json::to_string(&projection)
     }
 
@@ -645,7 +664,22 @@ impl PersistedAgentSession {
         if version > u64::from(CONVERSATION_SCHEMA_VERSION) {
             return Err(SessionDecodeError::UnsupportedVersion(version));
         }
+        let has_disclosure = value.get("capability_disclosure").is_some();
+        let has_focus_epoch = value.get("focus_epoch").is_some();
+        let has_visual_evidence = value.get("visual_evidence").is_some();
+        let has_visual_verification = value.get("pending_visual_verification").is_some();
         let mut session: Self = serde_json::from_value(value)?;
+        if session.surface == AgentSessionSurface::DeviceAssistant
+            && (version < u64::from(CONVERSATION_SCHEMA_VERSION)
+                || !has_disclosure
+                || !has_focus_epoch
+                || !has_visual_evidence
+                || !has_visual_verification)
+        {
+            // Device Assistant has not shipped with this persisted schema. Do
+            // not infer a working set or re-enable the old full catalog.
+            return Err(SessionDecodeError::UnsupportedVersion(version));
+        }
         validate_attachment_set(&session.context_attachments)
             .map_err(|error| SessionDecodeError::InvalidContextAttachment(error.to_string()))?;
         for attachment in &session.context_attachments {
@@ -656,6 +690,38 @@ impl PersistedAgentSession {
                 session.surface,
             )
             .map_err(|error| SessionDecodeError::InvalidContextAttachment(error.to_string()))?;
+        }
+        crate::visual_evidence::validate_set(&session.visual_evidence)
+            .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+        if session.visual_evidence.iter().any(|frame| {
+            frame.conversation_id != session.conversation_id
+                || frame.device_id != session.device_id
+                || frame.focus_input_revision > session.input_revision
+        }) {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "visual evidence subject or epoch mismatch".into(),
+            ));
+        }
+        if let Some(fence) = &session.pending_visual_verification
+            && (fence.focus_input_revision != session.input_revision
+                || fence.source_tool_call_id.is_empty()
+                || fence.source_assistant_message_id.is_empty()
+                || !session.visual_evidence.iter().any(|frame| {
+                    frame.focus_input_revision == fence.focus_input_revision
+                        && frame.tool_call_id == fence.source_tool_call_id
+                })
+                || !session.conversation.iter().any(|message| {
+                    message.role == ChatRole::Assistant
+                        && message.message_id == fence.source_assistant_message_id
+                        && message
+                            .tool_calls
+                            .iter()
+                            .any(|call| call.id == fence.source_tool_call_id)
+                }))
+        {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "visual verification fence is not bound to retained evidence".into(),
+            ));
         }
         if let Some(message) = session
             .conversation
@@ -686,6 +752,39 @@ impl PersistedAgentSession {
                 "input_revision is behind latest_input_seq".into(),
             ));
         }
+        session
+            .capability_disclosure
+            .validate(session.input_revision)
+            .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+        if session.surface == AgentSessionSurface::DeviceAssistant {
+            session
+                .focus_epoch
+                .validate(
+                    session.input_revision,
+                    session.task_status_projection.is_some(),
+                )
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+            if session.capability_disclosure.focus_input_revision != session.input_revision {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "capability disclosure is not bound to the current focus epoch".into(),
+                ));
+            }
+            if session
+                .focus_epoch
+                .selected_attachment_ids
+                .iter()
+                .any(|id| {
+                    !session.context_attachments.iter().any(|attachment| {
+                        attachment.attachment_id == *id
+                            && matches!(attachment.state, AttachmentState::Active)
+                    })
+                })
+            {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "focus epoch references a missing or stale attachment".into(),
+                ));
+            }
+        }
         if let Some(projection) = &session.task_status_projection {
             projection
                 .validate()
@@ -711,6 +810,11 @@ impl PersistedAgentSession {
                     "duplicate permission request id".into(),
                 ));
             }
+        }
+        if session.pending_auto_triggers.len() > MAX_PENDING_AUTO_TRIGGERS {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "too many pending auto triggers".into(),
+            ));
         }
         if version == 0 {
             session.conversation_schema_version = CONVERSATION_SCHEMA_VERSION;
@@ -758,9 +862,14 @@ impl PersistedAgentSession {
             surface: AgentSessionSurface::Unknown,
             conversation_schema_version: CONVERSATION_SCHEMA_VERSION,
             conversation: Vec::new(),
+            focus_epoch: crate::focus_epoch::FocusEpochState::default(),
+            capability_disclosure: crate::capability_disclosure::CapabilityDisclosureState::default(
+            ),
             model_context_state: ModelContextState::default(),
             context_notices: Vec::new(),
             context_attachments: Vec::new(),
+            visual_evidence: Vec::new(),
+            pending_visual_verification: None,
             actor_id: actor_id.into(),
             device_id: device_id.into(),
             policy_revision,
@@ -811,11 +920,34 @@ impl PersistedAgentSession {
     /// This mutates only request state; it never creates, revokes, or matches a
     /// grant. The durable append transaction persists it together with the new
     /// user message so a stale panel can never remain approvable after ACK.
-    pub fn require_permission_revalidation(&mut self, next_input_revision: u64) -> usize {
-        self.permission_requests
+    pub fn begin_focus_epoch(
+        &mut self,
+        next_input_revision: u64,
+        selected_attachment_ids: impl IntoIterator<Item = String>,
+    ) -> Result<usize, &'static str> {
+        if self.surface == AgentSessionSurface::DeviceAssistant {
+            let selected_attachment_ids = selected_attachment_ids.into_iter().collect::<Vec<_>>();
+            if selected_attachment_ids.iter().any(|id| {
+                !self.context_attachments.iter().any(|attachment| {
+                    attachment.attachment_id == *id
+                        && matches!(attachment.state, AttachmentState::Active)
+                })
+            }) {
+                return Err("focus epoch references a missing or stale attachment");
+            }
+            let mut focus_epoch = crate::focus_epoch::FocusEpochState::default();
+            focus_epoch.reset(next_input_revision, selected_attachment_ids)?;
+            self.focus_epoch = focus_epoch;
+            self.capability_disclosure
+                .reset_for_input(next_input_revision);
+            self.task_status_projection = None;
+            self.pending_visual_verification = None;
+        }
+        Ok(self
+            .permission_requests
             .iter_mut()
             .map(|request| usize::from(request.require_revalidation(next_input_revision)))
-            .sum()
+            .sum())
     }
 
     pub fn add_permission_request(
@@ -890,7 +1022,7 @@ impl PersistedAgentSession {
         let mut projected = self.context_attachments.clone();
         projected.push(attachment.clone());
         validate_attachment_set(&projected)?;
-        self.context_attachments.push(attachment);
+        self.context_attachments = projected;
         Ok(true)
     }
 
@@ -911,6 +1043,7 @@ impl PersistedAgentSession {
             return false;
         }
         attachment.mark_stale(AttachmentStaleReason::Detached);
+        self.retain_active_focus_attachments();
         true
     }
 
@@ -961,9 +1094,15 @@ impl PersistedAgentSession {
 
         let mut projected = self.context_attachments.clone();
         projected[stale_index].mark_stale(reason);
+        let replacement_id = replacement.attachment_id.clone();
         projected.push(replacement);
         validate_attachment_set(&projected)?;
         self.context_attachments = projected;
+        for selected_id in &mut self.focus_epoch.selected_attachment_ids {
+            if selected_id == stale_attachment_id {
+                *selected_id = replacement_id.clone();
+            }
+        }
         Ok(true)
     }
 
@@ -979,7 +1118,9 @@ impl PersistedAgentSession {
         now_unix_ms: u64,
         bindings: &[AttachmentRuntimeBinding],
     ) -> Vec<ContextAttachmentEvent> {
-        revalidate_attachments(&mut self.context_attachments, now_unix_ms, bindings)
+        let events = revalidate_attachments(&mut self.context_attachments, now_unix_ms, bindings);
+        self.retain_active_focus_attachments();
+        events
     }
 
     pub fn mark_context_stale(&mut self, reason: AttachmentStaleReason) {
@@ -991,6 +1132,19 @@ impl PersistedAgentSession {
                 attachment.mark_stale(reason);
             }
         }
+        self.retain_active_focus_attachments();
+    }
+
+    fn retain_active_focus_attachments(&mut self) {
+        let active = self
+            .context_attachments
+            .iter()
+            .filter(|attachment| matches!(attachment.state, AttachmentState::Active))
+            .map(|attachment| attachment.attachment_id.as_str())
+            .collect::<HashSet<_>>();
+        self.focus_epoch
+            .selected_attachment_ids
+            .retain(|id| active.contains(id.as_str()));
     }
 
     /// Validate that a follow-up turn comes from the same subject. The connection
@@ -1071,6 +1225,11 @@ impl PersistedAgentSession {
         self.lifetime_steps = self.lifetime_steps.saturating_add(1);
         add_usage(&mut self.current_turn_tokens, usage);
         add_usage(&mut self.lifetime_tokens, usage);
+        if self.surface == AgentSessionSurface::DeviceAssistant
+            && self.focus_epoch.input_revision == self.input_revision
+        {
+            self.focus_epoch.record_step(usage);
+        }
     }
 
     /// Record a provider-backed context-compression call without consuming one
@@ -1079,6 +1238,11 @@ impl PersistedAgentSession {
     pub fn record_compression_usage(&mut self, usage: TokenUsage) {
         add_usage(&mut self.current_turn_tokens, usage);
         add_usage(&mut self.lifetime_tokens, usage);
+        if self.surface == AgentSessionSurface::DeviceAssistant
+            && self.focus_epoch.input_revision == self.input_revision
+        {
+            self.focus_epoch.record_tokens(usage);
+        }
     }
 
     /// Build the authoritative raw-history protection snapshot used by context
@@ -1172,6 +1336,9 @@ impl PersistedAgentSession {
             .iter()
             .any(|p| p.event_id == trigger.event_id)
         {
+            return false;
+        }
+        if self.pending_auto_triggers.len() >= MAX_PENDING_AUTO_TRIGGERS {
             return false;
         }
         self.pending_auto_triggers.push(trigger);
@@ -1769,6 +1936,65 @@ mod tests {
             }],
             created_at: "2026-08-29T00:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn new_user_input_resets_only_focus_state_and_revalidates_pending_permission() {
+        let mut value = session();
+        value.surface = AgentSessionSurface::DeviceAssistant;
+        value.input_revision = 1;
+        value.latest_input_seq = 1;
+        value.focus_epoch.input_revision = 1;
+        value.focus_epoch.bind_task_status();
+        value.focus_epoch.record_step(TokenUsage {
+            input_tokens: Some(99),
+            output_tokens: Some(7),
+            ..Default::default()
+        });
+        value.capability_disclosure.focus_input_revision = 1;
+        value.capability_disclosure.updated_input_revision = 1;
+        value.capability_disclosure.loaded_tool_names = vec!["read_system_info".into()];
+        value.task_status_projection = Some(crate::dynamic_run::TaskStatusProjection {
+            schema_version: crate::dynamic_run::TASK_STATUS_PROJECTION_SCHEMA_VERSION,
+            revision: 1,
+            items: Vec::new(),
+            updated_at: "2026-09-03T00:00:00Z".into(),
+        });
+        value
+            .add_permission_request(permission_request(1, PermissionRequestState::Pending))
+            .unwrap();
+        value.execution_state = ExecutionState::OutcomeUnknown {
+            action: ActionIdentity::agent_exec(8, "exec_t9", "execution-9"),
+            placeholder_message_id: "result-placeholder".into(),
+            since: "2026-09-03T00:00:00Z".into(),
+        };
+        let durable_execution_fact = value.execution_state.clone();
+
+        let changed = value.begin_focus_epoch(2, Vec::<String>::new()).unwrap();
+
+        assert_eq!(changed, 1);
+        assert_eq!(value.focus_epoch.input_revision, 2);
+        assert_eq!(value.focus_epoch.steps_used, 0);
+        assert_eq!(value.focus_epoch.tokens_used, TokenUsage::default());
+        assert_eq!(value.focus_epoch.history_lookup_calls, 0);
+        assert_eq!(value.focus_epoch.history_result_bytes, 0);
+        assert_eq!(value.focus_epoch.task_status_input_revision, None);
+        assert!(value.focus_epoch.selected_attachment_ids.is_empty());
+        assert_eq!(value.capability_disclosure.focus_input_revision, 2);
+        assert!(value.capability_disclosure.loaded_tool_names.is_empty());
+        assert!(value.task_status_projection.is_none());
+        assert_eq!(
+            value.permission_requests[0].state,
+            PermissionRequestState::NeedsRevalidation
+        );
+        assert_eq!(value.execution_state, durable_execution_fact);
+
+        let unchanged = value.clone();
+        assert_eq!(
+            value.begin_focus_epoch(3, ["missing-attachment".into()]),
+            Err("focus epoch references a missing or stale attachment")
+        );
+        assert_eq!(value, unchanged, "invalid selection must fail atomically");
     }
 
     #[test]
@@ -2829,6 +3055,21 @@ mod tests {
     }
 
     #[test]
+    fn old_device_assistant_schema_is_rejected_instead_of_inferred() {
+        let mut value = serde_json::to_value(session()).unwrap();
+        value["surface"] = serde_json::json!("device_assistant");
+        value["conversation_schema_version"] = serde_json::json!(1);
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("capability_disclosure");
+        assert!(matches!(
+            PersistedAgentSession::decode_json(&value.to_string()),
+            Err(SessionDecodeError::UnsupportedVersion(1))
+        ));
+    }
+
+    #[test]
     fn storage_limit_tombstones_opaque_replay_without_deleting_transcript() {
         use crate::chat::ToolCallRef;
         use crate::model_profile::WireProtocol;
@@ -2923,6 +3164,19 @@ mod tests {
 
         assert_eq!(s.pending_auto_triggers.len(), 2);
         assert_eq!(s.earliest_pending_at(), Some("2026-07-20T00:00:01Z"));
+    }
+
+    #[test]
+    fn pending_auto_trigger_projection_has_a_hard_limit() {
+        let mut s = session();
+        for index in 0..MAX_PENDING_AUTO_TRIGGERS {
+            assert!(s.add_pending_auto_trigger(pending(
+                &format!("event-{index}"),
+                &format!("2026-07-20T00:00:{:02}Z", index % 60),
+            )));
+        }
+        assert!(!s.add_pending_auto_trigger(pending("event-overflow", "2026-07-20T00:01:00Z",)));
+        assert_eq!(s.pending_auto_triggers.len(), MAX_PENDING_AUTO_TRIGGERS);
     }
 
     /// `clear_reacted_auto_triggers` drops exactly the entries whose `event_id` is

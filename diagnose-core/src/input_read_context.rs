@@ -99,6 +99,7 @@ pub fn validate_objects(objects: &[ContextAttachment]) -> Result<(), AgentError>
                     ContextAttachmentKind::TerminalSessionRef,
                     ObjectKind::TerminalOutput
                 )
+                | (ContextAttachmentKind::WindowSelection, ObjectKind::Window)
         );
         let expiry = DateTime::parse_from_rfc3339(&reference.expires_at)
             .ok()

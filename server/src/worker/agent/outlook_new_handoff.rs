@@ -155,6 +155,7 @@ pub fn execute(
         verification: CommunicationPrepareVerification::AssistiveUnverified,
         readback_payload_sha256: None,
         send_authority: CommunicationSendAuthority::ManualOnly,
+        send_payload_snapshot: None,
         handed_off_at_unix_ms,
     };
     handoff

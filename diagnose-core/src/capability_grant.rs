@@ -147,6 +147,7 @@ pub fn fresh_object_resource_scope(
 pub struct CapabilityGrantCall<'a> {
     pub actor_id: &'a str,
     pub run_id: &'a str,
+    pub input_revision: u64,
     pub surface: ProductSurface,
     pub target_device_id: &'a str,
     pub target_session_id: Option<&'a str>,
@@ -177,6 +178,7 @@ pub enum GrantMismatch {
     Expired,
     Exhausted,
     Subject,
+    InputRevision,
     Surface,
     Target,
     ProviderTool,
@@ -229,6 +231,9 @@ fn match_capability_grant_inner(
     }
     if grant.actor_id != call.actor_id || grant.run_id != call.run_id {
         return Err(GrantMismatch::Subject);
+    }
+    if grant.input_revision != call.input_revision {
+        return Err(GrantMismatch::InputRevision);
     }
     if grant.surface != call.surface {
         return Err(GrantMismatch::Surface);
@@ -312,6 +317,7 @@ mod tests {
             grant_id: "grant-1".into(),
             actor_id: "actor-1".into(),
             run_id: "run-1".into(),
+            input_revision: 3,
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: "device-1".into(),
             target_session_id: Some("session-1".into()),
@@ -429,6 +435,7 @@ mod tests {
         CapabilityGrantCall {
             actor_id: "actor-1",
             run_id: "run-1",
+            input_revision: 3,
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: "device-1",
             target_session_id: Some("session-1"),
@@ -464,6 +471,21 @@ mod tests {
                 &call(&resources, &operations, &envelopes, &digests, &digest('a')),
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn grant_from_an_older_focus_epoch_is_rejected() {
+        let resources = vec!["root:selected".into()];
+        let operations = vec!["create_new".into()];
+        let envelopes = vec!["envelope-1".into()];
+        let digests = vec![digest('b')];
+        let canonical = digest('a');
+        let mut current = call(&resources, &operations, &envelopes, &digests, &canonical);
+        current.input_revision = 4;
+        assert_eq!(
+            match_capability_grant(&grant(), &current),
+            Err(GrantMismatch::InputRevision)
         );
     }
 

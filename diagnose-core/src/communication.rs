@@ -7,8 +7,8 @@
 
 use desk_agent_protocol::communication::{
     COMMUNICATION_SCHEMA_VERSION, CommunicationContractError, CommunicationPayload,
-    LocalDraftDocument, RecipientDisplayWarning, RecipientRole, ResolvedRecipientMember,
-    SendPayloadSnapshot,
+    GmailWebExactSendInput, LocalDraftDocument, RecipientDisplayWarning, RecipientRole,
+    ResolvedRecipientMember, SendPayloadSnapshot, SlackWebExactSendInput,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -104,7 +104,7 @@ pub fn canonicalize_email_address(
     let has_ascii = trimmed
         .chars()
         .any(|character| character.is_ascii_alphanumeric());
-    let has_non_ascii = trimmed.chars().any(|character| !character.is_ascii());
+    let has_non_ascii = !trimmed.is_ascii();
     let mut display_warnings = Vec::new();
     if has_non_ascii {
         display_warnings.push(RecipientDisplayWarning::UnicodeAddress);
@@ -196,6 +196,70 @@ pub fn send_idempotency_key(
 ) -> Result<String, CommunicationSealError> {
     verify_send_payload_snapshot(snapshot)?;
     Ok(format!("send:v1:{}", snapshot.canonical_payload_sha256))
+}
+
+fn body_matches(snapshot: &SendPayloadSnapshot, body: &str) -> bool {
+    snapshot.payload.body.size_bytes == body.len() as u64
+        && snapshot.payload.body.digest_sha256 == format!("{:x}", Sha256::digest(body.as_bytes()))
+}
+
+pub fn verify_gmail_web_exact_send_input(
+    input: &GmailWebExactSendInput,
+) -> Result<(), CommunicationSealError> {
+    input.validate_shape()?;
+    let snapshot = input
+        .handoff
+        .send_payload_snapshot
+        .as_ref()
+        .ok_or(CommunicationContractError::InvalidSendAuthority)?;
+    verify_send_payload_snapshot(snapshot)?;
+    let canonical = canonicalize_email_address(&input.draft.recipients[0].address)?;
+    let expected_attachments = input
+        .draft
+        .attachment_labels
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let actual_attachments = snapshot
+        .payload
+        .attachments
+        .iter()
+        .map(|attachment| attachment.file_name.as_str())
+        .collect::<Vec<_>>();
+    if snapshot.payload.recipients.len() != 1
+        || snapshot.payload.recipients[0].role != RecipientRole::To
+        || snapshot.payload.recipients[0].canonical_address != canonical.value
+        || snapshot.payload.recipients[0].display_name != input.draft.recipients[0].display_name
+        || snapshot.payload.recipients[0].display_warnings != canonical.display_warnings
+        || snapshot.payload.subject != input.draft.subject
+        || !body_matches(snapshot, &input.draft.body_plain_text)
+        || actual_attachments != expected_attachments
+    {
+        return Err(CommunicationSealError::SnapshotDigestMismatch);
+    }
+    Ok(())
+}
+
+pub fn verify_slack_web_exact_send_input(
+    input: &SlackWebExactSendInput,
+) -> Result<(), CommunicationSealError> {
+    input.validate_shape()?;
+    let snapshot = input
+        .handoff
+        .send_payload_snapshot
+        .as_ref()
+        .ok_or(CommunicationContractError::InvalidSendAuthority)?;
+    verify_send_payload_snapshot(snapshot)?;
+    if snapshot.payload.recipients.len() != 1
+        || snapshot.payload.recipients[0].role != RecipientRole::ChatDestination
+        || snapshot.payload.recipients[0].canonical_address != input.composer.accessible_name.trim()
+        || !snapshot.payload.subject.is_empty()
+        || !snapshot.payload.attachments.is_empty()
+        || !body_matches(snapshot, &input.body_plain_text)
+    {
+        return Err(CommunicationSealError::SnapshotDigestMismatch);
+    }
+    Ok(())
 }
 
 /// Render a local-only draft as inert UTF-8 text. This intentionally does not
@@ -292,6 +356,217 @@ fn is_bidi_or_invisible_control(character: char) -> bool {
             | '\u{2060}'..='\u{2069}'
             | '\u{feff}'
     )
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use desk_agent_protocol::{
+        browser_control::{
+            BROWSER_CONTROL_SCHEMA_VERSION, BrowserAdapterRef, BrowserElementRef,
+            BrowserElementRole, BrowserEngineKind, BrowserOrigin, BrowserOriginKind,
+            BrowserPageRef,
+        },
+        communication::{
+            COMMUNICATION_SCHEMA_VERSION, CommunicationChannel, CommunicationDraftHandoff,
+            CommunicationPayload, CommunicationPrepareVerification, CommunicationSendAuthority,
+            CommunicationSurfaceKind, CommunicationSurfaceRef, CommunicationSurfaceScope,
+            GmailWebExactSendInput, ImmutableBodySnapshot, LocalDraftDocument, LocalDraftRecipient,
+            RecipientIdentity, RecipientKind, RecipientRole, SlackWebExactSendInput,
+        },
+        data_lineage::ContentRef,
+    };
+    use sha2::{Digest, Sha256};
+
+    use super::seal_send_payload;
+
+    fn page(host: &str) -> BrowserPageRef {
+        BrowserPageRef {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            adapter: BrowserAdapterRef {
+                engine: BrowserEngineKind::ChromeExtension,
+                device_id: "device".into(),
+                os_session_id: "session".into(),
+                browser_major_version: 151,
+                browser_version: "151.0".into(),
+                adapter_id: "chrome-extension".into(),
+                adapter_version: "1".into(),
+                profile_incarnation: "profile".into(),
+                connection_revision: 7,
+            },
+            page_id: "page".into(),
+            page_incarnation: "page-incarnation".into(),
+            origin: BrowserOrigin {
+                kind: BrowserOriginKind::Https,
+                host_ascii: host.into(),
+                port: 443,
+            },
+            document_revision: 3,
+            url_sha256: "a".repeat(64),
+            observed_at_unix_ms: 200,
+        }
+    }
+
+    fn element(
+        page: &BrowserPageRef,
+        element_id: &str,
+        role: BrowserElementRole,
+        accessible_name: &str,
+    ) -> BrowserElementRef {
+        BrowserElementRef {
+            page_id: page.page_id.clone(),
+            page_incarnation: page.page_incarnation.clone(),
+            document_revision: page.document_revision,
+            element_id: element_id.into(),
+            role,
+            accessible_name: accessible_name.into(),
+            value: None,
+            element_revision: 1,
+        }
+    }
+
+    fn body(value: &str) -> ImmutableBodySnapshot {
+        let digest = format!("{:x}", Sha256::digest(value.as_bytes()));
+        ImmutableBodySnapshot {
+            content: ContentRef::ImmutableBlob {
+                blob_id: format!("body-{digest}"),
+                sha256: digest.clone(),
+                size_bytes: value.len() as u64,
+                media_type: "text/plain; charset=utf-8".into(),
+            },
+            media_type: "text/plain; charset=utf-8".into(),
+            size_bytes: value.len() as u64,
+            digest_sha256: digest,
+        }
+    }
+
+    fn handoff(payload: CommunicationPayload, kind: &str) -> CommunicationDraftHandoff {
+        let surface = payload.surface.clone();
+        let snapshot =
+            seal_send_payload(format!("{kind}-send-snapshot"), "run".into(), payload, 100).unwrap();
+        CommunicationDraftHandoff {
+            schema_version: COMMUNICATION_SCHEMA_VERSION,
+            handoff_id: format!("{kind}-handoff"),
+            run_id: "run".into(),
+            surface,
+            compose_id: format!("{kind}-compose"),
+            prepared_payload_sha256: "b".repeat(64),
+            verification: CommunicationPrepareVerification::SemanticExact,
+            readback_payload_sha256: Some("b".repeat(64)),
+            send_authority: CommunicationSendAuthority::ExactGrantEligible,
+            send_payload_snapshot: Some(snapshot),
+            handed_off_at_unix_ms: 100,
+        }
+    }
+
+    pub(crate) fn gmail_exact_send_input() -> GmailWebExactSendInput {
+        let page = page("mail.google.com");
+        let draft = LocalDraftDocument {
+            schema_version: COMMUNICATION_SCHEMA_VERSION,
+            recipients: vec![LocalDraftRecipient {
+                role: RecipientRole::To,
+                address: "alice@example.com".into(),
+                display_name: Some("Alice".into()),
+            }],
+            subject: "Reviewed subject".into(),
+            body_plain_text: "Reviewed Gmail body".into(),
+            attachment_labels: Vec::new(),
+        };
+        let surface = CommunicationSurfaceRef {
+            channel: CommunicationChannel::Email,
+            kind: CommunicationSurfaceKind::ChromeExtension,
+            scope: CommunicationSurfaceScope::WebOrigin {
+                origin: page.origin.clone(),
+            },
+            device_id: page.adapter.device_id.clone(),
+            os_session_id: page.adapter.os_session_id.clone(),
+            adapter_id: "gmail-web".into(),
+            adapter_version: "1".into(),
+            profile_id: page.adapter.profile_incarnation.clone(),
+            account_id: "gmail-current-profile".into(),
+            revision: page.adapter.connection_revision,
+        };
+        let handoff = handoff(
+            CommunicationPayload {
+                surface,
+                recipients: vec![RecipientIdentity {
+                    role: RecipientRole::To,
+                    kind: RecipientKind::EmailMailbox,
+                    stable_id: "gmail-mailbox-alice".into(),
+                    canonical_address: "alice@example.com".into(),
+                    display_name: Some("Alice".into()),
+                    display_warnings: Vec::new(),
+                    resolved_members: Vec::new(),
+                    member_snapshot_sha256: None,
+                }],
+                subject: draft.subject.clone(),
+                body: body(&draft.body_plain_text),
+                attachments: Vec::new(),
+            },
+            "gmail",
+        );
+        GmailWebExactSendInput {
+            schema_version: COMMUNICATION_SCHEMA_VERSION,
+            handoff,
+            to_field: element(&page, "to", BrowserElementRole::Combobox, "To recipients"),
+            subject_field: element(&page, "subject", BrowserElementRole::Textbox, "Subject"),
+            body_field: element(&page, "body", BrowserElementRole::Textbox, "Message Body"),
+            send_control: element(&page, "send", BrowserElementRole::Button, "Send"),
+            page,
+            draft,
+        }
+    }
+
+    pub(crate) fn slack_exact_send_input() -> SlackWebExactSendInput {
+        let page = page("app.slack.com");
+        let body_plain_text = "Reviewed Slack body".to_string();
+        let composer = element(
+            &page,
+            "composer",
+            BrowserElementRole::Textbox,
+            "Message #review",
+        );
+        let surface = CommunicationSurfaceRef {
+            channel: CommunicationChannel::Chat,
+            kind: CommunicationSurfaceKind::ChromeExtension,
+            scope: CommunicationSurfaceScope::WebOrigin {
+                origin: page.origin.clone(),
+            },
+            device_id: page.adapter.device_id.clone(),
+            os_session_id: page.adapter.os_session_id.clone(),
+            adapter_id: "slack-web".into(),
+            adapter_version: "1".into(),
+            profile_id: page.adapter.profile_incarnation.clone(),
+            account_id: "slack-current-profile".into(),
+            revision: page.adapter.connection_revision,
+        };
+        let handoff = handoff(
+            CommunicationPayload {
+                surface,
+                recipients: vec![RecipientIdentity {
+                    role: RecipientRole::ChatDestination,
+                    kind: RecipientKind::ChatChannel,
+                    stable_id: "slack-channel-review".into(),
+                    canonical_address: composer.accessible_name.clone(),
+                    display_name: None,
+                    display_warnings: Vec::new(),
+                    resolved_members: Vec::new(),
+                    member_snapshot_sha256: None,
+                }],
+                subject: String::new(),
+                body: body(&body_plain_text),
+                attachments: Vec::new(),
+            },
+            "slack",
+        );
+        SlackWebExactSendInput {
+            schema_version: COMMUNICATION_SCHEMA_VERSION,
+            handoff,
+            composer,
+            send_control: element(&page, "send", BrowserElementRole::Button, "Send message"),
+            page,
+            body_plain_text,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,1 @@
+{"type":"object","required":["hasMore","limit"],"properties":{"hasMore":{"type":"boolean"},"limit":{"type":"integer","minimum":0},"nextBeforeMessageId":{"type":["string","null"]}},"x-readme-ref-name":"SnapshotMessagePageDto"}

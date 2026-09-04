@@ -2160,25 +2160,54 @@ impl WorkerSession {
                                             action_broker.release_writer_lease(&generation);
                                             let (class, facts, message, output) = match result {
                                                 Ok(result) => {
-                                                    let changed = mutation_may_have_started;
+                                                    let (class, changed, verified, summary, message) =
+                                                        match result
+                                                            .send_receipt
+                                                            .as_ref()
+                                                            .map(|receipt| receipt.outcome)
+                                                        {
+                                                            Some(desk_agent_protocol::communication::SendOutcome::Sent) => (
+                                                                ComputerActionResultClass::Verified,
+                                                                true,
+                                                                true,
+                                                                "reviewed browser provider observed its sent acknowledgement",
+                                                                "browser exact send returned a typed Sent receipt",
+                                                            ),
+                                                            Some(desk_agent_protocol::communication::SendOutcome::DefinitelyNotSent) => (
+                                                                ComputerActionResultClass::Verified,
+                                                                false,
+                                                                true,
+                                                                "reviewed browser provider rejected changed preconditions before activation",
+                                                                "browser exact send returned DefinitelyNotSent without activating Send",
+                                                            ),
+                                                            Some(desk_agent_protocol::communication::SendOutcome::OutcomeUnknown) => (
+                                                                ComputerActionResultClass::OutcomeUnknown,
+                                                                true,
+                                                                false,
+                                                                "Send was activated but no conclusive provider receipt was observed",
+                                                                "browser exact send outcome is unknown and must not be retried automatically",
+                                                            ),
+                                                            None => (
+                                                                ComputerActionResultClass::Verified,
+                                                                mutation_may_have_started,
+                                                                true,
+                                                                if mutation_may_have_started {
+                                                                    "browser action completed with bounded semantic read-back"
+                                                                } else {
+                                                                    "browser observation completed with bounded semantic projection"
+                                                                },
+                                                                "browser adapter returned a typed, page-bound result",
+                                                            ),
+                                                        };
                                                     (
-                                                        ComputerActionResultClass::Verified,
+                                                        class,
                                                         vec![ComputerActionStepFact {
                                                             index: 0,
                                                             changed,
-                                                            verified: true,
-                                                            summary: if changed {
-                                                                "browser action completed with bounded semantic read-back"
-                                                                    .into()
-                                                            } else {
-                                                                "browser observation completed with bounded semantic projection"
-                                                                    .into()
-                                                            },
+                                                            verified,
+                                                            summary: summary.into(),
                                                         }],
-                                                        Some(
-                                                            "browser adapter returned a typed, page-bound result"
-                                                                .into(),
-                                                        ),
+                                                        Some(message.into()),
                                                         Some(ComputerActionOutput::Browser(result)),
                                                     )
                                                 }

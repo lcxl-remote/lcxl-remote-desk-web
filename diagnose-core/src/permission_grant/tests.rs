@@ -216,7 +216,7 @@ fn exact_external_grant_never_restores_removed_scopes_or_destinations() {
     item.resource_scope = crate::capability_grant::exact_external_query_resource_scope(&digest);
     item.operation_scope = vec!["search_public_web".into()];
     item.export_destinations = vec![DestinationIdentity::WebResearch {
-        connector_id: crate::device_assistant::DUCKDUCKGO_HTML_CONNECTOR_ID.into(),
+        connector_id: crate::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
     }];
     item.canonical_input_json = Some(canonical);
     item.canonical_input_digest_sha256 = Some(digest);

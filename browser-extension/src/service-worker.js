@@ -12,11 +12,14 @@ const TAB_DESCRIBE_RETRY_INTERVAL_MS = 250;
 const TAB_QUERY_TIMEOUT_MS = 3000;
 const TARGET_TAB_CACHE_KEY = "openedTargetTabs";
 const MAX_REMEMBERED_TARGET_TABS = 16;
+const SEND_RECEIPTS_KEY = "exactSendReceipts";
+const MAX_SEND_RECEIPTS = 128;
 let socket = null;
 let reconnectDelayMs = 1000;
 let reconnectTimer = null;
 let keepaliveTimer = null;
 let connectionGeneration = 0;
+const sendInflight = new Map();
 
 function stopKeepalive() {
     if (keepaliveTimer) {
@@ -259,7 +262,35 @@ async function rememberTargetTab(targetUrl, tabId) {
     }
 }
 
-export async function execute(action) {
+function rawPageFromAction(action) {
+    return {
+        page_id: action.page.page_id,
+        page_incarnation: action.page.page_incarnation,
+        origin: action.page.origin,
+        document_revision: action.page.document_revision,
+        url_sha256: action.page.url_sha256
+    };
+}
+
+async function cachedSendReceipt(idempotencyKey) {
+    const stored = await storageGet("local", [SEND_RECEIPTS_KEY]);
+    return stored?.[SEND_RECEIPTS_KEY]?.[idempotencyKey] || null;
+}
+
+async function rememberSendReceipt(receipt) {
+    const stored = await storageGet("local", [SEND_RECEIPTS_KEY]);
+    const entries = Object.entries(stored?.[SEND_RECEIPTS_KEY] || {})
+        .filter(([, value]) => value?.idempotency_key !== receipt.idempotency_key)
+        .sort((left, right) =>
+            Number(left[1]?.observed_at_unix_ms || 0) - Number(right[1]?.observed_at_unix_ms || 0)
+        )
+        .slice(-(MAX_SEND_RECEIPTS - 1));
+    const next = Object.fromEntries(entries);
+    next[receipt.idempotency_key] = receipt;
+    await chrome.storage.local.set({ [SEND_RECEIPTS_KEY]: next });
+}
+
+async function executeOnce(action) {
     if (action.action === "open_page") {
         await assertHostPermissionForUrl(chrome, action.target.url);
         const existing = await findExistingTabForTarget(action.target.url)
@@ -289,6 +320,33 @@ export async function execute(action) {
         return describeTabWithRetry(tabId);
     }
     return sendToTab(tabId, action);
+}
+
+export async function execute(action) {
+    const send = action.action === "activate_element" && action.activation_class?.kind === "send_external";
+    if (!send) return executeOnce(action);
+    const key = action.activation_class.idempotency_key;
+    const cached = await cachedSendReceipt(key);
+    if (cached) {
+        if (cached.snapshot_id !== action.activation_class.snapshot_id ||
+            cached.snapshot_sha256 !== action.activation_class.payload_sha256 ||
+            cached.idempotency_key !== key) {
+            throw new Error("invalid_cached_send_receipt");
+        }
+        return { page: rawPageFromAction(action), send_receipt: cached };
+    }
+    const existing = sendInflight.get(key);
+    if (existing) return existing;
+    const pending = (async () => {
+        const result = await executeOnce(action);
+        if (!result?.send_receipt || result.send_receipt.idempotency_key !== key) {
+            throw new Error("invalid_send_receipt");
+        }
+        await rememberSendReceipt(result.send_receipt);
+        return result;
+    })().finally(() => sendInflight.delete(key));
+    sendInflight.set(key, pending);
+    return pending;
 }
 
 async function handleMessage(event, activeSocket) {

@@ -9,6 +9,8 @@ import { useQueryAiPolicySettings } from "@/services/hooks/aiModelController/use
 import { useUpdateAiPolicySettings } from "@/services/hooks/aiModelController/useUpdateAiPolicySettings"
 import { useQueryCollectionPolicySettings } from "@/services/hooks/aiModelController/useQueryCollectionPolicySettings"
 import { useUpdateCollectionPolicySettings } from "@/services/hooks/aiModelController/useUpdateCollectionPolicySettings"
+import { useQueryDeviceAssistantSettings } from "@/services/hooks/aiModelController/useQueryDeviceAssistantSettings"
+import { useUpdateDeviceAssistantSettings } from "@/services/hooks/aiModelController/useUpdateDeviceAssistantSettings"
 import type { AiExecutionPolicyUpdate, CollectionPolicySettingsUpdate } from "@/services/types"
 
 import { Button } from "@/components/ui/button"
@@ -77,6 +79,8 @@ export function AiPolicySettings() {
     const { mutateAsync: updatePolicy, isPending: isPolicyUpdating } = useUpdateAiPolicySettings()
     const { data: collectionResponse, isLoading: isCollectionLoading } = useQueryCollectionPolicySettings()
     const { mutateAsync: updateCollection, isPending: isCollectionUpdating } = useUpdateCollectionPolicySettings()
+    const assistantSettings = useQueryDeviceAssistantSettings()
+    const assistantSettingsMutation = useUpdateDeviceAssistantSettings()
 
     const policyForm = useForm<PolicyFormValues>({
         resolver: zodResolver(policySchema),
@@ -164,7 +168,32 @@ export function AiPolicySettings() {
         }
     }
 
-    if (isPolicyLoading || isCollectionLoading) {
+    const onAssistantEnabledChange = async (enabled: boolean) => {
+        const current = assistantSettings.data?.data
+        if (!current) return
+        try {
+            const response = await assistantSettingsMutation.mutateAsync({
+                data: { enabled, expected_revision: current.revision },
+            })
+            if (!response.success || !response.data) throw new Error(response.message ?? "update failed")
+            await assistantSettings.refetch()
+            toast({
+                title: t("pages.system.settings.success"),
+                description: t(enabled
+                    ? "pages.aiPolicy.deviceAssistant.enabled"
+                    : "pages.aiPolicy.deviceAssistant.disabled"),
+            })
+        } catch {
+            await assistantSettings.refetch()
+            toast({
+                variant: "destructive",
+                title: t("pages.system.settings.error"),
+                description: t("pages.aiPolicy.deviceAssistant.updateFailed"),
+            })
+        }
+    }
+
+    if (isPolicyLoading || isCollectionLoading || assistantSettings.isLoading) {
         return (
             <div className="flex h-full items-center justify-center">
                 <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -185,6 +214,29 @@ export function AiPolicySettings() {
                     {t("pages.aiPolicy.settings.description")}
                 </p>
             </div>
+
+            <Card className="mb-6">
+                <CardHeader>
+                    <CardTitle>{t("pages.aiPolicy.deviceAssistant.title")}</CardTitle>
+                    <CardDescription>{t("pages.aiPolicy.deviceAssistant.description")}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div className="flex items-center justify-between gap-6">
+                        <div>
+                            <p className="font-medium">{t("pages.aiPolicy.deviceAssistant.switch")}</p>
+                            <p className="text-sm text-muted-foreground">
+                                {t("pages.aiPolicy.deviceAssistant.switchDescription")}
+                            </p>
+                        </div>
+                        <Switch
+                            checked={assistantSettings.data?.data?.enabled === true}
+                            disabled={!assistantSettings.data?.data || assistantSettingsMutation.isPending}
+                            onCheckedChange={(checked) => void onAssistantEnabledChange(checked)}
+                            aria-label={t("pages.aiPolicy.deviceAssistant.switch")}
+                        />
+                    </div>
+                </CardContent>
+            </Card>
 
             <Card>
                 <CardHeader>

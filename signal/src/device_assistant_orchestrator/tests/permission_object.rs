@@ -50,7 +50,7 @@ async fn stale_readiness_or_legacy_input_cannot_restore_object_read_authority() 
 
 #[actix_web::test]
 async fn scanner_recovers_committed_decision_once_with_original_model_and_object_read() {
-    run_case(None, ResumeMode::Scan).await;
+    Box::pin(run_case(None, ResumeMode::Scan)).await;
 }
 
 #[actix_web::test]
@@ -67,8 +67,9 @@ async fn periodic_executor_discovers_a_committed_decision_without_controller_wak
 
 #[actix_web::test]
 async fn live_document_permission_resume_reads_the_frozen_target_over_real_transport() {
-    run_case_with_live(None, ResumeMode::Direct, true).await;
-    run_case_with_live(None, ResumeMode::Scan, true).await;
+    for mode in [ResumeMode::Direct, ResumeMode::Scan] {
+        Box::pin(run_case_with_live(None, mode, true)).await;
+    }
 }
 
 #[actix_web::test]
@@ -448,6 +449,12 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
             db.clone()
         },
         connections.clone(),
+        std::sync::Arc::new(crate::device_assistant_gate::DeviceAssistantGate::new(
+            desk_agent_protocol::device_assistant::DeviceAssistantSettings {
+                revision: 1,
+                enabled: true,
+            },
+        )),
     );
     if scanner {
         let original = map.write().await.remove(&host).unwrap();

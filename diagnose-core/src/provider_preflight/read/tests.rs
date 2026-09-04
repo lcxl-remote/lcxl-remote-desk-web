@@ -64,6 +64,7 @@ fn live_read_authority_uses_original_targets_on_both_surfaces() {
             let subject = ProviderCallSubject {
                 actor_id: "7",
                 run_id: "run",
+                input_revision: 1,
                 target_device_id: "42",
                 policy_revision: 1,
                 readiness_revision: 7,
@@ -131,6 +132,7 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
     let subject = ProviderCallSubject {
         actor_id: "7",
         run_id: "run",
+        input_revision: 1,
         target_device_id: "42",
         policy_revision: 1,
         readiness_revision: 7,
@@ -177,6 +179,76 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
                 destination: &destination,
                 now_unix_ms: 1000
             }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn central_web_authority_is_exact_and_fixes_the_search_destination() {
+    let registry = device_assistant_provider_registry();
+    let destination = destination();
+    let original = ReadContextSelection {
+        tool_names: vec!["search_public_web".into()],
+        expires_at: None,
+        object_attachments: vec![],
+        live_targets: vec![],
+    };
+    let binding = ObjectReadBinding {
+        original: &original,
+        destination: &destination,
+        now_unix_ms: 1_000,
+    };
+    let call = ToolCall {
+        id: "search-call".into(),
+        name: "search_public_web".into(),
+        arguments_json: serde_json::json!({"query":"Rust language","max_results":5}).to_string(),
+    };
+    let preflight = ReadCallPreflight::build_central_web(
+        &registry,
+        ProductSurface::ManagerPersonalOwner,
+        &call,
+        &binding,
+        "请搜索 Rust language",
+    )
+    .unwrap();
+    let authority = preflight
+        .grant_call(&ProviderCallSubject {
+            actor_id: "7",
+            run_id: "run",
+            input_revision: 1,
+            target_device_id: "42",
+            policy_revision: 1,
+            readiness_revision: 1,
+            now_unix_ms: 1_000,
+        })
+        .unwrap();
+    assert_eq!(authority.effect, CapabilityEffect::ExportData);
+    assert_eq!(authority.item_count, 5);
+    assert!(authority.resource_scope[0].starts_with("external_query_input:sha256:"));
+    assert_eq!(authority.operation_scope, ["search_public_web"]);
+    assert_eq!(
+        authority.export_destinations,
+        [DestinationIdentity::WebResearch {
+            connector_id: crate::web_research::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
+        }]
+    );
+    assert!(
+        ReadCallPreflight::build_central_web(
+            &registry,
+            ProductSurface::ManagerPersonalOwner,
+            &call,
+            &binding,
+            "请搜索刚才的关键词",
+        )
+        .is_err()
+    );
+    assert!(
+        ReadCallPreflight::build(
+            &registry,
+            ProductSurface::ManagerPersonalOwner,
+            &call,
+            &binding
         )
         .is_err()
     );

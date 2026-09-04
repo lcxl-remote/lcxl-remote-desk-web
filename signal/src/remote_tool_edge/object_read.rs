@@ -41,6 +41,16 @@ impl SignalDeviceAssistantTools {
         })
     }
 
+    pub(super) fn uses_selected_objects(&self, call: &ToolCall) -> Result<bool, AgentError> {
+        let input = self.original_input.get().ok_or_else(denied)?;
+        Ok(
+            desk_diagnose_core::input_read_context::object_read::uses_selected_objects(
+                &call.name,
+                &input.selection.object_attachments,
+            ),
+        )
+    }
+
     pub(crate) async fn validate_original_objects(&self) -> Result<(), AgentError> {
         let input = self.original_input.get().ok_or_else(denied)?;
         SignalAgentRunEventStore::new(self.db.clone())

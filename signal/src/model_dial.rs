@@ -115,19 +115,6 @@ pub(crate) struct SsrfResolver {
     enforce_public_tls: bool,
 }
 
-impl SsrfResolver {
-    /// Fixed transport posture for untrusted Web Research targets. Unlike the
-    /// operator-configured model gateway, this can never opt into private/LAN
-    /// reachability or plaintext transport.
-    pub(crate) const fn strict_public_https() -> Self {
-        Self {
-            mode: desk_utils::ssrf::ProviderSsrfMode::Strict,
-            scheme_is_tls: true,
-            enforce_public_tls: true,
-        }
-    }
-}
-
 impl actix_tls::connect::Resolve for SsrfResolver {
     fn lookup<'a>(
         &'a self,
@@ -1929,6 +1916,860 @@ mod tests {
         assert!(!turn.text.trim().is_empty());
         assert!(!turn.provider_meta.reasoning_observed);
         assert!(turn.usage.output_tokens.is_some_and(|tokens| tokens > 0));
+    }
+
+    async fn run_progressive_disclosure_fixed_eval(seam: &SignalModelSeam, provider: &str) {
+        use desk_diagnose_core::capability_availability::CapabilityAvailability;
+        use desk_diagnose_core::capability_disclosure::{
+            CapabilityDisclosureState, CapabilityLoadContext, apply_load_call,
+            capability_discovery_tool_registry, capability_name_index_prompt,
+            project_capability_disclosure,
+        };
+        use desk_diagnose_core::device_assistant::device_assistant_provider_registry;
+
+        async fn call(
+            seam: &SignalModelSeam,
+            system: String,
+            user: &str,
+            tools: Vec<ToolSpec>,
+        ) -> (ModelTurn, u64) {
+            let request = ModelRequest {
+                messages: vec![
+                    ChatMessage::text("eval-system", ChatRole::System, system),
+                    ChatMessage::text("eval-user", ChatRole::User, user),
+                ],
+                tool_requirements:
+                    desk_diagnose_core::model_capability::ModelRequirements::TEXT_ONLY,
+                tools,
+                tool_choice: ToolChoice::Auto,
+                response_format: ResponseFormatSpec::None,
+                use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
+                caller_output_hard_cap: Some(1024),
+            };
+            let mut sink = desk_diagnose_core::seam::NullTurnSink;
+            let started = std::time::Instant::now();
+            let turn = seam.call(request, &mut sink).await.unwrap();
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            (turn, elapsed_ms)
+        }
+
+        fn usage(turn: &ModelTurn, elapsed_ms: u64) -> Value {
+            json!({
+                "input_tokens": turn.usage.input_tokens,
+                "output_tokens": turn.usage.output_tokens,
+                "tool_calls": turn.tool_calls.len(),
+                "elapsed_ms": elapsed_ms,
+            })
+        }
+
+        let registry = device_assistant_provider_registry();
+        let inventory = registry
+            .providers()
+            .flat_map(|provider| {
+                provider
+                    .capabilities
+                    .iter()
+                    .map(|capability| CapabilityAvailability {
+                        provider_id: provider.wire.provider_id.clone(),
+                        capability_id: capability.wire.capability_id.clone(),
+                        tool_name: capability.tool_spec.name.clone(),
+                        compiled: true,
+                        enabled: true,
+                        connected: true,
+                        ready: true,
+                        reason: None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let all_tools = registry.registered_tools();
+        let discovery = capability_discovery_tool_registry().remove(0);
+        let permission =
+            desk_diagnose_core::permission_tools::permission_planning_tool_registry().remove(0);
+        let advertised = std::collections::BTreeSet::new();
+        let index =
+            capability_name_index_prompt(&registry, &inventory, &[], &all_tools, &advertised)
+                .unwrap();
+        let contract = "You are evaluating a bounded capability protocol. Follow the server-authored index exactly. Never invent a tool. If the requested capability is not an advertised API tool, first call load_capability_details with its exact name. Loading grants no authority.";
+        let mut results = Vec::new();
+
+        let (no_tool, no_tool_elapsed_ms) = call(
+            seam,
+            contract.into(),
+            "Reply with exactly OK and do not call a tool.",
+            Vec::new(),
+        )
+        .await;
+        results.push(json!({
+            "case": "no_tool",
+            "success": no_tool.tool_calls.is_empty() && !no_tool.text.trim().is_empty(),
+            "usage": usage(&no_tool, no_tool_elapsed_ms),
+        }));
+
+        let direct_tool = all_tools
+            .iter()
+            .find(|tool| tool.name() == "read_system_info")
+            .unwrap();
+        let (direct, direct_elapsed_ms) = call(
+            seam,
+            contract.into(),
+            "Call read_system_info now. Do not answer in prose.",
+            vec![direct_tool.spec.clone()],
+        )
+        .await;
+        results.push(json!({
+            "case": "direct_system_read",
+            "success": direct.tool_calls.iter().any(|tool| tool.name == "read_system_info"),
+            "usage": usage(&direct, direct_elapsed_ms),
+        }));
+
+        for (case, target, request) in [
+            (
+                "file_read_discovery",
+                "read_selected_text_file",
+                "The user explicitly selected a text file and asks you to read it. Start the capability protocol now; do not answer in prose.",
+            ),
+            (
+                "iwork_discovery",
+                "inspect_selected_pages_with_iwork",
+                "The user explicitly selected a Pages document and asks you to inspect it with Pages. Start the capability protocol now; do not answer in prose.",
+            ),
+            (
+                "gmail_discovery",
+                "prepare_gmail_web_draft_handoff",
+                "The user asks to prepare a Gmail web draft. Start the capability protocol now; do not answer in prose.",
+            ),
+            (
+                "slack_discovery",
+                "prepare_slack_web_message_handoff",
+                "The user asks to prepare a Slack web message. Start the capability protocol now; do not answer in prose.",
+            ),
+        ] {
+            let (first, elapsed_ms) = call(
+                seam,
+                format!("{contract}\n\n{index}"),
+                request,
+                vec![discovery.spec.clone()],
+            )
+            .await;
+            let selected_exact = first.tool_calls.iter().any(|tool| {
+                tool.name == discovery.name()
+                    && serde_json::from_str::<Value>(&tool.arguments_json)
+                        .ok()
+                        .and_then(|value| value["tool_names"].as_array().cloned())
+                        .is_some_and(|names| names.iter().any(|name| name == target))
+            });
+            results.push(json!({
+                "case": case,
+                "success": selected_exact,
+                "usage": usage(&first, elapsed_ms),
+            }));
+        }
+
+        let target = "replace_selected_pages_copy_body";
+        let mut state = CapabilityDisclosureState::default();
+        let synthetic_load = ToolCall {
+            id: "eval-load".into(),
+            name: discovery.name().into(),
+            arguments_json: json!({"tool_names": [target]}).to_string(),
+        };
+        apply_load_call(
+            &synthetic_load,
+            &mut state,
+            1,
+            &CapabilityLoadContext {
+                registry: &registry,
+                inventory: &inventory,
+                max_context_bytes: 128 * 1024,
+                callable_tools: &[],
+                permission_candidates: &all_tools,
+            },
+        )
+        .unwrap();
+        let projection = project_capability_disclosure(
+            &registry,
+            &inventory,
+            &[],
+            &all_tools,
+            &[],
+            &state,
+            128 * 1024,
+        )
+        .unwrap();
+        let (permission_turn, permission_elapsed_ms) = call(
+            seam,
+            format!(
+                "{contract}\nThe requested capability is loaded. Ask for permission with request_capability_grants; loading itself did not authorize it.\n\n{}\n\n{}",
+                projection.index_prompt, projection.detail_prompt
+            ),
+            "The user wants to replace the selected Pages copy body with the exact text `Quarterly review`. Request the required permission now and do not claim execution.",
+            vec![permission.spec.clone(), discovery.spec.clone()],
+        )
+        .await;
+        results.push(json!({
+            "case": "permission_plan",
+            "success": permission_turn
+                .tool_calls
+                .iter()
+                .any(|tool| tool.name == permission.name()),
+            "usage": usage(&permission_turn, permission_elapsed_ms),
+        }));
+
+        let resume_tool = all_tools.iter().find(|tool| tool.name() == target).unwrap();
+        let (approved, approved_elapsed_ms) = call(
+            seam,
+            "The owner approved the exact pending input. The only advertised tool is the exact continuation. Call it now; do not re-plan, re-observe, or answer in prose.".into(),
+            "Resume the approved Pages operation.",
+            vec![resume_tool.spec.clone()],
+        )
+        .await;
+        results.push(json!({
+            "case": "permission_approve_resume",
+            "success": approved.tool_calls.iter().any(|tool| tool.name == target),
+            "usage": usage(&approved, approved_elapsed_ms),
+        }));
+
+        let (denied, denied_elapsed_ms) = call(
+            seam,
+            "The owner denied the requested capability. No execution tool is advertised. Explain the denial truthfully and do not claim the action ran.".into(),
+            "Continue after the permission decision.",
+            Vec::new(),
+        )
+        .await;
+        results.push(json!({
+            "case": "permission_deny",
+            "success": denied.tool_calls.is_empty() && !denied.text.trim().is_empty(),
+            "usage": usage(&denied, denied_elapsed_ms),
+        }));
+
+        let (background, background_elapsed_ms) = call(
+            seam,
+            "A previously dispatched background task completed successfully. Report only the supplied completion fact; do not invent another action.".into(),
+            "The durable result says task bg-1 completed and produced artifact report-1. Summarize that status.",
+            Vec::new(),
+        )
+        .await;
+        results.push(json!({
+            "case": "background_completion",
+            "success": background.tool_calls.is_empty() && !background.text.trim().is_empty(),
+            "usage": usage(&background, background_elapsed_ms),
+        }));
+
+        let succeeded = results
+            .iter()
+            .filter(|result| result["success"] == true)
+            .count();
+        let total_elapsed_ms = results
+            .iter()
+            .filter_map(|result| result["usage"]["elapsed_ms"].as_u64())
+            .sum::<u64>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "provider": provider,
+                "case_count": results.len(),
+                "success_count": succeeded,
+                "total_elapsed_ms": total_elapsed_ms,
+                "results": results,
+            }))
+            .unwrap()
+        );
+        assert_eq!(succeeded, results.len());
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires LRD_LIVE_DEEPSEEK_API_KEY and public network access"]
+    async fn live_deepseek_progressive_disclosure_fixed_eval() {
+        let api_key = std::env::var("LRD_LIVE_DEEPSEEK_API_KEY")
+            .expect("set LRD_LIVE_DEEPSEEK_API_KEY for the explicit live test");
+        let model = std::env::var("LRD_LIVE_DEEPSEEK_MODEL")
+            .unwrap_or_else(|_| "deepseek-v4-flash".to_string());
+        let base_url = std::env::var("LRD_LIVE_DEEPSEEK_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
+        let config = ModelProviderConfig {
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+            model: Some(model),
+            base_url: Some(base_url),
+            api_key: Some(api_key),
+            request_options: json!({"thinking": {"type": "disabled"}}),
+            max_context_bytes: Some(128 * 1024),
+            ..Default::default()
+        };
+        let seam = SignalModelSeam::from_config(&config).unwrap();
+        run_progressive_disclosure_fixed_eval(&seam, "deepseek").await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires LRD_LIVE_STRICT_PROVIDER_* and public network access"]
+    async fn live_strict_provider_progressive_disclosure_fixed_eval() {
+        let api_key = std::env::var("LRD_LIVE_STRICT_PROVIDER_API_KEY")
+            .expect("set LRD_LIVE_STRICT_PROVIDER_API_KEY for the explicit live test");
+        let model = std::env::var("LRD_LIVE_STRICT_PROVIDER_MODEL")
+            .expect("set LRD_LIVE_STRICT_PROVIDER_MODEL for the explicit live test");
+        let base_url = std::env::var("LRD_LIVE_STRICT_PROVIDER_BASE_URL")
+            .expect("set LRD_LIVE_STRICT_PROVIDER_BASE_URL for the explicit live test");
+        let wire_protocol = match std::env::var("LRD_LIVE_STRICT_PROVIDER_WIRE_PROTOCOL")
+            .as_deref()
+            .unwrap_or("open_ai_chat_completions")
+        {
+            "open_ai_chat_completions" => WireProtocol::OpenAiChatCompletions,
+            "anthropic_messages" => WireProtocol::AnthropicMessages,
+            other => panic!("unsupported strict-provider wire protocol: {other}"),
+        };
+        let request_options = std::env::var("LRD_LIVE_STRICT_PROVIDER_REQUEST_OPTIONS")
+            .map(|value| {
+                let parsed: Value = serde_json::from_str(&value)
+                    .expect("LRD_LIVE_STRICT_PROVIDER_REQUEST_OPTIONS must be valid JSON");
+                assert!(
+                    parsed.is_object(),
+                    "LRD_LIVE_STRICT_PROVIDER_REQUEST_OPTIONS must be a JSON object"
+                );
+                parsed
+            })
+            .unwrap_or_else(|_| json!({}));
+        let config = ModelProviderConfig {
+            wire_protocol: Some(wire_protocol),
+            model: Some(model),
+            base_url: Some(base_url),
+            api_key: Some(api_key),
+            request_options,
+            max_context_bytes: Some(128 * 1024),
+            ..Default::default()
+        };
+        let seam = SignalModelSeam::from_config(&config).unwrap();
+        run_progressive_disclosure_fixed_eval(&seam, "strict-provider").await;
+    }
+
+    const LONG_EVAL_CONTEXT_BYTES: usize = 32 * 1024;
+    const LONG_EVAL_FRAMING_RESERVE_BYTES: usize = 2 * 1024;
+
+    fn bounded_long_eval_messages(
+        wire_protocol: WireProtocol,
+        provider: &str,
+        system: String,
+        conversation: Vec<ChatMessage>,
+        tools: &[ToolSpec],
+    ) -> (Vec<ChatMessage>, usize) {
+        use desk_diagnose_core::model_context::{
+            ModelContextState, PinnedContextPolicy, build_model_context_view,
+        };
+        use desk_diagnose_core::replay::SourceContextKey;
+        use desk_diagnose_core::trim::model_context_cost;
+
+        let system = ChatMessage::text("lcc-eval-system", ChatRole::System, system);
+        let tool_bytes = serde_json::to_vec(tools).unwrap().len();
+        let request_overhead = model_context_cost(&system)
+            .saturating_add(tool_bytes)
+            .saturating_add(LONG_EVAL_FRAMING_RESERVE_BYTES);
+        let policy = PinnedContextPolicy::window(
+            SourceContextKey::derive(wire_protocol, "lcc-live-eval", provider, "fixed"),
+            1,
+            LONG_EVAL_CONTEXT_BYTES,
+        )
+        .unwrap()
+        .with_request_overhead_bytes(request_overhead)
+        .unwrap();
+        let mut state = ModelContextState::default();
+        let view = build_model_context_view(
+            &conversation,
+            &mut state,
+            &policy,
+            conversation.len() as i64,
+        )
+        .unwrap();
+        let mut messages = Vec::with_capacity(view.messages.len() + 1);
+        messages.push(system);
+        messages.extend(view.messages);
+        let measured = messages
+            .iter()
+            .map(model_context_cost)
+            .sum::<usize>()
+            .saturating_add(tool_bytes)
+            .saturating_add(LONG_EVAL_FRAMING_RESERVE_BYTES);
+        assert!(measured <= LONG_EVAL_CONTEXT_BYTES);
+        (messages, measured)
+    }
+
+    #[test]
+    fn thousand_message_live_eval_projection_is_bounded_before_provider_call() {
+        let mut conversation = (0..1_000)
+            .map(|index| {
+                ChatMessage::text(
+                    format!("eval-history-{index:04}"),
+                    if index % 2 == 0 {
+                        ChatRole::User
+                    } else {
+                        ChatRole::Assistant
+                    },
+                    format!("unrelated historical payload {index} {}", "x".repeat(96)),
+                )
+            })
+            .collect::<Vec<_>>();
+        conversation.push(ChatMessage::text(
+            "eval-current",
+            ChatRole::User,
+            "This is the authoritative current request.",
+        ));
+        let (messages, measured) = bounded_long_eval_messages(
+            WireProtocol::OpenAiChatCompletions,
+            "offline-test",
+            "Follow only the current request.".into(),
+            conversation,
+            &[],
+        );
+        assert!(
+            messages.len() < 1_002,
+            "the old prefix must be windowed out"
+        );
+        assert_eq!(messages.last().unwrap().message_id, "eval-current");
+        assert!(measured <= LONG_EVAL_CONTEXT_BYTES);
+    }
+
+    async fn run_long_conversation_fixed_eval(
+        seam: &SignalModelSeam,
+        provider: &str,
+        wire_protocol: WireProtocol,
+    ) {
+        use desk_diagnose_core::capability_availability::CapabilityAvailability;
+        use desk_diagnose_core::capability_disclosure::{
+            CapabilityDisclosureState, CapabilityLoadContext, apply_load_call,
+            capability_discovery_tool_registry, capability_name_index_prompt,
+            project_capability_disclosure,
+        };
+        use desk_diagnose_core::device_assistant::device_assistant_provider_registry;
+
+        async fn invoke(
+            seam: &SignalModelSeam,
+            messages: Vec<ChatMessage>,
+            tools: Vec<ToolSpec>,
+        ) -> ModelTurn {
+            let request = ModelRequest {
+                messages,
+                tool_requirements:
+                    desk_diagnose_core::model_capability::ModelRequirements::TEXT_ONLY,
+                tools,
+                tool_choice: ToolChoice::Auto,
+                response_format: ResponseFormatSpec::None,
+                use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
+                caller_output_hard_cap: Some(1024),
+            };
+            let mut sink = desk_diagnose_core::seam::NullTurnSink;
+            seam.call(request, &mut sink).await.unwrap()
+        }
+
+        let registry = device_assistant_provider_registry();
+        let inventory = registry
+            .providers()
+            .flat_map(|provider| {
+                provider
+                    .capabilities
+                    .iter()
+                    .map(|capability| CapabilityAvailability {
+                        provider_id: provider.wire.provider_id.clone(),
+                        capability_id: capability.wire.capability_id.clone(),
+                        tool_name: capability.tool_spec.name.clone(),
+                        compiled: true,
+                        enabled: true,
+                        connected: true,
+                        ready: true,
+                        reason: None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let all_tools = registry.registered_tools();
+        let discovery = capability_discovery_tool_registry().remove(0);
+        let permission =
+            desk_diagnose_core::permission_tools::permission_planning_tool_registry().remove(0);
+        let direct_tool = all_tools
+            .iter()
+            .find(|tool| tool.name() == "read_system_info")
+            .unwrap();
+        let index = capability_name_index_prompt(
+            &registry,
+            &inventory,
+            &[],
+            &all_tools,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+        let contract = "Follow only the latest user request and the server-authored capability protocol. Never infer that an older topic, permission, or tool remains active. Never invent a tool or claim an action ran.";
+        let mut results = Vec::new();
+
+        let short_tools = vec![direct_tool.spec.clone()];
+        let (short_messages, short_bytes) = bounded_long_eval_messages(
+            wire_protocol,
+            provider,
+            format!("{contract} The only advertised tool is read_system_info; call it now."),
+            vec![
+                ChatMessage::text("short-user-1", ChatRole::User, "Help me inspect this Mac."),
+                ChatMessage::text(
+                    "short-assistant-1",
+                    ChatRole::Assistant,
+                    "I can inspect its system information when requested.",
+                ),
+                ChatMessage::text(
+                    "short-user-2",
+                    ChatRole::User,
+                    "Continue now by calling read_system_info. Do not answer in prose.",
+                ),
+            ],
+            &short_tools,
+        );
+        let short = invoke(seam, short_messages, short_tools).await;
+        results.push(json!({
+            "case": "short_followup",
+            "success": short.tool_calls.iter().any(|call| call.name == "read_system_info"),
+            "projected_request_bytes": short_bytes,
+            "input_tokens": short.usage.input_tokens,
+            "output_tokens": short.usage.output_tokens,
+            "discovery_calls": 0,
+            "history_lookup_calls": 0,
+            "permission_attempts": 0,
+        }));
+
+        let mut switched = (0..120)
+            .map(|index| {
+                ChatMessage::text(
+                    format!("switch-{index:03}"),
+                    if index % 2 == 0 {
+                        ChatRole::User
+                    } else {
+                        ChatRole::Assistant
+                    },
+                    format!(
+                        "unrelated prior topic {}: weather, code, travel, or spreadsheets",
+                        index % 4
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        switched.push(ChatMessage::text(
+            "switch-current",
+            ChatRole::User,
+            "Ignore prior topics. Prepare a Gmail web draft by starting capability discovery now; do not answer in prose.",
+        ));
+        let switch_tools = vec![discovery.spec.clone()];
+        let (switch_messages, switch_bytes) = bounded_long_eval_messages(
+            wire_protocol,
+            provider,
+            format!(
+                "{contract} If the latest requested capability is not advertised, call load_capability_details with its exact name. Loading grants no authority.\n\n{index}"
+            ),
+            switched,
+            &switch_tools,
+        );
+        let switched = invoke(seam, switch_messages, switch_tools).await;
+        let switch_success = switched.tool_calls.iter().any(|call| {
+            call.name == discovery.name()
+                && serde_json::from_str::<Value>(&call.arguments_json)
+                    .ok()
+                    .and_then(|value| value["tool_names"].as_array().cloned())
+                    .is_some_and(|names| {
+                        names
+                            .iter()
+                            .any(|name| name == "prepare_gmail_web_draft_handoff")
+                    })
+        });
+        results.push(json!({
+            "case": "frequent_topic_switch",
+            "success": switch_success,
+            "projected_request_bytes": switch_bytes,
+            "input_tokens": switched.usage.input_tokens,
+            "output_tokens": switched.usage.output_tokens,
+            "discovery_calls": usize::from(switch_success),
+            "history_lookup_calls": 0,
+            "permission_attempts": 0,
+        }));
+
+        let target = "replace_selected_pages_copy_body";
+        let mut disclosure = CapabilityDisclosureState::default();
+        apply_load_call(
+            &ToolCall {
+                id: "lcc-eval-load".into(),
+                name: discovery.name().into(),
+                arguments_json: json!({"tool_names": [target]}).to_string(),
+            },
+            &mut disclosure,
+            1_000,
+            &CapabilityLoadContext {
+                registry: &registry,
+                inventory: &inventory,
+                max_context_bytes: LONG_EVAL_CONTEXT_BYTES,
+                callable_tools: &[],
+                permission_candidates: &all_tools,
+            },
+        )
+        .unwrap();
+        let disclosure = project_capability_disclosure(
+            &registry,
+            &inventory,
+            &[],
+            &all_tools,
+            &[],
+            &disclosure,
+            LONG_EVAL_CONTEXT_BYTES,
+        )
+        .unwrap();
+        let mixed_topics = [
+            "system information",
+            "Pages inspection",
+            "browser interaction",
+            "permission decision",
+            "background completion",
+            "outcome unknown reconciliation",
+        ];
+        let mut long = (0..1_000)
+            .map(|index| {
+                ChatMessage::text(
+                    format!("long-{index:04}"),
+                    if index % 2 == 0 {
+                        ChatRole::User
+                    } else {
+                        ChatRole::Assistant
+                    },
+                    format!(
+                        "{} historical payload {}",
+                        mixed_topics[index % mixed_topics.len()],
+                        "x".repeat(96)
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        long.push(ChatMessage::text(
+            "long-current",
+            ChatRole::User,
+            "Replace the selected Pages copy body with the exact text `Quarterly review`. Request the required permission now; do not execute or answer in prose.",
+        ));
+        let long_tools = vec![permission.spec.clone(), discovery.spec.clone()];
+        let (long_messages, long_bytes) = bounded_long_eval_messages(
+            wire_protocol,
+            provider,
+            format!(
+                "{contract} The latest capability is loaded but not authorized. Request exact permission with request_capability_grants.\n\n{}\n\n{}",
+                disclosure.index_prompt, disclosure.detail_prompt
+            ),
+            long,
+            &long_tools,
+        );
+        let mut long_turns = vec![invoke(seam, long_messages.clone(), long_tools.clone()).await];
+        let requested_discovery_names = long_turns[0]
+            .tool_calls
+            .iter()
+            .filter(|call| call.name == discovery.name())
+            .filter_map(|call| serde_json::from_str::<Value>(&call.arguments_json).ok())
+            .filter_map(|value| value["tool_names"].as_array().cloned())
+            .flatten()
+            .filter_map(|name| name.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let redundant_discovery = long_turns[0].tool_calls.iter().find(|call| {
+            call.name == discovery.name()
+                && serde_json::from_str::<Value>(&call.arguments_json)
+                    .ok()
+                    .and_then(|value| value["tool_names"].as_array().cloned())
+                    .is_some_and(|names| names.iter().any(|name| name == target))
+        });
+        if !long_turns[0]
+            .tool_calls
+            .iter()
+            .any(|call| call.name == permission.name())
+            && let Some(discovery_call) = redundant_discovery
+        {
+            // Mirror the production loop: a redundant bounded discovery call is
+            // idempotent and gets one tool result before the next model step. It
+            // is measured as extra discovery/model work rather than misreported
+            // as a permission attempt or an immediate task failure.
+            let mut retry_messages = long_messages;
+            retry_messages.push(ChatMessage::assistant_tool_calls(
+                "long-redundant-discovery",
+                long_turns[0].text.clone(),
+                vec![desk_diagnose_core::chat::ToolCallRef {
+                    id: discovery_call.id.clone(),
+                    name: discovery_call.name.clone(),
+                    arguments_json: discovery_call.arguments_json.clone(),
+                }],
+            ));
+            retry_messages.push(ChatMessage::tool_result(
+                "long-redundant-discovery-result",
+                discovery_call.id.clone(),
+                json!({
+                    "status": "already_loaded",
+                    "loaded_tool_names": [target],
+                    "next": "request the exact required permission now"
+                })
+                .to_string(),
+            ));
+            long_turns.push(invoke(seam, retry_messages, long_tools).await);
+        }
+        let permission_attempts = long_turns
+            .iter()
+            .flat_map(|turn| turn.tool_calls.iter())
+            .filter(|call| call.name == permission.name())
+            .count();
+        let permission_success = permission_attempts == 1;
+        let returned_tool_names = long_turns
+            .iter()
+            .flat_map(|turn| turn.tool_calls.iter())
+            .map(|call| call.name.as_str())
+            .collect::<Vec<_>>();
+        let long_discovery_calls = long_turns
+            .iter()
+            .flat_map(|turn| turn.tool_calls.iter())
+            .filter(|call| call.name == discovery.name())
+            .count();
+        let long_input_tokens = long_turns
+            .iter()
+            .map(|turn| turn.usage.input_tokens)
+            .collect::<Option<Vec<_>>>()
+            .map(|tokens| tokens.into_iter().sum::<i64>());
+        let long_output_tokens = long_turns
+            .iter()
+            .map(|turn| turn.usage.output_tokens)
+            .collect::<Option<Vec<_>>>()
+            .map(|tokens| tokens.into_iter().sum::<i64>());
+        results.push(json!({
+            "case": "thousand_message_mixed_permission",
+            "success": permission_success,
+            "projected_request_bytes": long_bytes,
+            "input_tokens": long_input_tokens,
+            "output_tokens": long_output_tokens,
+            "model_calls": long_turns.len(),
+            "discovery_calls": long_discovery_calls,
+            "history_lookup_calls": 0,
+            "permission_attempts": permission_attempts,
+            "permission_retries": permission_attempts.saturating_sub(1),
+            "requested_discovery_names": requested_discovery_names,
+            "returned_tool_names": returned_tool_names,
+            "visible_text": long_turns.iter().any(|turn| !turn.text.trim().is_empty()),
+        }));
+
+        let success_count = results
+            .iter()
+            .filter(|result| result["success"] == true)
+            .count();
+        let total_input_tokens = short
+            .usage
+            .input_tokens
+            .zip(switched.usage.input_tokens)
+            .zip(long_input_tokens)
+            .map(|((short, switched), long)| short.saturating_add(switched).saturating_add(long));
+        let total_output_tokens = short
+            .usage
+            .output_tokens
+            .zip(switched.usage.output_tokens)
+            .zip(long_output_tokens)
+            .map(|((short, switched), long)| short.saturating_add(switched).saturating_add(long));
+        let total_tokens = total_input_tokens
+            .zip(total_output_tokens)
+            .map(|(input, output)| input.saturating_add(output));
+        let tokens_per_success = total_tokens.and_then(|tokens| {
+            i64::try_from(success_count)
+                .ok()
+                .filter(|count| *count > 0)
+                .map(|count| tokens / count)
+        });
+        let discovery_calls = results
+            .iter()
+            .filter_map(|result| result["discovery_calls"].as_u64())
+            .sum::<u64>();
+        let history_lookup_calls = results
+            .iter()
+            .filter_map(|result| result["history_lookup_calls"].as_u64())
+            .sum::<u64>();
+        let permission_attempts = results
+            .iter()
+            .filter_map(|result| result["permission_attempts"].as_u64())
+            .sum::<u64>();
+        let permission_retries = results
+            .iter()
+            .filter_map(|result| result["permission_retries"].as_u64())
+            .sum::<u64>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "provider": provider,
+                "case_count": results.len(),
+                "success_count": success_count,
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+                "total_tokens": total_tokens,
+                "tokens_per_success": tokens_per_success,
+                "model_calls": 2 + long_turns.len(),
+                "discovery_calls": discovery_calls,
+                "history_lookup_calls": history_lookup_calls,
+                "permission_attempts": permission_attempts,
+                "permission_retries": permission_retries,
+                "results": results,
+            }))
+            .unwrap()
+        );
+        assert_eq!(success_count, results.len());
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires LRD_LIVE_DEEPSEEK_API_KEY and public network access"]
+    async fn live_deepseek_long_conversation_fixed_eval() {
+        let api_key = std::env::var("LRD_LIVE_DEEPSEEK_API_KEY")
+            .expect("set LRD_LIVE_DEEPSEEK_API_KEY for the explicit live test");
+        let config = ModelProviderConfig {
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+            model: Some(
+                std::env::var("LRD_LIVE_DEEPSEEK_MODEL")
+                    .unwrap_or_else(|_| "deepseek-v4-flash".to_string()),
+            ),
+            base_url: Some(
+                std::env::var("LRD_LIVE_DEEPSEEK_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.deepseek.com".to_string()),
+            ),
+            api_key: Some(api_key),
+            request_options: json!({"thinking": {"type": "disabled"}}),
+            max_context_bytes: Some(128 * 1024),
+            ..Default::default()
+        };
+        let seam = SignalModelSeam::from_config(&config).unwrap();
+        run_long_conversation_fixed_eval(&seam, "deepseek", WireProtocol::OpenAiChatCompletions)
+            .await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires LRD_LIVE_STRICT_PROVIDER_* and public network access"]
+    async fn live_strict_provider_long_conversation_fixed_eval() {
+        let api_key = std::env::var("LRD_LIVE_STRICT_PROVIDER_API_KEY")
+            .expect("set LRD_LIVE_STRICT_PROVIDER_API_KEY for the explicit live test");
+        let model = std::env::var("LRD_LIVE_STRICT_PROVIDER_MODEL")
+            .expect("set LRD_LIVE_STRICT_PROVIDER_MODEL for the explicit live test");
+        let base_url = std::env::var("LRD_LIVE_STRICT_PROVIDER_BASE_URL")
+            .expect("set LRD_LIVE_STRICT_PROVIDER_BASE_URL for the explicit live test");
+        let wire_protocol = match std::env::var("LRD_LIVE_STRICT_PROVIDER_WIRE_PROTOCOL")
+            .as_deref()
+            .unwrap_or("open_ai_chat_completions")
+        {
+            "open_ai_chat_completions" => WireProtocol::OpenAiChatCompletions,
+            "anthropic_messages" => WireProtocol::AnthropicMessages,
+            other => panic!("unsupported strict-provider wire protocol: {other}"),
+        };
+        let request_options = std::env::var("LRD_LIVE_STRICT_PROVIDER_REQUEST_OPTIONS")
+            .map(|value| {
+                let parsed: Value = serde_json::from_str(&value)
+                    .expect("LRD_LIVE_STRICT_PROVIDER_REQUEST_OPTIONS must be valid JSON");
+                assert!(
+                    parsed.is_object(),
+                    "LRD_LIVE_STRICT_PROVIDER_REQUEST_OPTIONS must be a JSON object"
+                );
+                parsed
+            })
+            .unwrap_or_else(|_| json!({}));
+        let config = ModelProviderConfig {
+            wire_protocol: Some(wire_protocol),
+            model: Some(model),
+            base_url: Some(base_url),
+            api_key: Some(api_key),
+            request_options,
+            max_context_bytes: Some(128 * 1024),
+            ..Default::default()
+        };
+        let seam = SignalModelSeam::from_config(&config).unwrap();
+        run_long_conversation_fixed_eval(&seam, "strict-provider", wire_protocol).await;
     }
 
     #[actix_web::test]

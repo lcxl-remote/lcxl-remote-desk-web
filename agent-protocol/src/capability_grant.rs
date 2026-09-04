@@ -14,7 +14,7 @@ use crate::{
     data_lineage::DestinationIdentity,
 };
 
-pub const CAPABILITY_GRANT_SCHEMA_VERSION: u16 = 1;
+pub const CAPABILITY_GRANT_SCHEMA_VERSION: u16 = 2;
 pub const MAX_GRANT_SCOPE_VALUES: usize = 128;
 pub const MAX_GRANT_USES: u32 = 10_000;
 
@@ -75,6 +75,9 @@ pub struct CapabilityGrant {
     pub grant_id: String,
     pub actor_id: String,
     pub run_id: String,
+    /// Focus/input epoch that issued this authority. A later user input must
+    /// never inherit a grant merely because the conversation id is unchanged.
+    pub input_revision: u64,
     pub surface: ProductSurface,
     pub target_device_id: String,
     pub target_session_id: Option<String>,
@@ -126,6 +129,7 @@ impl CapabilityGrant {
         if self.tool_schema_version == 0
             || self.issued_at_unix_ms == 0
             || self.expires_at_unix_ms <= self.issued_at_unix_ms
+            || self.input_revision == 0
             || self.policy_revision < 1
             || self.readiness_revision == 0
             || self.remaining_uses > MAX_GRANT_USES

@@ -8,6 +8,7 @@ import { useListConnections } from "@/services/hooks/connectionController/useLis
 import { Skeleton } from "@/components/ui/skeleton"
 import { Badge } from "@/components/ui/badge"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
+import { isDeviceAssistantEnabled } from "@/features/desk/device-assistant-switch"
 
 const OSS_DEVICE_ASSISTANT_ENABLED = import.meta.env.BASE_URL !== '/console/';
 
@@ -172,7 +173,8 @@ export default function DeskDashboard({
                     </Card>
                     )}
 
-                    {showAssistant && restricted.ownerPlaneVisible && (
+                    {showAssistant && restricted.ownerPlaneVisible
+                        && isDeviceAssistantEnabled(connection.version_info) && (
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/assistant`)}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">

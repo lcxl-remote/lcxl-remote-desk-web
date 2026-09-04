@@ -49,11 +49,13 @@ use crate::{
         service_mgmt::{install_service, uninstall_service},
         settings::{
             ack_security_approval, query_ai_policy_settings, query_collection_policy_settings,
-            query_log_settings, query_security_settings, query_settings, query_telemetry_status,
-            query_turn_client_settings, query_turn_settings, regenerate_turn_secret,
-            submit_security_approval, update_ai_policy_settings, update_collection_policy_settings,
-            update_log_settings, update_security_settings, update_settings,
-            update_telemetry_consent, update_turn_client_settings, update_turn_settings,
+            query_device_assistant_settings, query_log_settings, query_security_settings,
+            query_settings, query_telemetry_status, query_turn_client_settings,
+            query_turn_settings, regenerate_turn_secret, submit_security_approval,
+            update_ai_policy_settings, update_collection_policy_settings,
+            update_device_assistant_settings, update_log_settings, update_security_settings,
+            update_settings, update_telemetry_consent, update_turn_client_settings,
+            update_turn_settings,
         },
         support::{start_support, stop_support, support_status},
         turn::{get_turn_info, get_turn_metrics, get_turn_session_statistics},
@@ -269,6 +271,8 @@ pub fn configure_api_surface(
                     .service(update_ai_policy_settings)
                     .service(query_collection_policy_settings)
                     .service(update_collection_policy_settings)
+                    .service(query_device_assistant_settings)
+                    .service(update_device_assistant_settings)
                     .service(query_turn_settings)
                     .service(update_turn_settings)
                     .service(query_turn_client_settings)
@@ -527,6 +531,11 @@ pub async fn run_with_hub(
     }
     // Initialize settings
     let shared_settings = Arc::new(SharedSettings::from(settings.clone()));
+    // The durable host setting is authoritative. Publish it before starting
+    // signaling maintenance tasks so the default-disabled gate cannot briefly
+    // admit work during startup.
+    desk_signal::device_assistant_gate::global_device_assistant_gate()
+        .replace(settings.device_assistant);
 
     // The host's authoritative security policy, and the only path that commits
     // it or the locale durably. Every mode builds one; the modes with no worker
@@ -635,6 +644,7 @@ pub async fn run_with_hub(
             desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
                 desk_signal::db::get_db().clone(),
                 connection_map.clone(),
+                desk_signal::device_assistant_gate::global_device_assistant_gate(),
             )
             .run(),
         );
@@ -1525,6 +1535,8 @@ mod tests {
             max_ai_command_runtime_ms: None,
             exec_pty: false,
             exec_pty_elevation: false,
+            device_assistant_revision: None,
+            device_assistant_enabled: None,
         };
         let query = serde_urlencoded::to_string(&version).unwrap();
         let uri = format!("/api/desk/signaling?{query}");

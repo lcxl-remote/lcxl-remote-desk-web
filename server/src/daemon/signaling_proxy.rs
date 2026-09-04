@@ -275,6 +275,7 @@ pub async fn run_signaling_proxy(
         exec_pty_link: None,
         outbound_tx: outbound_tx.clone(),
         settings: settings.clone(),
+        settings_coordinator: Arc::clone(&settings_coordinator),
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
             &settings_coordinator,
         )),

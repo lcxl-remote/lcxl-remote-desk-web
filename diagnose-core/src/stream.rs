@@ -237,6 +237,21 @@ impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
         self.sink.emit(event);
     }
 
+    fn on_visual_evidence(
+        &mut self,
+        evidence: &desk_agent_protocol::visual_evidence::VisualEvidenceFrame,
+    ) {
+        if self.terminated {
+            return;
+        }
+        let seq = self.next_seq();
+        self.sink.emit(AgentEvent::visual_evidence(
+            &self.request_id,
+            seq,
+            evidence.clone(),
+        ));
+    }
+
     fn on_permission_requested(&mut self, request_id: &str, item_count: usize) {
         if self.terminated {
             return;
@@ -441,6 +456,48 @@ mod tests {
         let events = store.borrow();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].background_task_id.as_deref(), Some("exec_task_1"));
+    }
+
+    #[test]
+    fn visual_evidence_is_a_separate_nonterminal_gapless_frame() {
+        use desk_agent_protocol::visual_evidence::{
+            VISUAL_EVIDENCE_SCHEMA_VERSION, VisualEvidenceFrame, VisualEvidencePhase,
+            VisualEvidenceStatus,
+        };
+
+        let (store, sink) = recorder();
+        let mut bridge = StreamingTurnSink::starting_at(sink, "req-1", 7);
+        let evidence = VisualEvidenceFrame {
+            schema_version: VISUAL_EVIDENCE_SCHEMA_VERSION,
+            evidence_id: "evidence-1".into(),
+            conversation_id: "conversation-1".into(),
+            focus_input_revision: 2,
+            turn_id: "turn-1".into(),
+            tool_call_id: "call-1".into(),
+            frame_id: "frame-1".into(),
+            phase: VisualEvidencePhase::Observation,
+            status: VisualEvidenceStatus::Available,
+            captured_at_unix_ms: 100,
+            expires_at_unix_ms: Some(200),
+            device_id: "device-1".into(),
+            display_summary: None,
+            application_summary: None,
+            content: None,
+            digest_sha256: None,
+            size_bytes: 3,
+            media_type: Some("image/png".into()),
+            preview_data_url: Some("data:image/png;base64,AQID".into()),
+        };
+        bridge.on_visual_evidence(&evidence);
+        bridge.on_tool_finished("call-1", true, "captured", None);
+
+        let events = store.borrow();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].seq, 7);
+        assert_eq!(events[0].kind, AgentEventKind::VisualEvidence);
+        assert_eq!(events[0].visual_evidence.as_ref(), Some(&evidence));
+        assert!(!events[0].is_terminal());
+        assert_eq!(events[1].seq, 8);
     }
 
     /// An injected provenance is stamped onto the terminal `Answer` frame so the

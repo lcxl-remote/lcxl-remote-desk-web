@@ -75,6 +75,7 @@ pub async fn run_local_api(
         desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
             desk_signal::db::get_db().clone(),
             connection_map.clone(),
+            desk_signal::device_assistant_gate::global_device_assistant_gate(),
         )
         .run(),
     );

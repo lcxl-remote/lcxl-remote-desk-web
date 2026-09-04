@@ -176,12 +176,11 @@ fn decode(
     {
         return Err(invalid());
     }
-    if let Some(unknown) = &record.unknown {
-        if unknown.observed_at_unix_ms == 0
-            || project_on(binding, work, payload, &unknown.native)?.is_some()
-        {
-            return Err(invalid());
-        }
+    if let Some(unknown) = &record.unknown
+        && (unknown.observed_at_unix_ms == 0
+            || project_on(binding, work, payload, &unknown.native)?.is_some())
+    {
+        return Err(invalid());
     }
     if let Some(terminal) = &record.terminal {
         if terminal.observation.observed_at_unix_ms == 0

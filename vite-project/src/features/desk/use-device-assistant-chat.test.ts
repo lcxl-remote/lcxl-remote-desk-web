@@ -5,7 +5,9 @@ import {
     SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_OBJECT_CONTEXT_UPDATED,
+    SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_SESSION_SELECTED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
+    SIGNALING_TYPE_CODE_SELECT_DEVICE_ASSISTANT_SESSION,
     SIGNALING_TYPE_CODE_UPDATE_DEVICE_ASSISTANT_CONTEXT,
     SIGNALING_TYPE_CODE_UPDATE_DEVICE_ASSISTANT_OBJECT_CONTEXT,
 } from './constants';
@@ -17,6 +19,117 @@ describe('useDeviceAssistantChat', () => {
     afterEach(() => {
         vi.useRealTimers();
         vi.unstubAllGlobals();
+    });
+
+    it('selects the only Device Assistant desktop session before enabling turns', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const sendMessage = vi.fn((type: number) => type ===
+            SIGNALING_TYPE_CODE_SELECT_DEVICE_ASSISTANT_SESSION
+            ? 'session-request-1'
+            : 'assistant-request-1');
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1',
+            connected: true,
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage,
+        }));
+
+        await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_SELECT_DEVICE_ASSISTANT_SESSION,
+            {},
+            'desk-1',
+        ));
+        expect(result.current.sessionTargetReady).toBe(false);
+        expect(result.current.start('too early')).toBe(false);
+
+        act(() => {
+            subscriber?.({
+                request_id: 'session-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_SESSION_SELECTED,
+                signaling_data: {
+                    revision: 3,
+                    target: {
+                        target_id: 'target-a',
+                        display_name: 'Desktop A',
+                        session_type: 'wayland',
+                        seat: 'seat0',
+                        foreground: true,
+                        remote_desktop_ready: true,
+                        terminal_ready: true,
+                        file_ready: true,
+                        assistant_ready: true,
+                    },
+                },
+                response_state: { error_code: 0, message: '' },
+            });
+        });
+
+        expect(result.current.sessionTargetReady).toBe(true);
+        expect(result.current.sessionTarget?.target_id).toBe('target-a');
+        expect(result.current.start('continue')).toBe(true);
+    });
+
+    it('requires an explicit Device Assistant target when the host returns many', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const sendMessage = vi.fn((type: number) => type ===
+            SIGNALING_TYPE_CODE_SELECT_DEVICE_ASSISTANT_SESSION
+            ? 'session-request-1'
+            : 'assistant-request-1');
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1',
+            connected: true,
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage,
+        }));
+        await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+
+        act(() => {
+            subscriber?.({
+                request_id: 'session-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_SESSION_SELECTED,
+                signaling_data: {
+                    revision: 2,
+                    targets: [{
+                        target_id: 'target-a',
+                        display_name: 'Desktop A',
+                        foreground: true,
+                        remote_desktop_ready: true,
+                        terminal_ready: true,
+                        file_ready: true,
+                        assistant_ready: true,
+                    }, {
+                        target_id: 'target-b',
+                        display_name: 'Desktop B',
+                        foreground: false,
+                        remote_desktop_ready: true,
+                        terminal_ready: true,
+                        file_ready: true,
+                        assistant_ready: true,
+                    }],
+                },
+                response_state: { error_code: 109, message: 'selection required' },
+            });
+        });
+
+        expect(result.current.sessionTargetReady).toBe(false);
+        expect(result.current.sessionTargets.map((target) => target.target_id)).toEqual([
+            'target-a',
+            'target-b',
+        ]);
+        act(() => {
+            expect(result.current.selectSessionTarget('target-b')).toBe(true);
+        });
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_SELECT_DEVICE_ASSISTANT_SESSION,
+            { session_target_id: 'target-b' },
+            'desk-1',
+        );
     });
 
     it('restores browser-safe attachment metadata with the durable conversation', async () => {
@@ -56,6 +169,85 @@ describe('useDeviceAssistantChat', () => {
                 staleReason: 'worker_respawned',
             }),
         ]);
+    });
+
+    it('attaches only the opaque owner-selected window reference', () => {
+        const sendMessage = vi.fn(() => 'window-request-1');
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage,
+        }));
+        const objectRef = {
+            token: 'opaque-window',
+            snapshot_id: 'worker-1:7',
+            object_kind: 'window' as const,
+            expires_at: '2030-01-01T00:00:00Z',
+        };
+
+        act(() => {
+            expect(result.current.attachWindow(objectRef, 'Calculator')).toBe(true);
+        });
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_UPDATE_DEVICE_ASSISTANT_OBJECT_CONTEXT,
+            expect.objectContaining({
+                operation: {
+                    kind: 'attach_window',
+                    object_ref: objectRef,
+                    display_summary: 'Calculator',
+                },
+            }),
+            'desk-1',
+        );
+        const payload = sendMessage.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+        expect(JSON.stringify(payload)).not.toMatch(/handle|process_id|coordinate/);
+    });
+
+    it('prepends an older page only for the same durable snapshot', async () => {
+        localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({ data: {
+                    sessionId: 'session-1',
+                    seq: 7,
+                    active: false,
+                    messages: [
+                        { id: 'm2', role: 'user', text: 'newer question' },
+                        { id: 'm3', role: 'assistant', text: 'newer answer' },
+                    ],
+                    messagePage: { hasMore: true, nextBeforeMessageId: 'm2', limit: 100 },
+                    contextAttachments: [],
+                } }),
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({ data: {
+                    sessionId: 'session-1',
+                    seq: 7,
+                    active: false,
+                    messages: [
+                        { id: 'm1', role: 'assistant', text: 'older answer' },
+                        { id: 'm2', role: 'user', text: 'newer question' },
+                    ],
+                    messagePage: { hasMore: false, limit: 100 },
+                    contextAttachments: [],
+                } }),
+            });
+        vi.stubGlobal('fetch', fetchMock);
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(result.current.hasMoreMessages).toBe(true);
+        await act(async () => { await result.current.loadOlderMessages(); });
+
+        expect(fetchMock.mock.calls[1]?.[0]).toContain('message_before=m2');
+        expect(result.current.messages.map((message) => message.id)).toEqual(['m1', 'm2', 'm3']);
+        expect(result.current.hasMoreMessages).toBe(false);
     });
 
     it('ignores an older durable snapshot that resolves after a newer one', async () => {
@@ -679,6 +871,64 @@ describe('useDeviceAssistantChat', () => {
         expect(result.current.messages.at(-1)?.text).toContain('Nothing was executed');
         expect(result.current.running).toBe(false);
         expect(result.current.status).toBe('done');
+    });
+
+    it('deduplicates visual evidence and keeps its live preview out of transcript state', () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1',
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage: () => 'assistant-request-1',
+        }));
+        act(() => { expect(result.current.start('Look at the screen.')).toBe(true); });
+        const evidence = {
+            schema_version: 1,
+            evidence_id: 'evidence-1',
+            conversation_id: 'conversation-1',
+            focus_input_revision: 1,
+            turn_id: 'turn-1',
+            tool_call_id: 'call-1',
+            frame_id: 'frame-1',
+            phase: 'observation' as const,
+            status: 'available' as const,
+            captured_at_unix_ms: 1,
+            expires_at_unix_ms: 2,
+            device_id: 'desk-1',
+            content: null,
+            digest_sha256: 'a'.repeat(64),
+            size_bytes: 3,
+            media_type: 'image/png',
+            preview_data_url: 'data:image/png;base64,AQID',
+        };
+        act(() => {
+            subscriber?.({
+                request_id: 'assistant-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'assistant-request-1', seq: 0, kind: 'visual_evidence',
+                    visual_evidence: evidence,
+                },
+            });
+            subscriber?.({
+                request_id: 'assistant-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'assistant-request-1', seq: 1, kind: 'visual_evidence',
+                    visual_evidence: {
+                        ...evidence, status: 'not_retained', preview_data_url: null,
+                    },
+                },
+            });
+        });
+        expect(result.current.visualEvidence).toHaveLength(1);
+        expect(result.current.visualEvidence[0]?.preview_data_url).toBe(evidence.preview_data_url);
+        expect(result.current.messages).toHaveLength(1);
+        expect(result.current.messages[0]?.text).toBe('Look at the screen.');
+        act(() => { result.current.reset(); });
+        expect(result.current.visualEvidence).toEqual([]);
     });
 
     it('ignores a stale assistant stream', () => {

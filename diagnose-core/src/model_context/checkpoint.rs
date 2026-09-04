@@ -342,7 +342,11 @@ pub fn plan_model_context(
     let checkpoint_and_raw_cost = checkpoint_cost
         .checked_add(raw_cost)
         .ok_or(ModelContextError::ContextCostOverflow)?;
-    if all_raw_safe && checkpoint_and_raw_cost <= policy.max_context_bytes {
+    let history_budget = policy.history_context_bytes();
+    if history_budget == 0 {
+        return Err(ModelContextError::InvalidBudget(history_budget));
+    }
+    if all_raw_safe && checkpoint_and_raw_cost <= history_budget {
         return Ok(ContextBuildPlan::Ready(ready_checkpoint_view(
             conversation,
             state,
@@ -354,7 +358,7 @@ pub fn plan_model_context(
         )?));
     }
 
-    let summary_reserve = summary_context_cost_limit(policy.max_context_bytes);
+    let summary_reserve = summary_context_cost_limit(history_budget);
     let low = policy.low_watermark_bytes();
     let mut recent_start = groups.len();
     let mut recent_cost = 0usize;
@@ -386,19 +390,19 @@ pub fn plan_model_context(
     if let Some((_, oversized)) = groups[suffix_start..]
         .iter()
         .enumerate()
-        .find(|(_, group)| group.cost > policy.max_context_bytes)
+        .find(|(_, group)| group.cost > history_budget)
     {
         return Err(ModelContextError::ContextItemTooLarge {
             group_head_message_id: conversation[oversized.start].message_id.clone(),
             cost: oversized.cost,
-            high_watermark: policy.max_context_bytes,
+            high_watermark: history_budget,
         });
     }
     let suffix_cost = checked_cost_sum(groups[suffix_start..].iter().map(|group| group.cost))?;
-    if suffix_cost > policy.max_context_bytes {
+    if suffix_cost > history_budget {
         return Err(ModelContextError::ProtectedStateTooLarge {
             cost: suffix_cost,
-            high_watermark: policy.max_context_bytes,
+            high_watermark: history_budget,
         });
     }
     if suffix_start == floor {
@@ -413,7 +417,7 @@ pub fn plan_model_context(
             )));
         }
         let one = project_groups(conversation, &groups, index, index + 1);
-        if canonical_json(&one)?.len() > policy.max_context_bytes {
+        if canonical_json(&one)?.len() > history_budget {
             return Ok(ContextBuildPlan::NeedsFloorReconciliation(
                 floor_reconciliation_plan(
                     conversation,
@@ -542,7 +546,7 @@ pub fn parse_validated_context_summary(
     let summary_model_context_cost = u64::try_from(model_context_cost(&summary_message))
         .map_err(|_| ModelContextError::InvalidCheckpoint("summary cost overflow".into()))?;
     if usize::try_from(summary_model_context_cost).unwrap_or(usize::MAX)
-        > summary_context_cost_limit(plan.policy.max_context_bytes)
+        > summary_context_cost_limit(plan.policy.history_context_bytes())
     {
         return Err(ModelContextError::SummaryTooLarge);
     }
@@ -661,10 +665,10 @@ pub fn apply_validated_checkpoint(
         true,
     )?;
     let final_cost = checked_cost_sum(view.messages.iter().map(model_context_cost))?;
-    if final_cost > plan.policy.max_context_bytes {
+    if final_cost > plan.policy.history_context_bytes() {
         return Err(ModelContextError::InvalidCheckpoint(format!(
             "checkpoint plus raw suffix exceeds high watermark: {final_cost} > {}",
-            plan.policy.max_context_bytes
+            plan.policy.history_context_bytes()
         )));
     }
     Ok((next_state, view))
@@ -903,7 +907,7 @@ fn validate_checkpoint(
         ));
     }
     if usize::try_from(cost).unwrap_or(usize::MAX)
-        > summary_context_cost_limit(policy.max_context_bytes)
+        > summary_context_cost_limit(policy.history_context_bytes())
     {
         return Err(ModelContextError::InvalidCheckpoint(
             "summary context cost exceeds the policy limit".into(),

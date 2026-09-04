@@ -75,7 +75,7 @@ fn both_orchestrators_derive_closed_create_new_artifacts() {
                 json!({
                     "file_name":"message.draft.txt",
                     "draft":{
-                        "schema_version":3,
+                        "schema_version":desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
                         "recipients":[{"role":"to","address":"person@example.com","display_name":null}],
                         "subject":"Subject",
                         "body_plain_text":"Body",
@@ -101,6 +101,7 @@ fn both_orchestrators_derive_closed_create_new_artifacts() {
                 .grant_call(&ProviderCallSubject {
                     actor_id: "owner",
                     run_id: "run",
+                    input_revision: 1,
                     target_device_id: "device",
                     policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
                     readiness_revision: 9,

@@ -60,6 +60,17 @@ const AI_ASSISTANT_GRANT: &str = "ai.assistant";
 /// The orchestrator-layer permission gating the terminal AI copilot / completion.
 const AI_COPILOT_GRANT: &str = "ai.terminal_copilot";
 
+fn starts_device_assistant_work(signaling_type: SignalingType) -> bool {
+    matches!(
+        signaling_type,
+        SignalingType::AskDeviceAssistant
+            | SignalingType::GetDeviceAssistantCapabilities
+            | SignalingType::UpdateDeviceAssistantContext
+            | SignalingType::UpdateDeviceAssistantObjectContext
+            | SignalingType::SelectDeviceAssistantSession
+    )
+}
+
 /// The nine shared read-evidence capabilities exposed through Providers.
 fn read_evidence_capabilities() -> [Capability; 9] {
     [
@@ -229,6 +240,7 @@ fn build_wrapper_outcome(
 pub struct SignalControlAuthorizer {
     db: DatabaseConnection,
     issuer: String,
+    device_assistant_gate: std::sync::Arc<crate::device_assistant_gate::DeviceAssistantGate>,
     /// Connection map handle used to stream centrally-orchestrated terminal
     /// copilot / completion results back to the asking browser. Held (not just
     /// borrowed per call) so a spawned, `!Send` model dial can reach the browser
@@ -251,11 +263,16 @@ impl SignalControlAuthorizer {
             ControlFrameOutcome::Reject { code, message }
         }
     }
-    pub fn new(db: DatabaseConnection, connection_map: web::Data<SharedConnectionMap>) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        connection_map: web::Data<SharedConnectionMap>,
+        device_assistant_gate: std::sync::Arc<crate::device_assistant_gate::DeviceAssistantGate>,
+    ) -> Self {
         Self {
             db,
             issuer: "signal".to_string(),
             connection_map,
+            device_assistant_gate,
         }
     }
 
@@ -292,6 +309,18 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             // by a client that already moved on.
             if model.signaling_type == SignalingType::CancelDeviceAssistant {
                 return ControlFrameOutcome::Handled;
+            }
+            if starts_device_assistant_work(model.signaling_type)
+                && !self.device_assistant_gate.is_enabled()
+            {
+                return self
+                    .reject_frame(
+                        actor,
+                        model,
+                        DeskErrorCode::FEATURE_UNAVAILABLE,
+                        "Device Assistant is disabled on this device".into(),
+                    )
+                    .await;
             }
             // A signal-owned agentic exec parks its approval here. Consume only
             // when the request id and browser connection both match; otherwise
@@ -572,6 +601,12 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                         ),
                     );
                     ControlFrameOutcome::Handled
+                }
+                // The authenticated single-account owner asks the host to apply
+                // its own opaque 0/1/N session-target policy. The central never
+                // decodes or rewrites the selector.
+                SignalingType::SelectDeviceAssistantSession => {
+                    ControlFrameOutcome::Forward(model.clone())
                 }
                 // The relay branch only routes the frame types above through the
                 // authorizer; any other type here is a routing bug.
@@ -861,5 +896,30 @@ mod tests {
                 .granted
                 .contains(&Capability::DesktopInputFallbackConfirmed)
         );
+    }
+
+    #[test]
+    fn total_switch_blocks_only_new_assistant_work_at_the_control_gate() {
+        assert!(starts_device_assistant_work(
+            SignalingType::AskDeviceAssistant
+        ));
+        assert!(starts_device_assistant_work(
+            SignalingType::GetDeviceAssistantCapabilities
+        ));
+        assert!(starts_device_assistant_work(
+            SignalingType::UpdateDeviceAssistantContext
+        ));
+        assert!(starts_device_assistant_work(
+            SignalingType::UpdateDeviceAssistantObjectContext
+        ));
+        assert!(starts_device_assistant_work(
+            SignalingType::SelectDeviceAssistantSession
+        ));
+        assert!(!starts_device_assistant_work(
+            SignalingType::CancelDeviceAssistant
+        ));
+        assert!(!starts_device_assistant_work(
+            SignalingType::ControlExecution
+        ));
     }
 }

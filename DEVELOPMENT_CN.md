@@ -101,6 +101,12 @@ npm run tauri build -- --bundles app --no-sign
 
 分发构建必须去掉 `--no-sign`，使用可信 Developer ID 身份，并用系统 `codesign` 验证
 最终主程序确实携带 Automation entitlement。
+tag 发布工作流要求配置 `APPLE_CERTIFICATE_P12_BASE64`、
+`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、
+`MACOS_KEYCHAIN_PASSWORD`、`APPLE_ID`、`APPLE_APP_PASSWORD` 和
+`APPLE_TEAM_ID`。工作流会以 hardened runtime 分别签名 shell 与 server sidecar，提交 DMG
+公证并 staple；缺少凭据、entitlement、有效签名或公证结果都会使发布失败。手动触发的工作流
+仍只生成 ad-hoc 签名的打包 dry-run，不能作为可分发产物。
 
 ### Windows 系统
 

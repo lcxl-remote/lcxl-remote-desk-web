@@ -33,6 +33,9 @@ const DEFAULT_WORKER_HEARTBEAT_TIMEOUT_SECS: u64 = 30;
 /// timeout itself — finer granularity costs nothing meaningful and
 /// keeps recovery latency bounded.
 const WORKER_HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+/// Cross-platform hard ceiling for simultaneously resident user-session workers.
+/// Platform registration sources must enforce this before spawning a worker.
+pub const MAX_RESIDENT_SESSION_WORKERS: usize = 32;
 const INTERACTIVE_ROUTE_ACK_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Identifies one worker the daemon started, so what that worker says can be

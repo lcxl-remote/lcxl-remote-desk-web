@@ -1,7 +1,9 @@
 //! Pure projection of the original sealed action's bounded native completion.
 
 use super::*;
-use desk_agent_protocol::browser_control::{BrowserAction, BrowserActionOutcome};
+use desk_agent_protocol::browser_control::{
+    BrowserAction, BrowserActionOutcome, BrowserActionResult,
+};
 
 struct PendingWaitGuard(String);
 
@@ -238,6 +240,25 @@ pub(crate) fn project(
     } else {
         validate_output(action, &plan.device_id, completed)?;
     }
+    let exact_send_receipt = if matches!(tool_name, "send_gmail_web_exact" | "send_slack_web_exact")
+        && matches!(
+            &completed.output,
+            Some(ComputerActionOutput::Browser(BrowserActionResult {
+                outcome: BrowserActionOutcome::ExternalSend,
+                ..
+            }))
+        ) {
+        Some(
+            desk_diagnose_core::communication_handoff::project_web_send_receipt(
+                tool_name,
+                canonical_input,
+                completed,
+            )?
+            .ok_or_else(invalid)?,
+        )
+    } else {
+        None
+    };
     if matches!(
         completed.result,
         ComputerActionResultClass::OutcomeUnknown
@@ -248,7 +269,9 @@ pub(crate) fn project(
     {
         return Ok(None);
     }
-    let content = if verified && matches!(action, ComputerActionKind::Browser(_)) {
+    let content = if let Some(receipt) = exact_send_receipt {
+        serde_json::to_string(&receipt).map_err(|_| invalid())?
+    } else if verified && matches!(action, ComputerActionKind::Browser(_)) {
         browser_projection(
             tool_name,
             run_id,
@@ -302,6 +325,13 @@ fn validate_output(
                 BrowserAction::FillForm { .. } => BrowserActionOutcome::FormFilled,
                 BrowserAction::FillFormAndUpload { .. } => BrowserActionOutcome::FormFilledWithFile,
                 BrowserAction::UploadFile { .. } => BrowserActionOutcome::FileUploaded,
+                BrowserAction::ActivateElement {
+                    activation_class:
+                        desk_agent_protocol::browser_control::BrowserActivationClass::SendExternal {
+                            ..
+                        },
+                    ..
+                } => BrowserActionOutcome::ExternalSend,
                 BrowserAction::ActivateElement { .. } => BrowserActionOutcome::ElementActivated,
             };
             if result.call_id != completed.action_request_id
@@ -370,6 +400,15 @@ fn browser_projection(
     canonical_input_digest_sha256: &str,
     completion: &ComputerActionCompleted,
 ) -> Result<Option<String>, AgentError> {
+    if let Some(receipt) = desk_diagnose_core::communication_handoff::project_web_send_receipt(
+        tool_name,
+        canonical_input,
+        completion,
+    )? {
+        return serde_json::to_string(&receipt)
+            .map(Some)
+            .map_err(|_| invalid());
+    }
     if let Some(handoff) = desk_diagnose_core::communication_handoff::project_web_draft_handoff(
         tool_name,
         run_id,

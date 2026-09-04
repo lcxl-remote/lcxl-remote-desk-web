@@ -688,6 +688,79 @@ async fn a_replaced_workers_backlog_is_not_its_successors_heartbeat() {
     );
 }
 
+#[tokio::test]
+async fn bounded_resident_pool_churn_reclaims_workers_targets_and_bindings() {
+    let (manager, _worker_rx) = test_manager();
+    manager.enable_session_targeting_for_test();
+    let mut keys = Vec::new();
+    let mut command_receivers = Vec::new();
+
+    for index in 0..MAX_RESIDENT_SESSION_WORKERS {
+        let key = resident_key(&format!("bounded-session-{index}"));
+        manager
+            .session_targets()
+            .upsert(crate::daemon::session_target::SessionCandidate {
+                session: key.session.clone(),
+                display_name: format!("Desktop {index}"),
+                session_type: Some("wayland".to_string()),
+                seat: Some(format!("seat{index}")),
+                foreground: index == 0,
+                remote_desktop_ready: true,
+                terminal_ready: true,
+                file_ready: true,
+                assistant_ready: true,
+            });
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        manager
+            .install_resident_for_test(key.clone(), command_tx)
+            .await;
+        manager
+            .bind_connection_target(&format!("connection-{index}"), &key.session)
+            .unwrap();
+        keys.push(key);
+        command_receivers.push(command_rx);
+    }
+
+    assert_eq!(
+        manager.resident_worker_snapshots().await.len(),
+        MAX_RESIDENT_SESSION_WORKERS
+    );
+    assert_eq!(
+        manager
+            .session_targets()
+            .list_for(crate::daemon::session_target::SessionCapability::Assistant)
+            .1
+            .len(),
+        MAX_RESIDENT_SESSION_WORKERS
+    );
+
+    for (index, key) in keys.iter().enumerate() {
+        manager.clear_connection_target(&format!("connection-{index}"));
+        assert!(manager.session_targets().remove(&key.session));
+        manager.stop_resident_worker(key).await;
+    }
+
+    assert!(manager.resident_worker_snapshots().await.is_empty());
+    assert!(
+        manager
+            .session_targets()
+            .list_for(crate::daemon::session_target::SessionCapability::Assistant)
+            .1
+            .is_empty()
+    );
+    for index in 0..keys.len() {
+        assert!(
+            manager
+                .connection_target(&format!("connection-{index}"))
+                .is_none()
+        );
+        assert!(matches!(
+            command_receivers[index].try_recv(),
+            Ok(ServiceToWorker::Shutdown)
+        ));
+    }
+}
+
 /// A pipe server waits up to fifteen seconds for its worker to dial in, and a
 /// desktop switch inside that window installs a replacement. When the wait then
 /// fails, restarting on the abandoned worker's behalf would kill the one that

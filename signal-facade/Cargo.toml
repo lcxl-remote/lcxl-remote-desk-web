@@ -36,6 +36,9 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
 futures-util = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }
 log = { workspace = true }
 futures = { workspace = true }
 

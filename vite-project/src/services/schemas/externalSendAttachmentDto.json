@@ -1,0 +1,1 @@
+{"type":"object","required":["fileName","sizeBytes"],"properties":{"fileName":{"type":"string"},"sizeBytes":{"type":"integer","format":"int64","minimum":0}},"x-readme-ref-name":"ExternalSendAttachmentDto"}

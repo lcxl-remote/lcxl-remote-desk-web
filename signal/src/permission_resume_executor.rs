@@ -24,11 +24,20 @@ pub struct ResumeScanReport {
 pub struct SignalPermissionResumeExecutor {
     db: DatabaseConnection,
     connections: web::Data<SharedConnectionMap>,
+    device_assistant_gate: std::sync::Arc<crate::device_assistant_gate::DeviceAssistantGate>,
 }
 
 impl SignalPermissionResumeExecutor {
-    pub fn new(db: DatabaseConnection, connections: web::Data<SharedConnectionMap>) -> Self {
-        Self { db, connections }
+    pub fn new(
+        db: DatabaseConnection,
+        connections: web::Data<SharedConnectionMap>,
+        device_assistant_gate: std::sync::Arc<crate::device_assistant_gate::DeviceAssistantGate>,
+    ) -> Self {
+        Self {
+            db,
+            connections,
+            device_assistant_gate,
+        }
     }
 
     pub async fn scan_once(&self, after_id: i64) -> Result<ResumeScanReport, AgentError> {
@@ -60,6 +69,9 @@ impl SignalPermissionResumeExecutor {
         &self,
         candidate: crate::entity::agent_permission_resume::Model,
     ) -> Result<bool, AgentError> {
+        if !self.device_assistant_gate.is_enabled() {
+            return Ok(false);
+        }
         // OSS has one owner identity. No public or code-session principal can
         // inherit a stored personal permission through this background path.
         if candidate.actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string() {

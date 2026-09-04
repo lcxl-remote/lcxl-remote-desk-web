@@ -49,6 +49,9 @@ impl Fixture {
             desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
         session.surface = AgentSessionSurface::DeviceAssistant;
         session
+            .begin_focus_epoch(session.input_revision, std::iter::empty::<String>())
+            .unwrap();
+        session
             .begin_turn(
                 "turn-1",
                 None,
@@ -121,6 +124,7 @@ impl Fixture {
         let subject = ProviderCallSubject {
             actor_id: actor,
             run_id: "run-1",
+            input_revision: 1,
             target_device_id: "device-1",
             policy_revision:
                 desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
@@ -130,6 +134,7 @@ impl Fixture {
         let authority = evaluated.grant_call(&subject).unwrap();
         let mut permission = grant(1);
         permission.actor_id = actor.into();
+        permission.input_revision = subject.input_revision;
         permission.policy_revision = subject.policy_revision;
         permission.target_session_id = authority.target_session_id.map(str::to_owned);
         permission.provider_id = authority.provider_id.into();

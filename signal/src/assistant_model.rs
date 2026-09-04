@@ -52,6 +52,30 @@ impl ModelSeam for MeteredModel {
         self.inner.context_policy(requirements).await
     }
 
+    fn on_model_request_projected(
+        &self,
+        metrics: desk_diagnose_core::seam::ModelRequestProjectionMetrics,
+    ) {
+        log::debug!(
+            "[device-assistant] model projection messages={} message_json_bytes={} tools={} tool_json_bytes={} registry={} ready={} permission_candidates={} catalog_bytes={} index_bytes={} detail_bytes={} conversation_messages={} session_snapshot_bytes={} attachments={} permission_requests={} pending_work={}",
+            metrics.message_count,
+            metrics.message_json_bytes,
+            metrics.advertised_tool_count,
+            metrics.advertised_tool_json_bytes,
+            metrics.capability_registry_count,
+            metrics.runtime_ready_count,
+            metrics.permission_candidate_count,
+            metrics.capability_catalog_utf8_bytes,
+            metrics.capability_index_utf8_bytes,
+            metrics.loaded_capability_detail_utf8_bytes,
+            metrics.conversation_message_count,
+            metrics.session_snapshot_json_bytes,
+            metrics.context_attachment_count,
+            metrics.permission_request_count,
+            metrics.pending_work_trigger_count,
+        );
+    }
+
     async fn call(
         &self,
         request: ModelRequest,

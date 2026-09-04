@@ -100,6 +100,7 @@ server 内置信令、STUN 与 TURN。跨 NAT 连接时：
   - `relaxed`（默认）——允许私网 / 回环目标（本地模型网关，如 `http://localhost:11434`）。
   - `strict`——拒绝私网 / 回环 / CGNAT / ULA 目标；连接期再校验解析到的 IP（防 DNS 重绑定）。当不可信用户可配置供应商时使用。
 - **`LRD_ENFORCE_PUBLIC_TLS`**——是否允许以**明文**（`http`）拨号**公网**目标。默认 `true`（仅显式设为 `false` / `0` / `no` / `off` 才关闭）。开启时，对公网地址的明文拨号会在连接前被拒（api_key 绝不明文外泄）；私网 / 回环 / 局域网目标始终豁免，云元数据段无论如何始终拦截。与 SSRF 模式正交：要放行公网明文供应商，关闭本开关即可，**无需**切到 `relaxed`（那会额外放开私网目标）。
+- **`LRD_BRAVE_SEARCH_API_KEY`**——可选的服务端 Brave Web Search 凭据。设置且格式有效时，Device Assistant 才会把 `search_public_web` 标为可用；未设置时该能力明确 unavailable。查询仍须逐字来自当前用户消息并通过一次精确 ExportData 授权。凭据不会发送给模型、浏览器控制端或被控端，也不会进入工具输出或 Debug 文本。
 - **没有运行时 API 文档端点**：server 不提供 Swagger UI / ReDoc / RapiDoc / Scalar，也不提供 `/openapi.json`，公网上因此没有这一类可被探测的面。需要规范时用离线 `dump-openapi` 生成（见 [REST API 参考](/zh/reference/api)）。
 - 把 server 置于反向代理之后，由其终结 TLS、透传 `Host`，并为信令转发 WebSocket `Upgrade` 头。
 - 同机原生反向代理通常从 loopback 连接，可直接使用默认信任；代理容器通常从 bridge/container 地址连接，必须显式加入其实际 peer CIDR。若 Docker 或四层代理已经丢失真实源地址且不提供 XFF，应用无法恢复，所有客户端只能共享一个限流 bucket。

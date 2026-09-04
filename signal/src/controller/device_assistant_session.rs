@@ -41,6 +41,8 @@ fn not_accessible() -> HttpResponse {
         ("connection" = String, Query, description = "Target connection id"),
         ("conversation" = Option<String>, Query, description = "Client conversation intent"),
         ("session" = Option<String>, Query, description = "Opaque session id from history list"),
+        ("message_before" = Option<String>, Query, description = "Exclusive older-message cursor"),
+        ("message_limit" = Option<usize>, Query, description = "Message page size, 1 through 100"),
     ),
     responses((status = 200, description = "Conversation snapshot, or a uniform \
         not-found/not-accessible response", body = RestResponse<DeviceAssistantSessionSnapshotDto>)),
@@ -77,6 +79,18 @@ pub async fn get_device_assistant_session(
             let snapshot = snapshot.session;
             let evidence_summary =
                 build_evidence_summary(&snapshot.messages, &snapshot.context_attachments);
+            let visual_evidence = desk_diagnose_core::visual_evidence::durable_projection(
+                &snapshot.visual_evidence,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+            );
+            let message_page = project_snapshot_message_page(
+                snapshot.messages,
+                query.message_before.as_deref(),
+                query.message_limit,
+            )
+            .map_err(|message| {
+                DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, message)
+            })?;
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
                 DeviceAssistantSessionSnapshotDto {
                     session_id,
@@ -104,16 +118,9 @@ pub async fn get_device_assistant_session(
                     background_tasks: background_tasks.into_iter().map(Into::into).collect(),
                     capability_grants: capability_grants.into_iter().map(Into::into).collect(),
                     evidence_summary,
-                    messages: snapshot
-                        .messages
-                        .into_iter()
-                        .filter(|message| {
-                            !desk_diagnose_core::permission_resume::is_permission_resume_message(
-                                message,
-                            )
-                        })
-                        .map(Into::into)
-                        .collect(),
+                    visual_evidence,
+                    messages: message_page.messages,
+                    message_page: message_page.page,
                     context_notices: snapshot
                         .context_notices
                         .into_iter()
@@ -335,6 +342,12 @@ pub async fn decide_device_assistant_permission(
     connection_map: web::Data<SharedConnectionMap>,
     body: web::Json<PermissionDecisionBody>,
 ) -> Result<HttpResponse, DeskSignalError> {
+    if !crate::device_assistant_gate::global_device_assistant_gate().is_enabled() {
+        return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            "Device Assistant is disabled on this device".to_string(),
+        )));
+    }
     decide_permission_on(crate::db::get_db(), connection_map, body).await
 }
 
@@ -778,6 +791,7 @@ mod tests {
             verification: CommunicationPrepareVerification::SemanticExact,
             readback_payload_sha256: Some("d".repeat(64)),
             send_authority: CommunicationSendAuthority::ManualOnly,
+            send_payload_snapshot: None,
             handed_off_at_unix_ms: 42,
         };
         handoff.validate().unwrap();

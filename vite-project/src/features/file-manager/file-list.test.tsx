@@ -51,6 +51,8 @@ vi.mock("./use-file-transfer", async (importOriginal) => ({
         prepareTransfers: h.prepareTransfers,
         channelStatus: 'ready' as const,
         channelFailure: null,
+        sessionTargets: [],
+        selectSessionTarget: vi.fn(),
     }),
 }))
 vi.mock("@/features/desk/restricted-session", () => ({

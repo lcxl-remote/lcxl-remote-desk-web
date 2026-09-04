@@ -116,6 +116,7 @@ async fn strict_compression_loop_commits_only_authorized_unexpired_summaries() {
                     "test",
                     "test",
                 ),
+                max_context_bytes: crate::MIN_MODEL_CONTEXT_BYTES * 4,
             },
             policy: RefCell::new(policy),
             expire_after_compression,

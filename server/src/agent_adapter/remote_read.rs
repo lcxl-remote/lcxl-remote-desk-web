@@ -355,6 +355,7 @@ mod tests {
                     height: 2,
                     dpi_x: 96,
                     dpi_y: 96,
+                    window: None,
                     image: png,
                     truncated: false,
                 },

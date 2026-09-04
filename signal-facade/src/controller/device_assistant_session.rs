@@ -1,6 +1,8 @@
 //! Shared browser/mobile wire DTOs and pure projections for Device Assistant sessions.
 
-use desk_agent_protocol::communication::CommunicationDraftHandoff;
+use desk_agent_protocol::communication::{
+    CommunicationChannel, CommunicationDraftHandoff, GmailWebExactSendInput, SlackWebExactSendInput,
+};
 use desk_agent_protocol::computer_use::{ComputerActionCompleted, ComputerActionOutput};
 use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope};
 use desk_diagnose_core::chat::ChatMessage;
@@ -14,12 +16,18 @@ use utoipa::ToSchema;
 const EVIDENCE_SUMMARY_SCHEMA_VERSION: u16 = 1;
 const MAX_EVIDENCE_NODES: usize = 128;
 const MAX_EVIDENCE_RECEIPTS: usize = 32;
+pub const DEFAULT_SNAPSHOT_MESSAGE_PAGE_SIZE: usize = 100;
+pub const MAX_SNAPSHOT_MESSAGE_PAGE_SIZE: usize = 100;
+pub const MAX_SNAPSHOT_MESSAGE_PAGE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DeviceAssistantSessionQuery {
     pub connection: String,
     pub conversation: Option<String>,
     pub session: Option<String>,
+    /// Exclusive message cursor. Omit for the newest page.
+    pub message_before: Option<String>,
+    pub message_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -170,6 +178,107 @@ pub struct SnapshotMessageDto {
     pub background_task_id: Option<String>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotMessagePageDto {
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before_message_id: Option<String>,
+    pub limit: usize,
+}
+
+pub struct SnapshotMessagePageProjection {
+    pub messages: Vec<SnapshotMessageDto>,
+    pub page: SnapshotMessagePageDto,
+}
+
+pub fn project_snapshot_message_page(
+    messages: Vec<ChatMessage>,
+    before_message_id: Option<&str>,
+    requested_limit: Option<usize>,
+) -> Result<SnapshotMessagePageProjection, &'static str> {
+    let limit = requested_limit.unwrap_or(DEFAULT_SNAPSHOT_MESSAGE_PAGE_SIZE);
+    if limit == 0 || limit > MAX_SNAPSHOT_MESSAGE_PAGE_SIZE {
+        return Err("invalid message page limit");
+    }
+    let visible = messages
+        .into_iter()
+        .filter(|message| {
+            !desk_diagnose_core::permission_resume::is_permission_resume_message(message)
+        })
+        .collect::<Vec<_>>();
+    let end = match before_message_id {
+        Some(cursor) => visible
+            .iter()
+            .position(|message| message.message_id == cursor)
+            .ok_or("invalid message page cursor")?,
+        None => visible.len(),
+    };
+    let mut groups = Vec::new();
+    let mut index = 0;
+    while index < visible.len() {
+        let start = index;
+        index += 1;
+        if visible[start].role == desk_diagnose_core::chat::ChatRole::Assistant
+            && !visible[start].tool_calls.is_empty()
+        {
+            while index < visible.len()
+                && visible[index].role == desk_diagnose_core::chat::ChatRole::Tool
+            {
+                index += 1;
+            }
+        }
+        groups.push((start, index));
+    }
+    if end != visible.len() && !groups.iter().any(|(start, _)| *start == end) {
+        return Err("message page cursor is not a group boundary");
+    }
+    let mut start = end;
+    let mut count = 0usize;
+    let mut bytes = 2usize;
+    for (group_start, group_end) in groups
+        .iter()
+        .copied()
+        .filter(|(_, group_end)| *group_end <= end)
+        .rev()
+    {
+        let group_count = group_end - group_start;
+        let group = visible[group_start..group_end]
+            .iter()
+            .cloned()
+            .map(SnapshotMessageDto::from)
+            .collect::<Vec<_>>();
+        let group_bytes = serde_json::to_vec(&group)
+            .map_err(|_| "message page projection failed")?
+            .len();
+        if count + group_count > limit
+            || bytes.saturating_add(group_bytes) > MAX_SNAPSHOT_MESSAGE_PAGE_BYTES
+        {
+            if start == end {
+                return Err("one transcript message group exceeds the page budget");
+            }
+            break;
+        }
+        start = group_start;
+        count += group_count;
+        bytes = bytes.saturating_add(group_bytes);
+    }
+    let has_more = start > 0;
+    let next_before_message_id = has_more.then(|| visible[start].message_id.clone());
+    Ok(SnapshotMessagePageProjection {
+        messages: visible[start..end]
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect(),
+        page: SnapshotMessagePageDto {
+            has_more,
+            next_before_message_id,
+            limit,
+        },
+    })
+}
+
 impl From<ChatMessage> for SnapshotMessageDto {
     fn from(message: ChatMessage) -> Self {
         Self {
@@ -293,6 +402,7 @@ fn attachment_kind_name(kind: ContextAttachmentKind) -> &'static str {
         ContextAttachmentKind::InteractiveSession => "interactive_session",
         ContextAttachmentKind::ActiveApplication => "active_application",
         ContextAttachmentKind::UiSelection => "ui_selection",
+        ContextAttachmentKind::WindowSelection => "window_selection",
         ContextAttachmentKind::OfficeDocument => "office_document",
         ContextAttachmentKind::Worksheet => "worksheet",
         ContextAttachmentKind::Range => "range",
@@ -349,8 +459,13 @@ pub struct DeviceAssistantSessionSnapshotDto {
     /// Bounded metadata-only lineage graph. It contains no message bodies,
     /// credentials, cookies, tokens, browser storage or native paths.
     pub evidence_summary: EvidenceSummaryDto,
+    /// Recent screen observations, bound to epoch/turn/tool/frame. Durable
+    /// snapshots contain no pixel bytes; live previews arrive on AgentEvent.
+    pub visual_evidence: Vec<desk_agent_protocol::visual_evidence::VisualEvidenceFrame>,
     /// The persisted conversation, oldest first.
     pub messages: Vec<SnapshotMessageDto>,
+    /// Cursor metadata for the bounded `messages` page.
+    pub message_page: SnapshotMessagePageDto,
     /// Durable transcript metadata for context-window changes. No omitted text is exposed.
     pub context_notices: Vec<ContextNoticeDto>,
     /// Durable selection metadata only; no UI tree, cells, files or screenshots.
@@ -567,6 +682,7 @@ pub fn build_evidence_summary(
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityGrantDto {
     pub grant_id: String,
+    pub input_revision: u64,
     pub provider_id: String,
     pub capability_id: String,
     pub tool_name: String,
@@ -583,6 +699,7 @@ impl From<desk_agent_protocol::capability_grant::CapabilityGrant> for Capability
     fn from(grant: desk_agent_protocol::capability_grant::CapabilityGrant) -> Self {
         Self {
             grant_id: grant.grant_id,
+            input_revision: grant.input_revision,
             provider_id: grant.provider_id,
             capability_id: grant.capability_id,
             tool_name: grant.tool_name,
@@ -665,6 +782,29 @@ pub struct BackgroundTaskDto {
     pub terminal_at: Option<String>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalSendAttachmentDto {
+    pub file_name: String,
+    pub size_bytes: u64,
+}
+
+/// Safe owner-facing projection of a frozen exact-send request. Browser
+/// references, canonical permission JSON, credentials, and pairing secrets are
+/// deliberately excluded.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalSendConfirmationDto {
+    pub channel: CommunicationChannel,
+    pub account_id: String,
+    pub destination: String,
+    pub subject: Option<String>,
+    pub body_plain_text: String,
+    pub body_size_bytes: u64,
+    pub attachments: Vec<ExternalSendAttachmentDto>,
+    pub one_shot: bool,
+}
+
 impl From<desk_diagnose_core::dynamic_run::BackgroundTaskRecord> for BackgroundTaskDto {
     fn from(record: desk_diagnose_core::dynamic_run::BackgroundTaskRecord) -> Self {
         use desk_diagnose_core::dynamic_run::BackgroundTaskState;
@@ -704,6 +844,55 @@ pub struct GrantRequestItemDto {
     pub suggested_ttl_seconds: u32,
     pub suggested_max_uses: u32,
     pub reason: String,
+    pub external_send_confirmation: Option<ExternalSendConfirmationDto>,
+}
+
+fn external_send_confirmation(
+    tool_name: &str,
+    canonical_input_json: Option<&str>,
+) -> Option<ExternalSendConfirmationDto> {
+    let canonical_input_json = canonical_input_json?;
+    let (snapshot, body_plain_text) = match tool_name {
+        "send_gmail_web_exact" => {
+            let input: GmailWebExactSendInput = serde_json::from_str(canonical_input_json).ok()?;
+            desk_diagnose_core::communication::verify_gmail_web_exact_send_input(&input).ok()?;
+            (
+                input.handoff.send_payload_snapshot?,
+                input.draft.body_plain_text,
+            )
+        }
+        "send_slack_web_exact" => {
+            let input: SlackWebExactSendInput = serde_json::from_str(canonical_input_json).ok()?;
+            desk_diagnose_core::communication::verify_slack_web_exact_send_input(&input).ok()?;
+            (input.handoff.send_payload_snapshot?, input.body_plain_text)
+        }
+        _ => return None,
+    };
+    let destination = snapshot
+        .payload
+        .recipients
+        .first()?
+        .canonical_address
+        .clone();
+    Some(ExternalSendConfirmationDto {
+        channel: snapshot.payload.surface.channel,
+        account_id: snapshot.payload.surface.account_id,
+        destination,
+        subject: (snapshot.payload.surface.channel == CommunicationChannel::Email)
+            .then_some(snapshot.payload.subject),
+        body_size_bytes: body_plain_text.len() as u64,
+        body_plain_text,
+        attachments: snapshot
+            .payload
+            .attachments
+            .into_iter()
+            .map(|attachment| ExternalSendAttachmentDto {
+                file_name: attachment.file_name,
+                size_bytes: attachment.size_bytes,
+            })
+            .collect(),
+        one_shot: true,
+    })
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -776,17 +965,24 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
             items: request
                 .items
                 .into_iter()
-                .map(|item| GrantRequestItemDto {
-                    item_id: item.item_id,
-                    provider_id: item.provider_id,
-                    tool_name: item.tool_name,
-                    expected_effect: item.expected_effect,
-                    resource_scope: item.resource_scope,
-                    operation_scope: item.operation_scope,
-                    export_destinations: item.export_destinations,
-                    suggested_ttl_seconds: item.suggested_ttl_seconds,
-                    suggested_max_uses: item.suggested_max_uses,
-                    reason: item.reason,
+                .map(|item| {
+                    let external_send_confirmation = external_send_confirmation(
+                        &item.tool_name,
+                        item.canonical_input_json.as_deref(),
+                    );
+                    GrantRequestItemDto {
+                        item_id: item.item_id,
+                        provider_id: item.provider_id,
+                        tool_name: item.tool_name,
+                        expected_effect: item.expected_effect,
+                        resource_scope: item.resource_scope,
+                        operation_scope: item.operation_scope,
+                        export_destinations: item.export_destinations,
+                        suggested_ttl_seconds: item.suggested_ttl_seconds,
+                        suggested_max_uses: item.suggested_max_uses,
+                        reason: item.reason,
+                        external_send_confirmation,
+                    }
                 })
                 .collect(),
             created_at: request.created_at,
@@ -817,6 +1013,136 @@ pub struct DeviceAssistantSessionListDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn slack_exact_send_json() -> String {
+        use desk_agent_protocol::{
+            browser_control::{
+                BROWSER_CONTROL_SCHEMA_VERSION, BrowserAdapterRef, BrowserElementRef,
+                BrowserElementRole, BrowserEngineKind, BrowserOrigin, BrowserOriginKind,
+                BrowserPageRef,
+            },
+            communication::{
+                COMMUNICATION_SCHEMA_VERSION, CommunicationChannel, CommunicationDraftHandoff,
+                CommunicationPayload, CommunicationPrepareVerification, CommunicationSendAuthority,
+                CommunicationSurfaceKind, CommunicationSurfaceRef, CommunicationSurfaceScope,
+                ImmutableBodySnapshot, RecipientIdentity, RecipientKind, RecipientRole,
+                SlackWebExactSendInput,
+            },
+            data_lineage::ContentRef,
+        };
+
+        let page = BrowserPageRef {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            adapter: BrowserAdapterRef {
+                engine: BrowserEngineKind::ChromeExtension,
+                device_id: "device".into(),
+                os_session_id: "session".into(),
+                browser_major_version: 151,
+                browser_version: "151.0".into(),
+                adapter_id: "chrome-extension".into(),
+                adapter_version: "1".into(),
+                profile_incarnation: "profile".into(),
+                connection_revision: 7,
+            },
+            page_id: "page".into(),
+            page_incarnation: "page-incarnation".into(),
+            origin: BrowserOrigin {
+                kind: BrowserOriginKind::Https,
+                host_ascii: "app.slack.com".into(),
+                port: 443,
+            },
+            document_revision: 3,
+            url_sha256: "a".repeat(64),
+            observed_at_unix_ms: 200,
+        };
+        let composer = BrowserElementRef {
+            page_id: page.page_id.clone(),
+            page_incarnation: page.page_incarnation.clone(),
+            document_revision: page.document_revision,
+            element_id: "composer".into(),
+            role: BrowserElementRole::Textbox,
+            accessible_name: "Message #review".into(),
+            value: None,
+            element_revision: 1,
+        };
+        let send_control = BrowserElementRef {
+            element_id: "send".into(),
+            role: BrowserElementRole::Button,
+            accessible_name: "Send message".into(),
+            ..composer.clone()
+        };
+        let surface = CommunicationSurfaceRef {
+            channel: CommunicationChannel::Chat,
+            kind: CommunicationSurfaceKind::ChromeExtension,
+            scope: CommunicationSurfaceScope::WebOrigin {
+                origin: page.origin.clone(),
+            },
+            device_id: page.adapter.device_id.clone(),
+            os_session_id: page.adapter.os_session_id.clone(),
+            adapter_id: "slack-web".into(),
+            adapter_version: "1".into(),
+            profile_id: page.adapter.profile_incarnation.clone(),
+            account_id: "slack-current-profile".into(),
+            revision: page.adapter.connection_revision,
+        };
+        let body_plain_text = "Reviewed Slack body".to_string();
+        let body_digest =
+            "93c68073d6928d5cdb4b7e77a45fb5171f3cb32931eed876c10fe96c319b5d49".to_string();
+        let payload = CommunicationPayload {
+            surface: surface.clone(),
+            recipients: vec![RecipientIdentity {
+                role: RecipientRole::ChatDestination,
+                kind: RecipientKind::ChatChannel,
+                stable_id: "slack-channel-review".into(),
+                canonical_address: composer.accessible_name.clone(),
+                display_name: None,
+                display_warnings: Vec::new(),
+                resolved_members: Vec::new(),
+                member_snapshot_sha256: None,
+            }],
+            subject: String::new(),
+            body: ImmutableBodySnapshot {
+                content: ContentRef::ImmutableBlob {
+                    blob_id: "slack-body".into(),
+                    sha256: body_digest.clone(),
+                    size_bytes: body_plain_text.len() as u64,
+                    media_type: "text/plain; charset=utf-8".into(),
+                },
+                media_type: "text/plain; charset=utf-8".into(),
+                size_bytes: body_plain_text.len() as u64,
+                digest_sha256: body_digest,
+            },
+            attachments: Vec::new(),
+        };
+        let snapshot = desk_diagnose_core::communication::seal_send_payload(
+            "slack-send-snapshot".into(),
+            "run".into(),
+            payload,
+            100,
+        )
+        .unwrap();
+        serde_json::to_string(&SlackWebExactSendInput {
+            schema_version: COMMUNICATION_SCHEMA_VERSION,
+            handoff: CommunicationDraftHandoff {
+                schema_version: COMMUNICATION_SCHEMA_VERSION,
+                handoff_id: "slack-handoff".into(),
+                run_id: "run".into(),
+                surface,
+                compose_id: "slack-compose".into(),
+                prepared_payload_sha256: "b".repeat(64),
+                verification: CommunicationPrepareVerification::SemanticExact,
+                readback_payload_sha256: Some("b".repeat(64)),
+                send_authority: CommunicationSendAuthority::ExactGrantEligible,
+                send_payload_snapshot: Some(snapshot),
+                handed_off_at_unix_ms: 100,
+            },
+            page,
+            composer,
+            send_control,
+            body_plain_text,
+        })
+        .unwrap()
+    }
 
     #[test]
     fn permission_decision_accepts_mobile_camel_case_and_legacy_snake_case() {
@@ -852,5 +1178,65 @@ mod tests {
             .unwrap();
             assert_eq!(body.items.len(), 1);
         }
+    }
+
+    #[test]
+    fn exact_send_confirmation_projects_only_verified_owner_fields() {
+        let canonical = slack_exact_send_json();
+        let confirmation =
+            external_send_confirmation("send_slack_web_exact", Some(&canonical)).unwrap();
+        assert_eq!(confirmation.channel, CommunicationChannel::Chat);
+        assert_eq!(confirmation.account_id, "slack-current-profile");
+        assert_eq!(confirmation.destination, "Message #review");
+        assert_eq!(confirmation.subject, None);
+        assert_eq!(confirmation.body_plain_text, "Reviewed Slack body");
+        assert_eq!(confirmation.body_size_bytes, 19);
+        assert!(confirmation.attachments.is_empty());
+        assert!(confirmation.one_shot);
+
+        let mut changed = serde_json::from_str::<serde_json::Value>(&canonical).unwrap();
+        changed["body_plain_text"] = serde_json::json!("Changed after review");
+        assert!(
+            external_send_confirmation("send_slack_web_exact", Some(&changed.to_string()))
+                .is_none()
+        );
+        assert!(external_send_confirmation("send_slack_web_exact", None).is_none());
+        assert!(external_send_confirmation("browser_activate_element", Some(&canonical)).is_none());
+    }
+
+    #[test]
+    fn thousand_message_snapshot_pages_are_stable_and_bounded() {
+        let messages = (0..1_000)
+            .map(|index| {
+                ChatMessage::text(
+                    format!("message-{index:04}"),
+                    desk_diagnose_core::chat::ChatRole::User,
+                    format!("text-{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut before = None;
+        let mut recovered = Vec::new();
+        loop {
+            let projection =
+                project_snapshot_message_page(messages.clone(), before.as_deref(), None).unwrap();
+            assert!(projection.messages.len() <= MAX_SNAPSHOT_MESSAGE_PAGE_SIZE);
+            assert!(
+                serde_json::to_vec(&projection.messages).unwrap().len()
+                    <= MAX_SNAPSHOT_MESSAGE_PAGE_BYTES
+            );
+            recovered.splice(
+                0..0,
+                projection.messages.iter().map(|message| message.id.clone()),
+            );
+            if !projection.page.has_more {
+                break;
+            }
+            before = projection.page.next_before_message_id;
+        }
+        assert_eq!(recovered.len(), 1_000);
+        assert_eq!(recovered.first().map(String::as_str), Some("message-0000"));
+        assert_eq!(recovered.last().map(String::as_str), Some("message-0999"));
+        assert!(project_snapshot_message_page(Vec::new(), None, Some(101)).is_err());
     }
 }

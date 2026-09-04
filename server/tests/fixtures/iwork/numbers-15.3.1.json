@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "application": "numbers",
+  "bundle_id": "com.apple.Numbers",
+  "team_id": "JCRTNEU7GK",
+  "version": "15.3.1",
+  "sdef_sha256": "ee098803afeec84afa58bc37bff97115eb5c5bac07d14d9fbff27ee16e3e1d9b",
+  "reviewed_surface": ["document", "password_protected", "active_sheet", "table", "selection_range", "cell", "value", "formula", "formatted_value", "save", "export"]
+}

@@ -53,7 +53,8 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::AskDeviceAssistant
         | SignalingType::GetDeviceAssistantCapabilities
         | SignalingType::UpdateDeviceAssistantContext
-        | SignalingType::UpdateDeviceAssistantObjectContext => Request,
+        | SignalingType::UpdateDeviceAssistantObjectContext
+        | SignalingType::SelectDeviceAssistantSession => Request,
 
         SignalingType::HeartbeatAcknowledged
         | SignalingType::ConnectionsFetched
@@ -88,7 +89,8 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::DeviceAssistantUpdated
         | SignalingType::DeviceAssistantCapabilitiesUpdated
         | SignalingType::DeviceAssistantContextUpdated
-        | SignalingType::DeviceAssistantObjectContextUpdated => Response,
+        | SignalingType::DeviceAssistantObjectContextUpdated
+        | SignalingType::DeviceAssistantSessionSelected => Response,
 
         SignalingType::RevokeSupportCode
         | SignalingType::RevokeAccessGrant
@@ -101,7 +103,8 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::SyncCommandTemplates
         | SignalingType::CancelTerminalCopilot
         | SignalingType::SyncCommandBlocklist
-        | SignalingType::CancelDeviceAssistant => Command,
+        | SignalingType::CancelDeviceAssistant
+        | SignalingType::UpdateDeviceAssistantSettings => Command,
 
         SignalingType::ConnectionRemoved
         | SignalingType::PrivateScreenStateChanged
@@ -164,6 +167,9 @@ pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
         SignalingType::UpdateDeviceAssistantObjectContext => {
             SignalingType::DeviceAssistantObjectContextUpdated
         }
+        SignalingType::SelectDeviceAssistantSession => {
+            SignalingType::DeviceAssistantSessionSelected
+        }
         _ => return None,
     })
 }
@@ -206,6 +212,7 @@ pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] 
         GetDeviceAssistantCapabilities => &[DeviceAssistantCapabilitiesUpdated],
         UpdateDeviceAssistantContext => &[DeviceAssistantContextUpdated],
         UpdateDeviceAssistantObjectContext => &[DeviceAssistantObjectContextUpdated],
+        SelectDeviceAssistantSession => &[DeviceAssistantSessionSelected],
         _ => &[],
     }
 }

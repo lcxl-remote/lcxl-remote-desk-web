@@ -369,8 +369,8 @@ async fn background_receipt_keeps_original_call_and_label_separate_from_wait_sta
         crate::dynamic_run::RUN_CONTROL_PROVIDER_ID
     );
     assert_eq!(
-        label.provenance.source_envelope_ids,
-        [envelope.envelope_id.clone()]
+        label.provenance.source_envelope_ids.as_slice(),
+        std::slice::from_ref(&envelope.envelope_id)
     );
     assert_eq!(label.retention, envelope.retention);
     assert_eq!(label.allowed_destinations, envelope.allowed_destinations);
@@ -651,8 +651,8 @@ fn background_status_inherits_proposal_boundary_without_requesting_a_native_rece
             crate::dynamic_run::RUN_CONTROL_PROVIDER_ID
         );
         assert_eq!(
-            label.provenance.source_envelope_ids,
-            [parent.envelope_id.clone()]
+            label.provenance.source_envelope_ids.as_slice(),
+            std::slice::from_ref(&parent.envelope_id)
         );
         assert_eq!(label.retention, parent.retention);
     }

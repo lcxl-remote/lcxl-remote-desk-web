@@ -21,6 +21,7 @@ fn subject() -> ProviderCallSubject<'static> {
     ProviderCallSubject {
         actor_id: "owner",
         run_id: "run",
+        input_revision: 1,
         target_device_id: "device",
         policy_revision: crate::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
         readiness_revision: 7,
@@ -114,7 +115,7 @@ fn browser_preflight_derives_identical_authority_for_both_runtimes() {
         );
         assert_eq!(
             authority.resource_scope,
-            fresh_object_resource_scope(&[selected.clone()])
+            fresh_object_resource_scope(std::slice::from_ref(&selected))
         );
         assert_eq!(authority.operation_scope, ["use_selected_object"]);
         assert!(authority.export_destinations.is_empty());
@@ -363,6 +364,74 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
         injected["send"] = json!(true);
         call.arguments_json = injected.to_string();
         assert!(evaluate(&call, &surface()).is_err());
+    }
+}
+
+#[test]
+fn exact_external_send_preflight_is_sealed_r3_authority() {
+    use crate::{
+        communication::test_support::{gmail_exact_send_input, slack_exact_send_input},
+        device_assistant::{
+            GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID, SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID,
+        },
+    };
+    use desk_agent_protocol::capability_provider::CapabilityEffect;
+
+    for (tool, input, destination) in [
+        (
+            "send_gmail_web_exact",
+            serde_json::to_value(gmail_exact_send_input()).unwrap(),
+            DestinationIdentity::EmailAccount {
+                account_id: GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+            },
+        ),
+        (
+            "send_slack_web_exact",
+            serde_json::to_value(slack_exact_send_input()).unwrap(),
+            DestinationIdentity::ChatAccount {
+                account_id: SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+            },
+        ),
+    ] {
+        let call = ToolCall {
+            id: "send-call".into(),
+            name: tool.into(),
+            arguments_json: input.to_string(),
+        };
+        let preflight = evaluate(&call, &surface()).unwrap();
+        let subject = subject();
+        let authority = preflight.grant_call(&subject).unwrap();
+        assert_eq!(authority.effect, CapabilityEffect::SendExternal);
+        assert_eq!(authority.risk_tier, CapabilityRiskTier::R3);
+        assert_eq!(authority.operation_scope, ["use_selected_object"]);
+        assert_eq!(authority.export_destinations, [destination]);
+        assert!(matches!(
+            preflight.request().action,
+            BrowserAction::ActivateElement {
+                activation_class: BrowserActivationClass::SendExternal { .. },
+                ..
+            }
+        ));
+
+        let mut changed = input.clone();
+        if tool == "send_gmail_web_exact" {
+            changed["draft"]["body_plain_text"] = json!("Changed after review");
+        } else {
+            changed["body_plain_text"] = json!("Changed after review");
+        }
+        let changed = ToolCall {
+            arguments_json: changed.to_string(),
+            ..call.clone()
+        };
+        assert!(evaluate(&changed, &surface()).is_err());
+
+        let mut stale = input;
+        stale["page"]["observed_at_unix_ms"] = stale["handoff"]["handed_off_at_unix_ms"].clone();
+        let stale = ToolCall {
+            arguments_json: stale.to_string(),
+            ..call
+        };
+        assert!(evaluate(&stale, &surface()).is_err());
     }
 }
 

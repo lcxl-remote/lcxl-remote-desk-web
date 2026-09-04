@@ -166,6 +166,7 @@ impl SignalAgentSessionStore {
             scope_snapshot: session.scope_snapshot,
             task_status_projection: session.task_status_projection,
             permission_requests: session.permission_requests,
+            visual_evidence: session.visual_evidence,
             messages: session.conversation,
             context_notices: session.context_notices,
             context_attachments: session.context_attachments,
@@ -848,6 +849,7 @@ pub struct SessionSnapshot {
     pub scope_snapshot: AgentScope,
     pub task_status_projection: Option<desk_diagnose_core::dynamic_run::TaskStatusProjection>,
     pub permission_requests: Vec<desk_diagnose_core::dynamic_run::PermissionRequest>,
+    pub visual_evidence: Vec<desk_agent_protocol::visual_evidence::VisualEvidenceFrame>,
     pub messages: Vec<desk_diagnose_core::chat::ChatMessage>,
     pub context_notices: Vec<desk_diagnose_core::model_context::ContextNotice>,
     pub context_attachments: Vec<ContextAttachment>,
@@ -888,6 +890,7 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         scope_snapshot: session.scope_snapshot,
         task_status_projection: session.task_status_projection,
         permission_requests: session.permission_requests,
+        visual_evidence: session.visual_evidence,
         messages: session.conversation,
         context_notices: session.context_notices,
         context_attachments: session.context_attachments,
@@ -1813,6 +1816,95 @@ mod tests {
         }
     }
 
+    fn populate_thousand_turn_lcc_matrix(session: &mut PersistedAgentSession) {
+        for index in 0..1_000 {
+            session
+                .conversation
+                .push(desk_diagnose_core::chat::ChatMessage::text(
+                    format!("matrix-user-{index:04}"),
+                    desk_diagnose_core::chat::ChatRole::User,
+                    format!("unrelated user topic {index}"),
+                ));
+            session
+                .conversation
+                .push(desk_diagnose_core::chat::ChatMessage::text(
+                    format!("matrix-assistant-{index:04}"),
+                    desk_diagnose_core::chat::ChatRole::Assistant,
+                    format!("bounded answer {index}"),
+                ));
+        }
+        let mut unknown_call = desk_diagnose_core::chat::ChatMessage::assistant_tool_calls(
+            "matrix-unknown-call-message",
+            "",
+            vec![desk_diagnose_core::chat::ToolCallRef {
+                id: "matrix-unknown-call".into(),
+                name: "execute_confirmed_command".into(),
+                arguments_json:
+                    r#"{"schema_version":1,"shell":"bash","command":"printf safe","timeout_ms":1000}"#
+                        .into(),
+            }],
+        );
+        unknown_call.replay_disposition =
+            Some(desk_diagnose_core::replay::ReplayDisposition::NotRequired {
+                source_context_key: desk_diagnose_core::replay::SourceContextKey::derive(
+                    desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+                    "matrix",
+                    "matrix",
+                    "matrix",
+                ),
+            });
+        session.conversation.push(unknown_call);
+        session
+            .conversation
+            .push(desk_diagnose_core::chat::ChatMessage::tool_result(
+                "matrix-unknown-placeholder",
+                "matrix-unknown-call",
+                "execution outcome unknown; the command may have executed; do not assume success",
+            ));
+        session.input_revision = 1_000;
+        session.latest_input_seq = 1_000;
+        session.handled_input_seq = 999;
+        session.focus_epoch.input_revision = 1_000;
+        session.capability_disclosure.reset_for_input(1_000);
+        session.capability_disclosure.loaded_tool_names = vec!["read_system_info".into()];
+        session.permission_requests = vec![PermissionRequest {
+            schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
+            request_id: "matrix-permission".into(),
+            input_revision: 1_000,
+            state: PermissionRequestState::Pending,
+            items: vec![GrantRequestItem {
+                item_id: "matrix-read".into(),
+                provider_id: "file.read".into(),
+                tool_name: "read_selected_text_file".into(),
+                expected_effect: CapabilityEffect::ReadFile,
+                resource_scope: Vec::new(),
+                operation_scope: Vec::new(),
+                export_destinations: Vec::new(),
+                canonical_input_json: None,
+                canonical_input_digest_sha256: None,
+                suggested_ttl_seconds: 300,
+                suggested_max_uses: 1,
+                reason: "matrix permission".into(),
+            }],
+            created_at: "2026-09-03T00:00:00Z".into(),
+        }];
+        session.pending_auto_triggers = vec![PendingAutoTrigger {
+            work_id: 42,
+            kind: WorkKind::CapabilityProvider,
+            execution_id: "matrix-background-execution".into(),
+            tool_call_id: "matrix-background-call".into(),
+            event_id: "matrix-background-event".into(),
+            chain_id: "matrix-old-chain".into(),
+            resolution_org_id: None,
+            since: "2026-09-03T00:00:01Z".into(),
+        }];
+        session.execution_state = ExecutionState::OutcomeUnknown {
+            action: ActionIdentity::agent_exec(41, "matrix-request", "matrix-execution"),
+            placeholder_message_id: "matrix-unknown-placeholder".into(),
+            since: "2026-09-03T00:00:02Z".into(),
+        };
+    }
+
     #[tokio::test]
     async fn task_status_projection_and_event_commit_together() {
         let store = store().await;
@@ -1869,6 +1961,206 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "task_status_updated");
         assert_eq!(events[0].event_seq, 1);
+    }
+
+    #[tokio::test]
+    async fn capability_disclosure_survives_sqlite_reopen_and_save_cas() {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("disclosure.db").display()
+        );
+        let db = Database::connect(&url).await.unwrap();
+        let schema = Schema::new(db.get_database_backend());
+        db.execute(&schema.create_table_from_entity(agent_session::Entity))
+            .await
+            .unwrap();
+        db.execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+            .await
+            .unwrap();
+        db.execute(&schema.create_table_from_entity(agent_run_event::Entity))
+            .await
+            .unwrap();
+        db.execute(
+            &schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
+        )
+        .await
+        .unwrap();
+        db.execute(&schema.create_table_from_entity(agent_capability_grant::Entity))
+            .await
+            .unwrap();
+        let first = SignalAgentSessionStore::new(db).with_client_metadata(
+            Some("client-conversation-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        let mut session = first.claim_turn(claim("disclosure-turn")).await.unwrap();
+        session.input_revision = 7;
+        session.latest_input_seq = 7;
+        session.focus_epoch.input_revision = 7;
+        session.capability_disclosure.focus_input_revision = 7;
+        session.capability_disclosure.updated_input_revision = 7;
+        session.capability_disclosure.loaded_tool_names = vec![
+            "inspect_selected_pages_with_iwork".into(),
+            "read_system_info".into(),
+        ];
+        session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        first.save(&mut session).await.unwrap();
+        let saved_version = session.version;
+        first.db.close().await.unwrap();
+
+        let reopened_db = Database::connect(&url).await.unwrap();
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq("conversation-1"))
+            .one(&reopened_db)
+            .await
+            .unwrap()
+            .unwrap();
+        let restored = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+        assert_eq!(restored.version, saved_version);
+        assert_eq!(restored.capability_disclosure.focus_input_revision, 7);
+        assert_eq!(restored.focus_epoch.input_revision, 7);
+        assert_eq!(
+            restored.capability_disclosure.loaded_tool_names,
+            ["inspect_selected_pages_with_iwork", "read_system_info"]
+        );
+
+        let stale = SignalAgentSessionStore::new(reopened_db.clone()).with_client_metadata(
+            Some("client-conversation-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        let owner = SignalAgentSessionStore::new(reopened_db).with_client_metadata(
+            Some("client-conversation-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        let mut claimed = owner.claim_turn(claim("next-owner")).await.unwrap();
+        let mut stale_snapshot = restored;
+        stale_snapshot.turn_state = TurnState::Running;
+        assert!(stale.save(&mut stale_snapshot).await.is_err());
+        claimed.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        owner.save(&mut claimed).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn obsolete_device_assistant_session_is_rejected_without_reinitializing_the_row() {
+        let store = store().await.with_client_metadata(
+            Some("client-conversation-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        let mut session = store.claim_turn(claim("current-schema")).await.unwrap();
+        session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        store.save(&mut session).await.unwrap();
+
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq("conversation-1"))
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut obsolete: serde_json::Value = serde_json::from_str(&row.state_json).unwrap();
+        obsolete["conversation_schema_version"] = serde_json::json!(
+            desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION.saturating_sub(1)
+        );
+        let obsolete_json = serde_json::to_string(&obsolete).unwrap();
+        agent_session::Entity::update_many()
+            .col_expr(
+                agent_session::Column::StateJson,
+                Expr::value(obsolete_json.clone()),
+            )
+            .filter(agent_session::Column::ConversationId.eq("conversation-1"))
+            .exec(&store.db)
+            .await
+            .unwrap();
+
+        let restarted = SignalAgentSessionStore::new(store.db.clone()).with_client_metadata(
+            Some("client-conversation-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        assert!(matches!(
+            restarted.claim_turn(claim("must-not-reinitialize")).await,
+            Err(ClaimError::Backend(_))
+        ));
+        let unchanged = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq("conversation-1"))
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.state_json, obsolete_json);
+    }
+
+    #[tokio::test]
+    async fn thousand_turn_lcc_matrix_survives_oss_restart_and_rejects_stale_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("lcc-matrix.db").display()
+        );
+        let db = Database::connect(&url).await.unwrap();
+        let schema = Schema::new(db.get_database_backend());
+        db.execute(&schema.create_table_from_entity(agent_session::Entity))
+            .await
+            .unwrap();
+        db.execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+            .await
+            .unwrap();
+        db.execute(&schema.create_table_from_entity(agent_run_event::Entity))
+            .await
+            .unwrap();
+        db.execute(
+            &schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
+        )
+        .await
+        .unwrap();
+        db.execute(&schema.create_table_from_entity(agent_capability_grant::Entity))
+            .await
+            .unwrap();
+        let owner = SignalAgentSessionStore::new(db).with_client_metadata(
+            Some("client-conversation-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        let mut session = owner.claim_turn(claim("matrix-owner")).await.unwrap();
+        populate_thousand_turn_lcc_matrix(&mut session);
+        session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        owner.save(&mut session).await.unwrap();
+        let expected_version = session.version;
+        owner.db.close().await.unwrap();
+
+        let reopened_db = Database::connect(&url).await.unwrap();
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq("conversation-1"))
+            .one(&reopened_db)
+            .await
+            .unwrap()
+            .unwrap();
+        let restored = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+        assert_eq!(restored.version, expected_version);
+        assert_eq!(restored.conversation.len(), 2_002);
+        assert_eq!(restored.input_revision, 1_000);
+        assert_eq!(restored.focus_epoch.input_revision, 1_000);
+        assert_eq!(restored.permission_requests.len(), 1);
+        assert_eq!(restored.pending_auto_triggers.len(), 1);
+        assert!(matches!(
+            restored.execution_state,
+            ExecutionState::OutcomeUnknown { .. }
+        ));
+
+        let store_a = SignalAgentSessionStore::new(reopened_db.clone()).with_client_metadata(
+            Some("client-conversation-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        let store_b = SignalAgentSessionStore::new(reopened_db).with_client_metadata(
+            Some("client-conversation-1".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        let mut winner = store_a
+            .claim_turn(claim("matrix-next-owner"))
+            .await
+            .unwrap();
+        let mut stale = winner.clone();
+        winner.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        store_a.save(&mut winner).await.unwrap();
+        stale.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        assert!(store_b.save(&mut stale).await.is_err());
     }
 
     #[tokio::test]
@@ -2445,24 +2737,26 @@ mod tests {
         now_unix_ms: u64,
     ) -> ContextSelectionClaim {
         ContextSelectionClaim {
-            selected_capability_ids: selected
-                .then(|| vec!["desktop.ui.inspect".into()])
-                .unwrap_or_default(),
+            selected_capability_ids: if selected {
+                vec!["desktop.ui.inspect".into()]
+            } else {
+                Vec::new()
+            },
             runtime_bindings: vec![AttachmentRuntimeBinding {
                 source_provider_id: "desktop.ui".into(),
                 source_capability_id: "desktop.ui.inspect".into(),
                 object_incarnation: incarnation.into(),
             }],
-            candidates: selected
-                .then(|| {
-                    vec![context_attachment(
-                        candidate_id,
-                        &format!("request-{candidate_id}"),
-                        incarnation,
-                        now_unix_ms,
-                    )]
-                })
-                .unwrap_or_default(),
+            candidates: if selected {
+                vec![context_attachment(
+                    candidate_id,
+                    &format!("request-{candidate_id}"),
+                    incarnation,
+                    now_unix_ms,
+                )]
+            } else {
+                Vec::new()
+            },
             now_unix_ms,
         }
     }

@@ -584,6 +584,7 @@ impl ChromeDevtoolsMcpSession {
             page,
             snapshot,
             form_readback,
+            send_receipt: None,
             completed_at_unix_ms,
         };
         result

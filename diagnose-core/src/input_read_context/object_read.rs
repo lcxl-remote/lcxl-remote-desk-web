@@ -37,6 +37,17 @@ pub fn requires_objects(name: &str) -> bool {
         )
 }
 
+/// Most object tools always require an owner selection. Current-screen capture
+/// additionally becomes object-bound when the owner attached one window; an
+/// ordinary display capture remains valid without a window attachment.
+pub fn uses_selected_objects(name: &str, objects: &[ContextAttachment]) -> bool {
+    requires_objects(name)
+        || (name == "read_current_screen"
+            && objects
+                .iter()
+                .any(|object| object.kind == ContextAttachmentKind::WindowSelection))
+}
+
 /// Object selection enables only reads; live-document and batch tools still
 /// require their separate explicit capability selection.
 pub fn implicit_object_tool(name: &str, objects: &[ContextAttachment]) -> bool {
@@ -53,6 +64,9 @@ pub fn implicit_object_tool(name: &str, objects: &[ContextAttachment]) -> bool {
                 ContextAttachmentKind::File | ContextAttachmentKind::DirectorySelection
             )
         }),
+        "read_current_screen" => objects
+            .iter()
+            .any(|object| object.kind == ContextAttachmentKind::WindowSelection),
         _ => false,
     }
 }
@@ -63,6 +77,7 @@ impl ObjectReadBinding<'_> {
             return Err(denied());
         }
         let terminal = call.name == "inspect_selected_terminal_output";
+        let window = call.name == "read_current_screen";
         let mut selected: Vec<_> = self
             .original
             .object_attachments
@@ -70,6 +85,8 @@ impl ObjectReadBinding<'_> {
             .filter(|object| {
                 if terminal {
                     object.kind == ContextAttachmentKind::TerminalSessionRef
+                } else if window {
+                    object.kind == ContextAttachmentKind::WindowSelection
                 } else {
                     matches!(
                         object.kind,
@@ -89,6 +106,9 @@ impl ObjectReadBinding<'_> {
             if selected.len() != 1 {
                 return Err(denied());
             }
+        }
+        if window && selected.len() != 1 {
+            return Err(denied());
         }
         if selected.is_empty() {
             return Err(denied());
@@ -154,6 +174,12 @@ impl ObjectReadBinding<'_> {
             ("inspect_selected_terminal_output", ContextKind::TerminalOutputInspect(params)) => {
                 params.roots = refs;
                 params.max_bytes = params.max_bytes.min(bytes);
+            }
+            ("read_current_screen", ContextKind::ScreenCaptureCurrent(params)) => {
+                if refs[0].object_kind != ObjectKind::Window {
+                    return Err(denied());
+                }
+                params.window = Some(refs[0].clone());
             }
             (
                 "inspect_selected_numbers_with_iwork",
@@ -236,12 +262,19 @@ impl ObjectReadBinding<'_> {
             ContextKind::SpreadsheetFileInspect(params) => params.max_bytes,
             ContextKind::SpreadsheetMergePreview(params) => params.max_bytes,
             ContextKind::TerminalOutputInspect(params) => params.max_bytes,
+            ContextKind::ScreenCaptureCurrent(_) => selected
+                .iter()
+                .map(|object| object.bounds.max_bytes as u32)
+                .min()
+                .ok_or_else(denied)?,
             ContextKind::SpreadsheetLiveInspect(params)
             | ContextKind::DocumentLiveInspect(params)
             | ContextKind::PresentationLiveInspect(params) => params.max_bytes,
             _ => return Err(denied()),
         });
-        if output.image_data_url.is_some() || output.content.len() as u64 > max_bytes {
+        if (call.name != "read_current_screen" && output.image_data_url.is_some())
+            || output.content.len() as u64 > max_bytes
+        {
             return Err(denied());
         }
         let expiry = self.expiry(call)?;

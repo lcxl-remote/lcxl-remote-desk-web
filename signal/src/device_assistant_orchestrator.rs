@@ -54,14 +54,24 @@ use sha2::{Digest, Sha256};
 use crate::model_dial::SignalModelSeam;
 
 pub(crate) fn oss_central_capability_readiness() -> Vec<CentralCapabilityReadiness> {
-    [
+    let mut readiness = [
         ACTION_PREVIEW_CAPABILITY_ID,
         WEB_RESEARCH_FETCH_CAPABILITY_ID,
-        WEB_RESEARCH_SEARCH_CAPABILITY_ID,
     ]
     .into_iter()
     .map(CentralCapabilityReadiness::ready)
-    .collect()
+    .collect::<Vec<_>>();
+    readiness.push(
+        if crate::web_research::production_search_config().is_some() {
+            CentralCapabilityReadiness::ready(WEB_RESEARCH_SEARCH_CAPABILITY_ID)
+        } else {
+            CentralCapabilityReadiness::unavailable(
+            WEB_RESEARCH_SEARCH_CAPABILITY_ID,
+            desk_agent_protocol::capability_provider::CapabilityBlockedReason::AdapterUnavailable,
+        )
+        },
+    );
+    readiness
 }
 
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -887,6 +897,7 @@ async fn run_turn_inner(
     let mut selected_file_roots = Vec::new();
     let mut selected_spreadsheet_roots = Vec::new();
     let mut selected_terminal_roots = Vec::new();
+    let mut selected_window_roots = Vec::new();
     for attachment in &selected_objects {
         let reference = match serde_json::from_str::<desk_agent_protocol::computer_use::ObjectRef>(
             &attachment.object_ref.opaque_token,
@@ -908,6 +919,8 @@ async fn run_turn_inner(
         };
         if attachment.kind == ContextAttachmentKind::TerminalSessionRef {
             selected_terminal_roots.push(reference);
+        } else if attachment.kind == ContextAttachmentKind::WindowSelection {
+            selected_window_roots.push(reference);
         } else {
             // Display labels do not determine file type or grant read authority.
             // The original device validates the selected object and its format.
@@ -1137,6 +1150,10 @@ async fn run_turn_inner(
         },
     );
     let mut selected_tool_capability_ids = ask.selected_capability_ids.clone();
+    if !selected_window_roots.is_empty() {
+        selected_tool_capability_ids
+            .push(desk_diagnose_core::device_assistant::CURRENT_SCREEN_CAPABILITY_ID.to_string());
+    }
     if resume_desktop_ui_inspect {
         selected_tool_capability_ids
             .push(desk_diagnose_core::device_assistant::DESKTOP_UI_CAPABILITY_ID.into());
@@ -1275,11 +1292,13 @@ async fn run_turn_inner(
                 || original.tool_names.iter().any(|name| name == tool.name())
         });
     }
-    let capability_catalog = desk_diagnose_core::permission_tools::discoverable_catalog_prompt(
-        &provider_registry,
-        &inventory,
-        &registry,
-    );
+    let capability_catalog_metrics =
+        desk_diagnose_core::permission_tools::capability_catalog_metrics(
+            &provider_registry,
+            &inventory,
+            &registry,
+            &[],
+        );
     let permission_requests = snapshot
         .as_ref()
         .map(|snapshot| snapshot.permission_requests.as_slice())
@@ -1289,6 +1308,9 @@ async fn run_turn_inner(
             &capability_grants,
             permission_requests,
             now_unix_ms,
+            snapshot
+                .as_ref()
+                .map_or(0, |session| session.input_revision),
             readiness_revision,
         );
     let permission_continuation_exact_tools =
@@ -1296,6 +1318,9 @@ async fn run_turn_inner(
             &capability_grants,
             permission_requests,
             now_unix_ms,
+            snapshot
+                .as_ref()
+                .map_or(0, |session| session.input_revision),
             readiness_revision,
         );
     // Internal run projection is not a Provider capability and grants no device
@@ -1305,6 +1330,9 @@ async fn run_turn_inner(
     // Permission planning is also internal run control. It can only create a
     // normalized pending request; it never widens this callable registry.
     registry.extend(desk_diagnose_core::permission_tools::permission_planning_tool_registry());
+    registry
+        .extend(desk_diagnose_core::capability_disclosure::capability_discovery_tool_registry());
+    registry.extend(desk_diagnose_core::conversation_history::conversation_history_tool_registry());
     let context_selection = match context_selection_claim(
         &provider_registry,
         &inventory,
@@ -1393,6 +1421,9 @@ async fn run_turn_inner(
     }
     if !selected_terminal_roots.is_empty() {
         granted.push(desk_agent_protocol::Capability::TerminalOutputRead);
+    }
+    if !selected_window_roots.is_empty() {
+        granted.push(desk_agent_protocol::Capability::ScreenCaptureCurrent);
     }
     if selected_browser_surface.is_some() {
         desk_diagnose_core::device_assistant::extend_browser_context_capabilities(&mut granted);
@@ -1536,7 +1567,7 @@ async fn run_turn_inner(
     }
     let mut system_prompt = build_device_assistant_system_message_with_catalog(
         ask.locale.as_deref(),
-        &format!("{capability_catalog}\n\n{}", capability_authorization.text),
+        &capability_authorization.text,
     );
     if resume_conversation_id.is_some() {
         system_prompt.text.push_str(
@@ -1571,6 +1602,8 @@ async fn run_turn_inner(
         registry: &registry,
         provider_registry: Some(&provider_registry),
         capability_inventory: Some(&inventory),
+        capability_permission_candidates: &[],
+        capability_catalog_metrics: Some(capability_catalog_metrics),
         permission_continuation_exact_tools: &permission_continuation_exact_tools,
         response_format: ResponseFormatSpec::None,
         system_prompt,
@@ -1908,6 +1941,7 @@ mod tests {
             grant_id: "grant-ui-read".into(),
             actor_id: "owner".into(),
             run_id: "run".into(),
+            input_revision: 1,
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: "device".into(),
             target_session_id: None,

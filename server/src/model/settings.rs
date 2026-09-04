@@ -17,6 +17,7 @@ use crate::error::DeskError;
 mod ai_policy;
 mod collection_policy;
 mod computer_use;
+mod device_assistant;
 mod log_config;
 mod system;
 mod turn_client;
@@ -26,6 +27,7 @@ mod virtual_display;
 pub use ai_policy::*;
 pub use collection_policy::*;
 pub use computer_use::*;
+pub use device_assistant::*;
 pub use log_config::*;
 pub use system::*;
 pub use turn_client::*;
@@ -100,6 +102,12 @@ pub struct Settings {
     /// settings store and is never widened by a signaling request.
     #[serde(default)]
     pub computer_use: ComputerUseSettings,
+
+    /// Device-owned product-level gate for the complete Device Assistant.
+    /// This is intentionally separate from the narrower Computer Use safety
+    /// ceilings above and defaults disabled.
+    #[serde(default)]
+    pub device_assistant: DeviceAssistantSettings,
 
     /// Command line arguments, come from clap and do not load from or save to config file
     #[serde(skip)]

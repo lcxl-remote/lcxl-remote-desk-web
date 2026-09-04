@@ -527,6 +527,11 @@ export type CapabilityGrantDto = {
     */
     grantId: string;
     /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    inputRevision: number;
+    /**
      * @type array
     */
     operationScope: string[];
@@ -617,6 +622,16 @@ export type CollectionPolicySettingsUpdate = {
     allow_screen?: boolean | null;
 };
 
+export const communicationChannelEnum = {
+    email: "email",
+    chat: "chat",
+    local_draft: "local_draft"
+} as const;
+
+export type CommunicationChannelEnumKey = (typeof communicationChannelEnum)[keyof typeof communicationChannelEnum];
+
+export type CommunicationChannel = CommunicationChannelEnumKey;
+
 export const operationSystemEnumEnum = {
     Windows: "Windows",
     Linux: "Linux",
@@ -683,6 +698,17 @@ export type VersionInfo = {
      * @type boolean | undefined
     */
     debug_build?: boolean;
+    /**
+     * @description Device-owned Device Assistant value projected at the same revision.
+     * @type boolean,null
+    */
+    device_assistant_enabled?: boolean | null;
+    /**
+     * @description Device-owned Device Assistant revision projected at connection time.
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    device_assistant_revision?: number | null;
     /**
      * @description Display name of the remote desk.
      * @type string,null
@@ -854,6 +880,89 @@ export type ConnectionsFetchedData = {
     */
     current_connection_id: string;
 };
+
+export const contentRefKindEnum = {
+    immutable_blob: "immutable_blob"
+} as const;
+
+export type ContentRefKindEnumKey = (typeof contentRefKindEnum)[keyof typeof contentRefKindEnum];
+
+export const contentRefKindEnum2 = {
+    ephemeral_observation: "ephemeral_observation"
+} as const;
+
+export type ContentRefKindEnum2Key = (typeof contentRefKindEnum2)[keyof typeof contentRefKindEnum2];
+
+export const contentRefKindEnum3 = {
+    artifact: "artifact"
+} as const;
+
+export type ContentRefKindEnum3Key = (typeof contentRefKindEnum3)[keyof typeof contentRefKindEnum3];
+
+export type ContentRef = ({
+    /**
+     * @type string
+    */
+    blob_id: string;
+    /**
+     * @type string
+    */
+    kind: ContentRefKindEnumKey;
+    /**
+     * @type string
+    */
+    media_type: string;
+    /**
+     * @type string
+    */
+    sha256: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+} | {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expires_at_unix_ms: number;
+    /**
+     * @type string
+    */
+    kind: ContentRefKindEnum2Key;
+    /**
+     * @type string
+    */
+    observation_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+} | {
+    /**
+     * @type string
+    */
+    artifact_id: string;
+    /**
+     * @type string
+    */
+    kind: ContentRefKindEnum3Key;
+    /**
+     * @type string
+    */
+    media_type: string;
+    /**
+     * @type string
+    */
+    sha256: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+});
 
 /**
  * @description Browser-safe attachment metadata. Opaque tokens, envelope digests and model\ndestination identities remain server-side; the selector only needs enough\ninformation to show provenance, expiry and whether a refresh is required.
@@ -1714,6 +1823,22 @@ export type EvidenceSummaryDto = {
     truncated: boolean;
 };
 
+export type SnapshotMessagePageDto = {
+    /**
+     * @type boolean
+    */
+    hasMore: boolean;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    limit: number;
+    /**
+     * @type string,null
+    */
+    nextBeforeMessageId?: string | null;
+};
+
 export type SnapshotToolCallDto = {
     /**
      * @type string
@@ -1763,6 +1888,57 @@ export type SnapshotMessageDto = {
     turnId?: string | null;
 };
 
+export type ExternalSendAttachmentDto = {
+    /**
+     * @type string
+    */
+    fileName: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    sizeBytes: number;
+};
+
+/**
+ * @description Safe owner-facing projection of a frozen exact-send request. Browser\nreferences, canonical permission JSON, credentials, and pairing secrets are\ndeliberately excluded.
+*/
+export type ExternalSendConfirmationDto = {
+    /**
+     * @type string
+    */
+    accountId: string;
+    /**
+     * @type array
+    */
+    attachments: ExternalSendAttachmentDto[];
+    /**
+     * @type string
+    */
+    bodyPlainText: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    bodySizeBytes: number;
+    /**
+     * @type string
+    */
+    channel: CommunicationChannel;
+    /**
+     * @type string
+    */
+    destination: string;
+    /**
+     * @type boolean
+    */
+    oneShot: boolean;
+    /**
+     * @type string,null
+    */
+    subject?: string | null;
+};
+
 export type GrantRequestItemDto = {
     /**
      * @type string
@@ -1772,6 +1948,7 @@ export type GrantRequestItemDto = {
      * @type array
     */
     exportDestinations: DestinationIdentity[];
+    externalSendConfirmation?: (null | ExternalSendConfirmationDto);
     /**
      * @type string
     */
@@ -1926,6 +2103,113 @@ export type UnknownOutcomeDto = {
     workKind: string;
 };
 
+export const visualEvidencePhaseEnum = {
+    before: "before",
+    observation: "observation",
+    after: "after"
+} as const;
+
+export type VisualEvidencePhaseEnumKey = (typeof visualEvidencePhaseEnum)[keyof typeof visualEvidencePhaseEnum];
+
+export type VisualEvidencePhase = VisualEvidencePhaseEnumKey;
+
+export const visualEvidenceStatusEnum = {
+    available: "available",
+    expired: "expired",
+    not_retained: "not_retained",
+    failed: "failed",
+    blocked: "blocked"
+} as const;
+
+export type VisualEvidenceStatusEnumKey = (typeof visualEvidenceStatusEnum)[keyof typeof visualEvidenceStatusEnum];
+
+export type VisualEvidenceStatus = VisualEvidenceStatusEnumKey;
+
+/**
+ * @description The optional preview is emitted only on the live owner stream. Durable\nsession JSON and snapshot DTOs carry metadata plus `content`, never pixels.
+*/
+export type VisualEvidenceFrame = {
+    /**
+     * @type string,null
+    */
+    application_summary?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    captured_at_unix_ms: number;
+    content?: (null | ContentRef);
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type string
+    */
+    device_id: string;
+    /**
+     * @type string,null
+    */
+    digest_sha256?: string | null;
+    /**
+     * @type string,null
+    */
+    display_summary?: string | null;
+    /**
+     * @type string
+    */
+    evidence_id: string;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    expires_at_unix_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    focus_input_revision: number;
+    /**
+     * @type string
+    */
+    frame_id: string;
+    /**
+     * @type string,null
+    */
+    media_type?: string | null;
+    /**
+     * @type string
+    */
+    phase: VisualEvidencePhase;
+    /**
+     * @description Bounded data URL already authorized for this active owner stream. It is\nnever accepted from a client and is never persisted by the session store.
+     * @type string,null
+    */
+    preview_data_url?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schema_version: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+    /**
+     * @type string
+    */
+    status: VisualEvidenceStatus;
+    /**
+     * @type string
+    */
+    tool_call_id: string;
+    /**
+     * @type string
+    */
+    turn_id: string;
+};
+
 export type DeviceAssistantSessionSnapshotDto = {
     /**
      * @description Whether the persisted turn is still running or awaiting approval.
@@ -1979,6 +2263,11 @@ export type DeviceAssistantSessionSnapshotDto = {
     */
     latestInputSeq: number;
     /**
+     * @description Cursor metadata for the bounded `messages` page.
+     * @type object
+    */
+    messagePage: SnapshotMessagePageDto;
+    /**
      * @description The persisted conversation, oldest first.
      * @type array
     */
@@ -2005,6 +2294,45 @@ export type DeviceAssistantSessionSnapshotDto = {
     sessionId: string;
     taskStatusProjection?: (null | TaskStatusProjectionDto);
     unresolvedOutcome?: (null | UnknownOutcomeDto);
+    /**
+     * @description Recent screen observations, bound to epoch/turn/tool/frame. Durable\nsnapshots contain no pixel bytes; live previews arrive on AgentEvent.
+     * @type array
+    */
+    visualEvidence: VisualEvidenceFrame[];
+};
+
+/**
+ * @description Device-owned product switch projected to trusted central orchestrators.\n\nThe device is the only authority for this value. Central services may cache\nthe latest observed snapshot for routing and UI, but may never synthesize a\nnewer revision or treat their cache as desired state.
+*/
+export type DeviceAssistantSettings = {
+    /**
+     * @description The one product-level Device Assistant switch. Defaults fail closed.
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @description Monotonic device-local revision. Revision zero is the initial state.
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
+/**
+ * @description Compare-and-set request accepted by the device-local settings endpoint.
+*/
+export type DeviceAssistantSettingsUpdate = {
+    /**
+     * @description Exact desired product-switch value.
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @description Revision returned by the most recent authoritative device read.
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
 };
 
 export type DeviceCodeBatchDeleteParams = {
@@ -3247,13 +3575,13 @@ export type PermissionItemDecisionBody = ({
     */
     max_uses: number;
     /**
-     * @type array | undefined
+     * @type array
     */
-    operation_scope?: string[];
+    operation_scope: string[];
     /**
-     * @type array | undefined
+     * @type array
     */
-    resource_scope?: string[];
+    resource_scope: string[];
     /**
      * @minLength 0
      * @type integer, int32
@@ -4059,6 +4387,11 @@ export type RestResponseCapabilityGrantDto = {
         */
         grantId: string;
         /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        inputRevision: number;
+        /**
          * @type array
         */
         operationScope: string[];
@@ -4356,6 +4689,11 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
         */
         latestInputSeq: number;
         /**
+         * @description Cursor metadata for the bounded `messages` page.
+         * @type object
+        */
+        messagePage: SnapshotMessagePageDto;
+        /**
          * @description The persisted conversation, oldest first.
          * @type array
         */
@@ -4382,6 +4720,43 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
         sessionId: string;
         taskStatusProjection?: (null | TaskStatusProjectionDto);
         unresolvedOutcome?: (null | UnknownOutcomeDto);
+        /**
+         * @description Recent screen observations, bound to epoch/turn/tool/frame. Durable\nsnapshots contain no pixel bytes; live previews arrive on AgentEvent.
+         * @type array
+        */
+        visualEvidence: VisualEvidenceFrame[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseDeviceAssistantSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Device-owned product switch projected to trusted central orchestrators.\n\nThe device is the only authority for this value. Central services may cache\nthe latest observed snapshot for routing and UI, but may never synthesize a\nnewer revision or treat their cache as desired state.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description The one product-level Device Assistant switch. Defaults fail closed.
+         * @type boolean
+        */
+        enabled: boolean;
+        /**
+         * @description Monotonic device-local revision. Revision zero is the initial state.
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
     };
     /**
      * @type string,null
@@ -7078,6 +7453,33 @@ export type UpdateCollectionPolicySettingsMutation = {
 };
 
 /**
+ * @description Current device-owned switch and revision
+*/
+export type QueryDeviceAssistantSettings200 = RestResponseDeviceAssistantSettings;
+
+export type QueryDeviceAssistantSettingsQueryResponse = QueryDeviceAssistantSettings200;
+
+export type QueryDeviceAssistantSettingsQuery = {
+    Response: QueryDeviceAssistantSettings200;
+    Errors: any;
+};
+
+/**
+ * @description Updated snapshot, or REVISION_CONFLICT carrying the current snapshot
+*/
+export type UpdateDeviceAssistantSettings200 = RestResponseDeviceAssistantSettings;
+
+export type UpdateDeviceAssistantSettingsMutationRequest = DeviceAssistantSettingsUpdate;
+
+export type UpdateDeviceAssistantSettingsMutationResponse = UpdateDeviceAssistantSettings200;
+
+export type UpdateDeviceAssistantSettingsMutation = {
+    Response: UpdateDeviceAssistantSettings200;
+    Request: UpdateDeviceAssistantSettingsMutationRequest;
+    Errors: any;
+};
+
+/**
  * @description Query log settings successfully
 */
 export type QueryLogSettings200 = RestResponseLogSettings;
@@ -7269,6 +7671,17 @@ export type OpenSignalingHandleQueryParams = {
      * @type boolean | undefined
     */
     exec_pty_elevation?: boolean;
+    /**
+     * @description Device-owned Device Assistant revision projected at connection time.
+     * @minLength 0
+     * @type integer | undefined, int64
+    */
+    device_assistant_revision?: number;
+    /**
+     * @description Device-owned Device Assistant value projected at the same revision.
+     * @type boolean | undefined
+    */
+    device_assistant_enabled?: boolean;
 };
 
 /**
@@ -7595,6 +8008,17 @@ export type GetDeviceAssistantSessionQueryParams = {
      * @type string | undefined
     */
     session?: string;
+    /**
+     * @description Exclusive older-message cursor
+     * @type string | undefined
+    */
+    message_before?: string;
+    /**
+     * @description Message page size, 1 through 100
+     * @minLength 0
+     * @type integer | undefined
+    */
+    message_limit?: number;
 };
 
 /**

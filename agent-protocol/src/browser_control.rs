@@ -475,6 +475,15 @@ pub enum BrowserMutationClass {
 }
 
 #[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserReviewedSendSite {
+    GmailWeb,
+    SlackWeb,
+}
+
+#[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -485,13 +494,67 @@ pub enum BrowserActivationClass {
     /// read-back. The digest is the immutable SendPayloadSnapshot authority.
     SendExternal {
         payload_sha256: String,
+        snapshot_id: String,
+        idempotency_key: String,
+        site: BrowserReviewedSendSite,
+        /// Exact owner-approved values which the extension must re-read before
+        /// activation. No other page text may be returned.
+        fields: Vec<BrowserFormField>,
+        attachment_file_names: Vec<String>,
     },
 }
 
 impl BrowserActivationClass {
     fn validate(&self) -> Result<(), BrowserControlContractError> {
-        if let Self::SendExternal { payload_sha256 } = self {
+        if let Self::SendExternal {
+            payload_sha256,
+            snapshot_id,
+            idempotency_key,
+            fields,
+            attachment_file_names,
+            ..
+        } = self
+        {
             validate_sha256(payload_sha256)?;
+            validate_id("send.snapshot_id", snapshot_id, MAX_BROWSER_ID_BYTES)?;
+            validate_id(
+                "send.idempotency_key",
+                idempotency_key,
+                MAX_BROWSER_ID_BYTES,
+            )?;
+            if idempotency_key != &format!("send:v1:{payload_sha256}") {
+                return Err(BrowserControlContractError::InvalidDigest);
+            }
+            if fields.is_empty() || fields.len() > 3 {
+                return Err(BrowserControlContractError::InvalidForm);
+            }
+            let page_id = fields[0].element.page_id.as_str();
+            let page_incarnation = fields[0].element.page_incarnation.as_str();
+            let document_revision = fields[0].element.document_revision;
+            let mut element_ids = BTreeSet::new();
+            for field in fields {
+                if field.element.page_id != page_id
+                    || field.element.page_incarnation != page_incarnation
+                    || field.element.document_revision != document_revision
+                    || !element_ids.insert(field.element.element_id.as_str())
+                {
+                    return Err(BrowserControlContractError::InvalidForm);
+                }
+                validate_text(
+                    "send.field.value",
+                    &field.value,
+                    MAX_BROWSER_FORM_VALUE_BYTES,
+                )?;
+            }
+            if attachment_file_names.len() > 1 {
+                return Err(BrowserControlContractError::InvalidUpload);
+            }
+            for file_name in attachment_file_names {
+                validate_text("send.attachment_file_name", file_name, 200)?;
+                if file_name.contains(['/', '\\']) {
+                    return Err(BrowserControlContractError::InvalidUpload);
+                }
+            }
         }
         Ok(())
     }
@@ -744,7 +807,13 @@ impl BrowserAction {
                 activation_class,
             } => {
                 element.validate_for_page(page)?;
-                activation_class.validate()
+                activation_class.validate()?;
+                if let BrowserActivationClass::SendExternal { fields, .. } = activation_class {
+                    for field in fields {
+                        field.element.validate_for_page(page)?;
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -773,6 +842,7 @@ pub enum BrowserActionOutcome {
     FormFilledWithFile,
     FileUploaded,
     ElementActivated,
+    ExternalSend,
 }
 
 /// Edge-projected result. Raw MCP text, page titles, arbitrary tab inventory,
@@ -793,6 +863,9 @@ pub struct BrowserActionResult {
     /// Present only for FormFilled. Each item is exact, request-bounded edge
     /// evidence and never a projection of arbitrary page text.
     pub form_readback: Vec<BrowserFormFieldReadback>,
+    /// Present only for the reviewed exact-send action. Generic browser
+    /// activation can never synthesize this receipt.
+    pub send_receipt: Option<crate::communication::SendReceipt>,
     pub completed_at_unix_ms: u64,
 }
 
@@ -813,8 +886,11 @@ impl BrowserActionResult {
                 | BrowserActionOutcome::FileUploaded
                 | BrowserActionOutcome::ElementActivated
         );
-        let permits_snapshot =
-            requires_snapshot || self.outcome == BrowserActionOutcome::PageOpened;
+        let permits_snapshot = requires_snapshot
+            || matches!(
+                self.outcome,
+                BrowserActionOutcome::PageOpened | BrowserActionOutcome::ExternalSend
+            );
         if requires_snapshot && self.snapshot.is_none()
             || !permits_snapshot && self.snapshot.is_some()
         {
@@ -846,6 +922,18 @@ impl BrowserActionResult {
             }
         } else if !self.form_readback.is_empty() {
             return Err(BrowserControlContractError::InvalidActionResult);
+        }
+        match (&self.outcome, &self.send_receipt) {
+            (BrowserActionOutcome::ExternalSend, Some(receipt)) => {
+                receipt
+                    .validate()
+                    .map_err(|_| BrowserControlContractError::InvalidActionResult)?;
+            }
+            (BrowserActionOutcome::ExternalSend, None) => {
+                return Err(BrowserControlContractError::InvalidActionResult);
+            }
+            (_, Some(_)) => return Err(BrowserControlContractError::InvalidActionResult),
+            (_, None) => {}
         }
         if let Some(snapshot) = &self.snapshot {
             snapshot.validate()?;
@@ -1226,11 +1314,11 @@ mod tests {
 
     #[test]
     fn generic_activate_cannot_smuggle_send_authority() {
-        let page = page();
+        let request_page = page();
         let element = BrowserElementRef {
-            page_id: page.page_id.clone(),
-            page_incarnation: page.page_incarnation.clone(),
-            document_revision: page.document_revision,
+            page_id: request_page.page_id.clone(),
+            page_incarnation: request_page.page_incarnation.clone(),
+            document_revision: request_page.document_revision,
             element_id: "send".into(),
             role: BrowserElementRole::Button,
             accessible_name: "Send".into(),
@@ -1241,7 +1329,7 @@ mod tests {
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             call_id: "call-1".into(),
             action: BrowserAction::ActivateElement {
-                page: page.clone(),
+                page: request_page.clone(),
                 element: element.clone(),
                 activation_class: BrowserActivationClass::InputFallback,
             },
@@ -1250,14 +1338,71 @@ mod tests {
         .unwrap();
 
         let invalid_send = BrowserAction::ActivateElement {
-            page,
+            page: request_page,
             element,
             activation_class: BrowserActivationClass::SendExternal {
                 payload_sha256: "not-a-digest".into(),
+                snapshot_id: "snapshot-1".into(),
+                idempotency_key: "send:v1:invalid".into(),
+                site: BrowserReviewedSendSite::GmailWeb,
+                fields: vec![BrowserFormField {
+                    element: BrowserElementRef {
+                        page_id: "page-1".into(),
+                        page_incarnation: "document-1".into(),
+                        document_revision: 1,
+                        element_id: "field-1".into(),
+                        role: BrowserElementRole::Textbox,
+                        accessible_name: "Body".into(),
+                        value: None,
+                        element_revision: 1,
+                    },
+                    value: "body".into(),
+                }],
+                attachment_file_names: Vec::new(),
             },
         };
         assert_eq!(
             invalid_send.validate(),
+            Err(BrowserControlContractError::InvalidDigest)
+        );
+
+        let page = page();
+        let element = BrowserElementRef {
+            page_id: page.page_id.clone(),
+            page_incarnation: page.page_incarnation.clone(),
+            document_revision: page.document_revision,
+            element_id: "send-1".into(),
+            role: BrowserElementRole::Button,
+            accessible_name: "Send".into(),
+            value: None,
+            element_revision: 1,
+        };
+        let invalid_idempotency_key = BrowserAction::ActivateElement {
+            page,
+            element,
+            activation_class: BrowserActivationClass::SendExternal {
+                payload_sha256: "a".repeat(64),
+                snapshot_id: "snapshot-1".into(),
+                idempotency_key: format!("send:v1:{}", "b".repeat(64)),
+                site: BrowserReviewedSendSite::SlackWeb,
+                fields: vec![BrowserFormField {
+                    element: BrowserElementRef {
+                        page_id: "page-1".into(),
+                        page_incarnation: "document-1".into(),
+                        document_revision: 1,
+                        element_id: "field-1".into(),
+                        role: BrowserElementRole::Textbox,
+                        accessible_name: "Message".into(),
+                        value: None,
+                        element_revision: 1,
+                    },
+                    value: "body".into(),
+                }],
+                attachment_file_names: Vec::new(),
+            },
+        };
+        assert_eq!(
+            invalid_idempotency_key.validate(),
             Err(BrowserControlContractError::InvalidDigest)
         );
     }
@@ -1330,6 +1475,7 @@ mod tests {
                 captured_at_unix_ms: 42,
             }),
             form_readback: Vec::new(),
+            send_receipt: None,
             completed_at_unix_ms: 43,
         };
         result.validate().unwrap();

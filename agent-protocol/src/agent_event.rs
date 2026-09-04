@@ -7,6 +7,7 @@ use wincode::{SchemaRead, SchemaWrite};
 use crate::AgentError;
 use crate::content_safety::StreamRetractionReason;
 use crate::provenance::AiProvenance;
+use crate::visual_evidence::VisualEvidenceFrame;
 
 /// Kind of a streamed [`AgentEvent`] frame. `Answer`, `Error`, and `Retracted` are terminal.
 #[derive(
@@ -46,6 +47,9 @@ pub enum AgentEventKind {
     /// `tool_ok` + `tool_output`, plus `background_task_id` when execution
     /// continues in the background.
     ToolFinished,
+    /// A screen frame was shown to the model and is available to the active
+    /// owner stream as a bounded preview plus auditable metadata.
+    VisualEvidence,
     /// Terminal for the current planning turn: a normalized permission batch was
     /// durably recorded and is waiting for a separate trusted user decision.
     PermissionRequired,
@@ -113,6 +117,11 @@ pub struct AgentEvent {
     /// result reports a command continuing as a background task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_task_id: Option<String>,
+    /// `kind = ToolFinished`: optional screen evidence bound to this exact call.
+    /// Pixel bytes exist only on the live owner stream; durable recovery uses
+    /// the metadata-only session projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_evidence: Option<VisualEvidenceFrame>,
     /// `kind = PermissionRequired`: stable id of the durable request projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_request_id: Option<String>,
@@ -153,6 +162,7 @@ impl AgentEvent {
             tool_ok: None,
             tool_output: None,
             background_task_id: None,
+            visual_evidence: None,
             permission_request_id: None,
             permission_item_count: None,
             answer: None,
@@ -307,6 +317,22 @@ impl AgentEvent {
     pub fn with_background_task_id(mut self, background_task_id: impl Into<String>) -> Self {
         self.background_task_id = Some(background_task_id.into());
         self
+    }
+
+    pub fn with_visual_evidence(mut self, visual_evidence: VisualEvidenceFrame) -> Self {
+        self.visual_evidence = Some(visual_evidence);
+        self
+    }
+
+    pub fn visual_evidence(
+        request_id: impl Into<String>,
+        seq: u32,
+        visual_evidence: VisualEvidenceFrame,
+    ) -> Self {
+        Self {
+            visual_evidence: Some(visual_evidence),
+            ..Self::base(request_id, seq, AgentEventKind::VisualEvidence)
+        }
     }
 
     pub fn permission_required(

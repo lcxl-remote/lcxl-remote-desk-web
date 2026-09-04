@@ -104,9 +104,13 @@ impl SignalAgentSessionStore {
             for task in legacy {
                 tasks.push(agent_background_task_store::decode_record(&task)?);
             }
-            tasks.sort_by(|left, right| left.task.task_id.cmp(&right.task.task_id));
-            let grants =
+            let tasks = desk_diagnose_core::dynamic_run::bounded_background_task_projection(
+                tasks,
+                session.input_revision,
+            );
+            let mut grants =
                 SignalCapabilityGrantStore::list_for_subject_on(&txn, run, actor, device).await?;
+            grants.retain(|grant| grant.input_revision == session.input_revision);
             let fingerprint = format!(
                 "{:x}",
                 Sha256::digest(

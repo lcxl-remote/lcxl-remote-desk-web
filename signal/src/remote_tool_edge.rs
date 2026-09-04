@@ -5,7 +5,6 @@
 //! frames; writes use exact durable grants and sealed Computer Action plans.
 
 mod object_read;
-use desk_diagnose_core::input_read_context::object_read::requires_objects;
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -1180,7 +1179,7 @@ impl SignalDeviceAssistantTools {
             == [AuthorizationResourceKind::ExternalQuery]
         {
             vec![DestinationIdentity::WebResearch {
-                connector_id: desk_diagnose_core::device_assistant::DUCKDUCKGO_HTML_CONNECTOR_ID
+                connector_id: desk_diagnose_core::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID
                     .into(),
             }]
         } else {
@@ -1189,6 +1188,7 @@ impl SignalDeviceAssistantTools {
         let call_authority = CapabilityGrantCall {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
+            input_revision: session.input_revision,
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: &self.target_device_id,
             target_session_id: None,
@@ -1250,6 +1250,7 @@ impl SignalDeviceAssistantTools {
                 grant_id: grant_id.clone(),
                 actor_id: self.actor_id.clone(),
                 run_id: self.run_id.clone(),
+                input_revision: session.input_revision,
                 surface: ProductSurface::OssPersonalOwner,
                 target_device_id: self.target_device_id.clone(),
                 target_session_id: None,
@@ -1682,6 +1683,7 @@ impl SignalDeviceAssistantTools {
         let call_authority = CapabilityGrantCall {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
+            input_revision: session.input_revision,
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: &self.target_device_id,
             target_session_id: None,
@@ -2237,6 +2239,7 @@ impl SignalDeviceAssistantTools {
         let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
+            input_revision: session.input_revision,
             target_device_id: &self.target_device_id,
             policy_revision: self.policy_revision,
             readiness_revision: self.readiness_revision,
@@ -2248,6 +2251,7 @@ impl SignalDeviceAssistantTools {
             CapabilityGrantCall {
                 actor_id: &self.actor_id,
                 run_id: &self.run_id,
+                input_revision: session.input_revision,
                 surface: ProductSurface::OssPersonalOwner,
                 target_device_id: &self.target_device_id,
                 target_session_id: None,
@@ -2858,6 +2862,7 @@ impl SignalDeviceAssistantTools {
         let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
+            input_revision: session.input_revision,
             target_device_id: &self.target_device_id,
             policy_revision: self.policy_revision,
             readiness_revision: self.readiness_revision,
@@ -3365,6 +3370,7 @@ impl SignalDeviceAssistantTools {
         let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
+            input_revision: session.input_revision,
             target_device_id: &self.target_device_id,
             policy_revision: self.policy_revision,
             readiness_revision: self.readiness_revision,
@@ -3402,6 +3408,7 @@ impl SignalDeviceAssistantTools {
                 grant_id: grant_id.clone(),
                 actor_id: self.actor_id.clone(),
                 run_id: self.run_id.clone(),
+                input_revision: session.input_revision,
                 surface: ProductSurface::OssPersonalOwner,
                 target_device_id: self.target_device_id.clone(),
                 target_session_id: None,
@@ -3933,6 +3940,7 @@ impl SignalDeviceAssistantTools {
         let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
+            input_revision: session.input_revision,
             target_device_id: &self.target_device_id,
             policy_revision: self.policy_revision,
             readiness_revision: self.readiness_revision,
@@ -4604,7 +4612,8 @@ impl SignalDeviceAssistantTools {
             )
             .into());
         }
-        let object_expiry = if requires_objects(&call.name) {
+        let uses_selected_objects = self.uses_selected_objects(call)?;
+        let object_expiry = if uses_selected_objects {
             self.validate_original_objects().await?;
             // Rebind from the model's original bounded request; legacy defaults
             // above cannot widen either the owner's or model's read limit.
@@ -4812,7 +4821,7 @@ impl SignalDeviceAssistantTools {
                 result_digest_sha256,
             ));
         }
-        if requires_objects(&call.name) {
+        if uses_selected_objects {
             self.validate_original_objects().await.map_err(|error| {
                 ProviderInvokeError::known(error, provider_outcome, result_digest_sha256.clone())
             })?;
@@ -5071,6 +5080,8 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 | "browser_activate_element"
                 | "prepare_gmail_web_draft_handoff"
                 | "prepare_slack_web_message_handoff"
+                | "send_gmail_web_exact"
+                | "send_slack_web_exact"
         ) {
             return self.authorize_and_execute_browser(call).await;
         }
@@ -5275,7 +5286,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
         }
         if verified.as_ref().is_some_and(|verified| verified.failed) {
             Ok(Some(envelope))
-        } else if requires_objects(&call.name) {
+        } else if self.uses_selected_objects(call)? {
             let mut envelope = self.object_binding()?.label(call, output, envelope)?;
             if let Some(verified) = verified {
                 envelope.retention.expires_at_unix_ms = Some(
@@ -5948,6 +5959,7 @@ mod tests {
                     BrowserFormReadbackKind::ControlValue,
                 ),
             ],
+            send_receipt: None,
             completed_at_unix_ms: 44,
         };
         result.validate().unwrap();

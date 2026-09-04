@@ -328,6 +328,10 @@ fn automation_permission_raw(
     };
     // SAFETY: ownership was returned by AECreateDesc above.
     let _ = unsafe { AEDisposeDesc(&mut target) };
+    classify_automation_permission_status(status)
+}
+
+fn classify_automation_permission_status(status: i32) -> AutomationPermissionState {
     match status {
         NO_ERR => AutomationPermissionState::Granted,
         EVENT_NOT_PERMITTED | EVENT_WOULD_REQUIRE_CONSENT => AutomationPermissionState::Missing,
@@ -412,7 +416,37 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{AutomationPermissionState, AutomationPermissionWorker};
+    use super::{
+        AutomationPermissionState, AutomationPermissionWorker,
+        classify_automation_permission_status,
+    };
+
+    #[test]
+    fn automation_osstatus_mapping_is_closed_and_fail_safe() {
+        assert_eq!(
+            classify_automation_permission_status(super::NO_ERR),
+            AutomationPermissionState::Granted
+        );
+        for status in [
+            super::EVENT_NOT_PERMITTED,
+            super::EVENT_WOULD_REQUIRE_CONSENT,
+        ] {
+            assert_eq!(
+                classify_automation_permission_status(status),
+                AutomationPermissionState::Missing
+            );
+        }
+        assert_eq!(
+            classify_automation_permission_status(super::PROC_NOT_FOUND),
+            AutomationPermissionState::TargetOffline
+        );
+        for status in [1, -1, -1712, i32::MIN, i32::MAX] {
+            assert_eq!(
+                classify_automation_permission_status(status),
+                AutomationPermissionState::Failed
+            );
+        }
+    }
 
     #[test]
     fn stalled_automation_query_is_bounded_and_coalesced() {

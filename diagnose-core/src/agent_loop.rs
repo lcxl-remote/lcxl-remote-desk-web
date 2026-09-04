@@ -305,6 +305,12 @@ pub struct LoopDeps<'a> {
     /// permission-request validation. Static compilation alone is insufficient
     /// for edge capabilities such as the paired Office add-in.
     pub capability_inventory: Option<&'a [crate::capability_availability::CapabilityAvailability]>,
+    /// Context-grounded Provider tools that may be requested from the owner but
+    /// are not necessarily callable under the current grant scope.
+    pub capability_permission_candidates: &'a [RegisteredTool],
+    /// Content-free measurements captured when the caller built the current
+    /// capability catalog. Non-Device-Assistant callers leave this unset.
+    pub capability_catalog_metrics: Option<crate::permission_tools::CapabilityCatalogMetrics>,
     /// Active exact-input Provider tools recovered from the durable permission
     /// decision. On a permission-resumed turn the loop initially exposes only
     /// these mutations (plus internal run projection) so a model cannot replace
@@ -493,6 +499,7 @@ async fn run_or_resume(
         session.handled_input_seq = session.latest_input_seq;
     }
     crate::image_input::strip_session_images(&mut session.conversation);
+    crate::visual_evidence::strip_previews(&mut session.visual_evidence);
     // Surface a save failure only if the loop itself otherwise succeeded.
     let save = deps.session_seam.save(&mut session).await;
     if save.is_err()
@@ -630,6 +637,33 @@ async fn append_reviewed_tool_result(
             message.data_envelope = data_envelope;
             session.conversation.push(message);
             retain_latest_session_image(session)?;
+            if session.surface == AgentSessionSurface::DeviceAssistant {
+                let image_data_url = session
+                    .conversation
+                    .last()
+                    .and_then(|message| message.image_data_url.clone())
+                    .ok_or_else(|| AgentError {
+                        kind: AgentErrorKind::Internal,
+                        message: "accepted visual result was not retained for the active turn"
+                            .into(),
+                        retryable: false,
+                        safe_for_model: false,
+                        error_code: None,
+                    })?;
+                crate::visual_evidence::record_live_observation(
+                    session,
+                    call_id,
+                    &image_data_url,
+                    &info,
+                )
+                .map_err(|message| AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: message.into(),
+                    retryable: false,
+                    safe_for_model: false,
+                    error_code: None,
+                })?;
+            }
             Ok(None)
         }
         Ok(decision) => {
@@ -1209,6 +1243,11 @@ async fn run_inner(
         if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
             return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
         }
+        if session.surface == AgentSessionSurface::DeviceAssistant
+            && session.focus_epoch.step_budget_exhausted()
+        {
+            return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
+        }
         if let Some(current_input_revision) = input_revision_advanced(deps, session).await? {
             return Ok(LoopOutcome::Superseded {
                 previous_input_revision: session.input_revision,
@@ -1216,12 +1255,87 @@ async fn run_inner(
             });
         }
 
+        let disclosure_enabled = session.surface == AgentSessionSurface::DeviceAssistant
+            && deps.provider_registry.is_some()
+            && deps.capability_inventory.is_some();
+        if disclosure_enabled
+            && session.capability_disclosure.focus_input_revision != session.input_revision
+        {
+            session
+                .capability_disclosure
+                .reset_for_input(session.input_revision);
+        }
         let mut exposed = exposed_tools(
             deps.registry,
             &session.scope_snapshot,
             &session.execution_state,
             session.trigger_origin,
         );
+        exposed.retain(|tool| !crate::visual_evidence::blocks_targeting(session, tool.name()));
+        let raw_provider_exposed = exposed
+            .iter()
+            .filter(|tool| {
+                deps.provider_registry
+                    .is_some_and(|registry| registry.capability_for_tool(tool.name()).is_some())
+            })
+            .map(|tool| (*tool).clone())
+            .collect::<Vec<_>>();
+        let inferred_permission_candidates = if deps.capability_permission_candidates.is_empty() {
+            deps.registry
+                .iter()
+                .filter(|tool| {
+                    deps.provider_registry
+                        .is_some_and(|registry| registry.capability_for_tool(tool.name()).is_some())
+                        && !raw_provider_exposed
+                            .iter()
+                            .any(|exposed| exposed.name() == tool.name())
+                        && deps.capability_inventory.is_some_and(|inventory| {
+                            inventory
+                                .iter()
+                                .any(|item| item.tool_name == tool.name() && item.callable())
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let permission_candidates = if deps.capability_permission_candidates.is_empty() {
+            inferred_permission_candidates.as_slice()
+        } else {
+            deps.capability_permission_candidates
+        };
+        if disclosure_enabled
+            && session.capability_disclosure.loaded_tool_names.is_empty()
+            && let Some(provider_registry) = deps.provider_registry
+        {
+            session.capability_disclosure.loaded_tool_names =
+                crate::capability_disclosure::deterministic_preload_names(
+                    provider_registry,
+                    &raw_provider_exposed,
+                    permission_candidates,
+                );
+            session.capability_disclosure.updated_input_revision = session.input_revision;
+        }
+        if disclosure_enabled {
+            let loaded = session
+                .capability_disclosure
+                .loaded_tool_names
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            let pins = deps
+                .permission_continuation_exact_tools
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            exposed.retain(|tool| {
+                let provider_tool = deps
+                    .provider_registry
+                    .is_some_and(|registry| registry.capability_for_tool(tool.name()).is_some());
+                !provider_tool || loaded.contains(tool.name()) || pins.contains(tool.name())
+            });
+        }
         if permission_continuation_pending && !deps.permission_continuation_exact_tools.is_empty() {
             exposed.retain(|tool| {
                 deps.permission_continuation_exact_tools
@@ -1233,16 +1347,90 @@ async fn run_inner(
         let tool_requirements = crate::model_capability::ModelRequirements::for_registered_tools(
             exposed.iter().copied(),
         );
-        let specs = exposed.iter().map(|tool| tool.spec.clone()).collect();
+        let specs = exposed
+            .iter()
+            .map(|tool| tool.spec.clone())
+            .collect::<Vec<_>>();
         let request_requirements = tool_requirements.union(
             crate::model_capability::ModelRequirements::for_messages(&session.conversation),
         );
         let pinned_context = deps.model.context_policy(request_requirements).await?;
+        let mut system_prompt = deps.system_prompt.clone();
+        let mut disclosure_projection = None;
+        if disclosure_enabled {
+            let providers = deps.provider_registry.ok_or_else(|| AgentError {
+                kind: AgentErrorKind::Internal,
+                message: "Device Assistant capability disclosure has no Provider registry".into(),
+                retryable: false,
+                safe_for_model: false,
+                error_code: None,
+            })?;
+            let inventory = deps.capability_inventory.ok_or_else(|| AgentError {
+                kind: AgentErrorKind::Internal,
+                message: "Device Assistant capability disclosure has no live inventory".into(),
+                retryable: false,
+                safe_for_model: false,
+                error_code: None,
+            })?;
+            let projection = crate::capability_disclosure::project_capability_disclosure(
+                providers,
+                inventory,
+                &raw_provider_exposed,
+                permission_candidates,
+                deps.permission_continuation_exact_tools,
+                &session.capability_disclosure,
+                pinned_context.max_context_bytes,
+            )
+            .map_err(|error| AgentError {
+                kind: AgentErrorKind::InvalidInput,
+                message: format!("capability disclosure projection failed: {error:?}"),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            })?;
+            system_prompt.text.push_str("\n\n");
+            system_prompt.text.push_str(&projection.index_prompt);
+            if !projection.detail_prompt.is_empty() {
+                system_prompt.text.push_str("\n\n");
+                system_prompt.text.push_str(&projection.detail_prompt);
+            }
+            disclosure_projection = Some(projection);
+        }
+        if system_prompt
+            .data_envelope
+            .as_ref()
+            .is_some_and(|envelope| {
+                envelope.provenance.source_provider_id == "assistant-runtime-control"
+                    && envelope.provenance.source_tool_name == "capability-authorization"
+            })
+        {
+            system_prompt =
+                crate::permission_resume::rebind_exact_authorization_system_message(system_prompt)?;
+        }
+        // Reserve the concrete per-step prompt and API tool bytes before the
+        // history window is selected. Runtime markers/projections use the fixed
+        // framing reserve below and the fully assembled request is rechecked.
+        const REQUEST_FRAMING_RESERVE_BYTES: usize = 1024;
+        let tool_spec_bytes = serde_json::to_vec(&specs)
+            .map_err(|_| {
+                model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
+            })?
+            .len();
+        let request_overhead_bytes = crate::trim::model_context_cost(&system_prompt)
+            .checked_add(tool_spec_bytes)
+            .and_then(|value| value.checked_add(REQUEST_FRAMING_RESERVE_BYTES))
+            .ok_or_else(|| {
+                model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
+            })?;
+        let history_policy = pinned_context
+            .clone()
+            .with_request_overhead_bytes(request_overhead_bytes)
+            .map_err(model_context_error)?;
         let context_view = prepare_model_context(
             deps,
             session,
             turn_id,
-            &pinned_context,
+            &history_policy,
             &mut compression_attempted,
             sink,
         )
@@ -1251,7 +1439,7 @@ async fn run_inner(
         // trailing, budget-trimmed window of the stored conversation. The system
         // prompt is never persisted, so it is added here on every call.
         let mut messages = Vec::with_capacity(session.conversation.len() + 3);
-        messages.push(deps.system_prompt.clone());
+        messages.push(system_prompt);
         messages.extend(context_view.messages);
         if session.surface == AgentSessionSurface::DeviceAssistant {
             // Put the server-owned input watermark at the recency edge of the
@@ -1476,6 +1664,85 @@ async fn run_inner(
             use_case: crate::model_profile::ModelUseCase::Agent,
             caller_output_hard_cap: None,
         };
+        let assembled_request_cost = request
+            .messages
+            .iter()
+            .map(crate::trim::model_context_cost)
+            .try_fold(tool_spec_bytes, |total, cost| total.checked_add(cost))
+            .ok_or_else(|| {
+                model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
+            })?;
+        if assembled_request_cost > pinned_context.max_context_bytes {
+            return Err(model_context_error(
+                crate::model_context::ModelContextError::ProtectedStateTooLarge {
+                    cost: assembled_request_cost,
+                    high_watermark: pinned_context.max_context_bytes,
+                },
+            ));
+        }
+        let catalog_metrics = deps.capability_catalog_metrics.unwrap_or_default();
+        deps.model
+            .on_model_request_projected(crate::seam::ModelRequestProjectionMetrics {
+                message_count: u64::try_from(request.messages.len()).unwrap_or(u64::MAX),
+                message_json_bytes: u64::try_from(
+                    serde_json::to_vec(&request.messages)
+                        .expect("model request messages are serializable")
+                        .len(),
+                )
+                .unwrap_or(u64::MAX),
+                advertised_tool_count: u64::try_from(request.tools.len()).unwrap_or(u64::MAX),
+                advertised_tool_json_bytes: u64::try_from(
+                    serde_json::to_vec(&request.tools)
+                        .expect("model request tools are serializable")
+                        .len(),
+                )
+                .unwrap_or(u64::MAX),
+                capability_registry_count: catalog_metrics.registry_count,
+                runtime_ready_count: catalog_metrics.runtime_ready_count,
+                permission_candidate_count: u64::try_from(permission_candidates.len())
+                    .unwrap_or(u64::MAX),
+                capability_catalog_utf8_bytes: catalog_metrics.catalog_utf8_bytes,
+                capability_index_utf8_bytes: disclosure_projection
+                    .as_ref()
+                    .map_or(0, |projection| {
+                        u64::try_from(projection.index_utf8_bytes).unwrap_or(u64::MAX)
+                    }),
+                loaded_capability_detail_utf8_bytes: disclosure_projection
+                    .as_ref()
+                    .map_or(0, |projection| {
+                        u64::try_from(projection.detail_utf8_bytes).unwrap_or(u64::MAX)
+                    }),
+                loaded_capability_count: u64::try_from(
+                    session.capability_disclosure.loaded_tool_names.len(),
+                )
+                .unwrap_or(u64::MAX),
+                authorized_provider_tool_count: u64::try_from(raw_provider_exposed.len())
+                    .unwrap_or(u64::MAX),
+                conversation_message_count: u64::try_from(session.conversation.len())
+                    .unwrap_or(u64::MAX),
+                session_snapshot_json_bytes: u64::try_from(
+                    serde_json::to_vec(session)
+                        .expect("agent session snapshot is serializable")
+                        .len(),
+                )
+                .unwrap_or(u64::MAX),
+                context_attachment_count: u64::try_from(session.context_attachments.len())
+                    .unwrap_or(u64::MAX),
+                task_status_item_count: session
+                    .task_status_projection
+                    .as_ref()
+                    .map_or(0, |value| {
+                        u64::try_from(value.items.len()).unwrap_or(u64::MAX)
+                    }),
+                permission_request_count: u64::try_from(session.permission_requests.len())
+                    .unwrap_or(u64::MAX),
+                pending_work_trigger_count: u64::try_from(session.pending_auto_triggers.len())
+                    .unwrap_or(u64::MAX),
+                unresolved_execution_fact_count: u64::from(!matches!(
+                    session.execution_state,
+                    ExecutionState::None
+                )),
+            });
 
         if let Some(current_input_revision) = input_revision_advanced(deps, session).await? {
             return Ok(LoopOutcome::Superseded {
@@ -1711,6 +1978,18 @@ async fn run_inner(
                         });
                     }
 
+                    if crate::visual_evidence::blocks_targeting(session, &call.name) {
+                        append_internal_tool_result(
+                            session,
+                            turn.provider_meta.data_envelope.as_ref(),
+                            mint(),
+                            &call.id,
+                            "Computer Use targeting is unavailable until a later model step obtains a fresh semantic UI or screen observation".into(),
+                            "fresh_visual_verification_required",
+                        )?;
+                        continue;
+                    }
+
                     // Same-tool repeat circuit breaker.
                     let count = same_tool.entry(call.name.clone()).or_insert(0);
                     *count += 1;
@@ -1758,6 +2037,20 @@ async fn run_inner(
                         )?;
                         continue;
                     };
+                    if !exposed
+                        .iter()
+                        .any(|advertised| advertised.name() == call.name)
+                    {
+                        append_internal_tool_result(
+                            session,
+                            turn.provider_meta.data_envelope.as_ref(),
+                            mint(),
+                            &call.id,
+                            format!("tool `{}` is not loaded in the current focus", call.name),
+                            "unloaded_tool_call",
+                        )?;
+                        continue;
+                    }
 
                     // Some mutation inputs name evidence produced earlier in
                     // this durable run. Resolve those references before any
@@ -1900,6 +2193,18 @@ async fn run_inner(
                                 )
                                 .await;
                             }
+                            if ok {
+                                crate::visual_evidence::note_successful_observation(
+                                    session, &call.id, &call.name,
+                                )
+                                .map_err(|message| AgentError {
+                                    kind: AgentErrorKind::Internal,
+                                    message: message.into(),
+                                    retryable: false,
+                                    safe_for_model: false,
+                                    error_code: None,
+                                })?;
+                            }
                             if let Some(current_input_revision) =
                                 input_revision_advanced(deps, session).await?
                             {
@@ -2031,6 +2336,7 @@ async fn run_inner(
                                         safe_for_model: false,
                                         error_code: None,
                                     })?;
+                                    session.focus_epoch.bind_task_status();
                                     session.task_status_projection = Some(projection);
                                     session.last_event_seq = event_seq;
                                     let mut message =
@@ -2087,6 +2393,21 @@ async fn run_inner(
                                     created_at.clone(),
                                 )
                             }).and_then(|request| {
+                                let loaded = session
+                                    .capability_disclosure
+                                    .loaded_tool_names
+                                    .iter()
+                                    .map(String::as_str)
+                                    .collect::<HashSet<_>>();
+                                if disclosure_enabled && request.items.iter().any(|item| !loaded.contains(item.tool_name.as_str())) {
+                                    return Err(AgentError {
+                                        kind: AgentErrorKind::InvalidInput,
+                                        message: "permission request contains a capability that is not loaded in the current focus".into(),
+                                        retryable: false,
+                                        safe_for_model: true,
+                                        error_code: None,
+                                    });
+                                }
                                 let providers = deps.provider_registry.ok_or_else(|| AgentError {
                                     kind: AgentErrorKind::Internal,
                                     message: "permission planning has no Provider catalog".into(),
@@ -2299,6 +2620,89 @@ async fn run_inner(
                                     finish_tool(session, &call.id, false, sink);
                                 }
                             }
+                        }
+                        ToolEffect::CapabilityDiscovery => {
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            let providers = deps.provider_registry.ok_or_else(|| AgentError {
+                                kind: AgentErrorKind::Internal,
+                                message: "capability discovery has no Provider registry".into(),
+                                retryable: false,
+                                safe_for_model: false,
+                                error_code: None,
+                            })?;
+                            let inventory =
+                                deps.capability_inventory.ok_or_else(|| AgentError {
+                                    kind: AgentErrorKind::Internal,
+                                    message: "capability discovery has no live inventory".into(),
+                                    retryable: false,
+                                    safe_for_model: false,
+                                    error_code: None,
+                                })?;
+                            let result = crate::capability_disclosure::apply_load_call(
+                                call,
+                                &mut session.capability_disclosure,
+                                session.input_revision,
+                                &crate::capability_disclosure::CapabilityLoadContext {
+                                    registry: providers,
+                                    inventory,
+                                    max_context_bytes: pinned_context.max_context_bytes,
+                                    callable_tools: &raw_provider_exposed,
+                                    permission_candidates,
+                                },
+                            );
+                            let (content, ok) = match result {
+                                Ok(content) => (content, true),
+                                Err(error) => (format!("tool error: {}", error.message), false),
+                            };
+                            let envelope = derive_internal_tool_result_envelope(
+                                turn.provider_meta.data_envelope.as_ref(),
+                                &call.id,
+                                &content,
+                                crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME,
+                            )?;
+                            let mut message = ChatMessage::tool_result(mint(), &call.id, content);
+                            message.data_envelope = envelope;
+                            session.conversation.push(message);
+                            deps.session_seam.save(session).await?;
+                            finish_tool(session, &call.id, ok, sink);
+                        }
+                        ToolEffect::ConversationHistory => {
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            let result = crate::conversation_history::load_history_page(
+                                call,
+                                &session.conversation,
+                            )
+                            .and_then(|result| {
+                                session
+                                    .focus_epoch
+                                    .record_history_result(result.content.len())
+                                    .map_err(|message| AgentError {
+                                        kind: AgentErrorKind::InvalidInput,
+                                        message: message.into(),
+                                        retryable: false,
+                                        safe_for_model: true,
+                                        error_code: None,
+                                    })?;
+                                Ok(result)
+                            });
+                            let (content, source_messages, ok) = match result {
+                                Ok(result) => (result.content, result.source_messages, true),
+                                Err(error) => {
+                                    (format!("tool error: {}", error.message), Vec::new(), false)
+                                }
+                            };
+                            let envelope =
+                                crate::model_message_labels::conversation_history_result_envelope(
+                                    turn.provider_meta.data_envelope.as_ref(),
+                                    &source_messages,
+                                    &call.id,
+                                    &content,
+                                )?;
+                            let mut message = ChatMessage::tool_result(mint(), &call.id, content);
+                            message.data_envelope = envelope;
+                            session.conversation.push(message);
+                            deps.session_seam.save(session).await?;
+                            finish_tool(session, &call.id, ok, sink);
                         }
                     }
                 }
@@ -2865,6 +3269,8 @@ fn validate_browser_permission_references(
                 | "browser_activate_element"
                 | "prepare_gmail_web_draft_handoff"
                 | "prepare_slack_web_message_handoff"
+                | "send_gmail_web_exact"
+                | "send_slack_web_exact"
         ) {
             continue;
         }
@@ -3013,6 +3419,14 @@ fn finish_tool(
         .map(|message| message.text.as_str())
         .unwrap_or_default();
     let background_task_id = result.and_then(|message| message.background_task_id.as_deref());
+    if let Some(evidence) = session
+        .visual_evidence
+        .iter()
+        .rev()
+        .find(|evidence| evidence.tool_call_id == call_id)
+    {
+        sink.on_visual_evidence(evidence);
+    }
     sink.on_tool_finished(call_id, ok, output, background_task_id);
 }
 

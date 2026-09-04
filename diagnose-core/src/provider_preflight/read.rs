@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::input_read_context::object_read::{ObjectReadBinding, requires_objects};
-use desk_agent_protocol::capability_provider::{CapabilityEffect, ExecutionLocality};
+use desk_agent_protocol::{
+    capability_provider::{CapabilityEffect, ExecutionLocality},
+    data_lineage::DestinationIdentity,
+};
 
 pub mod limits;
 
@@ -14,6 +17,7 @@ pub struct ReadCallPreflight {
     root_count: u32,
     resource_scope: Vec<String>,
     operation_scope: Vec<String>,
+    export_destinations: Vec<DestinationIdentity>,
     risk_tier: CapabilityRiskTier,
     valid_until_unix_ms: u64,
 }
@@ -123,6 +127,106 @@ impl ReadCallPreflight {
             root_count,
             resource_scope: scope.resources,
             operation_scope: scope.operations,
+            export_destinations: Vec::new(),
+            risk_tier: classify_provider_call(capability, call)?,
+            valid_until_unix_ms: deadline,
+        })
+    }
+
+    /// Central Web Research has no edge object or device readiness, but still
+    /// consumes the same durable read grant under the original owner message.
+    pub fn build_central_web(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        binding: &ObjectReadBinding<'_>,
+        current_user_message: &str,
+    ) -> Result<Self, AgentError> {
+        binding.original.validate()?;
+        crate::web_research::validate_exact_call(call, current_user_message)?;
+        let capability = registry
+            .capability_for_tool(&call.name)
+            .ok_or_else(unavailable)?;
+        let provider = registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .ok_or_else(unavailable)?;
+        if !matches!(
+            surface,
+            ProductSurface::OssPersonalOwner | ProductSurface::ManagerPersonalOwner
+        ) || !capability.wire.surfaces.contains(&surface)
+            || capability.wire.execution_locality != ExecutionLocality::Central
+            || !matches!(
+                capability.wire.effect,
+                CapabilityEffect::ReadExternal | CapabilityEffect::ExportData
+            )
+            || !binding.original.tool_names.contains(&call.name)
+            || call.id.trim().is_empty()
+            || call.id.len() > 512
+            || call.arguments_json.len() > capability.wire.limits.max_input_bytes as usize
+        {
+            return Err(unavailable());
+        }
+        let canonical = canonical_tool_permission_input_json(
+            &call.name,
+            serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,
+        )
+        .map_err(|_| unavailable())?;
+        if canonical.len() > capability.wire.limits.max_input_bytes as usize {
+            return Err(unavailable());
+        }
+        let canonical_input_digest_sha256 = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+        let mut scope = canonical_compiled_scope(
+            &capability.wire.authorization_hint.resources,
+            capability.wire.effect,
+        )
+        .ok_or_else(unavailable)?;
+        let (root_count, export_destinations) = match call.name.as_str() {
+            crate::web_research::WEB_FETCH_TOOL_NAME => {
+                scope.resources = crate::capability_grant::exact_external_url_resource_scope(
+                    &canonical_input_digest_sha256,
+                );
+                (1, Vec::new())
+            }
+            crate::web_research::WEB_SEARCH_TOOL_NAME => {
+                scope.resources = crate::capability_grant::exact_external_query_resource_scope(
+                    &canonical_input_digest_sha256,
+                );
+                (
+                    u32::from(
+                        crate::web_research::validate_search_call(call, current_user_message)?
+                            .max_results(),
+                    ),
+                    vec![DestinationIdentity::WebResearch {
+                        connector_id: crate::web_research::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
+                    }],
+                )
+            }
+            _ => return Err(unavailable()),
+        };
+        let mut deadline = binding
+            .now_unix_ms
+            .checked_add(120_000)
+            .ok_or_else(unavailable)?;
+        if let Some(expiry) = &binding.original.expires_at {
+            deadline = deadline.min(
+                chrono::DateTime::parse_from_rfc3339(expiry)
+                    .ok()
+                    .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
+                    .ok_or_else(unavailable)?,
+            );
+        }
+        if binding.now_unix_ms == 0 || deadline <= binding.now_unix_ms {
+            return Err(unavailable());
+        }
+        Ok(Self {
+            capability: capability.clone(),
+            provider_id: provider.wire.provider_id.clone(),
+            surface,
+            canonical_input_digest_sha256,
+            root_count,
+            resource_scope: scope.resources,
+            operation_scope: scope.operations,
+            export_destinations,
             risk_tier: classify_provider_call(capability, call)?,
             valid_until_unix_ms: deadline,
         })
@@ -161,6 +265,7 @@ impl ReadCallPreflight {
         Ok(CapabilityGrantCall {
             actor_id: subject.actor_id,
             run_id: subject.run_id,
+            input_revision: subject.input_revision,
             surface: self.surface,
             target_device_id: subject.target_device_id,
             target_session_id: None,
@@ -172,7 +277,7 @@ impl ReadCallPreflight {
             risk_tier: self.risk_tier,
             resource_scope: &self.resource_scope,
             operation_scope: &self.operation_scope,
-            export_destinations: &[],
+            export_destinations: &self.export_destinations,
             envelope_ids: &[],
             content_digests_sha256: &[],
             canonical_input_digest_sha256: &self.canonical_input_digest_sha256,

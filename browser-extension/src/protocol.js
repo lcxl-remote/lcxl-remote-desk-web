@@ -134,9 +134,27 @@ function validateActivationClass(value) {
     }
     if (
         value.kind === "send_external" &&
-        exactKeys(value, ["kind", "payload_sha256"]) &&
-        /^[0-9a-f]{64}$/u.test(value.payload_sha256)
+        exactKeys(value, [
+            "kind", "payload_sha256", "snapshot_id", "idempotency_key", "site",
+            "fields", "attachment_file_names"
+        ]) &&
+        /^[0-9a-f]{64}$/u.test(value.payload_sha256) &&
+        boundedString(value.snapshot_id, 256) &&
+        value.idempotency_key === `send:v1:${value.payload_sha256}` &&
+        ["gmail_web", "slack_web"].includes(value.site) &&
+        Array.isArray(value.attachment_file_names) &&
+        value.attachment_file_names.length <= 1
     ) {
+        validateFields(value.fields);
+        for (const fileName of value.attachment_file_names) {
+            if (!boundedString(fileName, 200) || /[\\/]/u.test(fileName)) {
+                throw new Error("invalid_activation_class");
+            }
+        }
+        if ((value.site === "gmail_web" && value.fields.length !== 3) ||
+            (value.site === "slack_web" && (value.fields.length !== 1 || value.attachment_file_names.length !== 0))) {
+            throw new Error("invalid_activation_class");
+        }
         return;
     }
     throw new Error("invalid_activation_class");

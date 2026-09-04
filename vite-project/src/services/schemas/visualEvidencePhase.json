@@ -1,0 +1,1 @@
+{"type":"string","enum":["before","observation","after"],"x-readme-ref-name":"VisualEvidencePhase"}

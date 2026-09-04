@@ -43,6 +43,7 @@ const CELLS: u32 = fourcc(*b"NmCl");
 const VERSION: u32 = fourcc(*b"vers");
 const NAME: u32 = fourcc(*b"pnam");
 const FILE: u32 = fourcc(*b"file");
+const PASSWORD_PROTECTED: u32 = fourcc(*b"pwpt");
 const ACTIVE_SHEET: u32 = fourcc(*b"NmAS");
 const SELECTION_RANGE: u32 = fourcc(*b"NMTs");
 const CELL_VALUE: u32 = fourcc(*b"NMCv");
@@ -71,6 +72,30 @@ unsafe extern "C" {}
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {}
 
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+    fn SecStaticCodeCreateWithPath(
+        path: *const std::ffi::c_void,
+        flags: u32,
+        code: *mut *const std::ffi::c_void,
+    ) -> i32;
+    fn SecRequirementCreateWithString(
+        text: *const std::ffi::c_void,
+        flags: u32,
+        requirement: *mut *const std::ffi::c_void,
+    ) -> i32;
+    fn SecStaticCodeCheckValidity(
+        code: *const std::ffi::c_void,
+        flags: u32,
+        requirement: *const std::ffi::c_void,
+    ) -> i32;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(value: *const std::ffi::c_void);
+}
+
 unsafe extern "C-unwind" {
     #[link_name = "objc_msgSend"]
     fn objc_msg_send_variadic(
@@ -96,6 +121,7 @@ struct AppSpec {
     bundle_id: &'static str,
     executable_path: &'static str,
     version: &'static str,
+    team_id: &'static str,
     sdef_path: &'static str,
     sdef_sha256: &'static str,
 }
@@ -106,6 +132,7 @@ const APP_SPECS: [AppSpec; 3] = [
         bundle_id: "com.apple.Numbers",
         executable_path: "/Applications/Numbers Creator Studio.app/Contents/MacOS/Numbers",
         version: "15.3.1",
+        team_id: "JCRTNEU7GK",
         sdef_path: "/Applications/Numbers Creator Studio.app/Contents/Resources/Numbers.sdef",
         sdef_sha256: "ee098803afeec84afa58bc37bff97115eb5c5bac07d14d9fbff27ee16e3e1d9b",
     },
@@ -114,6 +141,7 @@ const APP_SPECS: [AppSpec; 3] = [
         bundle_id: "com.apple.Pages",
         executable_path: "/Applications/Pages Creator Studio.app/Contents/MacOS/Pages",
         version: "15.3.1",
+        team_id: "JCRTNEU7GK",
         sdef_path: "/Applications/Pages Creator Studio.app/Contents/Resources/Pages.sdef",
         sdef_sha256: "412e6fb4959ad8486e4d8ce0a5ce93de22a3cdbfb460e7fd21d87000ed860fb3",
     },
@@ -122,6 +150,7 @@ const APP_SPECS: [AppSpec; 3] = [
         bundle_id: "com.apple.Keynote",
         executable_path: "/Applications/Keynote Creator Studio.app/Contents/MacOS/Keynote",
         version: "15.3.1",
+        team_id: "JCRTNEU7GK",
         sdef_path: "/Applications/Keynote Creator Studio.app/Contents/Resources/Keynote.sdef",
         sdef_sha256: "62b866e5db36a815d18e64841ce6ead3ca78f1231c76e5aa3b0d7a01d4b9408e",
     },
@@ -593,6 +622,7 @@ fn exact_text_result(
 unsafe fn observe_numbers_document(
     document: *mut AnyObject,
 ) -> Result<IworkObservation, AgentError> {
+    ensure_document_is_supported(document)?;
     let document_identity_sha256 = document_identity(document)?;
     let sheet = property_object(document, ACTIVE_SHEET)?;
     if sheet.is_null() {
@@ -643,6 +673,7 @@ unsafe fn numbers_cell(document: *mut AnyObject) -> Result<*mut AnyObject, Agent
 }
 
 unsafe fn observe_pages_document(document: *mut AnyObject) -> Result<IworkObservation, AgentError> {
+    ensure_document_is_supported(document)?;
     let body_text = property_string(document, BODY_TEXT)?;
     Ok(IworkObservation::Pages {
         locator: PagesDocumentLocator {
@@ -656,6 +687,7 @@ unsafe fn observe_pages_document(document: *mut AnyObject) -> Result<IworkObserv
 unsafe fn observe_keynote_document(
     document: *mut AnyObject,
 ) -> Result<IworkObservation, AgentError> {
+    ensure_document_is_supported(document)?;
     let slide = current_keynote_slide(document)?;
     let slide_number = property_string(slide, SLIDE_NUMBER)?
         .parse::<i64>()
@@ -1007,6 +1039,7 @@ unsafe fn verify_app_version(app: *mut AnyObject, spec: AppSpec) -> Result<(), A
 }
 
 fn verify_contract(spec: AppSpec) -> Result<(), AgentError> {
+    verify_target_code_identity(spec)?;
     let bytes = fs::read(spec.sdef_path).map_err(|_| {
         failure(
             AgentErrorKind::UnsupportedCapability,
@@ -1023,6 +1056,54 @@ fn verify_contract(spec: AppSpec) -> Result<(), AgentError> {
             false,
         ))
     }
+}
+
+fn verify_target_code_identity(spec: AppSpec) -> Result<(), AgentError> {
+    let bundle_path = Path::new(spec.executable_path)
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| failure(AgentErrorKind::Internal, "invalid frozen iWork path", false))?;
+    let requirement = format!(
+        "(anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.9] exists or anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = {}) and identifier \"{}\"",
+        spec.team_id, spec.bundle_id
+    );
+    autoreleasepool(|_| unsafe {
+        let url = file_url(bundle_path)?;
+        let mut code: *const std::ffi::c_void = std::ptr::null();
+        if SecStaticCodeCreateWithPath(url.cast(), 0, &mut code) != 0 || code.is_null() {
+            return Err(unsupported_target_identity());
+        }
+        let requirement_text = match nsstring(&requirement) {
+            Ok(value) => value,
+            Err(error) => {
+                CFRelease(code);
+                return Err(error);
+            }
+        };
+        let mut compiled: *const std::ffi::c_void = std::ptr::null();
+        let compiled_status =
+            SecRequirementCreateWithString(requirement_text.cast(), 0, &mut compiled);
+        if compiled_status != 0 || compiled.is_null() {
+            CFRelease(code);
+            return Err(unsupported_target_identity());
+        }
+        let valid = SecStaticCodeCheckValidity(code, 0, compiled) == 0;
+        CFRelease(compiled);
+        CFRelease(code);
+        if valid {
+            Ok(())
+        } else {
+            Err(unsupported_target_identity())
+        }
+    })
+}
+
+fn unsupported_target_identity() -> AgentError {
+    failure(
+        AgentErrorKind::UnsupportedCapability,
+        "the installed iWork application does not match the frozen Apple code identity",
+        false,
+    )
 }
 
 fn application_is_running(bundle_id: &str) -> Result<bool, AgentError> {
@@ -1162,6 +1243,43 @@ unsafe fn optional_property_string(
     Ok(Some(CStr::from_ptr(bytes).to_string_lossy().into_owned()))
 }
 
+unsafe fn property_bool(object: *mut AnyObject, code: u32) -> Result<bool, AgentError> {
+    let property = property_object(object, code)?;
+    let value: *mut AnyObject = msg_send![property, get];
+    if value.is_null() {
+        return Err(failure(
+            AgentErrorKind::TransportError,
+            "iWork returned no boolean value for a frozen semantic property",
+            true,
+        ));
+    }
+    let is_number: bool = msg_send![value, isKindOfClass: class!(NSNumber)];
+    if !is_number {
+        return Err(failure(
+            AgentErrorKind::TransportError,
+            "iWork returned a non-boolean semantic value",
+            true,
+        ));
+    }
+    Ok(msg_send![value, boolValue])
+}
+
+unsafe fn ensure_document_is_supported(document: *mut AnyObject) -> Result<(), AgentError> {
+    ensure_document_protection_is_supported(property_bool(document, PASSWORD_PROTECTED)?)
+}
+
+fn ensure_document_protection_is_supported(password_protected: bool) -> Result<(), AgentError> {
+    if password_protected {
+        Err(failure(
+            AgentErrorKind::PermissionDenied,
+            "password-protected iWork documents are outside the supported adapter contract",
+            false,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn ensure_automation_permission(spec: AppSpec) -> Result<(), AgentError> {
     match crate::macos_permissions::automation_permission(spec.bundle_id) {
         crate::macos_permissions::AutomationPermissionState::Granted => Ok(()),
@@ -1189,6 +1307,15 @@ fn spec(application: IworkApplication) -> AppSpec {
         .copied()
         .find(|spec| spec.app == application)
         .expect("every closed iWork application has a frozen spec")
+}
+
+#[cfg(test)]
+const fn application_name(application: IworkApplication) -> &'static str {
+    match application {
+        IworkApplication::Numbers => "numbers",
+        IworkApplication::Pages => "pages",
+        IworkApplication::Keynote => "keynote",
+    }
 }
 
 const fn fourcc(bytes: [u8; 4]) -> u32 {
@@ -1229,6 +1356,53 @@ fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ContractFixture {
+        schema_version: u16,
+        application: String,
+        bundle_id: String,
+        team_id: String,
+        version: String,
+        sdef_sha256: String,
+        reviewed_surface: Vec<String>,
+    }
+
+    fn contract_fixture(application: IworkApplication) -> ContractFixture {
+        let json = match application {
+            IworkApplication::Numbers => {
+                include_str!("../../../tests/fixtures/iwork/numbers-15.3.1.json")
+            }
+            IworkApplication::Pages => {
+                include_str!("../../../tests/fixtures/iwork/pages-15.3.1.json")
+            }
+            IworkApplication::Keynote => {
+                include_str!("../../../tests/fixtures/iwork/keynote-15.3.1.json")
+            }
+        };
+        serde_json::from_str(json).expect("reviewed iWork contract fixture must stay valid")
+    }
+
+    #[test]
+    fn reviewed_contract_fixtures_match_the_compiled_target_identity() {
+        for spec in APP_SPECS {
+            let fixture = contract_fixture(spec.app);
+            assert_eq!(fixture.schema_version, 1);
+            assert_eq!(fixture.application, application_name(spec.app));
+            assert_eq!(fixture.bundle_id, spec.bundle_id);
+            assert_eq!(fixture.team_id, spec.team_id);
+            assert_eq!(fixture.version, spec.version);
+            assert_eq!(fixture.sdef_sha256, spec.sdef_sha256);
+            assert!(
+                fixture
+                    .reviewed_surface
+                    .iter()
+                    .any(|item| item == "password_protected")
+            );
+        }
+    }
 
     #[test]
     fn frozen_contracts_match_the_installed_iwork_dictionaries() {
@@ -1275,6 +1449,15 @@ mod tests {
         let reports = readiness();
         assert_eq!(reports.len(), 3);
         assert!(reports.iter().all(|report| report.contract_verified));
+    }
+
+    #[test]
+    fn password_protected_documents_fail_closed_without_retry() {
+        ensure_document_protection_is_supported(false).unwrap();
+        let error = ensure_document_protection_is_supported(true).unwrap_err();
+        assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
+        assert!(!error.retryable);
+        assert!(error.safe_for_model);
     }
 
     #[test]

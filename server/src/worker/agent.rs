@@ -348,11 +348,13 @@ async fn dispatch_read_context(
                 return Err(unsupported("screen capture requires a session context"));
             };
             let desk_settings = settings.read().await.desk.clone();
-            let _capture_permit = computer_use_broker
+            let capture_permit = computer_use_broker
                 .acquire_screen_capture_permit(&params, &desk_settings.video_device_name)?;
-            let output =
-                run_blocking(move || collectors::screen_capture::collect(&params, &desk_settings))
-                    .await??;
+            let window_region = capture_permit.window_region();
+            let output = run_blocking(move || {
+                collectors::screen_capture::collect(&params, &desk_settings, window_region)
+            })
+            .await??;
             Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ScreenCaptureCurrent(output),
             ))

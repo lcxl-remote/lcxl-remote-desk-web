@@ -3,6 +3,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::time::{Duration, Instant};
 
+use core_graphics::geometry::{CGPoint, CGSize};
 use desk_agent_protocol::computer_use::{UiSemanticAction, UiSemanticActionKind};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use objc2::rc::autoreleasepool;
@@ -32,6 +33,8 @@ const INVOKE_READBACK_MAX_NODES: u32 = 1_024;
 const INVOKE_READBACK_MAX_BYTES: u32 = 1024 * 1024;
 const INVOKE_READBACK_TIMEOUT: Duration = Duration::from_millis(750);
 const INVOKE_READBACK_INTERVAL: Duration = Duration::from_millis(25);
+const AX_VALUE_CGPOINT_TYPE: i32 = 1;
+const AX_VALUE_CGSIZE_TYPE: i32 = 2;
 
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {}
@@ -57,6 +60,8 @@ unsafe extern "C" {
         value: CfTypeRef,
     ) -> i32;
     fn AXUIElementSetMessagingTimeout(element: AxUiElementRef, timeout_seconds: f32) -> i32;
+    fn AXValueGetType(value: CfTypeRef) -> i32;
+    fn AXValueGetValue(value: CfTypeRef, value_type: i32, value_ptr: *mut c_void) -> bool;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -200,6 +205,56 @@ pub(super) fn preflight_action(
     let element =
         locate_action_target(expected_process_id, expected_image_path, target_fingerprint)?;
     validate_action_target(element.0, action)
+}
+
+pub(super) fn resolve_window_capture_region(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    target_fingerprint: &str,
+) -> Result<super::collectors::screen_capture::WindowCaptureRegion, AgentError> {
+    let element =
+        locate_action_target(expected_process_id, expected_image_path, target_fingerprint)?;
+    let role = attribute_string(element.0, "AXRole").unwrap_or_default();
+    if role != "AXWindow" {
+        return Err(failure(
+            AgentErrorKind::InvalidInput,
+            "the owner-selected Accessibility reference is no longer a window",
+            false,
+        ));
+    }
+    let position = attribute_point(element.0, "AXPosition").ok_or_else(|| {
+        failure(
+            AgentErrorKind::SessionUnavailable,
+            "the selected window no longer exposes a capture position",
+            true,
+        )
+    })?;
+    let size = attribute_size(element.0, "AXSize").ok_or_else(|| {
+        failure(
+            AgentErrorKind::SessionUnavailable,
+            "the selected window no longer exposes a capture size",
+            true,
+        )
+    })?;
+    if !position.x.is_finite()
+        || !position.y.is_finite()
+        || !size.width.is_finite()
+        || !size.height.is_finite()
+        || size.width <= 0.0
+        || size.height <= 0.0
+    {
+        return Err(failure(
+            AgentErrorKind::SessionUnavailable,
+            "the selected window has invalid capture bounds",
+            true,
+        ));
+    }
+    Ok(super::collectors::screen_capture::WindowCaptureRegion {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    })
 }
 
 pub(super) fn apply_action(
@@ -699,6 +754,38 @@ fn attribute_bool(element: AxUiElementRef, attribute: &str) -> Option<bool> {
         return None;
     }
     Some(unsafe { CFBooleanGetValue(value.0) })
+}
+
+fn attribute_point(element: AxUiElementRef, attribute: &str) -> Option<CGPoint> {
+    let value = copy_attribute(element, attribute)?;
+    if unsafe { AXValueGetType(value.0) } != AX_VALUE_CGPOINT_TYPE {
+        return None;
+    }
+    let mut point = CGPoint::default();
+    unsafe {
+        AXValueGetValue(
+            value.0,
+            AX_VALUE_CGPOINT_TYPE,
+            (&mut point as *mut CGPoint).cast(),
+        )
+    }
+    .then_some(point)
+}
+
+fn attribute_size(element: AxUiElementRef, attribute: &str) -> Option<CGSize> {
+    let value = copy_attribute(element, attribute)?;
+    if unsafe { AXValueGetType(value.0) } != AX_VALUE_CGSIZE_TYPE {
+        return None;
+    }
+    let mut size = CGSize::default();
+    unsafe {
+        AXValueGetValue(
+            value.0,
+            AX_VALUE_CGSIZE_TYPE,
+            (&mut size as *mut CGSize).cast(),
+        )
+    }
+    .then_some(size)
 }
 
 fn attribute_toggle_state(element: AxUiElementRef) -> Option<bool> {

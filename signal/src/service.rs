@@ -231,6 +231,7 @@ pub async fn handle_signaling(
         std::sync::Arc::new(crate::control_authorizer::SignalControlAuthorizer::new(
             crate::db::get_db().clone(),
             connection_map.clone(),
+            crate::device_assistant_gate::global_device_assistant_gate(),
         ));
     let edge_exec_observer = std::sync::Arc::new(crate::agent_exec::SignalEdgeExecObserver::new(
         crate::agent_exec::global_agent_exec_pending(),

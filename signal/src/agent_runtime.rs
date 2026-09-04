@@ -14,6 +14,7 @@ use desk_diagnose_core::seam::{
 use desk_diagnose_core::session::{
     AgentSessionSurface, PersistedAgentSession, TriggerOrigin, WorkKind,
 };
+use desk_utils::error::DeskErrorCode;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
 
@@ -101,6 +102,21 @@ impl ModelSeam for MeteredSignalModel {
         self.inner.context_policy(requirements).await
     }
 
+    fn on_model_request_projected(
+        &self,
+        metrics: desk_diagnose_core::seam::ModelRequestProjectionMetrics,
+    ) {
+        log::debug!(
+            "[device-assistant] completion projection messages={} message_json_bytes={} tools={} tool_json_bytes={} conversation_messages={} session_snapshot_bytes={}",
+            metrics.message_count,
+            metrics.message_json_bytes,
+            metrics.advertised_tool_count,
+            metrics.advertised_tool_json_bytes,
+            metrics.conversation_message_count,
+            metrics.session_snapshot_json_bytes,
+        );
+    }
+
     async fn call(
         &self,
         request: ModelRequest,
@@ -146,6 +162,13 @@ impl ModelSeam for CompletionModel {
         requirements: desk_diagnose_core::model_capability::ModelRequirements,
     ) -> Result<desk_diagnose_core::model_context::PinnedContextPolicy, AgentError> {
         self.inner.context_policy(requirements).await
+    }
+
+    fn on_model_request_projected(
+        &self,
+        metrics: desk_diagnose_core::seam::ModelRequestProjectionMetrics,
+    ) {
+        self.inner.on_model_request_projected(metrics);
     }
 
     async fn call(
@@ -236,6 +259,17 @@ pub async fn resume_completion_turn(
     session: PersistedAgentSession,
     work_kind: desk_diagnose_core::session::WorkKind,
 ) -> Result<LoopOutcome, AgentError> {
+    if session.surface == AgentSessionSurface::DeviceAssistant
+        && !crate::device_assistant_gate::global_device_assistant_gate().is_enabled()
+    {
+        return Err(AgentError {
+            kind: AgentErrorKind::UnsupportedCapability,
+            message: "Device Assistant is disabled on this device".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: Some(DeskErrorCode::FEATURE_UNAVAILABLE.code()),
+        });
+    }
     let config = model_provider::load(&db).await.map_err(|error| {
         transport_error(format!("failed to load model provider config: {error}"))
     })?;
@@ -312,6 +346,8 @@ pub async fn resume_completion_turn(
         registry: &registry,
         provider_registry: None,
         capability_inventory: None,
+        capability_permission_candidates: &[],
+        capability_catalog_metrics: None,
         permission_continuation_exact_tools: &[],
         response_format: desk_diagnose_core::prompt::ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),

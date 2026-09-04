@@ -392,7 +392,7 @@ pub fn build_permission_grants(
         );
         let export_destinations = if exact_external_query {
             vec![DestinationIdentity::WebResearch {
-                connector_id: crate::device_assistant::DUCKDUCKGO_HTML_CONNECTOR_ID.into(),
+                connector_id: crate::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
             }]
             .into_iter()
             .filter(|destination| export_destinations.contains(destination))
@@ -412,6 +412,7 @@ pub fn build_permission_grants(
             grant_id,
             actor_id: session.actor_id.clone(),
             run_id: session.conversation_id.clone(),
+            input_revision: request.input_revision,
             surface: context.surface,
             target_device_id: session.device_id.clone(),
             target_session_id: None,

@@ -1113,6 +1113,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::DeviceAssistantCapabilitiesUpdated
             | SignalingType::DeviceAssistantContextUpdated
             | SignalingType::DeviceAssistantObjectContextUpdated
+            | SignalingType::DeviceAssistantSessionSelected
             | SignalingType::TerminalCopilotUpdated
             | SignalingType::TerminalCompletionsGenerated
             | SignalingType::ExecutionPreviewGenerated
@@ -1228,7 +1229,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::CancelDeviceAssistant
             | SignalingType::GetDeviceAssistantCapabilities
             | SignalingType::UpdateDeviceAssistantContext
-            | SignalingType::UpdateDeviceAssistantObjectContext => {
+            | SignalingType::UpdateDeviceAssistantObjectContext
+            | SignalingType::SelectDeviceAssistantSession => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
                     match authorizer
                         .authorize(&self.connection_state, &self.connection_map, &signaling_model)
@@ -1394,6 +1396,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 log::warn!(
                     "Received RevokeAccessGrant from a client; it is server-originated and must \
                      not be sent inbound — dropping"
+                );
+            }
+            SignalingType::UpdateDeviceAssistantSettings => {
+                log::warn!(
+                    "Received UpdateDeviceAssistantSettings from a client; it is server-originated \
+                     and must not be sent inbound — dropping"
                 );
             }
         }

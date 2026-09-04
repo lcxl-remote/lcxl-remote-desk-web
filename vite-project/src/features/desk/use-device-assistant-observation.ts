@@ -42,6 +42,43 @@ export type ObservationEntry = {
     outcome: AgentOutcome | null;
 };
 
+export type OwnerSelectableWindow = {
+    objectRef: {
+        token: string;
+        snapshot_id: string;
+        object_kind: 'window';
+        expires_at: string;
+    };
+    title: string | null;
+};
+
+export function ownerSelectableWindows(entry: ObservationEntry): OwnerSelectableWindow[] {
+    if (entry.outcome?.status !== 'ok') return [];
+    const output = entry.outcome.data as {
+        ReadContext?: { DesktopUiInspect?: { owner_selectable_windows?: unknown[] } };
+    } | null;
+    const candidates = output?.ReadContext?.DesktopUiInspect?.owner_selectable_windows;
+    if (!Array.isArray(candidates)) return [];
+    return candidates.flatMap((candidate) => {
+        const value = candidate as {
+            object_ref?: OwnerSelectableWindow['objectRef'];
+            title?: unknown;
+        };
+        const objectRef = value.object_ref;
+        if (
+            !objectRef
+            || objectRef.object_kind !== 'window'
+            || !objectRef.token
+            || !objectRef.snapshot_id
+            || !objectRef.expires_at
+        ) return [];
+        return [{
+            objectRef,
+            title: typeof value.title === 'string' && value.title.trim() ? value.title : null,
+        }];
+    });
+}
+
 type SendMessage = (
     type: number,
     data: unknown,

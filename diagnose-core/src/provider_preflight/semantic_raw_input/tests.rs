@@ -80,6 +80,7 @@ fn both_orchestrators_derive_one_exact_r3_raw_input_authority() {
             let subject = ProviderCallSubject {
                 actor_id: "owner",
                 run_id: "run",
+                input_revision: 1,
                 target_device_id: "device",
                 policy_revision: 1,
                 readiness_revision: 7,
@@ -155,6 +156,7 @@ fn raw_input_reference_deadline_and_subject_facts_are_not_renewed() {
                 .grant_call(&ProviderCallSubject {
                     actor_id: "owner",
                     run_id: "run",
+                    input_revision: 1,
                     target_device_id: "device",
                     policy_revision: policy,
                     readiness_revision: revision,

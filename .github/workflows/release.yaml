@@ -149,6 +149,32 @@ jobs:
         # understand bash `\` line continuations.
         run: cargo build --release --target ${{ matrix.target }} --bin lcxl-remote-desk-tauri --bin lcxl-remote-desk-server
 
+      - name: Import macOS Developer ID certificate
+        if: matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERTIFICATE_P12_BASE64:?missing APPLE_CERTIFICATE_P12_BASE64}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?missing APPLE_CERTIFICATE_PASSWORD}"
+          : "${APPLE_SIGNING_IDENTITY:?missing APPLE_SIGNING_IDENTITY}"
+          : "${MACOS_KEYCHAIN_PASSWORD:?missing MACOS_KEYCHAIN_PASSWORD}"
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          keychain="$RUNNER_TEMP/lcxl-release.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | openssl base64 -d -A -out "$certificate"
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
+          security find-identity -v -p codesigning "$keychain" | grep -F "$APPLE_SIGNING_IDENTITY"
+          echo "MACOS_SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "MACOS_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
       - name: Assemble Package (Linux)
         if: matrix.platform == 'linux'
         run: |
@@ -196,19 +222,80 @@ jobs:
             <key>NSScreenCaptureUsageDescription</key><string>Screen capture for remote desktop sessions.</string>
             <key>NSMicrophoneUsageDescription</key><string>Audio capture for remote desktop sessions.</string>
             <key>NSCameraUsageDescription</key><string>Camera access for remote desktop sessions.</string>
+            <key>NSAppleEventsUsageDescription</key><string>Control Pages, Numbers, and Keynote only after you approve a Device Assistant action.</string>
           </dict>
           </plist>
           PLIST
           sed -i '' "s/__VERSION__/${VERSION}/g" "$APP/Contents/Info.plist"
-          # Ad-hoc sign (--deep covers the nested sidecar). Apple Silicon refuses
-          # to launch an unsigned binary, so this is required even without a cert.
-          codesign --force --deep --sign - "$APP"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            # Sign nested executables first. The server sidecar originates the
+            # Apple Events, so it and the responsible app identity both carry
+            # the frozen Automation entitlement under hardened runtime.
+            for executable in \
+              "$APP/Contents/MacOS/lcxl-remote-desk-server" \
+              "$APP/Contents/MacOS/lcxl-remote-desk-tauri"; do
+              codesign --force --timestamp --options runtime \
+                --entitlements tauri-app/src-tauri/Entitlements.plist \
+                --keychain "$MACOS_SIGNING_KEYCHAIN" \
+                --sign "$MACOS_SIGNING_IDENTITY" "$executable"
+            done
+            codesign --force --timestamp --options runtime \
+              --entitlements tauri-app/src-tauri/Entitlements.plist \
+              --keychain "$MACOS_SIGNING_KEYCHAIN" \
+              --sign "$MACOS_SIGNING_IDENTITY" "$APP"
+          else
+            # workflow_dispatch is a non-releasable packaging dry-run. Apple
+            # Silicon still requires an ad-hoc signature to launch the bundle.
+            for executable in \
+              "$APP/Contents/MacOS/lcxl-remote-desk-server" \
+              "$APP/Contents/MacOS/lcxl-remote-desk-tauri"; do
+              codesign --force --options runtime \
+                --entitlements tauri-app/src-tauri/Entitlements.plist \
+                --sign - "$executable"
+            done
+            codesign --force --options runtime \
+              --entitlements tauri-app/src-tauri/Entitlements.plist \
+              --sign - "$APP"
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          /usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$APP/Contents/Info.plist"
+          codesign -d --entitlements :- "$APP/Contents/MacOS/lcxl-remote-desk-server" 2>&1 \
+            | grep -F 'com.apple.security.automation.apple-events'
           # Lay out a drag-to-Applications disk image and compress it.
           mkdir -p dmg
           cp -R "$APP" dmg/
           ln -s /Applications dmg/Applications
           hdiutil create -volname "LCXL Remote Desktop" -srcfolder dmg -ov -format UDZO \
             "tauri-${{ matrix.platform }}-${{ matrix.arch }}.dmg"
+
+      - name: Notarize and staple macOS release
+        if: matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_ID:?missing APPLE_ID}"
+          : "${APPLE_APP_PASSWORD:?missing APPLE_APP_PASSWORD}"
+          : "${APPLE_TEAM_ID:?missing APPLE_TEAM_ID}"
+          artifact="tauri-macos-${{ matrix.arch }}.dmg"
+          codesign --force --timestamp --keychain "$MACOS_SIGNING_KEYCHAIN" \
+            --sign "$MACOS_SIGNING_IDENTITY" "$artifact"
+          xcrun notarytool submit "$artifact" --wait \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID"
+          xcrun stapler staple "$artifact"
+          xcrun stapler validate "$artifact"
+          spctl --assess --type install --verbose=2 "$artifact"
+
+      - name: Remove temporary macOS signing keychain
+        if: always() && matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [[ -n "${MACOS_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$MACOS_SIGNING_KEYCHAIN" || true
+          fi
 
       - name: Assemble Package (Windows)
         if: matrix.platform == 'windows'

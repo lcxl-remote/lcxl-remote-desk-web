@@ -362,6 +362,13 @@ struct DesktopSessionToolArgs {
     include_active_application: bool,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentScreenToolArgs {
+    #[serde(default)]
+    display: Option<String>,
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -540,9 +547,13 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
         "read_container_list" => {
             ContextKind::ContainerList(parse_params::<ContainerListParams>(&call.arguments_json)?)
         }
-        "read_current_screen" => ContextKind::ScreenCaptureCurrent(parse_params::<
-            ScreenCaptureParams,
-        >(&call.arguments_json)?),
+        "read_current_screen" => {
+            let args = parse_params::<CurrentScreenToolArgs>(&call.arguments_json)?;
+            ContextKind::ScreenCaptureCurrent(ScreenCaptureParams {
+                display: args.display,
+                window: None,
+            })
+        }
         "inspect_desktop_session" => {
             let args = parse_params::<DesktopSessionToolArgs>(&call.arguments_json)?;
             ContextKind::DesktopSessionInspect(DesktopSessionInspectParams {
@@ -753,11 +764,27 @@ mod tests {
         .unwrap();
         assert_eq!(cap, Capability::ScreenCaptureCurrent);
         assert!(matches!(
-            input,
+            &input,
             OperationInput::ReadContext(ReadContextInput {
                 kind: ContextKind::ScreenCaptureCurrent(_)
             })
         ));
+        let OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::ScreenCaptureCurrent(params),
+        }) = input
+        else {
+            unreachable!()
+        };
+        assert!(params.window.is_none());
+        assert!(
+            build_read_operation(&ToolCall {
+                id: "c".into(),
+                name: "read_current_screen".into(),
+                arguments_json: r#"{"window":{"token":"model-authored"}}"#.into(),
+            })
+            .is_err(),
+            "the model cannot nominate a window reference",
+        );
 
         // Unknown tool is rejected.
         assert!(

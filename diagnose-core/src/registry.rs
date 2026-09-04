@@ -36,6 +36,12 @@ pub enum ToolEffect {
     /// Creates a bounded user-facing permission request. It cannot mint grants,
     /// reserve uses, or dispatch tools; approval is a separate trusted action.
     PermissionPlanning,
+    /// Replaces the bounded capability working set for the current input
+    /// revision. It performs no Provider call and grants no authority.
+    CapabilityDiscovery,
+    /// Loads a bounded, re-authorized page of older user-visible messages from
+    /// this same conversation. It grants no device or execution authority.
+    ConversationHistory,
 }
 
 /// A tool registered with the agent loop: its model-facing spec, the capability
@@ -63,7 +69,9 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
         ToolEffect::ReadOnly
         | ToolEffect::WaitTask
         | ToolEffect::RunProjection
-        | ToolEffect::PermissionPlanning => true,
+        | ToolEffect::PermissionPlanning
+        | ToolEffect::CapabilityDiscovery
+        | ToolEffect::ConversationHistory => true,
         ToolEffect::Mutating => matches!(
             mode,
             ExecutionMode::ConfirmEachAction
@@ -93,6 +101,12 @@ pub fn is_exposed(
         return true;
     }
     if tool.effect == ToolEffect::PermissionPlanning {
+        return true;
+    }
+    if tool.effect == ToolEffect::CapabilityDiscovery {
+        return true;
+    }
+    if tool.effect == ToolEffect::ConversationHistory {
         return true;
     }
     if !scope.granted.contains(&tool.required_capability) {

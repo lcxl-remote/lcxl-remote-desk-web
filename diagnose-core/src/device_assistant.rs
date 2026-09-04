@@ -95,14 +95,19 @@ pub const SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID: &str =
 pub const WORD_DOCUMENT_CREATE_CAPABILITY_ID: &str = "word.document.create";
 pub const WEB_RESEARCH_FETCH_CAPABILITY_ID: &str = "web.research.fetch";
 pub const WEB_RESEARCH_SEARCH_CAPABILITY_ID: &str = "web.research.search";
-pub const DUCKDUCKGO_HTML_CONNECTOR_ID: &str = "duckduckgo_html_v1";
+pub const BRAVE_WEB_SEARCH_CONNECTOR_ID: &str = crate::web_research::BRAVE_WEB_SEARCH_CONNECTOR_ID;
 pub const FILE_ARTIFACT_CREATE_CAPABILITY_ID: &str = "file.artifact.create";
 pub const LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID: &str = "communication.local_draft.create";
 pub const OUTLOOK_NEW_HANDOFF_CAPABILITY_ID: &str = "communication.outlook_new.handoff";
 pub const GMAIL_WEB_HANDOFF_CAPABILITY_ID: &str = "communication.gmail_web.handoff";
 pub const SLACK_WEB_HANDOFF_CAPABILITY_ID: &str = "communication.slack_web.handoff";
+pub const GMAIL_WEB_SEND_CAPABILITY_ID: &str = "communication.gmail_web.send_exact";
+pub const SLACK_WEB_SEND_CAPABILITY_ID: &str = "communication.slack_web.send_exact";
+pub const GMAIL_WEB_SEND_PROVIDER_ID: &str = "communication.gmail_web.send_exact";
+pub const SLACK_WEB_SEND_PROVIDER_ID: &str = "communication.slack_web.send_exact";
 pub const TERMINAL_OUTPUT_CAPABILITY_ID: &str = "terminal.output.read";
 pub const CURRENT_SCREEN_CAPABILITY_ID: &str = "screen.capture.current";
+pub const CURRENT_SCREEN_MAX_OUTPUT_BYTES: u64 = 12 * 1024 * 1024;
 pub const ACTION_PREVIEW_CAPABILITY_ID: &str = "assistant.action.preview";
 pub const SYSTEM_INFO_CAPABILITY_ID: &str = "system.info.read";
 pub const SYSTEM_PROCESS_CAPABILITY_ID: &str = "system.process.read";
@@ -121,7 +126,7 @@ pub const BROWSER_WAIT_CAPABILITY_ID: &str = "browser.page.wait";
 pub const BROWSER_WAIT_FOREGROUND_BUDGET_MS: u32 = 8_000;
 pub const BROWSER_FILL_CAPABILITY_ID: &str = "browser.form.fill";
 pub const BROWSER_ACTIVATE_CAPABILITY_ID: &str = "browser.element.activate";
-pub const BROWSER_CONTEXT_CAPABILITY_IDS: [&str; 8] = [
+pub const BROWSER_CONTEXT_CAPABILITY_IDS: [&str; 10] = [
     BROWSER_OPEN_CAPABILITY_ID,
     BROWSER_NAVIGATE_CAPABILITY_ID,
     BROWSER_SNAPSHOT_CAPABILITY_ID,
@@ -130,12 +135,15 @@ pub const BROWSER_CONTEXT_CAPABILITY_IDS: [&str; 8] = [
     BROWSER_ACTIVATE_CAPABILITY_ID,
     GMAIL_WEB_HANDOFF_CAPABILITY_ID,
     SLACK_WEB_HANDOFF_CAPABILITY_ID,
+    GMAIL_WEB_SEND_CAPABILITY_ID,
+    SLACK_WEB_SEND_CAPABILITY_ID,
 ];
-pub const BROWSER_CONTEXT_CAPABILITIES: [Capability; 4] = [
+pub const BROWSER_CONTEXT_CAPABILITIES: [Capability; 5] = [
     Capability::BrowserPageObserve,
     Capability::BrowserPageNavigateConfirmed,
     Capability::BrowserInputFallbackConfirmed,
     Capability::BrowserExternalDraftWriteConfirmed,
+    Capability::BrowserExternalSendConfirmed,
 ];
 pub const SYSTEM_DIAGNOSTIC_CAPABILITY_IDS: [&str; 6] = [
     SYSTEM_INFO_CAPABILITY_ID,
@@ -404,6 +412,20 @@ pub fn provider_readiness_reports(
                 (
                     SLACK_WEB_HANDOFF_PROVIDER_ID,
                     SLACK_WEB_HANDOFF_CAPABILITY_ID,
+                    SLACK_WEB_ADAPTER_ID,
+                    SLACK_WEB_ADAPTER_VERSION,
+                ),
+            ],
+            Capability::BrowserExternalSendConfirmed => &[
+                (
+                    GMAIL_WEB_SEND_PROVIDER_ID,
+                    GMAIL_WEB_SEND_CAPABILITY_ID,
+                    GMAIL_WEB_ADAPTER_ID,
+                    GMAIL_WEB_ADAPTER_VERSION,
+                ),
+                (
+                    SLACK_WEB_SEND_PROVIDER_ID,
+                    SLACK_WEB_SEND_CAPABILITY_ID,
                     SLACK_WEB_ADAPTER_ID,
                     SLACK_WEB_ADAPTER_VERSION,
                 ),
@@ -1489,6 +1511,85 @@ fn prepare_gmail_web_handoff_tool() -> RegisteredTool {
     }
 }
 
+fn send_gmail_web_exact_tool() -> RegisteredTool {
+    RegisteredTool {
+        spec: ToolSpec {
+            name: "send_gmail_web_exact".into(),
+            description: "Send exactly one previously prepared and semantically read-back-verified Gmail Web draft. First take a fresh bounded snapshot of the same compose surface, then copy the complete handoff output and the owner's original draft verbatim, and bind the fresh To, Subject, Message Body, and reviewed Send button references. This always requires a new one-shot SendExternal confirmation even if draft permission was already granted. The edge rechecks every field and attachment name immediately before one activation; it returns Sent, DefinitelyNotSent, or OutcomeUnknown and never retries an unknown outcome.".into(),
+            parameters_schema: json!({
+                "type": "object",
+                "properties": {
+                    "schema_version": {"type": "integer", "const": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION},
+                    "handoff": {
+                        "type": "object",
+                        "description": "Copy the complete CommunicationDraftHandoff returned by prepare_gmail_web_draft_handoff without changes."
+                    },
+                    "page": browser_page_schema(),
+                    "to_field": browser_element_schema(),
+                    "subject_field": browser_element_schema(),
+                    "body_field": browser_element_schema(),
+                    "send_control": browser_element_schema(),
+                    "draft": {
+                        "type": "object",
+                        "properties": {
+                            "schema_version": {"type": "integer", "const": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION},
+                            "recipients": {
+                                "type": "array", "minItems": 1, "maxItems": 1,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "role": {"type": "string", "const": "to"},
+                                        "address": {"type": "string", "minLength": 3, "maxLength": 512},
+                                        "display_name": {"type": ["string", "null"], "maxLength": 512}
+                                    },
+                                    "required": ["role", "address", "display_name"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "subject": {"type": "string", "minLength": 1, "maxLength": 998},
+                            "body_plain_text": {"type": "string", "minLength": 1, "maxLength": 65536},
+                            "attachment_labels": {"type": "array", "maxItems": 1, "items": {"type": "string", "minLength": 1, "maxLength": 200}}
+                        },
+                        "required": ["schema_version", "recipients", "subject", "body_plain_text", "attachment_labels"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["schema_version", "handoff", "page", "to_field", "subject_field", "body_field", "send_control", "draft"],
+                "additionalProperties": false
+            }),
+        },
+        required_capability: Capability::BrowserExternalSendConfirmed,
+        effect: ToolEffect::Mutating,
+    }
+}
+
+fn send_slack_web_exact_tool() -> RegisteredTool {
+    RegisteredTool {
+        spec: ToolSpec {
+            name: "send_slack_web_exact".into(),
+            description: "Send exactly one previously prepared and semantically read-back-verified Slack Web message. First take a fresh bounded snapshot of the same composer, then copy the complete handoff output and owner-provided body verbatim, and bind the fresh composer and reviewed Send button references. This always requires a new one-shot SendExternal confirmation. The edge rechecks the destination-bound composer and exact body immediately before one activation; it returns Sent, DefinitelyNotSent, or OutcomeUnknown and never retries an unknown outcome. Attachments are not supported.".into(),
+            parameters_schema: json!({
+                "type": "object",
+                "properties": {
+                    "schema_version": {"type": "integer", "const": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION},
+                    "handoff": {
+                        "type": "object",
+                        "description": "Copy the complete CommunicationDraftHandoff returned by prepare_slack_web_message_handoff without changes."
+                    },
+                    "page": browser_page_schema(),
+                    "composer": browser_element_schema(),
+                    "send_control": browser_element_schema(),
+                    "body_plain_text": {"type": "string", "minLength": 1, "maxLength": 65536}
+                },
+                "required": ["schema_version", "handoff", "page", "composer", "send_control", "body_plain_text"],
+                "additionalProperties": false
+            }),
+        },
+        required_capability: Capability::BrowserExternalSendConfirmed,
+        effect: ToolEffect::Mutating,
+    }
+}
+
 fn browser_origin_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -1903,7 +2004,7 @@ fn search_public_web_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "search_public_web".into(),
-            description: "Search public Web metadata through the server-owned bounded Web Search connector. The exact query must appear verbatim in the owner's current message and the identical arguments must be approved as an R1 ExportData grant because the query is sent to the connector. The current experimental connector is DuckDuckGo HTML and requires no API key. Results are untrusted external data with connector and source evidence, plus an opaque web_search_call_id that may be copied verbatim into create_word_report_from_merge_preview with exact returned title/URL pairs; never invent or transform that id.".into(),
+            description: "Search public Web metadata through the server-owned bounded Brave Web Search connector. The exact query must appear verbatim in the owner's current message and the identical arguments must be approved as an R1 ExportData grant because the query is sent to the connector. The connector is exposed only when its central API credential is configured; the credential and endpoint are never model inputs or edge payloads. Results are untrusted external data with connector and source evidence, plus an opaque web_search_call_id that may be copied verbatim into create_word_report_from_merge_preview with exact returned title/URL pairs; never invent or transform that id.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2676,6 +2777,40 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
         vec![AuthorizationResourceKind::FreshObjectReference],
         prepare_slack_web_handoff_tool(),
     );
+    let gmail_web_send = provider_for_tool(
+        GMAIL_WEB_SEND_PROVIDER_ID,
+        GMAIL_WEB_SEND_CAPABILITY_ID,
+        "assistant.capability.gmailWebExactSend",
+        vec![GMAIL_WEB_ADAPTER_ID.into()],
+        ExecutionLocality::Edge,
+        CapabilityEffect::SendExternal,
+        1,
+        vec![ApplicationPrerequisite::EmailAccount],
+        vec![
+            CapabilityDataCategory::UserRequest,
+            CapabilityDataCategory::CommunicationContent,
+            CapabilityDataCategory::UiSemanticTree,
+        ],
+        vec![AuthorizationResourceKind::FreshObjectReference],
+        send_gmail_web_exact_tool(),
+    );
+    let slack_web_send = provider_for_tool(
+        SLACK_WEB_SEND_PROVIDER_ID,
+        SLACK_WEB_SEND_CAPABILITY_ID,
+        "assistant.capability.slackWebExactSend",
+        vec![SLACK_WEB_ADAPTER_ID.into()],
+        ExecutionLocality::Edge,
+        CapabilityEffect::SendExternal,
+        1,
+        vec![ApplicationPrerequisite::ChatAccount],
+        vec![
+            CapabilityDataCategory::UserRequest,
+            CapabilityDataCategory::CommunicationContent,
+            CapabilityDataCategory::UiSemanticTree,
+        ],
+        vec![AuthorizationResourceKind::FreshObjectReference],
+        send_slack_web_exact_tool(),
+    );
     let terminal = provider_for_tool(
         TERMINAL_OUTPUT_PROVIDER_ID,
         TERMINAL_OUTPUT_CAPABILITY_ID,
@@ -2691,7 +2826,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
             .remove("inspect_selected_terminal_output")
             .expect("static selected terminal output tool exists"),
     );
-    let current_screen = provider_for_tool(
+    let mut current_screen = provider_for_tool(
         CURRENT_SCREEN_PROVIDER_ID,
         CURRENT_SCREEN_CAPABILITY_ID,
         "assistant.capability.currentScreenCapture",
@@ -2706,6 +2841,8 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
             .remove("read_current_screen")
             .expect("static current screen tool exists"),
     );
+    current_screen.wire.capabilities[0].limits.max_output_bytes = CURRENT_SCREEN_MAX_OUTPUT_BYTES;
+    current_screen.capabilities[0].wire.limits.max_output_bytes = CURRENT_SCREEN_MAX_OUTPUT_BYTES;
     let browser_open = provider_for_tool(
         BROWSER_OPEN_PROVIDER_ID,
         BROWSER_OPEN_CAPABILITY_ID,
@@ -2833,6 +2970,8 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
         .register(outlook_new_handoff)
         .register(gmail_web_handoff)
         .register(slack_web_handoff)
+        .register(gmail_web_send)
+        .register(slack_web_send)
         .register(terminal)
         .register(current_screen)
         .register(browser_open)
@@ -3029,16 +3168,32 @@ pub fn device_assistant_edge_adapter_registry() -> EdgeAdapterRegistry {
             OUTLOOK_NEW_MAILTO_ADAPTER_VERSION,
             OUTLOOK_NEW_HANDOFF_CAPABILITY_ID,
         ))
-        .register(adapter(
-            GMAIL_WEB_ADAPTER_ID,
-            GMAIL_WEB_ADAPTER_VERSION,
-            GMAIL_WEB_HANDOFF_CAPABILITY_ID,
-        ))
-        .register(adapter(
-            SLACK_WEB_ADAPTER_ID,
-            SLACK_WEB_ADAPTER_VERSION,
-            SLACK_WEB_HANDOFF_CAPABILITY_ID,
-        ))
+        .register(EdgeAdapterDescriptor {
+            adapter_id: GMAIL_WEB_ADAPTER_ID.into(),
+            adapter_version: GMAIL_WEB_ADAPTER_VERSION.into(),
+            capability_ids: vec![
+                GMAIL_WEB_HANDOFF_CAPABILITY_ID.into(),
+                GMAIL_WEB_SEND_CAPABILITY_ID.into(),
+            ],
+            limits: providers
+                .capability(GMAIL_WEB_HANDOFF_CAPABILITY_ID)
+                .expect("static Gmail handoff capability exists")
+                .wire
+                .limits,
+        })
+        .register(EdgeAdapterDescriptor {
+            adapter_id: SLACK_WEB_ADAPTER_ID.into(),
+            adapter_version: SLACK_WEB_ADAPTER_VERSION.into(),
+            capability_ids: vec![
+                SLACK_WEB_HANDOFF_CAPABILITY_ID.into(),
+                SLACK_WEB_SEND_CAPABILITY_ID.into(),
+            ],
+            limits: providers
+                .capability(SLACK_WEB_HANDOFF_CAPABILITY_ID)
+                .expect("static Slack handoff capability exists")
+                .wire
+                .limits,
+        })
         .register(EdgeAdapterDescriptor {
             adapter_id: BROWSER_DEVTOOLS_ADAPTER_ID.into(),
             adapter_version: BROWSER_DEVTOOLS_ADAPTER_VERSION.into(),
@@ -3114,7 +3269,14 @@ fn prompt(locale: Option<&str>) -> String {
     );
     text = text.replace(
         "Copy every owner-provided value verbatim; do not translate, summarize, append, add Cc/Bcc, or add attachments. The account destination is fixed server-side to the current browser profile. After approval the reviewed adapter fills and semantically reads back those same three fields, stops with HandedOffToUser/ManualOnly, and never activates Send.",
-        "Copy every owner-provided value verbatim; do not translate, summarize, append, or add Cc/Bcc. You may attach at most one exact typed immutable artifact returned by an earlier file-creation tool in this run, using a fresh Gmail file-input element; never invent or pass a native path. Keep attachment_labels empty when attachment is null, otherwise set it to exactly the artifact file_name. The account destination is fixed server-side to the current browser profile. After approval the reviewed adapter fills and semantically reads back those same three fields and the visible attachment name, stops with HandedOffToUser/ManualOnly, and never activates Send.",
+        "Copy every owner-provided value verbatim; do not translate, summarize, append, or add Cc/Bcc. You may attach at most one exact typed immutable artifact returned by an earlier file-creation tool in this run, using a fresh Gmail file-input element; never invent or pass a native path. Keep attachment_labels empty when attachment is null, otherwise set it to exactly the artifact file_name. The account destination is fixed server-side to the current browser profile. After approval the reviewed adapter fills and semantically reads back those same three fields and the visible attachment name, then stops without activating Send. A Chrome-extension result can carry an ExactGrantEligible sealed snapshot; a development-only DevTools result remains ManualOnly. Neither result itself authorizes sending.",
+    );
+    text = text.replace(
+        "After approval the reviewed site adapter fills and semantically reads back only that composer, stops with HandedOffToUser/ManualOnly, accepts no attachments, and never activates Send.",
+        "After approval the reviewed site adapter fills and semantically reads back only that composer, accepts no attachments, and stops without activating Send. A Chrome-extension result can carry an ExactGrantEligible sealed snapshot; a development-only DevTools result remains ManualOnly. Neither result itself authorizes sending.",
+    );
+    text.push_str(
+        "\n\nWhen send_gmail_web_exact or send_slack_web_exact is present, use it only when the owner explicitly asked the assistant to send. First complete the matching draft handoff and require its ExactGrantEligible sealed payload snapshot; never send from a ManualOnly handoff. Then take one fresh bounded snapshot of the same compose page, identify the exact reviewed fields and Send button, and call request_capability_grants separately with expected_effect SendExternal and exact_input equal to the complete proposed send-tool arguments. Never batch SendExternal with the earlier WriteExternalDraft request, never alter the sealed recipient, destination, subject, body, account, or attachments, and stop after recording the pending send request. After a later owner approval exposes the exact send tool, call it at most once with that same frozen input. A precondition mismatch means DefinitelyNotSent and requires a new fresh handoff/confirmation before any later send attempt. OutcomeUnknown means activation may have occurred but no receipt was observed: report the uncertainty and never retry automatically. Sent, DefinitelyNotSent, and OutcomeUnknown are mutually distinct durable results; do not infer Sent from a click or from the prepared draft."
     );
     text = text.replace(
         "When the closed browser_* tools are present, they operate only on provider-owned page/element references from the current approved Chrome profile.",
@@ -3220,7 +3382,7 @@ mod tests {
     #[test]
     fn registry_contains_reads_preview_and_bounded_artifact_create() {
         let tools = device_assistant_tool_registry();
-        assert_eq!(tools.len(), 47);
+        assert_eq!(tools.len(), 49);
         assert_eq!(
             tools
                 .iter()
@@ -3248,7 +3410,9 @@ mod tests {
                 "prepare_outlook_new_draft_handoff",
                 "prepare_slack_web_message_handoff",
                 "replace_live_document_body",
-                "replace_selected_pages_copy_body"
+                "replace_selected_pages_copy_body",
+                "send_gmail_web_exact",
+                "send_slack_web_exact"
             ]
         );
         assert!(
@@ -3291,13 +3455,16 @@ mod tests {
         assert!(prompt.contains("at most one exact typed immutable artifact"));
         assert!(prompt.contains("CURRENT REUSABLE PROVIDER RESULTS is the newer"));
         assert!(prompt.contains("Do not claim that the page reference is missing"));
+        assert!(prompt.contains("Never batch SendExternal with the earlier WriteExternalDraft"));
+        assert!(prompt.contains("OutcomeUnknown means activation may have occurred"));
+        assert!(prompt.contains("call it at most once with that same frozen input"));
         assert!(!prompt.contains("or add attachments. The account destination"));
     }
 
     #[test]
     fn provider_inventory_is_static_complete_and_secret_free() {
         let registry = device_assistant_provider_registry();
-        assert_eq!(registry.providers().len(), 38);
+        assert_eq!(registry.providers().len(), 40);
         for provider in registry.providers() {
             provider.validate().unwrap();
         }
@@ -3390,6 +3557,8 @@ mod tests {
         legacy.push(prepare_outlook_new_handoff_tool());
         legacy.push(prepare_gmail_web_handoff_tool());
         legacy.push(prepare_slack_web_handoff_tool());
+        legacy.push(send_gmail_web_exact_tool());
+        legacy.push(send_slack_web_exact_tool());
         legacy.push(create_spreadsheet_artifact_tool());
         legacy.push(create_spreadsheet_formula_artifact_tool());
         legacy.push(create_word_report_artifact_tool());
@@ -3531,6 +3700,13 @@ mod tests {
         assert_eq!(
             raw_input.wire.prerequisites.platforms,
             vec![CapabilityPlatform::Windows]
+        );
+        let current_screen = providers
+            .capability(CURRENT_SCREEN_CAPABILITY_ID)
+            .expect("current screen capability");
+        assert_eq!(
+            current_screen.wire.limits.max_output_bytes,
+            CURRENT_SCREEN_MAX_OUTPUT_BYTES
         );
 
         for capability_id in [

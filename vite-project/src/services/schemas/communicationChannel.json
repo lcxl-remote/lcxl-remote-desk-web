@@ -1,0 +1,1 @@
+{"type":"string","enum":["email","chat","local_draft"],"x-readme-ref-name":"CommunicationChannel"}

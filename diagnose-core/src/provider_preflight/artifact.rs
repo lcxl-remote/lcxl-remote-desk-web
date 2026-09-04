@@ -346,6 +346,7 @@ impl ArtifactCallPreflight {
         Ok(CapabilityGrantCall {
             actor_id: subject.actor_id,
             run_id: subject.run_id,
+            input_revision: subject.input_revision,
             surface: self.surface,
             target_device_id: subject.target_device_id,
             target_session_id: None,

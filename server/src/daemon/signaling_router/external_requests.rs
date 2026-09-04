@@ -130,6 +130,16 @@ pub(super) async fn handle_remote_tool_request_inbound(
     };
     let request_id = request.request_id.clone();
 
+    if !ctx.settings.read().await.device_assistant.enabled {
+        send_remote_tool_error(
+            &ctx.outbound_tx,
+            &request_id,
+            AgentErrorKind::UnsupportedCapability,
+            "Device Assistant is disabled on this device",
+        );
+        return Ok(());
+    }
+
     // The read invoker is only injected where an in-process worker can read
     // (Default / DeskServer). Without it the edge cannot serve a remote read.
     let Some(invoker) = ctx.remote_read.clone() else {

@@ -50,6 +50,31 @@ fn plan() -> SealedComputerActionPlan {
 }
 
 #[tokio::test]
+async fn disabled_switch_rejects_new_computer_action_before_dispatch() {
+    let ctx = make_ctx().await;
+    ctx.settings.write().await.device_assistant.enabled = false;
+    let mut output = ctx.outbound_tx.subscribe();
+    let plan = plan();
+    let dispatch = SignalingModel::new(
+        &plan.execution_generation,
+        SignalingType::DispatchComputerAction,
+        None,
+        None,
+        Some(serde_json::to_value(&plan).unwrap()),
+        None,
+    );
+    handle_computer_action_inbound(&ctx, &dispatch)
+        .await
+        .unwrap();
+    let denied: SignalingModel = serde_json::from_str(&output.try_recv().unwrap()).unwrap();
+    let completed: ComputerActionCompleted = denied.get_data().unwrap();
+    assert_eq!(
+        completed.result,
+        ComputerActionResultClass::DefinitelyNotStarted
+    );
+}
+
+#[tokio::test]
 async fn central_computer_action_dispatches_without_peer_and_rejects_missing_worker_as_completed() {
     let mut ctx = make_ctx().await;
     let mut output = ctx.outbound_tx.subscribe();

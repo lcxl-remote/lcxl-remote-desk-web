@@ -6,6 +6,7 @@ use desk_agent_protocol::{
     ContextKind, OperationOutput, ReadContextOutput, capability_grant::CapabilityGrantLimits,
     computer_use::OfficeSelectionProjection,
 };
+use serde::Deserialize;
 
 #[cfg(test)]
 mod tests;
@@ -115,6 +116,12 @@ pub fn validate_output(
     if bytes as u64 > limits.max_bytes_per_call {
         return Err(unavailable());
     }
+    if matches!(
+        call.name.as_str(),
+        crate::web_research::WEB_FETCH_TOOL_NAME | crate::web_research::WEB_SEARCH_TOOL_NAME
+    ) {
+        return validate_web_output(call, output, &limits);
+    }
     if !requires_objects(&call.name) && call.name != "inspect_desktop_ui" {
         return Ok(());
     }
@@ -165,4 +172,143 @@ pub fn validate_output(
         return Err(unavailable());
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchOutput {
+    schema_version: u32,
+    untrusted_external_content: bool,
+    requested_url: String,
+    final_url: String,
+    title: Option<String>,
+    published_at: Option<String>,
+    fetched_at: String,
+    content_type: String,
+    body_bytes: usize,
+    sha256: String,
+    excerpt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchOutput {
+    schema_version: u32,
+    web_search_call_id: String,
+    untrusted_external_content: bool,
+    connector: SearchConnector,
+    query_sha256: String,
+    searched_at: String,
+    response_sha256: String,
+    response_bytes: usize,
+    result_count: usize,
+    results: Vec<SearchResult>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchConnector {
+    connector_id: String,
+    display_name: String,
+    requires_api_key: bool,
+    experimental: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+    published_at: Option<String>,
+}
+
+fn validate_web_output(
+    call: &ToolCall,
+    output: &ToolRunOutput,
+    limits: &CapabilityGrantLimits,
+) -> Result<(), AgentError> {
+    if output.image_data_url.is_some() {
+        return Err(unavailable());
+    }
+    match call.name.as_str() {
+        crate::web_research::WEB_FETCH_TOOL_NAME => {
+            let expected = crate::web_research::validate_fetch_arguments(call)?;
+            let value: FetchOutput =
+                serde_json::from_str(&output.content).map_err(|_| unavailable())?;
+            let final_url = crate::web_research::validate_public_url(&value.final_url, false)?;
+            if value.schema_version != 1
+                || !value.untrusted_external_content
+                || value.requested_url != expected.initial_url().as_str()
+                || !expected.same_approved_origin(&final_url)
+                || value
+                    .title
+                    .as_ref()
+                    .is_some_and(|title| title.chars().count() > 2_000)
+                || value
+                    .published_at
+                    .as_ref()
+                    .is_some_and(|date| date.len() > 256 || date.chars().any(char::is_control))
+                || value.fetched_at.len() > 64
+                || !matches!(
+                    value.content_type.as_str(),
+                    "text/html" | "text/plain" | "application/xhtml+xml"
+                )
+                || value.body_bytes > 128 * 1024
+                || !is_sha256(&value.sha256)
+                || value.excerpt.chars().count() > 24_000
+                || limits.max_items_per_call < 1
+            {
+                return Err(unavailable());
+            }
+        }
+        crate::web_research::WEB_SEARCH_TOOL_NAME => {
+            let expected = crate::web_research::validate_search_arguments(call)?;
+            let value: SearchOutput =
+                serde_json::from_str(&output.content).map_err(|_| unavailable())?;
+            let expected_query_sha256 =
+                format!("{:x}", sha2::Sha256::digest(expected.query().as_bytes()));
+            if value.schema_version != 1
+                || value.web_search_call_id != call.id
+                || !value.untrusted_external_content
+                || value.connector.connector_id
+                    != crate::web_research::BRAVE_WEB_SEARCH_CONNECTOR_ID
+                || value.connector.display_name != "Brave Web Search"
+                || !value.connector.requires_api_key
+                || value.connector.experimental
+                || value.query_sha256 != expected_query_sha256
+                || value.searched_at.len() > 64
+                || !is_sha256(&value.response_sha256)
+                || value.response_bytes > 256 * 1024
+                || value.result_count != value.results.len()
+                || value.results.len() > usize::from(expected.max_results())
+                || value.results.len() > limits.max_items_per_call as usize
+            {
+                return Err(unavailable());
+            }
+            for item in value.results {
+                if item.title.trim().is_empty()
+                    || item.title.chars().count() > 512
+                    || item.url.len() > 2_048
+                    || item.snippet.chars().count() > 2_000
+                    || item
+                        .published_at
+                        .as_ref()
+                        .is_some_and(|date| date.len() > 128 || date.chars().any(char::is_control))
+                    || crate::web_research::validate_public_url(&item.url, false).is_err()
+                {
+                    return Err(unavailable());
+                }
+            }
+        }
+        _ => return Err(unavailable()),
+    }
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }

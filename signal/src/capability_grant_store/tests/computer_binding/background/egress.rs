@@ -144,6 +144,12 @@ async fn fixture(
 
 #[actix_web::test]
 async fn production_publisher_uses_original_export_and_strict_model_before_network() {
+    crate::device_assistant_gate::global_device_assistant_gate().replace(
+        desk_agent_protocol::device_assistant::DeviceAssistantSettings {
+            revision: 1,
+            enabled: true,
+        },
+    );
     for case in [
         "running",
         "crash",
@@ -220,6 +226,9 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
         }
         if case == "new-input" {
             session.input_revision += 1;
+            session
+                .begin_focus_epoch(session.input_revision, std::iter::empty::<String>())
+                .unwrap();
         }
         if case == "detached" {
             assert!(session.detach_context("selected-context"));
@@ -284,7 +293,11 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
         }
         let capture = actix_web::rt::spawn(capture(listener));
         tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            // This path performs real loopback model I/O for every fixture.
+            // Leave enough headroom when the full crate runs in parallel on
+            // a loaded macOS builder; semantic deadlines are asserted by the
+            // production store rather than this test harness watchdog.
+            std::time::Duration::from_secs(30),
             f.store.publish_computer_results_once(),
         )
         .await
@@ -318,7 +331,7 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
                 after.pending_auto_triggers,
                 after.conversation.last()
             );
-            let body = tokio::time::timeout(std::time::Duration::from_secs(2), capture)
+            let body = tokio::time::timeout(std::time::Duration::from_secs(10), capture)
                 .await
                 .expect(case)
                 .unwrap();

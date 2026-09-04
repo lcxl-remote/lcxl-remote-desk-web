@@ -228,6 +228,32 @@ impl SessionTargetCatalog {
         (inner.revision, targets)
     }
 
+    pub fn descriptor_for_session(
+        &self,
+        capability: SessionCapability,
+        session: &SessionKey,
+    ) -> Option<(u64, SessionTargetDescriptor)> {
+        let inner = self.inner.read().unwrap();
+        let entry = inner.by_session.get(session)?;
+        if !entry.candidate.supports(capability) {
+            return None;
+        }
+        Some((
+            inner.revision,
+            SessionTargetDescriptor {
+                target_id: entry.id.to_string(),
+                display_name: entry.candidate.display_name.clone(),
+                session_type: entry.candidate.session_type.clone(),
+                seat: entry.candidate.seat.clone(),
+                foreground: entry.candidate.foreground,
+                remote_desktop_ready: entry.candidate.remote_desktop_ready,
+                terminal_ready: entry.candidate.terminal_ready,
+                file_ready: entry.candidate.file_ready,
+                assistant_ready: entry.candidate.assistant_ready,
+            },
+        ))
+    }
+
     pub fn select(
         &self,
         capability: SessionCapability,
@@ -470,6 +496,29 @@ mod tests {
         assert_eq!(
             catalog.validate_bound_session(SessionCapability::Assistant, &first_session),
             Err(SessionTargetSelectionError::Stale)
+        );
+    }
+
+    #[test]
+    fn descriptor_for_session_returns_only_capability_ready_targets() {
+        let catalog = SessionTargetCatalog::default();
+        let mut candidate = candidate("session-a", 1);
+        candidate.assistant_ready = true;
+        candidate.terminal_ready = false;
+        let session = candidate.session.clone();
+        let target_id = catalog.upsert(candidate);
+
+        let (revision, descriptor) = catalog
+            .descriptor_for_session(SessionCapability::Assistant, &session)
+            .expect("assistant-ready descriptor");
+        assert!(revision > 0);
+        assert_eq!(descriptor.target_id, target_id);
+        assert_eq!(descriptor.display_name, "session-a");
+        assert!(descriptor.assistant_ready);
+        assert!(
+            catalog
+                .descriptor_for_session(SessionCapability::Terminal, &session)
+                .is_none()
         );
     }
 

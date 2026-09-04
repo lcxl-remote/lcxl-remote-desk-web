@@ -147,6 +147,25 @@ pub struct SessionTargetListData {
     pub targets: Vec<SessionTargetDescriptor>,
 }
 
+/// Owner control end → host: resolve and freeze the Device Assistant desktop
+/// session for this signaling connection. Omitting the target applies the same
+/// fail-closed 0/1/N rule as the other session-scoped entry points.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct SelectDeviceAssistantSessionData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_target_id: Option<String>,
+}
+
+/// Host → owner control end: the exact opaque target frozen on the current
+/// signaling connection. The id is daemon-generation-bound and opaque outside
+/// the host.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct DeviceAssistantSessionSelectedData {
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<SessionTargetDescriptor>,
+}
+
 /// Browser-facing knobs that drive the adaptive-resolution hook. Server
 /// sources these from `Settings.virtual_display.adaptive_*` and ships
 /// them through `RemoteAccessInitializedData` so each browser session uses the

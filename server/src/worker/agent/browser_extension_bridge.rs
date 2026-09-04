@@ -289,6 +289,8 @@ struct RawExtensionResult {
     matched: Option<bool>,
     #[serde(default)]
     activated: Option<bool>,
+    #[serde(default)]
+    send_receipt: Option<desk_agent_protocol::communication::SendReceipt>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -378,6 +380,38 @@ pub(super) fn project_extension_result(
             captured_at_unix_ms: snapshot.captured_at_unix_ms,
         }
     });
+    match (&request.action, &raw.send_receipt) {
+        (
+            BrowserAction::ActivateElement {
+                activation_class:
+                    desk_agent_protocol::browser_control::BrowserActivationClass::SendExternal {
+                        payload_sha256,
+                        snapshot_id,
+                        idempotency_key,
+                        ..
+                    },
+                ..
+            },
+            Some(receipt),
+        ) if receipt.validate().is_ok()
+            && &receipt.snapshot_sha256 == payload_sha256
+            && &receipt.snapshot_id == snapshot_id
+            && &receipt.idempotency_key == idempotency_key => {}
+        (
+            BrowserAction::ActivateElement {
+                activation_class:
+                    desk_agent_protocol::browser_control::BrowserActivationClass::SendExternal {
+                        ..
+                    },
+                ..
+            },
+            _,
+        ) => {
+            return Err(BrowserExtensionBridgeError::InvalidExtensionResult);
+        }
+        (_, None) => {}
+        (_, Some(_)) => return Err(BrowserExtensionBridgeError::InvalidExtensionResult),
+    }
     let outcome = match &request.action {
         BrowserAction::OpenPage { .. } => BrowserActionOutcome::PageOpened,
         BrowserAction::NavigatePage { .. } => BrowserActionOutcome::PageNavigated,
@@ -396,6 +430,11 @@ pub(super) fn project_extension_result(
         {
             BrowserActionOutcome::FileUploaded
         }
+        BrowserAction::ActivateElement {
+            activation_class:
+                desk_agent_protocol::browser_control::BrowserActivationClass::SendExternal { .. },
+            ..
+        } if raw.send_receipt.is_some() => BrowserActionOutcome::ExternalSend,
         BrowserAction::ActivateElement { .. } if raw.activated == Some(true) => {
             BrowserActionOutcome::ElementActivated
         }
@@ -408,6 +447,7 @@ pub(super) fn project_extension_result(
         page,
         snapshot,
         form_readback: raw.form_readback,
+        send_receipt: raw.send_receipt,
         completed_at_unix_ms,
     };
     result

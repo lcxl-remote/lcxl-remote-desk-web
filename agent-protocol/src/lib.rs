@@ -54,6 +54,7 @@ pub mod provenance;
 pub mod remote_tool;
 pub mod terminal_complete;
 pub mod terminal_copilot;
+pub mod visual_evidence;
 
 use crate::exec::{CommandClassification, ExecDecision, ExecEffect, ExecIoMode};
 
@@ -781,6 +782,10 @@ pub struct ContainerLogsParams {
 pub struct ScreenCaptureParams {
     /// Display name to capture; `None` captures the primary / current target.
     pub display: Option<String>,
+    /// Exact owner-attached, edge-issued window reference. Model-authored
+    /// window handles, titles, process ids and coordinates are never accepted.
+    #[serde(default)]
+    pub window: Option<computer_use::ObjectRef>,
 }
 
 // -------- read outputs (carry the frozen `truncated` / `redactions`) --------
@@ -952,6 +957,9 @@ pub struct ScreenCaptureOutput {
     /// present the same values and the edge rechecks them before injection.
     pub dpi_x: u32,
     pub dpi_y: u32,
+    /// Present only when the edge captured the exact owner-attached window.
+    #[serde(default)]
+    pub window: Option<computer_use::ObjectRef>,
     /// Encoded image bytes (per `format`). Truncated outputs set `truncated`.
     pub image: Vec<u8>,
     pub truncated: bool,

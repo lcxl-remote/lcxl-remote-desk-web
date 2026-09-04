@@ -98,6 +98,10 @@ pub struct PinnedContextPolicy {
     pub source_context_key: SourceContextKey,
     pub profile_revision: i64,
     pub max_context_bytes: usize,
+    /// Bytes reserved for the per-step system prompt, API tool specifications
+    /// and request framing. This is ephemeral and deliberately excluded from
+    /// the persisted policy key.
+    pub request_overhead_bytes: usize,
     pub strategy: ContextManagementStrategy,
     pub platform_context_policy_revision: u64,
     pub context_strategy_schema_version: u16,
@@ -119,6 +123,7 @@ impl PinnedContextPolicy {
             source_context_key,
             profile_revision,
             max_context_bytes,
+            request_overhead_bytes: 0,
             strategy: ContextManagementStrategy::Window,
             platform_context_policy_revision: 1,
             context_strategy_schema_version: CONTEXT_STRATEGY_SCHEMA_VERSION,
@@ -142,7 +147,26 @@ impl PinnedContextPolicy {
     }
 
     pub const fn low_watermark_bytes(&self) -> usize {
-        self.max_context_bytes - self.max_context_bytes / 4
+        let budget = self.history_context_bytes();
+        budget - budget / 4
+    }
+
+    pub const fn history_context_bytes(&self) -> usize {
+        self.max_context_bytes
+            .saturating_sub(self.request_overhead_bytes)
+    }
+
+    pub fn with_request_overhead_bytes(
+        mut self,
+        request_overhead_bytes: usize,
+    ) -> Result<Self, ModelContextError> {
+        self.request_overhead_bytes = request_overhead_bytes;
+        if self.history_context_bytes() == 0 {
+            return Err(ModelContextError::InvalidBudget(
+                self.history_context_bytes(),
+            ));
+        }
+        Ok(self)
     }
 }
 
@@ -288,6 +312,11 @@ pub fn build_model_context_view(
     if !(MIN_MODEL_CONTEXT_BYTES..=MAX_MODEL_CONTEXT_BYTES).contains(&policy.max_context_bytes) {
         return Err(ModelContextError::InvalidBudget(policy.max_context_bytes));
     }
+    if policy.history_context_bytes() == 0 {
+        return Err(ModelContextError::InvalidBudget(
+            policy.history_context_bytes(),
+        ));
+    }
 
     let groups = group_messages(conversation, &policy.source_context_key)?;
     let policy_key = policy.key();
@@ -343,7 +372,8 @@ pub fn build_model_context_view(
     let total_cost = checked_cost_sum(safe_groups.iter().map(|group| group.cost))?;
     let mut selected_group_index = replay_floor.min(groups.len());
 
-    if total_cost > policy.max_context_bytes {
+    let history_budget = policy.history_context_bytes();
+    if total_cost > history_budget {
         let Some(last) = safe_groups.last() else {
             selected_group_index = groups.len();
             return finish_view(
@@ -357,11 +387,11 @@ pub fn build_model_context_view(
                 &groups,
             );
         };
-        if last.cost > policy.max_context_bytes {
+        if last.cost > history_budget {
             return Err(ModelContextError::ContextItemTooLarge {
                 group_head_message_id: conversation[last.start].message_id.clone(),
                 cost: last.cost,
-                high_watermark: policy.max_context_bytes,
+                high_watermark: history_budget,
             });
         }
 
@@ -745,6 +775,26 @@ mod tests {
             ),
             ChatMessage::tool_result("t1", "c1", "ok"),
         ]
+    }
+
+    #[test]
+    fn per_step_request_overhead_reduces_history_without_changing_policy_identity() {
+        let base = policy("overhead", MIN_MODEL_CONTEXT_BYTES * 2);
+        let key = base.key();
+        let reserved = base
+            .clone()
+            .with_request_overhead_bytes(MIN_MODEL_CONTEXT_BYTES)
+            .unwrap();
+        assert_eq!(reserved.key(), key);
+        assert_eq!(reserved.history_context_bytes(), MIN_MODEL_CONTEXT_BYTES);
+
+        let conversation = vec![user("old", MIN_MODEL_CONTEXT_BYTES), user("new", 512)];
+        let mut state = ModelContextState::default();
+        let view = build_model_context_view(&conversation, &mut state, &reserved, 1).unwrap();
+        assert!(
+            view.messages.iter().map(model_context_cost).sum::<usize>()
+                <= reserved.history_context_bytes()
+        );
     }
 
     #[test]

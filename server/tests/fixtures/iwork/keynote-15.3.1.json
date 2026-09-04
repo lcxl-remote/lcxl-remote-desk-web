@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "application": "keynote",
+  "bundle_id": "com.apple.Keynote",
+  "team_id": "JCRTNEU7GK",
+  "version": "15.3.1",
+  "sdef_sha256": "62b866e5db36a815d18e64841ce6ead3ca78f1231c76e5aa3b0d7a01d4b9408e",
+  "reviewed_surface": ["document", "password_protected", "current_slide", "slide_number", "default_title_item", "object_text", "presenter_notes", "save", "export"]
+}

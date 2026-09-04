@@ -46,6 +46,7 @@ pub mod read;
 pub struct ProviderCallSubject<'a> {
     pub actor_id: &'a str,
     pub run_id: &'a str,
+    pub input_revision: u64,
     pub target_device_id: &'a str,
     pub policy_revision: i64,
     pub readiness_revision: u64,
@@ -124,12 +125,18 @@ impl BrowserCallPreflight {
         .ok_or_else(unavailable)?
         .operations;
         let export_destinations = match call.name.as_str() {
-            "prepare_gmail_web_draft_handoff" => vec![DestinationIdentity::EmailAccount {
-                account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
-            }],
-            "prepare_slack_web_message_handoff" => vec![DestinationIdentity::ChatAccount {
-                account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
-            }],
+            "prepare_gmail_web_draft_handoff" | "send_gmail_web_exact" => {
+                vec![DestinationIdentity::EmailAccount {
+                    account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                        .into(),
+                }]
+            }
+            "prepare_slack_web_message_handoff" | "send_slack_web_exact" => {
+                vec![DestinationIdentity::ChatAccount {
+                    account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
+                        .into(),
+                }]
+            }
             _ => vec![],
         };
         Ok(Self {
@@ -180,6 +187,7 @@ impl BrowserCallPreflight {
         Ok(CapabilityGrantCall {
             actor_id: subject.actor_id,
             run_id: subject.run_id,
+            input_revision: subject.input_revision,
             surface: self.surface,
             target_device_id: subject.target_device_id,
             target_session_id: None,

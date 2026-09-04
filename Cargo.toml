@@ -81,6 +81,11 @@ async-trait = "0.1"
 futures = "0.3"
 futures-util = "0.3"
 anyhow = "1.0"
+reqwest = { version = "0.12.28", default-features = false, features = [
+    "json",
+    "rustls-tls-native-roots",
+    "stream",
+] }
 tokio = { version = "1.47", features = ["full", "tracing"] }
 console-subscriber = "0.5"
 

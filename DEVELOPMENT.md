@@ -99,6 +99,14 @@ npm run tauri build -- --bundles app --no-sign
 
 Distribution builds must omit `--no-sign`, use a trusted Developer ID identity,
 and verify the final executable's Automation entitlement with native `codesign`.
+The tag release workflow requires `APPLE_CERTIFICATE_P12_BASE64`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+`MACOS_KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_APP_PASSWORD`, and
+`APPLE_TEAM_ID`. It signs the shell and server sidecar with hardened runtime,
+submits the DMG for notarization, staples the ticket, and fails the release if
+any credential, entitlement, signature, or notarization check is missing.
+Manual workflow runs remain ad-hoc-signed packaging dry-runs and are not
+releasable artifacts.
 
 ### Windows System Dependencies
 

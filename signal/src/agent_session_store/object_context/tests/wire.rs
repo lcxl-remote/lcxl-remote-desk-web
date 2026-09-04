@@ -45,7 +45,16 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
     .await
     .unwrap();
     let map = actix_web::web::Data::new(SharedConnectionMap::new());
-    let authorizer = Arc::new(SignalControlAuthorizer::new(store.db.clone(), map.clone()));
+    let authorizer = Arc::new(SignalControlAuthorizer::new(
+        store.db.clone(),
+        map.clone(),
+        Arc::new(crate::device_assistant_gate::DeviceAssistantGate::new(
+            desk_agent_protocol::device_assistant::DeviceAssistantSettings {
+                revision: 1,
+                enabled: true,
+            },
+        )),
+    ));
     let server_map = map.clone();
     let server_authorizer = authorizer.clone();
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();

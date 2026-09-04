@@ -299,6 +299,8 @@ mod tests {
             max_ai_command_runtime_ms: None,
             exec_pty: false,
             exec_pty_elevation: false,
+            device_assistant_revision: None,
+            device_assistant_enabled: None,
         }
     }
 

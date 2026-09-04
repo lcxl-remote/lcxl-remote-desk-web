@@ -170,6 +170,7 @@ impl SignalAgentSessionStore {
                         params.update.operation,
                         DeviceAssistantObjectContextOperation::AttachFile { .. }
                             | DeviceAssistantObjectContextOperation::AttachTerminalOutput { .. }
+                            | DeviceAssistantObjectContextOperation::AttachWindow { .. }
                     ) {
                         return Err(transport("Device Assistant attachment does not exist"));
                     }

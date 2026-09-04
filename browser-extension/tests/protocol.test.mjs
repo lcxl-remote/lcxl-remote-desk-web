@@ -46,7 +46,8 @@ function extensionChrome(overrides = {}) {
         },
         storage: {
             local: {
-                get: async () => ({})
+                get: async () => ({}),
+                set: async () => undefined
             },
             onChanged: event,
             session: {
@@ -111,6 +112,116 @@ test("accepts only closed activation classes", () => {
     assert.throws(() => parseHostCommand(command), /invalid_activation_class/u);
     command.action.activation_class = { kind: "write_external_draft", script: "click()" };
     assert.throws(() => parseHostCommand(command), /invalid_activation_class/u);
+});
+
+function slackExactSendAction() {
+    const page = {
+        page_id: "tab-7",
+        page_incarnation: "document-1",
+        origin: { kind: "https", host_ascii: "app.slack.com", port: 443 },
+        document_revision: 2,
+        url_sha256: "a".repeat(64)
+    };
+    const composer = {
+        page_id: page.page_id,
+        page_incarnation: page.page_incarnation,
+        document_revision: page.document_revision,
+        element_id: "composer-1",
+        role: "textbox",
+        accessible_name: "Message #review",
+        value: "Approved body",
+        element_revision: 1
+    };
+    return {
+        action: "activate_element",
+        page,
+        element: {
+            ...composer,
+            element_id: "send-1",
+            role: "button",
+            accessible_name: "Send message",
+            value: null
+        },
+        activation_class: {
+            kind: "send_external",
+            payload_sha256: "b".repeat(64),
+            snapshot_id: "snapshot-1",
+            idempotency_key: `send:v1:${"b".repeat(64)}`,
+            site: "slack_web",
+            fields: [{ element: composer, value: "Approved body" }],
+            attachment_file_names: []
+        }
+    };
+}
+
+test("accepts only the complete closed exact-send activation", () => {
+    const command = {
+        schema_version: 1,
+        type: "request",
+        request_id: "request-send",
+        action: slackExactSendAction()
+    };
+    assert.deepEqual(parseHostCommand(command), command);
+
+    const missingSnapshot = structuredClone(command);
+    delete missingSnapshot.action.activation_class.snapshot_id;
+    assert.throws(() => parseHostCommand(missingSnapshot), /invalid_activation_class/u);
+
+    const extraAttachment = structuredClone(command);
+    extraAttachment.action.activation_class.attachment_file_names = ["unsafe.txt"];
+    assert.throws(() => parseHostCommand(extraAttachment), /invalid_activation_class/u);
+
+    const mismatchedIdempotencyKey = structuredClone(command);
+    mismatchedIdempotencyKey.action.activation_class.idempotency_key = `send:v1:${"c".repeat(64)}`;
+    assert.throws(() => parseHostCommand(mismatchedIdempotencyKey), /invalid_activation_class/u);
+});
+
+test("exact send reuses one stored receipt without dispatching a second click", async () => {
+    const stored = {};
+    let sendDispatches = 0;
+    const action = slackExactSendAction();
+    const receipt = {
+        schema_version: 4,
+        snapshot_id: action.activation_class.snapshot_id,
+        snapshot_sha256: action.activation_class.payload_sha256,
+        idempotency_key: action.activation_class.idempotency_key,
+        outcome: "sent",
+        provider_receipt_id: "slack-ui-receipt",
+        evidence: "provider_ui_acknowledgement",
+        observed_at_unix_ms: 42
+    };
+    globalThis.chrome = extensionChrome({
+        storage: {
+            ...extensionChrome().storage,
+            local: {
+                get: async () => ({ exactSendReceipts: stored }),
+                set: async ({ exactSendReceipts }) => {
+                    Object.assign(stored, exactSendReceipts);
+                }
+            }
+        },
+        tabs: {
+            ...extensionChrome().tabs,
+            get: async () => ({ id: 7, url: "https://app.slack.com/client/workspace/review" }),
+            sendMessage: async (_tabId, message) => {
+                if (message.action.action === "describe_page") {
+                    return { ok: true, result: { page: { ...action.page, page_id: null } } };
+                }
+                sendDispatches += 1;
+                return {
+                    ok: true,
+                    result: { page: { ...action.page, page_id: null }, send_receipt: receipt }
+                };
+            }
+        }
+    });
+    const workerUrl = new URL("../src/service-worker.js?exact-send-idempotency-test", import.meta.url);
+    const { execute } = await import(workerUrl);
+
+    assert.deepEqual((await execute(action)).send_receipt, receipt);
+    assert.deepEqual((await execute(action)).send_receipt, receipt);
+    assert.equal(sendDispatches, 1);
+    delete globalThis.chrome;
 });
 
 test("manifest keeps tab access user-scoped and excludes privileged browser surfaces", async () => {

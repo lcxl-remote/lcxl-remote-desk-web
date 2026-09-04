@@ -249,12 +249,11 @@ impl SignalAgentExecStore {
                     )
                     .await?
             };
-            if matches!(outcome, EventAppend::Appended | EventAppend::AlreadyPresent) {
-                if task.status == STATUS_UNKNOWN
-                    || self.follow_up_completion(&sessions, &task, &now).await?
-                {
-                    self.consume_event(&task.event_id).await?;
-                }
+            if matches!(outcome, EventAppend::Appended | EventAppend::AlreadyPresent)
+                && (task.status == STATUS_UNKNOWN
+                    || self.follow_up_completion(&sessions, &task, &now).await?)
+            {
+                self.consume_event(&task.event_id).await?;
             }
         }
         Ok(())

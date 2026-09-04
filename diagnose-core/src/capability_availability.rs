@@ -50,6 +50,17 @@ impl CentralCapabilityReadiness {
         }
     }
 
+    pub fn unavailable(capability_id: impl Into<String>, reason: CapabilityBlockedReason) -> Self {
+        Self {
+            capability_id: capability_id.into(),
+            compiled: true,
+            enabled: true,
+            connected: false,
+            ready: false,
+            reason: Some(reason),
+        }
+    }
+
     fn validate(&self) -> bool {
         if self.ready {
             self.compiled && self.enabled && self.connected && self.reason.is_none()

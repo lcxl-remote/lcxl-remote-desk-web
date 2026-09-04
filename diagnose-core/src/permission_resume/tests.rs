@@ -63,6 +63,59 @@ fn exact_projection_is_sensitive_and_expires_without_changing_its_text() {
 }
 
 #[test]
+fn exact_projection_can_be_rebound_after_server_owned_prompt_expansion() {
+    let mut bound = bind_exact_authorization_system_message(
+        ChatMessage::text("system", ChatRole::System, "Exact bounded input"),
+        destination(),
+        70_000,
+    )
+    .unwrap();
+    let old_envelope_id = bound.data_envelope.as_ref().unwrap().envelope_id.clone();
+    bound.text.push_str("\n\nServer-owned capability index");
+    assert!(matches!(
+        policy().authorize_request(crate::seam::ModelRequest::text_only(
+            vec![bound.clone()],
+            crate::prompt::ResponseFormatSpec::None,
+        )),
+        Err(crate::model_egress::ModelEgressError::Sink(
+            crate::sink_authorizer::SinkAuthorizationError::ContentSizeMismatch
+        ))
+    ));
+
+    let rebound = rebind_exact_authorization_system_message(bound).unwrap();
+    let envelope = rebound.data_envelope.as_ref().unwrap();
+    assert_ne!(envelope.envelope_id, old_envelope_id);
+    assert_eq!(envelope.retention.expires_at_unix_ms, Some(70_000));
+    assert_eq!(envelope.allowed_destinations, vec![destination()]);
+    policy()
+        .authorize_request(crate::seam::ModelRequest::text_only(
+            vec![rebound],
+            crate::prompt::ResponseFormatSpec::None,
+        ))
+        .unwrap();
+}
+
+#[test]
+fn exact_projection_rebind_rejects_untrusted_message_shapes() {
+    assert!(
+        rebind_exact_authorization_system_message(ChatMessage::text(
+            "system",
+            ChatRole::System,
+            "unbound"
+        ))
+        .is_err()
+    );
+    let mut wrong_role = bind_exact_authorization_system_message(
+        ChatMessage::text("system", ChatRole::System, "bound"),
+        destination(),
+        70_000,
+    )
+    .unwrap();
+    wrong_role.role = ChatRole::User;
+    assert!(rebind_exact_authorization_system_message(wrong_role).is_err());
+}
+
+#[test]
 fn invalid_model_destination_never_produces_a_bridge() {
     let invalid = DestinationIdentity::Model {
         connection_id: String::new(),

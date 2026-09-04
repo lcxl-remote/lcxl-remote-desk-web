@@ -38,6 +38,7 @@ export function ExecLifecycle({
     onCancel,
     onDismiss,
     ptyClient,
+    approvalDisabled = false,
 }: {
     entry: ExecEntry
     onApprove: () => void
@@ -46,6 +47,8 @@ export function ExecLifecycle({
     onCancel?: () => void
     onDismiss: () => void
     ptyClient?: ExecPtyClient | null
+    /** Prevent a new execution while preserving reject, cancel, and result controls. */
+    approvalDisabled?: boolean
 }) {
     const { t } = useTranslation()
 
@@ -99,6 +102,7 @@ export function ExecLifecycle({
                         size="sm"
                         className="h-7 flex-1 bg-red-600 text-xs hover:bg-red-700"
                         onClick={onApprove}
+                        disabled={approvalDisabled}
                     >
                         <Check className="mr-1 h-3 w-3" />
                         {t("pages.exec.approve")}

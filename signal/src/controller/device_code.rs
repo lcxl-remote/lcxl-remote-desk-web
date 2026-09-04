@@ -102,7 +102,7 @@ pub async fn list_device_codes(
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let page = std::cmp::max(1, query.page.unwrap_or(1));
-    let page_size = std::cmp::min(100, std::cmp::max(1, query.page_size.unwrap_or(10)));
+    let page_size = query.page_size.unwrap_or(10).clamp(1, 100);
 
     let offset = (page - 1) * page_size;
 

@@ -146,7 +146,16 @@ impl SignalAgentRunEventStore {
             // The new message and the approval fence commit atomically. Once the
             // ACK is visible, no permission request proposed against an older
             // requirement remains user-approvable.
-            session.require_permission_revalidation(session.input_revision);
+            session
+                .begin_focus_epoch(
+                    session.input_revision,
+                    params
+                        .read_context
+                        .iter()
+                        .flat_map(|selection| selection.object_attachments.iter())
+                        .map(|attachment| attachment.attachment_id.clone()),
+                )
+                .map_err(|error| internal(format!("start focus epoch: {error}")))?;
             session.last_event_seq = session
                 .last_event_seq
                 .checked_add(1)

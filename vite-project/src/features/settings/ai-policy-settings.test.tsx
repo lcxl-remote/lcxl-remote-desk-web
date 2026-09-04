@@ -27,6 +27,16 @@ vi.mock("@/services/hooks/aiModelController/useQueryCollectionPolicySettings", (
 vi.mock("@/services/hooks/aiModelController/useUpdateCollectionPolicySettings", () => ({
     useUpdateCollectionPolicySettings: () => ({ mutateAsync: h.collectionMutateAsync, isPending: false }),
 }))
+vi.mock("@/services/hooks/aiModelController/useQueryDeviceAssistantSettings", () => ({
+    useQueryDeviceAssistantSettings: () => ({
+        data: { data: { enabled: true, revision: 1 } },
+        isLoading: false,
+        refetch: vi.fn(),
+    }),
+}))
+vi.mock("@/services/hooks/aiModelController/useUpdateDeviceAssistantSettings", () => ({
+    useUpdateDeviceAssistantSettings: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}))
 
 import { AiPolicySettings } from "./ai-policy-settings"
 

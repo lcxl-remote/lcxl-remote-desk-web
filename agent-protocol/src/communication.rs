@@ -19,7 +19,7 @@ use crate::{
     data_lineage::ContentRef,
 };
 
-pub const COMMUNICATION_SCHEMA_VERSION: u16 = 3;
+pub const COMMUNICATION_SCHEMA_VERSION: u16 = 4;
 pub const MAX_COMMUNICATION_ID_BYTES: usize = 256;
 pub const MAX_RECIPIENTS: usize = 64;
 pub const MAX_GROUP_MEMBERS: usize = 256;
@@ -108,10 +108,7 @@ impl CommunicationSurfaceKind {
     }
 
     fn supports_exact_send(self) -> bool {
-        matches!(
-            self,
-            Self::ClassicOutlookDesktop | Self::ChromeExtension | Self::ChromeDevtoolsMcp
-        )
+        matches!(self, Self::ClassicOutlookDesktop | Self::ChromeExtension)
     }
 }
 
@@ -493,7 +490,18 @@ pub struct CommunicationPayload {
 impl CommunicationPayload {
     pub fn validate(&self) -> Result<(), CommunicationContractError> {
         self.surface.validate()?;
-        validate_text("subject", &self.subject, MAX_SUBJECT_BYTES)?;
+        match self.surface.channel {
+            CommunicationChannel::Email => {
+                validate_text("subject", &self.subject, MAX_SUBJECT_BYTES)?;
+            }
+            CommunicationChannel::Chat if !self.subject.is_empty() => {
+                return Err(CommunicationContractError::ChannelMismatch);
+            }
+            CommunicationChannel::Chat => {}
+            CommunicationChannel::LocalDraft => {
+                return Err(CommunicationContractError::LocalDraftCannotUseExternalPayload);
+            }
+        }
         self.body.validate()?;
         if self.recipients.is_empty() || self.recipients.len() > MAX_RECIPIENTS {
             return Err(CommunicationContractError::InvalidRecipientCount);
@@ -530,9 +538,7 @@ impl CommunicationPayload {
                     return Err(CommunicationContractError::ChannelMismatch);
                 }
             }
-            CommunicationChannel::LocalDraft => {
-                return Err(CommunicationContractError::LocalDraftCannotUseExternalPayload);
-            }
+            CommunicationChannel::LocalDraft => unreachable!("rejected above"),
         }
 
         let mut attachment_digests = BTreeSet::new();
@@ -605,6 +611,10 @@ pub struct CommunicationDraftHandoff {
     /// Present only after semantic read-back of all sealed fields.
     pub readback_payload_sha256: Option<String>,
     pub send_authority: CommunicationSendAuthority,
+    /// Present only when a reviewed semantic adapter proved every field and
+    /// the resulting immutable payload is eligible for a separate one-shot
+    /// SendExternal confirmation. Manual-only handoffs never carry it.
+    pub send_payload_snapshot: Option<SendPayloadSnapshot>,
     pub handed_off_at_unix_ms: u64,
 }
 
@@ -634,10 +644,21 @@ impl CommunicationDraftHandoff {
                 {
                     return Err(CommunicationContractError::InvalidSendAuthority);
                 }
+                match (&self.send_authority, &self.send_payload_snapshot) {
+                    (CommunicationSendAuthority::ExactGrantEligible, Some(snapshot))
+                        if snapshot.run_id == self.run_id
+                            && snapshot.payload.surface == self.surface =>
+                    {
+                        snapshot.validate_shape()?;
+                    }
+                    (CommunicationSendAuthority::ManualOnly, None) => {}
+                    _ => return Err(CommunicationContractError::InvalidSendAuthority),
+                }
             }
             CommunicationPrepareVerification::AssistiveUnverified => {
                 if self.readback_payload_sha256.is_some()
                     || self.send_authority != CommunicationSendAuthority::ManualOnly
+                    || self.send_payload_snapshot.is_some()
                 {
                     return Err(CommunicationContractError::InvalidSendAuthority);
                 }
@@ -804,6 +825,40 @@ pub struct GmailWebDraftHandoffInput {
     pub draft: LocalDraftDocument,
 }
 
+/// Exact, separately confirmed send of a previously read-back-verified Gmail
+/// compose surface. The fresh field references are used only for a final
+/// read-only equality check immediately before activating the reviewed Send
+/// control.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct GmailWebExactSendInput {
+    pub schema_version: u16,
+    pub handoff: CommunicationDraftHandoff,
+    pub page: BrowserPageRef,
+    pub to_field: BrowserElementRef,
+    pub subject_field: BrowserElementRef,
+    pub body_field: BrowserElementRef,
+    pub send_control: BrowserElementRef,
+    pub draft: LocalDraftDocument,
+}
+
+/// Exact, separately confirmed send of a previously read-back-verified Slack
+/// composer. Slack attachments are intentionally unsupported in this slice.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct SlackWebExactSendInput {
+    pub schema_version: u16,
+    pub handoff: CommunicationDraftHandoff,
+    pub page: BrowserPageRef,
+    pub composer: BrowserElementRef,
+    pub send_control: BrowserElementRef,
+    pub body_plain_text: String,
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
@@ -887,6 +942,107 @@ impl GmailWebDraftHandoffInput {
             return Err(CommunicationContractError::RecipientRoleMismatch);
         }
         Ok(())
+    }
+}
+
+fn validate_exact_send_handoff(
+    handoff: &CommunicationDraftHandoff,
+    page: &BrowserPageRef,
+    channel: CommunicationChannel,
+    host: &str,
+) -> Result<(), CommunicationContractError> {
+    handoff.validate()?;
+    page.validate()
+        .map_err(|_| CommunicationContractError::InvalidSurfaceScope)?;
+    if handoff.send_authority != CommunicationSendAuthority::ExactGrantEligible
+        || handoff.surface.channel != channel
+        || page.origin.kind != BrowserOriginKind::Https
+        || page.origin.host_ascii != host
+        || page.origin.port != 443
+        || handoff.surface.device_id != page.adapter.device_id
+        || handoff.surface.os_session_id != page.adapter.os_session_id
+        || handoff.surface.profile_id != page.adapter.profile_incarnation
+        || handoff.surface.revision != page.adapter.connection_revision
+        || page.observed_at_unix_ms <= handoff.handed_off_at_unix_ms
+        || handoff.surface.scope
+            != (CommunicationSurfaceScope::WebOrigin {
+                origin: page.origin.clone(),
+            })
+    {
+        return Err(CommunicationContractError::InvalidSendAuthority);
+    }
+    Ok(())
+}
+
+impl GmailWebExactSendInput {
+    pub fn validate_shape(&self) -> Result<(), CommunicationContractError> {
+        validate_schema(self.schema_version)?;
+        validate_exact_send_handoff(
+            &self.handoff,
+            &self.page,
+            CommunicationChannel::Email,
+            GMAIL_WEB_HOST,
+        )?;
+        self.draft.validate()?;
+        if self.draft.recipients.len() != 1 || self.draft.recipients[0].role != RecipientRole::To {
+            return Err(CommunicationContractError::InvalidRecipientCount);
+        }
+        let fields = [
+            &self.to_field,
+            &self.subject_field,
+            &self.body_field,
+            &self.send_control,
+        ];
+        let mut element_ids = BTreeSet::new();
+        for field in fields {
+            field
+                .validate_for_page(&self.page)
+                .map_err(|_| CommunicationContractError::InvalidSurfaceScope)?;
+            if !element_ids.insert(field.element_id.as_str()) {
+                return Err(CommunicationContractError::DuplicateItem(
+                    "gmail_web_send.fields",
+                ));
+            }
+        }
+        if !matches!(
+            self.to_field.role,
+            BrowserElementRole::Textbox | BrowserElementRole::Combobox
+        ) || self.subject_field.role != BrowserElementRole::Textbox
+            || self.body_field.role != BrowserElementRole::Textbox
+            || self.send_control.role != BrowserElementRole::Button
+        {
+            return Err(CommunicationContractError::RecipientRoleMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl SlackWebExactSendInput {
+    pub fn validate_shape(&self) -> Result<(), CommunicationContractError> {
+        validate_schema(self.schema_version)?;
+        validate_exact_send_handoff(
+            &self.handoff,
+            &self.page,
+            CommunicationChannel::Chat,
+            SLACK_WEB_HOST,
+        )?;
+        self.composer
+            .validate_for_page(&self.page)
+            .map_err(|_| CommunicationContractError::InvalidSurfaceScope)?;
+        self.send_control
+            .validate_for_page(&self.page)
+            .map_err(|_| CommunicationContractError::InvalidSurfaceScope)?;
+        if self.composer.element_id == self.send_control.element_id
+            || self.composer.role != BrowserElementRole::Textbox
+            || self.send_control.role != BrowserElementRole::Button
+        {
+            return Err(CommunicationContractError::RecipientRoleMismatch);
+        }
+        validate_plain_text_body(
+            "slack.body_plain_text",
+            &self.body_plain_text,
+            MAX_LOCAL_DRAFT_BODY_BYTES,
+        )
     }
 }
 
@@ -996,6 +1152,19 @@ pub enum SendOutcome {
 }
 
 #[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SendReceiptEvidence {
+    /// The reviewed provider UI exposed its positive sent acknowledgement.
+    ProviderUiAcknowledgement,
+    /// All final preconditions were checked and no activation was performed.
+    PreconditionRejectedBeforeActivation,
+    /// Activation occurred, but a bounded wait produced no conclusive receipt.
+    ReceiptNotObservedAfterActivation,
+}
+
+#[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 #[serde(deny_unknown_fields)]
@@ -1005,7 +1174,10 @@ pub struct SendReceipt {
     pub snapshot_sha256: String,
     pub idempotency_key: String,
     pub outcome: SendOutcome,
-    pub remote_message_id: Option<String>,
+    /// Opaque receipt identity derived from the reviewed provider UI. It is not
+    /// an email address, message body, cookie, token, or provider credential.
+    pub provider_receipt_id: Option<String>,
+    pub evidence: SendReceiptEvidence,
     pub observed_at_unix_ms: u64,
 }
 
@@ -1021,15 +1193,29 @@ impl SendReceipt {
         match self.outcome {
             SendOutcome::Sent => {
                 validate_id(
-                    "remote_message_id",
-                    self.remote_message_id
+                    "provider_receipt_id",
+                    self.provider_receipt_id
                         .as_deref()
                         .ok_or(CommunicationContractError::MissingRemoteMessageId)?,
                 )?;
+                if self.evidence != SendReceiptEvidence::ProviderUiAcknowledgement {
+                    return Err(CommunicationContractError::InvalidSendReceiptEvidence);
+                }
             }
-            SendOutcome::DefinitelyNotSent | SendOutcome::OutcomeUnknown => {
-                if self.remote_message_id.is_some() {
+            SendOutcome::DefinitelyNotSent => {
+                if self.provider_receipt_id.is_some() {
                     return Err(CommunicationContractError::UnexpectedRemoteMessageId);
+                }
+                if self.evidence != SendReceiptEvidence::PreconditionRejectedBeforeActivation {
+                    return Err(CommunicationContractError::InvalidSendReceiptEvidence);
+                }
+            }
+            SendOutcome::OutcomeUnknown => {
+                if self.provider_receipt_id.is_some() {
+                    return Err(CommunicationContractError::UnexpectedRemoteMessageId);
+                }
+                if self.evidence != SendReceiptEvidence::ReceiptNotObservedAfterActivation {
+                    return Err(CommunicationContractError::InvalidSendReceiptEvidence);
                 }
             }
         }
@@ -1069,6 +1255,7 @@ pub enum CommunicationContractError {
     InvalidSendAuthority,
     MissingRemoteMessageId,
     UnexpectedRemoteMessageId,
+    InvalidSendReceiptEvidence,
 }
 
 impl fmt::Display for CommunicationContractError {
@@ -1142,6 +1329,9 @@ impl fmt::Display for CommunicationContractError {
             }
             Self::UnexpectedRemoteMessageId => {
                 formatter.write_str("non-sent receipt cannot contain a remote message id")
+            }
+            Self::InvalidSendReceiptEvidence => {
+                formatter.write_str("send receipt evidence does not match its outcome")
             }
         }
     }
@@ -1477,15 +1667,48 @@ mod tests {
             snapshot_sha256: digest('c'),
             idempotency_key: "send:snapshot-1".into(),
             outcome: SendOutcome::OutcomeUnknown,
-            remote_message_id: None,
+            provider_receipt_id: None,
+            evidence: SendReceiptEvidence::ReceiptNotObservedAfterActivation,
             observed_at_unix_ms: 42,
         };
         receipt.validate().unwrap();
-        receipt.remote_message_id = Some("invented".into());
+        receipt.provider_receipt_id = Some("invented".into());
         assert_eq!(
             receipt.validate(),
             Err(CommunicationContractError::UnexpectedRemoteMessageId)
         );
+
+        receipt.provider_receipt_id = None;
+        receipt.evidence = SendReceiptEvidence::ProviderUiAcknowledgement;
+        assert_eq!(
+            receipt.validate(),
+            Err(CommunicationContractError::InvalidSendReceiptEvidence)
+        );
+    }
+
+    #[test]
+    fn receipt_requires_outcome_specific_evidence() {
+        let mut receipt = SendReceipt {
+            schema_version: COMMUNICATION_SCHEMA_VERSION,
+            snapshot_id: "snapshot-1".into(),
+            snapshot_sha256: digest('c'),
+            idempotency_key: "send:snapshot-1".into(),
+            outcome: SendOutcome::Sent,
+            provider_receipt_id: Some("provider-ui-receipt".into()),
+            evidence: SendReceiptEvidence::ProviderUiAcknowledgement,
+            observed_at_unix_ms: 42,
+        };
+        receipt.validate().unwrap();
+
+        receipt.evidence = SendReceiptEvidence::ReceiptNotObservedAfterActivation;
+        assert_eq!(
+            receipt.validate(),
+            Err(CommunicationContractError::InvalidSendReceiptEvidence)
+        );
+        receipt.outcome = SendOutcome::DefinitelyNotSent;
+        receipt.provider_receipt_id = None;
+        receipt.evidence = SendReceiptEvidence::PreconditionRejectedBeforeActivation;
+        receipt.validate().unwrap();
     }
 
     #[test]
@@ -1584,6 +1807,7 @@ mod tests {
             verification: CommunicationPrepareVerification::SemanticExact,
             readback_payload_sha256: Some(digest('d')),
             send_authority: CommunicationSendAuthority::ManualOnly,
+            send_payload_snapshot: None,
             handed_off_at_unix_ms: 42,
         };
         handoff.validate().unwrap();

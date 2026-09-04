@@ -8,17 +8,24 @@ import type {
     PermissionDecisionBody,
     PermissionRequestDto,
 } from '@/services/types';
-import type { DeviceAssistantEvent } from './device-assistant-event';
+import { deskErrorCodeEnum } from '@/services/types';
+import type { DeviceAssistantEvent, DeviceAssistantVisualEvidence } from './device-assistant-event';
 import {
     SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT,
     SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_OBJECT_CONTEXT_UPDATED,
+    SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_SESSION_SELECTED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
+    SIGNALING_TYPE_CODE_SELECT_DEVICE_ASSISTANT_SESSION,
     SIGNALING_TYPE_CODE_UPDATE_DEVICE_ASSISTANT_CONTEXT,
     SIGNALING_TYPE_CODE_UPDATE_DEVICE_ASSISTANT_OBJECT_CONTEXT,
 } from './constants';
 import type { SignalingMessage, SignalingSubscriber } from './use-desk-signaling';
+import {
+    parseSessionTargetList,
+    type SessionTargetDescriptor,
+} from './session-target-selection';
 
 const PREVIEW_TOOL = 'preview_computer_action';
 
@@ -49,6 +56,13 @@ export type DeviceAssistantContextAttachment = {
     staleReason?: string;
 };
 
+export type DeviceAssistantWindowRef = {
+    token: string;
+    snapshot_id: string;
+    object_kind: 'window';
+    expires_at: string;
+};
+
 export type ComputerActionDraftPreview = {
     schema_version: number;
     adapter: { kind: string; version: string };
@@ -66,6 +80,7 @@ export type ComputerActionDraftPreview = {
 
 type Props = {
     deskId: string;
+    connected?: boolean;
     /// Stable device identity for browser-side conversation intent. The OSS
     /// connection id changes after a server restart, while client_id does not.
     conversationStorageScope?: string;
@@ -100,6 +115,18 @@ function upsertTool(
     const index = tools.findIndex((tool) => tool.callId === next.callId);
     if (index === -1) return [...tools, next];
     return tools.map((tool, current) => current === index ? next : tool);
+}
+
+function upsertVisualEvidence(
+    current: DeviceAssistantVisualEvidence[],
+    next: DeviceAssistantVisualEvidence,
+) {
+    const existing = current.find((item) => item.evidence_id === next.evidence_id);
+    const merged = existing?.preview_data_url && !next.preview_data_url
+        ? { ...next, status: existing.status, preview_data_url: existing.preview_data_url }
+        : next;
+    const without = current.filter((item) => item.evidence_id !== next.evidence_id);
+    return [...without, merged].slice(-32);
 }
 
 type PersistedToolCall = {
@@ -149,7 +176,13 @@ type PersistedSnapshot = {
     capabilityGrants?: CapabilityGrantDto[];
     unresolvedOutcome?: DeviceAssistantUnknownOutcome | null;
     messages: PersistedSnapshotMessage[];
+    messagePage?: {
+        hasMore: boolean;
+        nextBeforeMessageId?: string | null;
+        limit: number;
+    };
     contextAttachments?: DeviceAssistantContextAttachment[];
+    visualEvidence?: DeviceAssistantVisualEvidence[];
 };
 
 function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
@@ -214,10 +247,12 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
 
 export function useDeviceAssistantChat({
     deskId,
+    connected,
     conversationStorageScope = deskId,
     subscribe,
     sendMessage,
 }: Props) {
+    const targetSelectionEnabled = connected !== undefined;
     const [messages, setMessages] = useState<DeviceAssistantMessage[]>([]);
     const [tools, setTools] = useState<DeviceAssistantToolActivity[]>([]);
     const [draft, setDraft] = useState<ComputerActionDraftPreview | null>(null);
@@ -239,6 +274,16 @@ export function useDeviceAssistantChat({
     const [permissionUpdating, setPermissionUpdating] = useState(false);
     const [grantRevoking, setGrantRevoking] = useState<string | null>(null);
     const [pendingInputCount, setPendingInputCount] = useState(0);
+    const [messagePage, setMessagePage] = useState<{
+        hasMore: boolean;
+        nextBeforeMessageId: string | null;
+    }>({ hasMore: false, nextBeforeMessageId: null });
+    const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+    const [visualEvidence, setVisualEvidence] = useState<DeviceAssistantVisualEvidence[]>([]);
+    const [sessionTarget, setSessionTarget] = useState<SessionTargetDescriptor | null>(null);
+    const [sessionTargets, setSessionTargets] = useState<SessionTargetDescriptor[]>([]);
+    const [sessionTargetReady, setSessionTargetReady] = useState(!targetSelectionEnabled);
+    const [sessionTargetResolving, setSessionTargetResolving] = useState(false);
     const activeRequest = useRef<string | null>(null);
     const contextRequest = useRef<string | null>(null);
     const contextTimer = useRef<number | null>(null);
@@ -253,6 +298,32 @@ export function useDeviceAssistantChat({
     } | null>(null);
     const lastSeq = useRef(-1);
     const previewArgs = useRef(new Map<string, string>());
+    const sessionTargetRequest = useRef<string | null>(null);
+
+    const selectSessionTarget = useCallback((targetId?: string) => {
+        if (!targetSelectionEnabled || !connected || sessionTargetRequest.current) return false;
+        setSessionTargetResolving(true);
+        setError(null);
+        sessionTargetRequest.current = sendMessage(
+            SIGNALING_TYPE_CODE_SELECT_DEVICE_ASSISTANT_SESSION,
+            targetId ? { session_target_id: targetId } : {},
+            deskId,
+        );
+        return true;
+    }, [connected, deskId, sendMessage, targetSelectionEnabled]);
+
+    useEffect(() => {
+        if (!targetSelectionEnabled) return;
+        if (!connected) {
+            sessionTargetRequest.current = null;
+            setSessionTarget(null);
+            setSessionTargets([]);
+            setSessionTargetReady(false);
+            setSessionTargetResolving(false);
+            return;
+        }
+        selectSessionTarget();
+    }, [connected, selectSessionTarget, targetSelectionEnabled]);
 
     const loadSnapshot = useCallback(async (
         expectedConversationId: string,
@@ -309,6 +380,19 @@ export function useDeviceAssistantChat({
             setCapabilityGrants(projected.capabilityGrants);
             setUnresolvedOutcome(projected.unresolvedOutcome);
             setPendingInputCount(projected.pendingInputCount);
+            setMessagePage({
+                hasMore: Boolean(snapshot.messagePage?.hasMore),
+                nextBeforeMessageId: snapshot.messagePage?.nextBeforeMessageId ?? null,
+            });
+            setVisualEvidence((current) => (snapshot.visualEvidence ?? []).reduce(
+                (items, next) => upsertVisualEvidence(items, next),
+                [] as DeviceAssistantVisualEvidence[],
+            ).map((next) => {
+                const live = current.find((item) => item.evidence_id === next.evidence_id);
+                return live?.preview_data_url && !next.preview_data_url
+                    ? { ...next, status: live.status, preview_data_url: live.preview_data_url }
+                    : next;
+            }));
             setRemoteActive(Boolean(snapshot.active));
             if (!activeRequest.current) {
                 setMessages(projected.messages);
@@ -355,6 +439,49 @@ export function useDeviceAssistantChat({
         }
     }, [deskId]);
 
+    const loadOlderMessages = useCallback(async () => {
+        const cursor = messagePage.nextBeforeMessageId;
+        const expectedConversationId = conversationId.current;
+        const watermark = snapshotWatermark.current;
+        if (!messagePage.hasMore || !cursor || !expectedConversationId || !watermark || loadingOlderMessages) {
+            return;
+        }
+        setLoadingOlderMessages(true);
+        try {
+            const response = await fetch(
+                `/api/my/device-assistant-session?connection=${encodeURIComponent(deskId)}`
+                + `&conversation=${encodeURIComponent(expectedConversationId)}`
+                + `&message_before=${encodeURIComponent(cursor)}&message_limit=100`,
+                { credentials: 'include', headers: { Accept: 'application/json' } },
+            );
+            const body = response.ok ? await response.json() : null;
+            const snapshot = body?.data as PersistedSnapshot | undefined;
+            if (
+                !snapshot
+                || conversationId.current !== expectedConversationId
+                || snapshot.sessionId !== watermark.sessionId
+                || snapshot.seq !== watermark.seq
+                || !Array.isArray(snapshot.messages)
+            ) return;
+            const projected = projectPersistedSnapshot(snapshot);
+            setMessages((current) => {
+                const olderIds = new Set(projected.messages.map((message) => message.id));
+                return [...projected.messages, ...current.filter((message) => !olderIds.has(message.id))];
+            });
+            setTools((current) => {
+                let merged = projected.tools;
+                for (const tool of current) merged = upsertTool(merged, tool);
+                return merged;
+            });
+            setMessagePage({
+                hasMore: Boolean(snapshot.messagePage?.hasMore),
+                nextBeforeMessageId: snapshot.messagePage?.nextBeforeMessageId ?? null,
+            });
+        } finally {
+            setLoadingOlderMessages(false);
+        }
+    }, [deskId, loadingOlderMessages, messagePage]);
+
     useEffect(() => {
         let stored: string | null = null;
         try {
@@ -372,6 +499,7 @@ export function useDeviceAssistantChat({
         setStatus('idle');
         setError(null);
         setAttachments([]);
+        setVisualEvidence([]);
         setRemoteActive(false);
         activeRequest.current = null;
         contextRequest.current = null;
@@ -387,6 +515,8 @@ export function useDeviceAssistantChat({
         setPermissionUpdating(false);
         setGrantRevoking(null);
         setPendingInputCount(0);
+        setMessagePage({ hasMore: false, nextBeforeMessageId: null });
+        setLoadingOlderMessages(false);
         lastSeq.current = -1;
         previewArgs.current.clear();
         if (!stored) return;
@@ -432,6 +562,7 @@ export function useDeviceAssistantChat({
             setPartial('');
             setError(null);
             setAttachments([]);
+            setVisualEvidence([]);
             setRemoteActive(false);
             setStatus('idle');
             if (event.newValue) void loadSnapshot(event.newValue, true);
@@ -445,6 +576,32 @@ export function useDeviceAssistantChat({
     }, []);
 
     useEffect(() => subscribe((message: SignalingMessage) => {
+        if (
+            message.signaling_type === SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_SESSION_SELECTED
+            && sessionTargetRequest.current
+            && message.request_id === sessionTargetRequest.current
+        ) {
+            sessionTargetRequest.current = null;
+            setSessionTargetResolving(false);
+            const errorCode = message.response_state?.error_code;
+            if (errorCode !== deskErrorCodeEnum.SUCCESS) {
+                const list = parseSessionTargetList(message.signaling_data);
+                setSessionTarget(null);
+                setSessionTargetReady(false);
+                setSessionTargets(list?.targets.filter((target) => target.assistant_ready) ?? []);
+                if (!list?.targets.length) {
+                    setError(message.response_state?.message ?? 'No Device Assistant desktop session is available.');
+                }
+                return;
+            }
+            const selected = message.signaling_data as {
+                target?: SessionTargetDescriptor | null;
+            } | null;
+            setSessionTarget(selected?.target ?? null);
+            setSessionTargets([]);
+            setSessionTargetReady(true);
+            return;
+        }
         if (
             (
                 message.signaling_type === SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_CONTEXT_UPDATED
@@ -513,6 +670,11 @@ export function useDeviceAssistantChat({
                 }
                 break;
             }
+            case 'visual_evidence':
+                if (event.visual_evidence) {
+                    setVisualEvidence((current) => upsertVisualEvidence(current, event.visual_evidence!));
+                }
+                break;
             case 'answer':
                 setMessages((current) => [...current, {
                     id: `assistant-${event.seq}`,
@@ -615,6 +777,34 @@ export function useDeviceAssistantChat({
         return true;
     }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage]);
 
+    const attachWindow = useCallback((objectRef: DeviceAssistantWindowRef, displaySummary: string) => {
+        if (activeRequest.current || remoteActive || contextRequest.current) return false;
+        const currentConversationId = ensureConversation();
+        setContextUpdating(true);
+        setError(null);
+        contextRequest.current = sendMessage(
+            SIGNALING_TYPE_CODE_UPDATE_DEVICE_ASSISTANT_OBJECT_CONTEXT,
+            {
+                conversation_id: currentConversationId,
+                client_request_id: v4(),
+                operation: {
+                    kind: 'attach_window',
+                    object_ref: objectRef,
+                    display_summary: displaySummary,
+                },
+            },
+            deskId,
+        );
+        contextTimer.current = window.setTimeout(() => {
+            contextTimer.current = null;
+            contextRequest.current = null;
+            setContextUpdating(false);
+            setError('Device Assistant window attachment timed out.');
+            if (conversationId.current) void loadSnapshot(conversationId.current);
+        }, 10_000);
+        return true;
+    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage]);
+
     const start = useCallback((
         question: string,
         locale?: string,
@@ -624,7 +814,7 @@ export function useDeviceAssistantChat({
         // A follow-up is durable input, not a second foreground workflow. Replace
         // the locally observed request stream with the newest request; the server
         // supersedes the older model turn under its input-revision fence.
-        if (!trimmed || contextRequest.current) return false;
+        if (!trimmed || contextRequest.current || !sessionTargetReady) return false;
         ensureConversation();
         const clientMessageId = `user-${v4()}`;
         setMessages((current) => [...current, {
@@ -655,7 +845,7 @@ export function useDeviceAssistantChat({
             deskId,
         );
         return true;
-    }, [attachments, deskId, ensureConversation, sendMessage]);
+    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady]);
 
     const submitPermissionDecision = useCallback(async (
         request: PermissionRequestDto,
@@ -807,6 +997,7 @@ export function useDeviceAssistantChat({
         setStatus('idle');
         setError(null);
         setAttachments([]);
+        setVisualEvidence([]);
         setRemoteActive(false);
         setContextUpdating(false);
         setTaskStatusProjection(null);
@@ -833,6 +1024,7 @@ export function useDeviceAssistantChat({
         status,
         error,
         attachments,
+        visualEvidence,
         hydrating,
         contextUpdating,
         taskStatusProjection,
@@ -844,14 +1036,23 @@ export function useDeviceAssistantChat({
         permissionUpdating,
         grantRevoking,
         pendingInputCount,
+        hasMoreMessages: messagePage.hasMore,
+        loadingOlderMessages,
+        sessionTarget,
+        sessionTargets,
+        sessionTargetReady,
+        sessionTargetResolving,
         running: activeRequest.current !== null || remoteActive || contextUpdating || permissionUpdating || outcomeDisposing,
         start,
         updateContext,
+        attachWindow,
         detachAttachment,
         decidePermission,
         decidePermissionItems,
         revokeCapabilityGrant,
         disposeUnknownOutcome,
+        loadOlderMessages,
+        selectSessionTarget,
         reset,
     };
 }

@@ -193,6 +193,7 @@ async fn outlook_projection_preserves_assistive_manual_only_handoff_and_original
         verification: CommunicationPrepareVerification::AssistiveUnverified,
         readback_payload_sha256: None,
         send_authority: CommunicationSendAuthority::ManualOnly,
+        send_payload_snapshot: None,
         handed_off_at_unix_ms: 1000,
     };
     plan.adapter.kind = ComputerUseAdapterKind::OutlookNewMailto;
@@ -344,6 +345,7 @@ async fn gmail_and_slack_projection_require_exact_readback_and_never_enable_send
                 captured_at_unix_ms: 1001,
             }),
             form_readback: readback,
+            send_receipt: None,
             completed_at_unix_ms: 1002,
         };
         let native = ComputerActionCompleted {

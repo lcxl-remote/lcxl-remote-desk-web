@@ -54,6 +54,23 @@ pub(super) async fn handle_edge_exec_request_inbound(
             return Ok(());
         }
     };
+    if matches!(&payload, EdgeExecRequestPayload::Agentic { .. })
+        && !ctx.settings.read().await.device_assistant.enabled
+    {
+        send_edge_execution_completed(
+            &ctx.outbound_tx,
+            &request_id,
+            EdgeExecDisposition::RejectedBeforeDispatch {
+                error: agent_error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "Device Assistant is disabled on this device",
+                    false,
+                    true,
+                ),
+            },
+        );
+        return Ok(());
+    }
 
     let carrier_id = payload.carrier_id().map(str::to_string);
     let carrier_shape_valid = match &payload {
@@ -720,6 +737,19 @@ pub(super) async fn handle_invoke_agent_capability_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
+    if !ctx.settings.read().await.device_assistant.enabled {
+        emit_agent_error(
+            ctx,
+            model,
+            agent_error(
+                AgentErrorKind::UnsupportedCapability,
+                "Device Assistant is disabled on this device",
+                false,
+                true,
+            ),
+        );
+        return Ok(());
+    }
     // The AI read collectors expose host data beyond the remote view, so what
     // may leave this host is gated locally by the fail-closed collection policy
     // (`allow_logs` / `allow_screen`) and centrally by the authorization scope
@@ -898,6 +928,14 @@ pub(super) async fn handle_computer_action_inbound(
     let reject = |ctx: &RouterContext, model: &SignalingModel, message: String| {
         emit_computer_action_rejected(ctx, model, &message);
     };
+    if !ctx.settings.read().await.device_assistant.enabled {
+        reject(
+            ctx,
+            model,
+            "Device Assistant is disabled on this device".into(),
+        );
+        return Ok(());
+    }
     let Some(authz) = ctx.inbound_authz.as_ref() else {
         reject(
             ctx,

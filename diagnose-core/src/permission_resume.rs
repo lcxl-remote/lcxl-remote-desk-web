@@ -166,5 +166,34 @@ pub fn bind_exact_authorization_system_message(
     Ok(message)
 }
 
+/// Rebind a server-owned exact-authorization projection after the runtime has
+/// appended other server-owned prompt material (for example progressive
+/// capability disclosure). The existing envelope supplies the already-pinned
+/// destination and expiry; arbitrary messages cannot use this path to mint a
+/// new export authority.
+pub fn rebind_exact_authorization_system_message(
+    mut message: ChatMessage,
+) -> Result<ChatMessage, AgentError> {
+    let denied = || AgentError {
+        kind: AgentErrorKind::Internal,
+        message: "invalid exact-authorization projection rebind".into(),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    };
+    let envelope = message.data_envelope.as_ref().ok_or_else(denied)?;
+    if message.role != ChatRole::System
+        || envelope.provenance.source_provider_id != "assistant-runtime-control"
+        || envelope.provenance.source_tool_name != "capability-authorization"
+        || envelope.allowed_destinations.len() != 1
+    {
+        return Err(denied());
+    }
+    let destination = envelope.allowed_destinations[0].clone();
+    let expires_at_unix_ms = envelope.retention.expires_at_unix_ms.ok_or_else(denied)?;
+    message.data_envelope = None;
+    bind_exact_authorization_system_message(message, destination, expires_at_unix_ms)
+}
+
 #[cfg(test)]
 mod tests;

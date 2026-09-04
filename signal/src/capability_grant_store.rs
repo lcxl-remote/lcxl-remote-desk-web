@@ -1549,6 +1549,7 @@ mod tests {
             grant_id: "grant-1".into(),
             actor_id: "actor-1".into(),
             run_id: "run-1".into(),
+            input_revision: 1,
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: "device-1".into(),
             target_session_id: Some("session-1".into()),
@@ -1672,6 +1673,7 @@ mod tests {
             call: CapabilityGrantCall {
                 actor_id: "actor-1",
                 run_id: "run-1",
+                input_revision: 1,
                 surface: ProductSurface::OssPersonalOwner,
                 target_device_id: "device-1",
                 target_session_id: Some("session-1"),

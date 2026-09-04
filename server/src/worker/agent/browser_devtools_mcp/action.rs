@@ -1,5 +1,6 @@
 use desk_agent_protocol::browser_control::{
-    BrowserAction, BrowserActionOutcome, BrowserControlContractError, BrowserWaitState,
+    BrowserAction, BrowserActionOutcome, BrowserActivationClass, BrowserControlContractError,
+    BrowserWaitState,
 };
 use std::path::Path;
 
@@ -21,6 +22,7 @@ pub(super) enum ChromeMcpActionError {
     InvalidPageId,
     UnsupportedWaitState,
     MissingMaterializedUpload,
+    ExactSendRequiresExtension,
 }
 
 pub(super) fn plan_action(
@@ -119,6 +121,10 @@ pub(super) fn plan_action(
         BrowserAction::UploadFile { .. } => {
             return Err(ChromeMcpActionError::MissingMaterializedUpload);
         }
+        BrowserAction::ActivateElement {
+            activation_class: BrowserActivationClass::SendExternal { .. },
+            ..
+        } => return Err(ChromeMcpActionError::ExactSendRequiresExtension),
         BrowserAction::ActivateElement { page, element, .. } => (
             AllowedChromeMcpTool::Click,
             map([

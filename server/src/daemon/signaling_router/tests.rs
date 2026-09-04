@@ -32,8 +32,11 @@ impl serde::Serialize for ChangeDisplaySettingsPayload {
 
 async fn make_ctx() -> RouterContext {
     let (outbound_tx, _) = broadcast::channel::<String>(16);
-    let shared =
-        crate::model::settings::SharedSettings::from(crate::model::settings::Settings::default());
+    let mut initial_settings = crate::model::settings::Settings::default();
+    // Most router tests exercise the capability beneath the product gate. Tests
+    // for the gate itself explicitly turn this back off.
+    initial_settings.device_assistant.enabled = true;
+    let shared = crate::model::settings::SharedSettings::from(initial_settings);
     let settings = web::Data::new(shared);
     let settings_coordinator = Arc::new(
         crate::model::settings_coordinator::SettingsCoordinator::from_settings(
@@ -76,6 +79,7 @@ async fn make_ctx() -> RouterContext {
         exec_pty_link: None,
         outbound_tx,
         settings,
+        settings_coordinator: Arc::clone(&settings_coordinator),
         policy: crate::model::policy_access::PolicyAccess::authoritative(Arc::clone(
             &settings_coordinator,
         )),

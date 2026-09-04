@@ -57,6 +57,10 @@ pub fn build_object_context_mutation(
         | AttachTerminalOutput {
             object_ref,
             display_summary,
+        }
+        | AttachWindow {
+            object_ref,
+            display_summary,
         } => Ok(ObjectContextMutation::Attach(build_attachment(
             update,
             object_ref,
@@ -113,6 +117,14 @@ fn build_attachment(
             "inspect_selected_terminal_output",
             32 * 1024,
             8,
+        ),
+        ObjectKind::Window => (
+            ContextAttachmentKind::WindowSelection,
+            CURRENT_SCREEN_PROVIDER_ID,
+            CURRENT_SCREEN_CAPABILITY_ID,
+            "read_current_screen",
+            CURRENT_SCREEN_MAX_OUTPUT_BYTES,
+            1,
         ),
         _ => return Err(invalid()),
     };
@@ -197,6 +209,27 @@ pub fn apply_object_mutation(
                     && existing.object_ref == attachment.object_ref
             }) {
                 return Ok(false);
+            }
+            // A window is a single current-screen focus, not an accumulating
+            // collection. Selecting another owner-issued WindowRef atomically
+            // stales the previous ref and carries the focus selection forward.
+            if attachment.kind == ContextAttachmentKind::WindowSelection
+                && let Some(previous_id) = session
+                    .context_attachments
+                    .iter()
+                    .find(|existing| {
+                        existing.kind == ContextAttachmentKind::WindowSelection
+                            && matches!(existing.state, AttachmentState::Active)
+                    })
+                    .map(|existing| existing.attachment_id.clone())
+            {
+                return session
+                    .refresh_context(
+                        &previous_id,
+                        AttachmentStaleReason::ObjectChanged,
+                        attachment.clone(),
+                    )
+                    .map_err(|_| invalid());
             }
             session
                 .attach_context(attachment.clone())

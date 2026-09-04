@@ -66,7 +66,8 @@ use desk_signal_facade::model::remote_session::{
 };
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{
-    OfferModel, RemoteSessionPurpose, RequestRemoteModel, SessionTargetListData, SignalingModel,
+    DeviceAssistantSessionSelectedData, OfferModel, RemoteSessionPurpose, RequestRemoteModel,
+    SelectDeviceAssistantSessionData, SessionTargetListData, SignalingModel,
     SignalingResponseState, SignalingType,
 };
 use desk_signal_facade::model::terminal::{
@@ -343,7 +344,10 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::UpdateDeviceAssistantContext
         | SignalingType::UpdateDeviceAssistantObjectContext
         | SignalingType::DeviceAssistantContextUpdated
-        | SignalingType::DeviceAssistantObjectContextUpdated => RouteOwnership::Daemon,
+        | SignalingType::DeviceAssistantObjectContextUpdated
+        | SignalingType::UpdateDeviceAssistantSettings
+        | SignalingType::SelectDeviceAssistantSession
+        | SignalingType::DeviceAssistantSessionSelected => RouteOwnership::Daemon,
 
         // Connection-list bookkeeping is daemon state too — the
         // daemon knows about every active PC, the worker only knows
@@ -445,6 +449,7 @@ pub struct RouterContext {
     pub exec_pty_link: Option<crate::daemon::exec_pty_carrier::ExecPtyLinkContext>,
     pub outbound_tx: broadcast::Sender<String>,
     pub settings: web::Data<SharedSettings>,
+    pub settings_coordinator: Arc<crate::model::settings_coordinator::SettingsCoordinator>,
     /// What the daemon-side permission gates read. Backed by the host's
     /// settings coordinator, so a gate and a settings update can never disagree
     /// about the policy.
@@ -1301,6 +1306,13 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // RemoteToolResponse is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own stream).
         SignalingType::RemoteToolOutputUpdated => Ok(()),
+        SignalingType::UpdateDeviceAssistantSettings => {
+            handle_device_assistant_settings_update_inbound(ctx, model).await
+        }
+        SignalingType::SelectDeviceAssistantSession => {
+            handle_select_device_assistant_session(ctx, model)
+        }
+        SignalingType::DeviceAssistantSessionSelected => Ok(()),
         // Central-orchestrator-only Device Assistant frames are never executed
         // by the edge. Swallow a stray/legacy-relayed copy fail closed.
         SignalingType::AskDeviceAssistant
@@ -1316,6 +1328,148 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             Ok(())
         }
     }
+}
+
+fn handle_select_device_assistant_session(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let connection_id = model
+        .check_and_get_from_connection_id()
+        .map_err(DeskError::from)?;
+    let selection = model
+        .get_data::<SelectDeviceAssistantSessionData>()
+        .map_err(DeskError::from)?;
+    let capability = crate::daemon::session_target::SessionCapability::Assistant;
+    let selected = match ctx
+        .worker_mgr
+        .resolve_session_target(capability, selection.session_target_id.as_deref())
+    {
+        Ok(selected) => selected,
+        Err(error) => {
+            emit_session_target_error(ctx, model, capability, error);
+            return Ok(());
+        }
+    };
+
+    let data = if let Some(session) = selected {
+        if let Some(existing) = ctx.worker_mgr.connection_target(connection_id)
+            && existing != session
+        {
+            if ctx
+                .worker_mgr
+                .session_targets()
+                .validate_bound_session(capability, &existing)
+                .is_ok()
+            {
+                emit_session_target_error(
+                    ctx,
+                    model,
+                    capability,
+                    crate::daemon::session_target::SessionTargetSelectionError::Stale,
+                );
+                return Ok(());
+            }
+            ctx.worker_mgr.clear_connection_target(connection_id);
+        }
+        if ctx
+            .worker_mgr
+            .bind_connection_target(connection_id, &session)
+            .is_err()
+        {
+            emit_session_target_error(
+                ctx,
+                model,
+                capability,
+                crate::daemon::session_target::SessionTargetSelectionError::Stale,
+            );
+            return Ok(());
+        }
+        let Some((revision, target)) = ctx
+            .worker_mgr
+            .session_targets()
+            .descriptor_for_session(capability, &session)
+        else {
+            ctx.worker_mgr.clear_connection_target(connection_id);
+            emit_session_target_error(
+                ctx,
+                model,
+                capability,
+                crate::daemon::session_target::SessionTargetSelectionError::Stale,
+            );
+            return Ok(());
+        };
+        DeviceAssistantSessionSelectedData {
+            revision,
+            target: Some(target),
+        }
+    } else {
+        // Portable/DeskServer uses one anonymous in-process worker and therefore
+        // has no user-visible target identity to freeze.
+        DeviceAssistantSessionSelectedData {
+            revision: 0,
+            target: None,
+        }
+    };
+
+    if let Ok(reply) = SignalingModel::success_response(
+        &model.request_id,
+        SignalingType::DeviceAssistantSessionSelected,
+        None,
+        model.from_connection_id.clone(),
+        Some(&data),
+    ) && let Ok(text) = serde_json::to_string(&reply)
+    {
+        let _ = ctx.outbound_tx.send(text);
+    }
+    Ok(())
+}
+
+async fn handle_device_assistant_settings_update_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    use crate::model::settings::{
+        DeviceAssistantSettingsUpdate, DeviceAssistantSettingsUpdateError,
+        apply_device_assistant_settings_update,
+    };
+
+    let update = model
+        .get_data::<DeviceAssistantSettingsUpdate>()
+        .map_err(DeskError::from)?;
+    let gate = desk_signal::device_assistant_gate::global_device_assistant_gate();
+    let gate_after_commit = gate.clone();
+    ctx.settings_coordinator
+        .commit_with_effect(
+            move |settings| {
+                settings.device_assistant =
+                    apply_device_assistant_settings_update(settings.device_assistant, update)
+                        .map_err(|error| match error {
+                            DeviceAssistantSettingsUpdateError::RevisionConflict(_) => {
+                                DeskError::new_custom_error(
+                                    DeskErrorCode::REVISION_CONFLICT,
+                                    "Device Assistant settings were modified concurrently",
+                                )
+                            }
+                            DeviceAssistantSettingsUpdateError::RevisionExhausted => {
+                                DeskError::new_custom_error(
+                                    DeskErrorCode::PRECONDITION_FAILED,
+                                    "Device Assistant settings revision is exhausted",
+                                )
+                            }
+                        })?;
+                Ok(())
+            },
+            move |settings| gate_after_commit.replace(settings.device_assistant),
+        )
+        .await?;
+    let current = gate.snapshot();
+    log::info!(
+        "[device-assistant] applied trusted central settings update: revision={}, enabled={}",
+        current.revision,
+        current.enabled
+    );
+    Ok(())
 }
 
 fn is_offer_business_error(code: DeskErrorCode) -> bool {

@@ -12,8 +12,9 @@ use crate::daemon::signaling_proxy::manager_link_should_connect;
 use crate::host_control::{ApprovalResponse, HostControlHub};
 use crate::model::settings::{
     AiExecutionPolicyPublic, AiExecutionPolicyUpdate, CollectionPolicySettings,
-    CollectionPolicySettingsUpdate, LogSettings, Settings, SharedSettings, SystemSettings,
-    TurnClientSettings,
+    CollectionPolicySettingsUpdate, DeviceAssistantSettings, DeviceAssistantSettingsUpdate,
+    DeviceAssistantSettingsUpdateError, LogSettings, Settings, SharedSettings, SystemSettings,
+    TurnClientSettings, apply_device_assistant_settings_update,
 };
 use crate::model::settings_coordinator::SettingsCoordinator;
 use crate::service::auto_start::update_auto_start_status;
@@ -231,6 +232,83 @@ pub async fn update_collection_policy_settings(
         settings.collection_policy
     );
     Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    tag = "AiModel",
+    summary = "Query the authoritative device-owned Device Assistant switch",
+    responses(
+        (status = 200, description = "Current device-owned switch and revision", body=RestResponse<DeviceAssistantSettings>),
+    ),
+)]
+#[get("/settings/device-assistant")]
+pub async fn query_device_assistant_settings(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+        settings.read().await.device_assistant,
+    )))
+}
+
+#[utoipa::path(
+    tag = "AiModel",
+    summary = "Compare-and-set the authoritative device-owned Device Assistant switch",
+    request_body(content = DeviceAssistantSettingsUpdate),
+    responses(
+        (status = 200, description = "Updated snapshot, or REVISION_CONFLICT carrying the current snapshot", body=RestResponse<DeviceAssistantSettings>),
+    ),
+)]
+#[post("/settings/device-assistant")]
+pub async fn update_device_assistant_settings(
+    request_json: web::Json<DeviceAssistantSettingsUpdate>,
+    coordinator: web::Data<SettingsCoordinator>,
+) -> Result<HttpResponse, AWError> {
+    let update = request_json.into_inner();
+    let conflict = Arc::new(std::sync::Mutex::new(None));
+    let conflict_for_commit = conflict.clone();
+    let gate = desk_signal::device_assistant_gate::global_device_assistant_gate();
+    let result = coordinator
+        .commit_with_effect(
+            move |settings| {
+                settings.device_assistant =
+                    match apply_device_assistant_settings_update(settings.device_assistant, update) {
+                        Ok(next) => next,
+                        Err(DeviceAssistantSettingsUpdateError::RevisionConflict(current)) => {
+                            *conflict_for_commit
+                                .lock()
+                                .expect("device assistant conflict snapshot") = Some(current);
+                            return crate::error::DeskError::custom_error(
+                                DeskErrorCode::REVISION_CONFLICT,
+                                "Device Assistant settings were modified concurrently; re-read and retry",
+                            );
+                        }
+                        Err(DeviceAssistantSettingsUpdateError::RevisionExhausted) => {
+                            return crate::error::DeskError::custom_error(
+                                DeskErrorCode::PRECONDITION_FAILED,
+                                "Device Assistant settings revision is exhausted",
+                            );
+                        }
+                    };
+                Ok(())
+            },
+            move |settings| gate.replace(settings.device_assistant),
+        )
+        .await;
+
+    if let Some(current) = *conflict.lock().expect("device assistant conflict snapshot") {
+        return Ok(HttpResponse::Ok().json(RestResponse::failed_with_data(
+            DeskErrorCode::REVISION_CONFLICT,
+            Some("Device Assistant settings were modified concurrently; re-read and retry".into()),
+            Some(current),
+        )));
+    }
+    result?;
+    let current = desk_signal::device_assistant_gate::global_device_assistant_gate().snapshot();
+    info!(
+        "Updated Device Assistant product switch: revision={}, enabled={}",
+        current.revision, current.enabled
+    );
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(current)))
 }
 
 #[utoipa::path(
