@@ -24,6 +24,7 @@ async fn seed(db: DatabaseConnection) -> (SignalAgentSessionStore, Vec<Permissio
         items: ["first", "second"]
             .into_iter()
             .map(|id| GrantRequestItem {
+                command_confirmation: None,
                 item_id: id.into(),
                 provider_id: "desktop.session".into(),
                 tool_name: "inspect_desktop_session".into(),

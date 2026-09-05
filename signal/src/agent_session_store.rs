@@ -154,6 +154,10 @@ impl SignalAgentSessionStore {
             _ => None,
         };
         Ok(Some(SessionSnapshot {
+            context_usage: session
+                .context_usage_basis
+                .as_ref()
+                .and_then(|basis| basis.usage(&session.conversation)),
             client_conversation_id: session.client_conversation_id,
             seq: row.version,
             active: session.turn_state.is_active(),
@@ -837,6 +841,7 @@ pub enum EventAppend {
 
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
+    pub context_usage: Option<desk_diagnose_core::context_usage::ContextUsage>,
     pub client_conversation_id: Option<String>,
     pub seq: i64,
     pub active: bool,
@@ -878,6 +883,10 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         _ => None,
     };
     Ok(SessionSnapshot {
+        context_usage: session
+            .context_usage_basis
+            .as_ref()
+            .and_then(|basis| basis.usage(&session.conversation)),
         client_conversation_id: session.client_conversation_id,
         seq: row.version,
         active: session.turn_state.is_active(),
@@ -1873,6 +1882,7 @@ mod tests {
             input_revision: 1_000,
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
+                command_confirmation: None,
                 item_id: "matrix-read".into(),
                 provider_id: "file.read".into(),
                 tool_name: "read_selected_text_file".into(),
@@ -2181,6 +2191,7 @@ mod tests {
             input_revision: 1,
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
+                command_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
                 tool_name: "inspect_desktop_session".into(),
@@ -2264,6 +2275,7 @@ mod tests {
             input_revision: 1,
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
+                command_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
                 tool_name: "inspect_desktop_session".into(),
@@ -2422,6 +2434,7 @@ mod tests {
             input_revision: 1,
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
+                command_confirmation: None,
                 item_id: "ui-action".into(),
                 provider_id: desk_diagnose_core::device_assistant::DESKTOP_UI_ACTION_PROVIDER_ID
                     .into(),

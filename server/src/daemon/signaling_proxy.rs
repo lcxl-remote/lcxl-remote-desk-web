@@ -716,6 +716,7 @@ pub async fn run_signaling_proxy(
                     | WorkerToService::RemoteAccessStateApplied(_)
                     | WorkerToService::LocaleApplied(_)
                     | WorkerToService::SecurityPolicyApplied(_)
+                    | WorkerToService::ComputerUseApplicationPolicyApplied(_)
             );
             let connection_owned =
                 worker_message
@@ -1271,6 +1272,9 @@ pub async fn run_signaling_proxy(
                     // sequences say, so this converges in one round.
                     settings_coordinator.republish().await;
                 }
+            }
+            WorkerToService::ComputerUseApplicationPolicyApplied(payload) => {
+                worker_mgr.note_application_policy_applied(payload);
             }
             // A user answered a worker-side prompt with "remember this". Only
             // the daemon can store it, and it applies the same staleness rule it

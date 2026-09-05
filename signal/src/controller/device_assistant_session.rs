@@ -94,6 +94,7 @@ pub async fn get_device_assistant_session(
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
                 DeviceAssistantSessionSnapshotDto {
                     session_id,
+                    context_usage: snapshot.context_usage.map(Into::into),
                     seq: snapshot.seq,
                     active: snapshot.active,
                     request_id: snapshot.request_id,
@@ -442,12 +443,27 @@ pub(crate) async fn decide_permission_on(
             &format!("invalid target capability readiness: {error}"),
         )
     })?;
-    let registry = device_assistant_provider_registry();
+    let search_config = crate::web_search_config::read(db).await?;
+    let registry =
+        device_assistant_provider_registry().with_web_search_binding(search_config.binding());
+    let registry = match crate::command_policy::current(
+        db,
+        connection_map.as_ref(),
+        &body.connection,
+        &actor_id,
+    )
+    .await
+    {
+        Ok(policy) => registry.with_command_policy(policy),
+        Err(_) => registry,
+    };
     let inventory = project_capability_availability(
         &registry,
         desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
         now_unix_ms,
-        crate::device_assistant_orchestrator::oss_central_capability_readiness(),
+        crate::device_assistant_orchestrator::oss_central_capability_readiness(
+            search_config.configured(),
+        ),
         reports,
     )
     .map_err(|error| {

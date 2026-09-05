@@ -141,6 +141,7 @@ fn export_denied() -> AgentError {
 }
 
 struct CompletionModel {
+    command_completion: bool,
     inner: crate::assistant_model::MeteredModel,
     run_id: String,
     actor_id: String,
@@ -151,6 +152,10 @@ struct CompletionModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for CompletionModel {
+    fn command_completion_event_id(&self) -> Option<&str> {
+        self.command_completion.then_some(self.event_id.as_str())
+    }
+
     fn model_egress_policy(
         &self,
     ) -> Result<Option<desk_diagnose_core::model_egress::ModelEgressPolicy>, AgentError> {
@@ -205,12 +210,24 @@ impl ModelSeam for CompletionModel {
         }
         let export =
             crate::capability_grant_store::SignalCapabilityGrantStore::new(self.inner.db.clone())
-                .computer_completion_export(&session, &self.event_id, &self.inner.destination)
+                .completion_export(&session, &self.event_id, &self.inner.destination)
                 .await
                 .map_err(|_| export_denied())?;
         if export != self.export {
             return Err(export_denied());
         }
+        let request =
+            if session.pending_auto_triggers.iter().any(|trigger| {
+                trigger.event_id == self.event_id && trigger.kind == WorkKind::AgentExec
+            }) {
+                desk_diagnose_core::command_completion::project_request(
+                    request,
+                    &session,
+                    &self.event_id,
+                )?
+            } else {
+                request
+            };
         let request = self
             .inner
             .model_egress_policy()?
@@ -282,14 +299,15 @@ pub async fn resume_completion_turn(
             .pending_auto_triggers
             .iter()
             .find(|pending| pending.kind == work_kind && pending.chain_id == session.chain_id)
-            .filter(|_| work_kind == WorkKind::ComputerAction)
+            .filter(|_| matches!(work_kind, WorkKind::ComputerAction | WorkKind::AgentExec))
             .ok_or_else(export_denied)?;
         let destination = config.destination_identity().map_err(|_| export_denied())?;
         let export = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
-            .computer_completion_export(&session, &pending.event_id, &destination)
+            .completion_export(&session, &pending.event_id, &destination)
             .await
             .map_err(|_| export_denied())?;
         Box::new(CompletionModel {
+            command_completion: pending.kind == WorkKind::AgentExec,
             inner: crate::assistant_model::MeteredModel {
                 inner: seam,
                 db: db.clone(),
@@ -351,6 +369,7 @@ pub async fn resume_completion_turn(
         permission_continuation_exact_tools: &[],
         response_format: desk_diagnose_core::prompt::ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),
+        response_locale: None,
         max_steps_per_turn: config.max_steps_per_turn.min(AUTO_FOLLOW_UP_MAX_STEPS),
         max_same_tool_per_turn: config
             .max_same_tool_calls_per_turn

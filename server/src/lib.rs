@@ -273,6 +273,10 @@ pub fn configure_api_surface(
                     .service(update_collection_policy_settings)
                     .service(query_device_assistant_settings)
                     .service(update_device_assistant_settings)
+                    .service(controller::computer_use_policy::query_computer_use_application_policy)
+                    .service(
+                        controller::computer_use_policy::update_computer_use_application_policy,
+                    )
                     .service(query_turn_settings)
                     .service(update_turn_settings)
                     .service(query_turn_client_settings)
@@ -339,6 +343,9 @@ pub fn configure_api_surface(
                             .service(update_model_provider)
                             .service(test_model_provider),
                     )
+                    .service(desk_signal::controller::web_search::get_web_search)
+                    .service(desk_signal::controller::web_search::update_web_search)
+                    .service(desk_signal::controller::web_search::test_web_search)
                     // Usage-retention windows govern both rollup tables; the row
                     // lives in the same local signal DB, present whenever the
                     // usage view is.

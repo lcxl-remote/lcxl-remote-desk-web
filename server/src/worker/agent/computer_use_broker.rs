@@ -854,6 +854,14 @@ impl ComputerUseBroker {
         } else {
             self.input_ownership_is_ready()
         };
+        let application_reason = application_readiness_reason(
+            ceiling,
+            observation
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(|desktop| desktop.foreground_application.as_ref())
+                .map(|application| application.image_path.as_str()),
+        );
         let (session_ready, session_reason) = if !ceiling.observation_enabled() {
             (
                 false,
@@ -869,9 +877,7 @@ impl ComputerUseBroker {
                 Some(ComputerUseReadinessReason::NoInteractiveSession),
             )
         };
-        let ui_ready = session_ready
-            && macos_accessibility_ready
-            && !ceiling.allowed_application_paths.is_empty();
+        let ui_ready = session_ready && macos_accessibility_ready && application_reason.is_none();
         let office_configured = super::office_bridge_observer::configured();
         let office_document_ref = (session_ready && ceiling.office_semantic && office_configured)
             .then(super::office_bridge_observer::current_excel_document_hash)
@@ -1178,17 +1184,15 @@ impl ComputerUseBroker {
                     },
                     supported: desktop_provider_supported,
                     ready: ui_ready,
-                    reason: (!ui_ready).then_some(
-                        if !ceiling.observation_enabled()
-                            || ceiling.allowed_application_paths.is_empty()
-                        {
-                            ComputerUseReadinessReason::DisabledByLocalCeiling
-                        } else if !macos_accessibility_ready {
-                            ComputerUseReadinessReason::PermissionMissing
-                        } else {
-                            session_reason.unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
-                        },
-                    ),
+                    reason: (!ui_ready).then_some(if !ceiling.observation_enabled() {
+                        ComputerUseReadinessReason::DisabledByLocalCeiling
+                    } else if !macos_accessibility_ready {
+                        ComputerUseReadinessReason::PermissionMissing
+                    } else {
+                        session_reason
+                            .or(application_reason)
+                            .unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
+                    }),
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DesktopUiActionConfirmed,
@@ -1216,7 +1220,9 @@ impl ComputerUseBroker {
                         } else if !input_ownership_ready {
                             ComputerUseReadinessReason::AdapterUnavailable
                         } else {
-                            session_reason.unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
+                            session_reason
+                                .or(application_reason)
+                                .unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
                         }),
                 },
                 ComputerUseCapabilityReadiness {
@@ -1228,24 +1234,21 @@ impl ComputerUseBroker {
                     supported: raw_input_supported,
                     ready: raw_input_supported
                         && session_ready
+                        && application_reason.is_none()
                         && input_ownership_ready
                         && display_selected
-                        && !ceiling.allowed_application_paths.is_empty()
                         && ceiling.enabled
                         && ceiling.raw_input_fallback,
                     reason: (!(raw_input_supported
                         && session_ready
+                        && application_reason.is_none()
                         && input_ownership_ready
                         && display_selected
-                        && !ceiling.allowed_application_paths.is_empty()
                         && ceiling.enabled
                         && ceiling.raw_input_fallback))
                         .then_some(if !raw_input_supported {
                             ComputerUseReadinessReason::UnsupportedPlatform
-                        } else if !ceiling.enabled
-                            || !ceiling.raw_input_fallback
-                            || ceiling.allowed_application_paths.is_empty()
-                        {
+                        } else if !ceiling.enabled || !ceiling.raw_input_fallback {
                             ComputerUseReadinessReason::DisabledByLocalCeiling
                         } else if !display_selected {
                             ComputerUseReadinessReason::NoDisplaySelected
@@ -1253,6 +1256,7 @@ impl ComputerUseBroker {
                             ComputerUseReadinessReason::AdapterUnavailable
                         } else {
                             session_reason
+                                .or(application_reason)
                                 .unwrap_or(ComputerUseReadinessReason::NoInteractiveSession)
                         }),
                 },
@@ -3088,6 +3092,19 @@ fn iwork_batch_resolved(
     }
 }
 
+fn application_readiness_reason(
+    ceiling: &ComputerUseSettings,
+    foreground_path: Option<&str>,
+) -> Option<ComputerUseReadinessReason> {
+    match foreground_path {
+        None => Some(ComputerUseReadinessReason::AdapterUnavailable),
+        Some(path) if !ceiling.application_allowed(path) => {
+            Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
+        }
+        Some(_) => None,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn split_iwork_readiness(
     result: Result<Option<ObjectRef>, AgentError>,
@@ -3916,6 +3933,73 @@ mod tests {
         };
         let second = broker.readiness(&changed, false, false);
         assert!(second.revision > first.revision);
+    }
+
+    #[test]
+    fn application_readiness_uses_the_same_optional_policy_as_execution() {
+        let path = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut settings = ComputerUseSettings::default();
+        assert_eq!(application_readiness_reason(&settings, Some(&path)), None);
+        assert_eq!(
+            application_readiness_reason(&settings, None),
+            Some(ComputerUseReadinessReason::AdapterUnavailable)
+        );
+        assert_eq!(
+            application_readiness_reason(&settings, Some("")),
+            Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
+        );
+        settings
+            .allowed_application_paths
+            .push(format!("{path}-other"));
+        assert_eq!(
+            application_readiness_reason(&settings, Some(&path)),
+            Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
+        );
+        settings.allowed_application_paths.push(path.clone());
+        assert_eq!(application_readiness_reason(&settings, Some(&path)), None);
+    }
+
+    #[test]
+    fn application_policy_tightening_rejects_an_old_ui_reference_before_native_dispatch() {
+        let broker = ComputerUseBroker::new();
+        broker.set_input_ownership_ready(true);
+        let path = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let target = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "session",
+                ObjectKind::UiElement,
+                ResolvedObject::UiElement {
+                    process_id: 42,
+                    image_path: path.clone(),
+                    fingerprint: "opaque-node".into(),
+                },
+            )
+            .unwrap();
+        let mut settings = ComputerUseSettings {
+            enabled: true,
+            generic_semantic_ui: true,
+            ..Default::default()
+        };
+        assert!(settings.application_allowed(&path));
+        settings
+            .update_application_policy(crate::model::settings::ComputerUseApplicationPolicyUpdate {
+                expected_revision: 0,
+                allowed_application_paths: vec![format!("{path}-different")],
+            })
+            .unwrap();
+        let error = broker
+            .execute_ui_action(&target, &UiSemanticAction::Invoke, &settings)
+            .err()
+            .expect("the old reference must be rejected before native dispatch");
+        assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
+        assert!(error.message.contains("allowlist"));
     }
 
     #[test]

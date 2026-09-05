@@ -1,0 +1,1 @@
+{"type":"object","required":["expected_revision","allowed_application_paths"],"properties":{"allowed_application_paths":{"type":"array","items":{"type":"string"}},"expected_revision":{"type":"integer","format":"int64","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"ComputerUseApplicationPolicyUpdate"}

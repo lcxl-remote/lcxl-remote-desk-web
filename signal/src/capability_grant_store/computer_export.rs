@@ -38,7 +38,36 @@ fn attachments_digest(session: &PersistedAgentSession) -> Result<String, DbErr> 
 }
 
 impl ComputerExportContext {
-    pub(super) fn capture(
+    pub(crate) fn capture_command(
+        policy: &ModelEgressPolicy,
+        session: &PersistedAgentSession,
+        completion: &desk_diagnose_core::command_completion::CommandCompletionContext,
+    ) -> Result<Self, DbErr> {
+        completion
+            .check(session, &policy.destination, completion.captured_at_unix_ms)
+            .map_err(|_| invalid())?;
+        let value = Self {
+            schema_version: 1,
+            destination: policy.destination.clone(),
+            selected_source_tools: [desk_diagnose_core::command_confirmation::COMMAND_TOOL.into()]
+                .into_iter()
+                .collect(),
+            export_authorization_id: policy.export_authorization_id.clone(),
+            attachments_sha256: attachments_digest(session)?,
+            captured_at_unix_ms: completion.captured_at_unix_ms,
+            expires_at_unix_ms: completion.expires_at_unix_ms,
+        };
+        if !policy
+            .selected_source_tools
+            .contains(desk_diagnose_core::command_confirmation::COMMAND_TOOL)
+        {
+            return Err(invalid());
+        }
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub(crate) fn capture(
         policy: &ModelEgressPolicy,
         session: &PersistedAgentSession,
         captured_at: i64,
@@ -98,6 +127,114 @@ impl ComputerExportContext {
 }
 
 impl SignalCapabilityGrantStore {
+    pub(crate) async fn completion_export(
+        &self,
+        session: &PersistedAgentSession,
+        event_id: &str,
+        destination: &DestinationIdentity,
+    ) -> Result<ComputerExportContext, DbErr> {
+        let pending = session
+            .pending_auto_triggers
+            .iter()
+            .find(|p| p.event_id == event_id)
+            .ok_or_else(invalid)?;
+        if pending.kind == WorkKind::ComputerAction {
+            return self
+                .computer_completion_export(session, event_id, destination)
+                .await;
+        }
+        if pending.kind != WorkKind::AgentExec || pending.chain_id != session.chain_id {
+            return Err(invalid());
+        }
+        let task = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+            .find_by_generation(&pending.execution_id)
+            .await
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+        let txn = self.db.begin().await?;
+        let result = async {
+            let (_, work, payload) = original_on(&txn, &pending.execution_id).await?;
+            let origin = payload.command_origin.ok_or_else(invalid)?;
+            origin.validate().map_err(|_| invalid())?;
+            let export = payload.command_export.ok_or_else(invalid)?;
+            export.validate()?;
+            if let Some(completion) = &origin.command_completion {
+                completion
+                    .check(
+                        session,
+                        destination,
+                        u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?,
+                    )
+                    .map_err(|_| invalid())?;
+                if export.captured_at_unix_ms != completion.captured_at_unix_ms
+                    || export.expires_at_unix_ms != completion.expires_at_unix_ms
+                    || export.attachments_sha256 != completion.context_sha256
+                {
+                    return Err(invalid());
+                }
+            }
+            let grant = agent_capability_grant::Entity::find()
+                .filter(agent_capability_grant::Column::GrantId.eq(&payload.grant_id))
+                .one(&txn)
+                .await?
+                .ok_or_else(invalid)?;
+            if grant.status != GRANT_STATUS_ACTIVE {
+                return Err(invalid());
+            }
+            let receipt = payload.command_receipt.ok_or_else(invalid)?;
+            let output = desk_diagnose_core::seam::ToolRunOutput {
+                content: task.result_text.clone().ok_or_else(invalid)?,
+                image_data_url: None,
+            };
+            receipt
+                .validate_for(
+                    &origin,
+                    desk_diagnose_core::session::ActionIdentity::agent_exec(
+                        task.id,
+                        &task.exec_request_id,
+                        &task.execution_generation,
+                    ),
+                    1,
+                    &output,
+                )
+                .map_err(|_| invalid())?;
+            let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
+            if task.id != pending.work_id
+                || task.event_id != event_id
+                || task.status != crate::agent_exec_store::STATUS_DONE
+                || task.conversation_id != session.conversation_id
+                || task.exec_request_id != payload.call_id
+                || task.tool_call_id != pending.tool_call_id
+                || work.conversation_id != session.conversation_id
+                || work.actor_id != session.actor_id
+                || work.target_device_id != session.device_id
+                || origin.turn_fence.conversation_id != session.conversation_id
+                || origin.turn_fence.actor_id != session.actor_id
+                || origin.turn_fence.device_id != session.device_id
+                || origin.turn_fence.input_revision != session.input_revision
+                || origin.tool_call_id != task.tool_call_id
+                || origin.tool_name != desk_diagnose_core::command_confirmation::COMMAND_TOOL
+                || &export.destination != destination
+                || export.expires_at_unix_ms <= now
+                || now < export.captured_at_unix_ms
+                || export.attachments_sha256 != attachments_digest(session)?
+                || !export.selected_source_tools.contains(&origin.tool_name)
+                || !session.conversation.iter().any(|message| {
+                    message.message_id == event_id
+                        && message.tool_call_id.as_deref() == Some(task.tool_call_id.as_str())
+                        && message.text == output.content
+                        && message.data_envelope.as_ref() == Some(&receipt.envelope)
+                })
+            {
+                return Err(invalid());
+            }
+            Ok(export)
+        }
+        .await;
+        txn.rollback().await?;
+        result
+    }
+
     /// Validate the persisted original completion, never synthesize export
     /// authority from a write grant or names found in a model conversation.
     pub(crate) async fn computer_completion_export(

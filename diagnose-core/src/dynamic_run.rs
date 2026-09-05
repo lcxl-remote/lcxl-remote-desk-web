@@ -593,6 +593,9 @@ pub struct GrantRequestItem {
     pub canonical_input_json: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_input_digest_sha256: Option<String>,
+    /// Server-authored plan reviewed with an exact command permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_confirmation: Option<crate::command_confirmation::CommandConfirmation>,
     pub suggested_ttl_seconds: u32,
     pub suggested_max_uses: u32,
     pub reason: String,
@@ -632,6 +635,17 @@ impl GrantRequestItem {
         }
         if self.suggested_ttl_seconds == 0 || self.suggested_max_uses == 0 {
             return Err(DynamicRunContractError::InvalidPermissionLimit);
+        }
+        if let Some(confirmation) = &self.command_confirmation {
+            if self.tool_name != crate::command_confirmation::COMMAND_TOOL
+                || self
+                    .canonical_input_json
+                    .as_deref()
+                    .is_none_or(|canonical| confirmation.validate(canonical).is_err())
+                || confirmation.resource_scope().ok().as_ref() != Some(&self.resource_scope)
+            {
+                return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
+            }
         }
         validate_text(
             "permission_reason",
@@ -1055,6 +1069,7 @@ mod tests {
             input_revision: 2,
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
+                command_confirmation: None,
                 item_id: "write-report".into(),
                 provider_id: "file.workspace".into(),
                 tool_name: "create_report".into(),

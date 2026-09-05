@@ -1,8 +1,9 @@
+import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 
 import { useState, useRef, useEffect, useCallback } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2, Info, Bot } from "lucide-react"
+import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2, Info } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -558,7 +559,7 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
                                                 {assistantFile.pendingPath === file.path ? (
                                                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                                 ) : (
-                                                    <Bot className="h-3.5 w-3.5" />
+                                                    <AiAssistantIcon className="h-3.5 w-3.5" />
                                                 )}
                                             </Button>
                                         )}

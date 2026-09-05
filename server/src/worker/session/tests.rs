@@ -765,6 +765,7 @@ fn a_locked_host_drops_remote_work() {
 /// in it that talks outward — which is where a wait would come from.
 mod inbound_reader {
     use super::super::runtime::spawn_inbound_reader;
+    use crate::model::settings::{Settings, SharedSettings};
     use crate::worker::policy_mirror::PolicyMirror;
     use desk_ipc_protocol::dual_transport::inprocess;
     use desk_ipc_protocol::message::{
@@ -787,6 +788,61 @@ mod inbound_reader {
         }
     }
 
+    #[tokio::test]
+    async fn application_policy_waits_for_readers_without_blocking_shutdown_and_rejects_stale_updates()
+     {
+        use desk_ipc_protocol::message::ComputerUseApplicationPolicyPayload;
+        let (daemon_tx, worker_rx) = inprocess::make_event::<ServiceToWorker>();
+        let mirror = Arc::new(PolicyMirror::new(PolicySnapshot::new(
+            SecuritySettings::default(),
+        )));
+        let settings = Arc::new(SharedSettings::from(Settings::default()));
+        let (ack_tx, mut ack_rx) = mpsc::unbounded_channel();
+        let (main_tx, mut main_rx) = mpsc::unbounded_channel();
+        let reader = spawn_inbound_reader(worker_rx, mirror, settings.clone(), ack_tx, main_tx);
+        let lease = settings.read().await;
+        let update = ComputerUseApplicationPolicyPayload {
+            operation_id: "applications-1".into(),
+            revision: 2,
+            allowed_application_paths: vec![
+                "/Applications/Calculator.app/Contents/MacOS/Calculator".into(),
+            ],
+        };
+        daemon_tx
+            .send(ServiceToWorker::UpdateComputerUseApplicationPolicy(
+                update.clone(),
+            ))
+            .await
+            .unwrap();
+        daemon_tx.send(ServiceToWorker::Shutdown).await.unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), main_rx.recv())
+                .await
+                .unwrap(),
+            Some(Some(ServiceToWorker::Shutdown))
+        ));
+        assert!(ack_rx.try_recv().is_err());
+        drop(lease);
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(1), ack_rx.recv()).await.unwrap(), Some(WorkerToService::ComputerUseApplicationPolicyApplied(applied)) if applied == update)
+        );
+        daemon_tx
+            .send(ServiceToWorker::UpdateComputerUseApplicationPolicy(
+                ComputerUseApplicationPolicyPayload {
+                    operation_id: "stale".into(),
+                    revision: 1,
+                    allowed_application_paths: vec![],
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(1), ack_rx.recv()).await.unwrap(), Some(WorkerToService::ComputerUseApplicationPolicyApplied(applied)) if applied.revision == 2 && applied.allowed_application_paths == update.allowed_application_paths)
+        );
+        drop(daemon_tx);
+        reader.await.unwrap();
+    }
+
     /// Nothing is reading the acknowledgement, and it still does not matter.
     ///
     /// A worker acknowledges a policy while the daemon may be doing anything at
@@ -802,7 +858,13 @@ mod inbound_reader {
         )));
         let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<WorkerToService>();
         let (main_tx, mut main_rx) = mpsc::unbounded_channel::<Option<ServiceToWorker>>();
-        let reader = spawn_inbound_reader(worker_rx, Arc::clone(&mirror), ack_tx, main_tx);
+        let reader = spawn_inbound_reader(
+            worker_rx,
+            Arc::clone(&mirror),
+            Arc::new(SharedSettings::from(Settings::default())),
+            ack_tx,
+            main_tx,
+        );
 
         daemon_tx
             .send(ServiceToWorker::UpdateSecurityPolicy(published(false)))
@@ -850,7 +912,13 @@ mod inbound_reader {
         )));
         let (ack_tx, _ack_rx) = mpsc::unbounded_channel::<WorkerToService>();
         let (main_tx, mut main_rx) = mpsc::unbounded_channel::<Option<ServiceToWorker>>();
-        let reader = spawn_inbound_reader(worker_rx, mirror, ack_tx, main_tx);
+        let reader = spawn_inbound_reader(
+            worker_rx,
+            mirror,
+            Arc::new(SharedSettings::from(Settings::default())),
+            ack_tx,
+            main_tx,
+        );
 
         drop(daemon_tx);
 

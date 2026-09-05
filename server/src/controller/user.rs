@@ -139,6 +139,9 @@ mod tests {
                 .service(
                     web::scope("/api")
                         .wrap(from_fn(enforce_device_scope))
+                        .service(desk_signal::controller::web_search::get_web_search)
+                        .service(desk_signal::controller::web_search::update_web_search)
+                        .service(desk_signal::controller::web_search::test_web_search)
                         .route("/probe", web::get().to(protected_probe)),
                 ),
         )
@@ -169,7 +172,7 @@ mod tests {
             &app,
             at::TestRequest::get()
                 .uri("/api/probe")
-                .cookie(cookie)
+                .cookie(cookie.clone())
                 .to_request(),
         )
         .await
@@ -186,6 +189,31 @@ mod tests {
             code_session_body.code,
             DeskErrorCode::PERMISSION_ERROR.code()
         );
+        for (method, uri) in [
+            (actix_web::http::Method::GET, "/api/admin/system/web-search"),
+            (actix_web::http::Method::PUT, "/api/admin/system/web-search"),
+            (
+                actix_web::http::Method::POST,
+                "/api/admin/system/web-search/test",
+            ),
+        ] {
+            let request = || {
+                at::TestRequest::default()
+                    .method(method.clone())
+                    .uri(uri)
+                    .set_json(serde_json::json!({"expected_revision":0,"provider":"duck_duck_go"}))
+            };
+            assert!(
+                at::try_call_service(&app, request().to_request())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                at::try_call_service(&app, request().cookie(cookie.clone()).to_request())
+                    .await
+                    .is_err()
+            );
+        }
 
         let owner_seed = at::call_service(
             &app,

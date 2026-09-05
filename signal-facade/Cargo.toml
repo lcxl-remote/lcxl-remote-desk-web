@@ -41,7 +41,9 @@ sha2 = { workspace = true }
 url = { workspace = true }
 log = { workspace = true }
 futures = { workspace = true }
+kuchikiki = "=0.8.8-speedreader"
 
 [dev-dependencies]
+http = "1"
 serde_urlencoded = { workspace = true }
 toml = { workspace = true }

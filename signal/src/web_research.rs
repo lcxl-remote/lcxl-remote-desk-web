@@ -1,12 +1,12 @@
 //! OSS central Web Research adapters over the shared validated connectors.
 
-use desk_agent_protocol::{AgentError, AgentErrorKind};
+use desk_agent_protocol::AgentError;
 use desk_diagnose_core::seam::ToolRunOutput;
 pub use desk_diagnose_core::web_research::{
     ValidatedFetch, ValidatedSearch, WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME,
     validate_fetch_call, validate_search_call,
 };
-use desk_signal_facade::web_search::{BraveSearchConfig, OSS_API_KEY_ENV};
+use desk_signal_facade::web_search::SearchConfig;
 
 pub(crate) async fn fetch_public_web_page(
     validated: ValidatedFetch,
@@ -15,21 +15,11 @@ pub(crate) async fn fetch_public_web_page(
 }
 
 pub(crate) async fn search_public_web(
+    config: &SearchConfig,
     validated: ValidatedSearch,
     server_call_id: &str,
 ) -> Result<ToolRunOutput, AgentError> {
-    let config = production_search_config().ok_or_else(|| AgentError {
-        kind: AgentErrorKind::UnsupportedCapability,
-        message: "Web Search is not configured".into(),
-        retryable: false,
-        safe_for_model: true,
-        error_code: None,
-    })?;
-    desk_signal_facade::web_search::search_public_web(&config, validated, server_call_id).await
-}
-
-pub(crate) fn production_search_config() -> Option<BraveSearchConfig> {
-    BraveSearchConfig::from_env(OSS_API_KEY_ENV)
+    desk_signal_facade::web_search::search_configured_web(config, validated, server_call_id).await
 }
 
 #[cfg(test)]

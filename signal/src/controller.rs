@@ -8,3 +8,4 @@ pub mod signaling;
 pub mod terminal;
 pub mod turn_usage;
 pub mod usage_retention;
+pub mod web_search;

@@ -1,6 +1,7 @@
+import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Globe, Server, Lock, Bot } from "lucide-react"
+import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Globe, Server, Lock } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
@@ -178,7 +179,7 @@ export default function DeskDashboard({
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/assistant`)}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
-                                <Bot className="h-5 w-5 text-violet-500" />
+                                <AiAssistantIcon className="h-5 w-5 text-violet-500" />
                                 {t('pages.deskDashboard.deviceAssistant')}
                             </CardTitle>
                             <CardDescription>{t('pages.deskDashboard.deviceAssistantDesc')}</CardDescription>

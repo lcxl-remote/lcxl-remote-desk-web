@@ -120,7 +120,7 @@ pub fn validate_output(
         call.name.as_str(),
         crate::web_research::WEB_FETCH_TOOL_NAME | crate::web_research::WEB_SEARCH_TOOL_NAME
     ) {
-        return validate_web_output(call, output, &limits);
+        return validate_web_output(registry, call, output, &limits);
     }
     if !requires_objects(&call.name) && call.name != "inspect_desktop_ui" {
         return Ok(());
@@ -194,6 +194,7 @@ struct FetchOutput {
 #[serde(deny_unknown_fields)]
 struct SearchOutput {
     schema_version: u32,
+    configuration_revision: u64,
     web_search_call_id: String,
     untrusted_external_content: bool,
     connector: SearchConnector,
@@ -224,6 +225,7 @@ struct SearchResult {
 }
 
 fn validate_web_output(
+    registry: &ProviderRegistry,
     call: &ToolCall,
     output: &ToolRunOutput,
     limits: &CapabilityGrantLimits,
@@ -271,10 +273,11 @@ fn validate_web_output(
             if value.schema_version != 1
                 || value.web_search_call_id != call.id
                 || !value.untrusted_external_content
-                || value.connector.connector_id
-                    != crate::web_research::BRAVE_WEB_SEARCH_CONNECTOR_ID
-                || value.connector.display_name != "Brave Web Search"
-                || !value.connector.requires_api_key
+                || crate::web_research::search_connector_metadata(&value.connector.connector_id)
+                    != Some((
+                        value.connector.display_name.as_str(),
+                        value.connector.requires_api_key,
+                    ))
                 || value.connector.experimental
                 || value.query_sha256 != expected_query_sha256
                 || value.searched_at.len() > 64
@@ -284,6 +287,12 @@ fn validate_web_output(
                 || value.results.len() > usize::from(expected.max_results())
                 || value.results.len() > limits.max_items_per_call as usize
             {
+                return Err(unavailable());
+            }
+            if registry.web_search_binding().is_some_and(|binding| {
+                binding.connector_id != value.connector.connector_id
+                    || binding.revision != value.configuration_revision
+            }) {
                 return Err(unavailable());
             }
             for item in value.results {

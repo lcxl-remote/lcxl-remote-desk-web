@@ -6,6 +6,41 @@
 //! services at all.
 
 use super::*;
+
+#[tokio::test]
+async fn application_policy_timeout_or_inexact_ack_retires_the_worker() {
+    for acknowledge_wrong_revision in [false, true] {
+        let (manager, _worker_rx) = test_manager();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        manager.install_active_for_test(tx).await;
+        let policy = crate::model::settings::ComputerUseApplicationPolicy {
+            revision: 1,
+            allowed_application_paths: vec![],
+        };
+        let publish = manager.publish_application_policy(policy, Duration::from_millis(20));
+        let worker = async {
+            if let Some(ServiceToWorker::UpdateComputerUseApplicationPolicy(mut payload)) =
+                rx.recv().await
+            {
+                if acknowledge_wrong_revision {
+                    payload.revision = 0;
+                    manager.note_application_policy_applied(payload);
+                }
+            } else {
+                panic!("expected application policy");
+            }
+        };
+        let (result, ()) = tokio::join!(publish, worker);
+        assert!(result.is_err());
+        assert!(manager.application_policy_acks.lock().unwrap().is_empty());
+        assert!(
+            manager
+                .send_to_worker(ServiceToWorker::Shutdown)
+                .await
+                .is_err()
+        );
+    }
+}
 use desk_signal_facade::model::policy_snapshot::PolicyGenerations;
 
 /// A bare manager, with no worker installed. Nothing here publishes; these

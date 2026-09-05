@@ -22,7 +22,7 @@ use crate::sink_authorizer::{
 };
 
 const MODEL_OUTPUT_TTL_MS: u64 = 5 * 60 * 1000;
-const MODEL_CALL_RETENTION_HEADROOM_MS: u64 = 60 * 1000;
+pub(crate) const MODEL_CALL_RETENTION_HEADROOM_MS: u64 = 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub struct ModelEgressPolicy {
@@ -457,7 +457,7 @@ fn envelope_has_finite_retention(envelope: &DataEnvelope) -> bool {
         || matches!(envelope.content, ContentRef::EphemeralObservation { .. })
 }
 
-fn envelope_expires_by(envelope: &DataEnvelope, cutoff_unix_ms: u64) -> bool {
+pub(crate) fn envelope_expires_by(envelope: &DataEnvelope, cutoff_unix_ms: u64) -> bool {
     envelope
         .retention
         .expires_at_unix_ms

@@ -160,6 +160,7 @@ fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
     let search = ToolRunOutput {
         content: serde_json::json!({
             "schema_version": 1,
+            "configuration_revision": 3,
             "web_search_call_id": "search-1",
             "untrusted_external_content": true,
             "connector": {
@@ -183,6 +184,23 @@ fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
     };
     assert!(validate_output(&registry, &search_call, &search, &limit(4096, 1)).is_err());
     validate_output(&registry, &search_call, &search, &limit(4096, 2)).unwrap();
+    for (connector, revision, valid) in [
+        ("brave_web_v1", 3, true),
+        ("tavily_search_v1", 3, false),
+        ("brave_web_v1", 4, false),
+    ] {
+        let bound =
+            registry
+                .clone()
+                .with_web_search_binding(Some(crate::web_research::SearchBinding {
+                    connector_id: connector.into(),
+                    revision,
+                }));
+        assert_eq!(
+            validate_output(&bound, &search_call, &search, &limit(4096, 2)).is_ok(),
+            valid
+        );
+    }
     let mut forged: serde_json::Value = serde_json::from_str(&search.content).unwrap();
     forged["connector"]["connector_id"] = serde_json::json!("model_selected");
     assert!(

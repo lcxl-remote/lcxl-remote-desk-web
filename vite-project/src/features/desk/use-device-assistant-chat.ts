@@ -1,3 +1,4 @@
+import type { AssistantContextUsage } from './assistant-context-meter';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { v4 } from 'uuid';
 
@@ -31,7 +32,7 @@ const PREVIEW_TOOL = 'preview_computer_action';
 
 export type DeviceAssistantMessage = {
     id: string;
-    role: 'user' | 'assistant';
+    role: 'user' | 'assistant' | 'tool_result';
     text: string;
     provenance?: AiProvenance | null;
 };
@@ -160,10 +161,12 @@ type PersistedSnapshotMessage = {
     role: string;
     text: string;
     toolCallId?: string | null;
+    backgroundTaskId?: string | null;
     toolCalls?: PersistedToolCall[];
 };
 
 type PersistedSnapshot = {
+    contextUsage?: AssistantContextUsage | null;
     sessionId: string;
     seq: number;
     active: boolean;
@@ -209,15 +212,20 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 draft = parseDraft(call.argumentsJson) ?? draft;
             }
         }
-        if (message.role === 'tool' && message.toolCallId) {
+        if ((message.role === 'tool' || message.role === 'untrusted_output') && message.toolCallId) {
             const existing = tools.find((tool) => tool.callId === message.toolCallId);
+            const backgroundRunning = /"status"\s*:\s*"background_running"/.test(message.text);
             tools = upsertTool(tools, {
                 callId: message.toolCallId,
                 name: existing?.name ?? 'unknown',
-                status: /^(tool error:|not executed:)/i.test(message.text) ? 'failed' : 'ok',
+                status: backgroundRunning ? 'running'
+                    : /^(tool error:|not executed:|execution failed:|execution did not complete:)/i.test(message.text) ? 'failed' : 'ok',
                 argumentsJson: existing?.argumentsJson ?? '{}',
                 output: message.text || null,
             });
+            if (!backgroundRunning && message.text && (existing?.name === 'execute_confirmed_command' || message.backgroundTaskId)) {
+                messages.push({ id: message.id, role: 'tool_result', text: message.text });
+            }
         }
     }
     return {
@@ -253,6 +261,7 @@ export function useDeviceAssistantChat({
     sendMessage,
 }: Props) {
     const targetSelectionEnabled = connected !== undefined;
+    const [contextUsage, setContextUsage] = useState<AssistantContextUsage | null>(null);
     const [messages, setMessages] = useState<DeviceAssistantMessage[]>([]);
     const [tools, setTools] = useState<DeviceAssistantToolActivity[]>([]);
     const [draft, setDraft] = useState<ComputerActionDraftPreview | null>(null);
@@ -328,6 +337,7 @@ export function useDeviceAssistantChat({
     const loadSnapshot = useCallback(async (
         expectedConversationId: string,
         showHydrating = false,
+        reportFailure = false,
     ) => {
         const expectedEpoch = snapshotEpoch.current;
         const expectedRequestOrder = ++snapshotRequestOrder.current;
@@ -339,6 +349,7 @@ export function useDeviceAssistantChat({
             { credentials: 'include', headers: { Accept: 'application/json' } },
             );
             const body = response.ok ? await response.json() : null;
+            if (reportFailure && !Array.isArray(body?.data?.messages)) throw new Error('Snapshot unavailable');
             if (
                 snapshotEpoch.current !== expectedEpoch
                 || conversationId.current !== expectedConversationId
@@ -372,6 +383,7 @@ export function useDeviceAssistantChat({
                 seq: snapshot.seq,
                 requestOrder: expectedRequestOrder,
             };
+            setContextUsage(snapshot.contextUsage ?? null);
             const projected = projectPersistedSnapshot(snapshot);
             setAttachments(projected.attachments);
             setTaskStatusProjection(projected.taskStatusProjection);
@@ -415,12 +427,14 @@ export function useDeviceAssistantChat({
                 )) {
                     setStatus('done');
                     setError(null);
-                } else if (last?.role === 'assistant') {
+                } else if (last?.role === 'assistant' || last?.role === 'tool_result') {
                     setStatus('done');
                     setError(null);
                 } else if (last?.role === 'user') {
                     setStatus('error');
-                    setError('The Device Assistant turn ended before producing an answer.');
+                    // A snapshot has no terminal error payload; keep the more
+                    // specific failure already received for this turn.
+                    setError((current) => current ?? 'The AI Assistant turn ended before producing an answer.');
                 } else {
                     setStatus('idle');
                     setError(null);
@@ -428,6 +442,9 @@ export function useDeviceAssistantChat({
             }
         } catch {
             // A transient poll failure must not erase the last durable view.
+            if (reportFailure && snapshotEpoch.current === expectedEpoch && conversationId.current === expectedConversationId) {
+                setError('history_restore_failed');
+            }
         } finally {
             if (
                 showHydrating
@@ -500,6 +517,7 @@ export function useDeviceAssistantChat({
         setError(null);
         setAttachments([]);
         setVisualEvidence([]);
+        setContextUsage(null);
         setRemoteActive(false);
         activeRequest.current = null;
         contextRequest.current = null;
@@ -563,6 +581,7 @@ export function useDeviceAssistantChat({
             setError(null);
             setAttachments([]);
             setVisualEvidence([]);
+            setContextUsage(null);
             setRemoteActive(false);
             setStatus('idle');
             if (event.newValue) void loadSnapshot(event.newValue, true);
@@ -590,7 +609,7 @@ export function useDeviceAssistantChat({
                 setSessionTargetReady(false);
                 setSessionTargets(list?.targets.filter((target) => target.assistant_ready) ?? []);
                 if (!list?.targets.length) {
-                    setError(message.response_state?.message ?? 'No Device Assistant desktop session is available.');
+                    setError(message.response_state?.message ?? 'No AI Assistant desktop session is available.');
                 }
                 return;
             }
@@ -697,7 +716,7 @@ export function useDeviceAssistantChat({
                 break;
             case 'error':
             case 'retracted':
-                setError(event.error?.message ?? 'The Device Assistant turn could not complete.');
+                setError(event.error?.message ?? 'The AI Assistant turn could not complete.');
                 setPartial('');
                 setStatus('error');
                 activeRequest.current = null;
@@ -743,7 +762,7 @@ export function useDeviceAssistantChat({
             contextTimer.current = null;
             contextRequest.current = null;
             setContextUpdating(false);
-            setError('Device Assistant context update timed out.');
+            setError('AI Assistant context update timed out.');
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
@@ -771,7 +790,7 @@ export function useDeviceAssistantChat({
             contextTimer.current = null;
             contextRequest.current = null;
             setContextUpdating(false);
-            setError('Device Assistant attachment update timed out.');
+            setError('AI Assistant attachment update timed out.');
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
@@ -799,7 +818,7 @@ export function useDeviceAssistantChat({
             contextTimer.current = null;
             contextRequest.current = null;
             setContextUpdating(false);
-            setError('Device Assistant window attachment timed out.');
+            setError('AI Assistant window attachment timed out.');
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
@@ -814,7 +833,7 @@ export function useDeviceAssistantChat({
         // A follow-up is durable input, not a second foreground workflow. Replace
         // the locally observed request stream with the newest request; the server
         // supersedes the older model turn under its input-revision fence.
-        if (!trimmed || contextRequest.current || !sessionTargetReady) return false;
+        if (!trimmed || hydrating || contextRequest.current || !sessionTargetReady) return false;
         ensureConversation();
         const clientMessageId = `user-${v4()}`;
         setMessages((current) => [...current, {
@@ -845,7 +864,7 @@ export function useDeviceAssistantChat({
             deskId,
         );
         return true;
-    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady]);
+    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady, hydrating]);
 
     const submitPermissionDecision = useCallback(async (
         request: PermissionRequestDto,
@@ -998,6 +1017,7 @@ export function useDeviceAssistantChat({
         setError(null);
         setAttachments([]);
         setVisualEvidence([]);
+        setContextUsage(null);
         setRemoteActive(false);
         setContextUpdating(false);
         setTaskStatusProjection(null);
@@ -1009,6 +1029,8 @@ export function useDeviceAssistantChat({
         setPermissionUpdating(false);
         setGrantRevoking(null);
         setPendingInputCount(0);
+        setMessagePage({ hasMore: false, nextBeforeMessageId: null });
+        setLoadingOlderMessages(false);
         try {
             localStorage.removeItem(storageKey(conversationStorageScope));
         } catch {
@@ -1016,7 +1038,23 @@ export function useDeviceAssistantChat({
         }
     }, [conversationStorageScope, deskId, sendMessage]);
 
+    const selectConversation = useCallback((id: string) => {
+        // Navigation must never cancel a turn or race an in-flight decision.
+        if (!id || activeRequest.current || remoteActive || contextUpdating || permissionUpdating
+            || outcomeDisposing || grantRevoking || hydrating) return false;
+        reset();
+        conversationId.current = id;
+        try {
+            localStorage.setItem(storageKey(conversationStorageScope), id);
+        } catch { /* Continuation still works without local storage. */ }
+        void loadSnapshot(id, true, true);
+        return true;
+    }, [remoteActive, contextUpdating, permissionUpdating, outcomeDisposing, grantRevoking,
+        hydrating, reset, conversationStorageScope, loadSnapshot]);
+
     return {
+        selectConversation,
+        contextUsage,
         messages,
         tools,
         draft,

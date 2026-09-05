@@ -559,6 +559,7 @@ impl SignalAgentTools {
         validation_input: ExecInput,
         carrier_id: Option<String>,
         ctx: &ExecContext,
+        preclaimed: bool,
     ) -> Result<SignalDispatch, AgentError> {
         let target = self.connection(&self.target_connection_id).await?;
         let request_id = plan.execution_generation.clone();
@@ -566,16 +567,33 @@ impl SignalAgentTools {
         let deadline = chrono::Utc::now()
             + chrono::Duration::milliseconds(plan.timeout_ms as i64)
             + chrono::Duration::from_std(RESULT_SLACK).unwrap_or_default();
-        let task = exec_store
-            .create(
-                &plan.exec_request_id.0,
-                &request_id,
-                &ctx.conversation_id,
-                &ctx.tool_call_id,
-                &self.target_connection_id,
-                deadline,
-            )
-            .await?;
+        let task = if preclaimed {
+            let task = exec_store
+                .find(&plan.exec_request_id.0, &request_id)
+                .await?
+                .ok_or_else(|| internal("confirmed command has no durable execution task"))?;
+            if task.conversation_id != ctx.conversation_id
+                || task.tool_call_id != ctx.tool_call_id
+                || task.target_connection_id != self.target_connection_id
+                || task.status != crate::agent_exec_store::STATUS_DISPATCHING
+            {
+                return Err(internal(
+                    "confirmed command task does not match its send claim",
+                ));
+            }
+            task
+        } else {
+            exec_store
+                .create(
+                    &plan.exec_request_id.0,
+                    &request_id,
+                    &ctx.conversation_id,
+                    &ctx.tool_call_id,
+                    &self.target_connection_id,
+                    deadline,
+                )
+                .await?
+        };
         let Some(rx) = self
             .pending
             .register_result(request_id.clone(), self.target_connection_id.clone())
@@ -656,9 +674,15 @@ impl SignalAgentTools {
                 let disposition = EdgeExecDisposition::ExecutionStateUnknown {
                     reason: "the host connection closed before returning a result".into(),
                 };
-                let _ = exec_store
+                if let Err(error) = exec_store
                     .finalize(&self.target_connection_id, &request_id, &disposition)
-                    .await?;
+                    .await
+                {
+                    log::error!(
+                        "[agent-exec] sent command outcome could not be persisted: {}",
+                        error.message
+                    );
+                }
                 Ok(SignalDispatch::Unknown(task))
             }
             Err(_) => Ok(SignalDispatch::Dispatched(task)),
@@ -668,12 +692,14 @@ impl SignalAgentTools {
     /// Execute a command whose user confirmation was already represented by a
     /// one-shot exact capability grant. This path deliberately skips the legacy
     /// `ExecPreview`/`ResolveExec` dialog, but keeps every other defense: current
-    /// execution-mode ceiling, verified shell availability, TemplateOnly
+    /// execution-mode ceiling, verified shell availability, owner-policy
     /// classification, immutable plan sealing, daemon re-classification, durable
     /// task tracking and OutcomeUnknown handling.
     pub(crate) async fn execute_preapproved(
         &self,
         mut validation_input: ExecInput,
+        confirmation: &desk_diagnose_core::command_confirmation::CommandConfirmation,
+        canonical_input: &str,
         ctx: &ExecContext,
         exec_request_id: ExecRequestId,
         execution_generation: String,
@@ -697,7 +723,7 @@ impl SignalAgentTools {
             &validation_input,
             &[],
             desk_agent_protocol::exec_policy::builtin_blocklist(),
-            ExecAdmissionPolicy::TemplateOnly,
+            self.admission_policy,
         );
         let Some(draft) = classified.draft else {
             return Ok(ExecOutcome::Rejected {
@@ -713,11 +739,13 @@ impl SignalAgentTools {
             });
         }
         if classified.classification.decision != ExecDecision::ConfirmRequired
-            || draft.execution_basis != ExecExecutionBasis::Template
             || draft.risk > self.max_risk
+            || draft != confirmation.plan
         {
             return Ok(ExecOutcome::Rejected {
-                reason: Some("the command is not admitted by the safe-template policy".into()),
+                reason: Some(
+                    "the command is not admitted by its approved plan and current policy".into(),
+                ),
             });
         }
 
@@ -740,7 +768,7 @@ impl SignalAgentTools {
             &validation_input,
             &[],
             desk_agent_protocol::exec_policy::builtin_blocklist(),
-            ExecAdmissionPolicy::TemplateOnly,
+            self.admission_policy,
         );
         if refreshed.draft.as_ref() != Some(&draft) {
             return Ok(ExecOutcome::Rejected {
@@ -748,6 +776,14 @@ impl SignalAgentTools {
             });
         }
 
+        crate::command_policy::current(
+            &self.db,
+            self.connections.as_ref(),
+            &self.target_connection_id,
+            &ctx.actor_id,
+        )
+        .await?
+        .revalidate(confirmation, canonical_input, confirmation.input_revision)?;
         let plan = ExecPlan::from_draft(exec_request_id, execution_generation, approval_id, draft);
         let actor_user_id = ctx.actor_id.parse::<i32>().map_err(|_| {
             safe(
@@ -765,6 +801,7 @@ impl SignalAgentTools {
                 validation_input,
                 None,
                 ctx,
+                true,
             )
             .await?
         {
@@ -1034,6 +1071,7 @@ impl ToolSeam for SignalAgentTools {
                 validation_input,
                 carrier_id,
                 ctx,
+                false,
             )
             .await?
         {

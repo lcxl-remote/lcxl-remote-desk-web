@@ -622,6 +622,68 @@ export type CollectionPolicySettingsUpdate = {
     allow_screen?: boolean | null;
 };
 
+export const execExecutionBasisEnum = {
+    template: "template",
+    owner_blocklist_only: "owner_blocklist_only"
+} as const;
+
+export type ExecExecutionBasisEnumKey = (typeof execExecutionBasisEnum)[keyof typeof execExecutionBasisEnum];
+
+/**
+ * @description The trust basis under which an execution draft was produced.\n\nThis is classification metadata. It is compared as part of the full draft\nbut deliberately excluded from the worker-field fingerprint.
+*/
+export type ExecExecutionBasis = ExecExecutionBasisEnumKey;
+
+/**
+ * @description Owner-visible projection of the exact persisted command plan.
+*/
+export type CommandConfirmationDto = {
+    /**
+     * @type string
+    */
+    command: string;
+    /**
+     * @type string,null
+    */
+    cwd?: string | null;
+    /**
+     * @description The trust basis under which an execution draft was produced.\n\nThis is classification metadata. It is compared as part of the full draft\nbut deliberately excluded from the worker-field fingerprint.
+     * @type string
+    */
+    executionBasis: ExecExecutionBasis;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxStderrBytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxStdoutBytes: number;
+    /**
+     * @type boolean
+    */
+    oneShot: boolean;
+    /**
+     * @type string
+    */
+    shell: string;
+    /**
+     * @type string
+    */
+    targetDeviceId: string;
+    /**
+     * @type string
+    */
+    targetSessionId: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    timeoutMs: number;
+};
+
 export const communicationChannelEnum = {
     email: "email",
     chat: "chat",
@@ -631,6 +693,30 @@ export const communicationChannelEnum = {
 export type CommunicationChannelEnumKey = (typeof communicationChannelEnum)[keyof typeof communicationChannelEnum];
 
 export type CommunicationChannel = CommunicationChannelEnumKey;
+
+export type ComputerUseApplicationPolicy = {
+    /**
+     * @type array
+    */
+    allowed_application_paths: string[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
+export type ComputerUseApplicationPolicyUpdate = {
+    /**
+     * @type array
+    */
+    allowed_application_paths: string[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+};
 
 export const operationSystemEnumEnum = {
     Windows: "Windows",
@@ -1040,6 +1126,23 @@ export type ContextNoticeDto = {
      * @type string
     */
     turnId: string;
+};
+
+export type ContextUsageDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    limitBytes: number;
+    /**
+     * @type string
+    */
+    strategy: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    usedBytes: number;
 };
 
 /**
@@ -1940,6 +2043,7 @@ export type ExternalSendConfirmationDto = {
 };
 
 export type GrantRequestItemDto = {
+    commandConfirmation?: (null | CommandConfirmationDto);
     /**
      * @type string
     */
@@ -2241,6 +2345,7 @@ export type DeviceAssistantSessionSnapshotDto = {
      * @type array
     */
     contextNotices: ContextNoticeDto[];
+    contextUsage?: (null | ContextUsageDto);
     /**
      * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
      * @type object
@@ -4469,6 +4574,35 @@ export type RestResponseCollectionPolicySettings = {
     success: boolean;
 };
 
+export type RestResponseComputerUseApplicationPolicy = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        allowed_application_paths: string[];
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseConnectionVerifyResult = {
     /**
      * @type integer, int32
@@ -4667,6 +4801,7 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
          * @type array
         */
         contextNotices: ContextNoticeDto[];
+        contextUsage?: (null | ContextUsageDto);
         /**
          * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
          * @type object
@@ -5236,6 +5371,106 @@ export type RestResponseRedeemCodeResult = {
          * @type string
         */
         target_connection_id: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export const searchProviderEnum = {
+    duck_duck_go: "duck_duck_go",
+    brave: "brave",
+    tavily: "tavily"
+} as const;
+
+export type SearchProviderEnumKey = (typeof searchProviderEnum)[keyof typeof searchProviderEnum];
+
+export type SearchProvider = SearchProviderEnumKey;
+
+export type SearchProviderInfo = {
+    /**
+     * @type string
+    */
+    display_name: string;
+    /**
+     * @type string
+    */
+    provider: SearchProvider;
+    /**
+     * @type boolean
+    */
+    requires_api_key: boolean;
+};
+
+export type RestResponseSearchConfigPublic = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        configured: boolean;
+        /**
+         * @type boolean
+        */
+        has_api_key: boolean;
+        /**
+         * @type string
+        */
+        provider: SearchProvider;
+        /**
+         * @type array
+        */
+        providers: SearchProviderInfo[];
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseSearchTestResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        latency_ms: number;
+        /**
+         * @type string
+        */
+        provider: SearchProvider;
+        /**
+         * @minLength 0
+         * @type integer
+        */
+        result_count: number;
     };
     /**
      * @type string,null
@@ -6210,6 +6445,66 @@ export type RestResponseBool = {
     success: boolean;
 };
 
+export type SearchConfigPublic = {
+    /**
+     * @type boolean
+    */
+    configured: boolean;
+    /**
+     * @type boolean
+    */
+    has_api_key: boolean;
+    /**
+     * @type string
+    */
+    provider: SearchProvider;
+    /**
+     * @type array
+    */
+    providers: SearchProviderInfo[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
+/**
+ * @description Null/omitted keeps a key only for the same provider; empty explicitly clears.
+*/
+export type SearchConfigUpdate = {
+    /**
+     * @type string,null
+    */
+    api_key?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+    /**
+     * @type string
+    */
+    provider: SearchProvider;
+};
+
+export type SearchTestResult = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    latency_ms: number;
+    /**
+     * @type string
+    */
+    provider: SearchProvider;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    result_count: number;
+};
+
 /**
  * @description Used by Tauri to send security approval requests to the frontend
 */
@@ -7004,6 +7299,39 @@ export type VirtualDisplaySettings = {
     prompt_ms?: number;
 };
 
+export type GetWebSearch200 = RestResponseSearchConfigPublic;
+
+export type GetWebSearchQueryResponse = GetWebSearch200;
+
+export type GetWebSearchQuery = {
+    Response: GetWebSearch200;
+    Errors: any;
+};
+
+export type UpdateWebSearch200 = RestResponseSearchConfigPublic;
+
+export type UpdateWebSearchMutationRequest = SearchConfigUpdate;
+
+export type UpdateWebSearchMutationResponse = UpdateWebSearch200;
+
+export type UpdateWebSearchMutation = {
+    Response: UpdateWebSearch200;
+    Request: UpdateWebSearchMutationRequest;
+    Errors: any;
+};
+
+export type TestWebSearch200 = RestResponseSearchTestResult;
+
+export type TestWebSearchMutationRequest = SearchConfigUpdate;
+
+export type TestWebSearchMutationResponse = TestWebSearch200;
+
+export type TestWebSearchMutation = {
+    Response: TestWebSearch200;
+    Request: TestWebSearchMutationRequest;
+    Errors: any;
+};
+
 /**
  * @description Credentials result
 */
@@ -7449,6 +7777,27 @@ export type UpdateCollectionPolicySettingsMutationResponse = UpdateCollectionPol
 export type UpdateCollectionPolicySettingsMutation = {
     Response: UpdateCollectionPolicySettings200;
     Request: UpdateCollectionPolicySettingsMutationRequest;
+    Errors: any;
+};
+
+export type UpdateComputerUseApplicationPolicy200 = RestResponseComputerUseApplicationPolicy;
+
+export type UpdateComputerUseApplicationPolicyMutationRequest = ComputerUseApplicationPolicyUpdate;
+
+export type UpdateComputerUseApplicationPolicyMutationResponse = UpdateComputerUseApplicationPolicy200;
+
+export type UpdateComputerUseApplicationPolicyMutation = {
+    Response: UpdateComputerUseApplicationPolicy200;
+    Request: UpdateComputerUseApplicationPolicyMutationRequest;
+    Errors: any;
+};
+
+export type QueryComputerUseApplicationPolicy200 = RestResponseComputerUseApplicationPolicy;
+
+export type QueryComputerUseApplicationPolicyMutationResponse = QueryComputerUseApplicationPolicy200;
+
+export type QueryComputerUseApplicationPolicyMutation = {
+    Response: QueryComputerUseApplicationPolicy200;
     Errors: any;
 };
 

@@ -45,6 +45,8 @@ pub struct HistoryMessageProjection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryPage {
     pub messages: Vec<HistoryMessageProjection>,
+    pub unavailable_count: usize,
+    pub availability_notice: String,
     pub has_more: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_before_message_id: Option<String>,
@@ -87,6 +89,8 @@ pub fn conversation_history_tool_registry() -> Vec<RegisteredTool> {
 pub fn load_history_page(
     call: &ToolCall,
     conversation: &[ChatMessage],
+    policy: Option<&crate::model_egress::ModelEgressPolicy>,
+    now_unix_ms: u64,
 ) -> Result<HistoryLoadResult, AgentError> {
     if call.name != LOAD_CONVERSATION_HISTORY_TOOL_NAME {
         return Err(invalid("invalid history tool"));
@@ -109,12 +113,33 @@ pub fn load_history_page(
     };
     let eligible = conversation[..before]
         .iter()
-        .filter(|message| is_visible_history_message(message) && message.data_envelope.is_some())
+        .filter(|message| is_visible_history_message(message))
         .collect::<Vec<_>>();
     let start = eligible.len().saturating_sub(input.limit);
     let selected = &eligible[start..];
+    // Page before filtering so an unavailable page still advances the cursor.
+    // Never renew source authority or include unavailable source text/lineage.
+    let available = selected
+        .iter()
+        .copied()
+        .filter(|message| {
+            message.data_envelope.as_ref().is_some_and(|envelope| {
+                envelope.validate().is_ok()
+                    && !crate::model_egress::envelope_expires_by(
+                        envelope,
+                        now_unix_ms
+                            .saturating_add(crate::model_egress::MODEL_CALL_RETENTION_HEADROOM_MS),
+                    )
+                    && policy.is_none_or(|policy| {
+                        envelope.allowed_destinations.contains(&policy.destination)
+                    })
+            })
+        })
+        .collect::<Vec<_>>();
     let page = HistoryPage {
-        messages: selected
+        unavailable_count: selected.len() - available.len(),
+        availability_notice: "Unavailable history is omitted because its model authorization is missing, expired, near expiry, or does not cover the current model. Do not infer omitted content; ask the user or obtain fresh authorized evidence if needed.".into(),
+        messages: available
             .iter()
             .map(|message| HistoryMessageProjection {
                 message_id: message.message_id.clone(),
@@ -130,7 +155,7 @@ pub fn load_history_page(
         return Err(invalid("history page exceeds the byte limit"));
     }
     let mut envelope_ids = BTreeSet::new();
-    let source_messages = selected
+    let source_messages = available
         .iter()
         .filter(|message| {
             message
@@ -171,6 +196,102 @@ mod tests {
     use super::*;
     use desk_agent_protocol::data_lineage::DestinationIdentity;
 
+    #[test]
+    fn filters_unavailable_history_without_renewing_it_and_advances_empty_pages() {
+        let valid = labeled("valid", ChatRole::User, "available question");
+        let destination = valid.data_envelope.as_ref().unwrap().allowed_destinations[0].clone();
+        let policy = crate::model_egress::ModelEgressPolicy {
+            destination,
+            selected_source_tools: BTreeSet::new(),
+            export_authorization_id: "test-export".into(),
+            now_unix_ms: 100_000,
+            byte_cap: 100_000,
+            omit_finite_retention_historical_turns: false,
+        };
+        let mut expired = labeled("expired", ChatRole::Assistant, "expired secret");
+        expired
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .retention
+            .expires_at_unix_ms = Some(100_000);
+        let mut near = labeled("near", ChatRole::Assistant, "near-expiry secret");
+        near.data_envelope
+            .as_mut()
+            .unwrap()
+            .retention
+            .expires_at_unix_ms = Some(160_000);
+        let mut other = labeled("other", ChatRole::Assistant, "other-model secret");
+        other.data_envelope.as_mut().unwrap().allowed_destinations =
+            vec![DestinationIdentity::Model {
+                connection_id: "another-gateway".into(),
+                connection_revision: 2,
+                model_id: "another-model".into(),
+                profile_revision: 3,
+            }];
+        let missing = ChatMessage::text("missing", ChatRole::Assistant, "unlabeled secret");
+        let mut ephemeral = labeled("ephemeral", ChatRole::Assistant, "ephemeral secret");
+        ephemeral.data_envelope.as_mut().unwrap().content =
+            desk_agent_protocol::data_lineage::ContentRef::EphemeralObservation {
+                observation_id: "old-observation".into(),
+                size_bytes: 16,
+                expires_at_unix_ms: 100_000,
+            };
+        let conversation = vec![
+            valid.clone(),
+            expired,
+            near,
+            other,
+            missing,
+            ephemeral,
+            labeled("current", ChatRole::User, "current question"),
+        ];
+        let original = serde_json::to_string(&conversation).unwrap();
+        let mut call = ToolCall {
+            id: "history".into(),
+            name: LOAD_CONVERSATION_HISTORY_TOOL_NAME.into(),
+            arguments_json: r#"{"limit":5}"#.into(),
+        };
+        let result = load_history_page(&call, &conversation, Some(&policy), 100_000).unwrap();
+        let page: HistoryPage = serde_json::from_str(&result.content).unwrap();
+        assert!(page.messages.is_empty());
+        assert_eq!(page.unavailable_count, 5);
+        assert!(page.has_more);
+        assert_eq!(page.next_before_message_id.as_deref(), Some("expired"));
+        assert!(result.source_messages.is_empty());
+        assert!(!result.content.contains("secret"));
+        let empty_page_envelope =
+            crate::model_message_labels::conversation_history_result_envelope(
+                valid.data_envelope.as_ref(),
+                &result.source_messages,
+                "empty-history",
+                &result.content,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty_page_envelope.retention.expires_at_unix_ms, None);
+        assert_eq!(
+            empty_page_envelope.provenance.source_envelope_ids,
+            vec![valid.data_envelope.as_ref().unwrap().envelope_id.clone()]
+        );
+        call.arguments_json = r#"{"limit":4,"before_message_id":"expired"}"#.into();
+        let result = load_history_page(&call, &conversation, Some(&policy), 100_000).unwrap();
+        let page: HistoryPage = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(page.messages[0].message_id, "valid");
+        assert!(!page.has_more);
+        let derived = crate::model_message_labels::conversation_history_result_envelope(
+            valid.data_envelope.as_ref(),
+            &result.source_messages,
+            "history",
+            &result.content,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(derived.retention.expires_at_unix_ms, None);
+        assert_eq!(derived.allowed_destinations, vec![policy.destination]);
+        assert_eq!(serde_json::to_string(&conversation).unwrap(), original);
+    }
+
     fn labeled(id: &str, role: ChatRole, text: &str) -> ChatMessage {
         let destination = DestinationIdentity::Model {
             connection_id: "gateway".into(),
@@ -203,6 +324,8 @@ mod tests {
                 arguments_json: r#"{"limit":2}"#.into(),
             },
             &conversation,
+            None,
+            0,
         )
         .unwrap();
         let page: HistoryPage = serde_json::from_str(&result.content).unwrap();
@@ -213,7 +336,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["u1", "a1"]
         );
-        assert!(!result.content.contains("current"));
+        assert!(
+            page.messages
+                .iter()
+                .all(|message| message.text != "current")
+        );
         assert!(!result.content.contains("must not appear"));
         assert_eq!(result.source_messages.len(), 2);
     }
@@ -226,7 +353,7 @@ mod tests {
             name: LOAD_CONVERSATION_HISTORY_TOOL_NAME.into(),
             arguments_json: r#"{"before_message_id":"missing"}"#.into(),
         };
-        assert!(load_history_page(&unknown, &conversation).is_err());
+        assert!(load_history_page(&unknown, &conversation, None, 0).is_err());
         let current = labeled("u2", ChatRole::User, "current");
         let oversized = [conversation[0].clone(), current];
         let first = ToolCall {
@@ -234,6 +361,6 @@ mod tests {
             name: LOAD_CONVERSATION_HISTORY_TOOL_NAME.into(),
             arguments_json: r#"{"limit":1}"#.into(),
         };
-        assert!(load_history_page(&first, &oversized).is_err());
+        assert!(load_history_page(&first, &oversized, None, 0).is_err());
     }
 }

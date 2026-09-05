@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 mod background_receipts;
+mod command_completion;
 mod egress;
 mod original_results;
 mod version_handoff;
@@ -627,6 +628,7 @@ fn deps<'a>(
     clock: &'a dyn Fn() -> String,
 ) -> LoopDeps<'a> {
     LoopDeps {
+        response_locale: None,
         session_seam: sess,
         model,
         tools,
@@ -720,6 +722,20 @@ async fn conversation_history_is_explicit_bounded_and_charged_to_current_focus()
         message.role = role;
         seeded.conversation.push(message);
     }
+    let mut expired = crate::model_message_labels::model_bound_user_message(
+        "expired-old".into(),
+        "expired history must not be replayed".into(),
+        destination,
+    )
+    .unwrap();
+    expired.role = ChatRole::Assistant;
+    expired
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(1);
+    seeded.conversation.push(expired);
     let sess = MemSession {
         inner: RefCell::new(Some(seeded)),
         ..Default::default()
@@ -731,7 +747,7 @@ async fn conversation_history_is_explicit_bounded_and_charged_to_current_focus()
                 tool_use_args(
                     "history-1",
                     crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME,
-                    r#"{"limit":2}"#,
+                    r#"{"limit":3}"#,
                 ),
                 answer("history loaded"),
             ]
@@ -768,6 +784,12 @@ async fn conversation_history_is_explicit_bounded_and_charged_to_current_focus()
         .expect("persisted bounded history result");
     assert!(history_result.text.contains("older question"));
     assert!(history_result.text.contains("older answer"));
+    assert!(
+        !history_result
+            .text
+            .contains("expired history must not be replayed")
+    );
+    assert!(history_result.text.contains("\"unavailable_count\":1"));
     assert!(!history_result.text.contains("unrelated current question"));
     assert_eq!(
         history_result
@@ -779,6 +801,81 @@ async fn conversation_history_is_explicit_bounded_and_charged_to_current_focus()
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn response_locale_survives_serialization_and_missing_resume_preference() {
+    let sess = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new([answer("first"), answer("second"), answer("completed")].into()),
+        requests: Rc::new(RefCell::new(Vec::new())),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        reply: "unused".into(),
+    };
+    let clock = || "2026-09-05T00:00:00Z".to_string();
+    let registry = vec![];
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.response_locale = Some("zh-CN".into());
+    run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u1", ChatRole::User, "first"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    let encoded = sess
+        .inner
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .encode_json_for_storage()
+        .unwrap();
+    *sess.inner.borrow_mut() = Some(PersistedAgentSession::decode_json(&encoded).unwrap());
+    loop_deps.response_locale = None;
+    let mut next_claim = claim();
+    next_claim.turn_id = "second-turn".into();
+    run_agent_turn(
+        &loop_deps,
+        next_claim,
+        ChatMessage::text("u2", ChatRole::User, "second"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sess.inner
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .response_locale
+            .as_deref(),
+        Some("zh-CN")
+    );
+    let mut completion_claim = claim();
+    completion_claim.turn_id = "completion-turn".into();
+    completion_claim.trigger_origin = crate::session::TriggerOrigin::WorkCompletion {
+        kind: crate::session::WorkKind::AgentExec,
+    };
+    loop_deps.response_locale = Some("en-US".into());
+    resume_agent_turn(&loop_deps, completion_claim, &mut NullTurnSink)
+        .await
+        .unwrap();
+    assert_eq!(
+        sess.inner
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .response_locale
+            .as_deref(),
+        Some("zh-CN")
+    );
+    assert_eq!(model.requests.borrow().len(), 3);
+    for request in model.requests.borrow().iter() {
+        assert!(request.messages[0].text.contains("locale zh-CN"));
+    }
 }
 
 #[tokio::test]
@@ -855,6 +952,7 @@ async fn capability_discovery_replaces_working_set_without_persisting_schema() {
     registry.extend(crate::capability_disclosure::capability_discovery_tool_registry());
     let clock = || "2026-09-03T00:00:01Z".to_string();
     let deps = LoopDeps {
+        response_locale: None,
         session_seam: &sess,
         model: &model,
         tools: &tools,
@@ -1967,6 +2065,7 @@ async fn checkpoint_compression_preserves_disclosure_selection_without_summarizi
     let permission_candidates = vec![target];
     let clock = || "2026-09-03T00:00:01Z".to_string();
     let loop_deps = LoopDeps {
+        response_locale: None,
         session_seam: &sess,
         model: &model,
         tools: &tools,
@@ -3185,6 +3284,7 @@ async fn projection_metrics_capture_long_session_growth_but_bounded_model_input(
                 input_revision: 1,
                 state: crate::dynamic_run::PermissionRequestState::Pending,
                 items: vec![crate::dynamic_run::GrantRequestItem {
+                    command_confirmation: None,
                     item_id: "read-file".into(),
                     provider_id: "file.read".into(),
                     tool_name: "read_selected_text_file".into(),
@@ -3424,6 +3524,7 @@ fn exec_deps<'a>(
     clock: &'a dyn Fn() -> String,
 ) -> LoopDeps<'a> {
     LoopDeps {
+        response_locale: None,
         session_seam: sess,
         model,
         tools: scripted,
@@ -4908,6 +5009,7 @@ async fn mutating_backend_error_fails_turn() {
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
     let user = ChatMessage::text("u", ChatRole::User, "do it");
     let deps = LoopDeps {
+        response_locale: None,
         session_seam: &sess,
         model: &model,
         tools: &failing,
@@ -5012,6 +5114,7 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
     let user = ChatMessage::text("u", ChatRole::User, "sleep briefly");
     let deps = LoopDeps {
+        response_locale: None,
         session_seam: &sess,
         model: &model,
         tools: &tools,
@@ -6008,6 +6111,7 @@ async fn rejected_tool_image_is_not_persisted_and_remaining_calls_are_paired() {
     };
     let clock = || "t".to_string();
     let loop_deps = LoopDeps {
+        response_locale: None,
         session_seam: &sess,
         model: &model,
         tools: &image_tools,
@@ -7087,6 +7191,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
         input_revision: 1,
         state: PermissionRequestState::Pending,
         items: vec![GrantRequestItem {
+            command_confirmation: None,
             item_id: "activate-compose".into(),
             provider_id: "browser.element.activate".into(),
             tool_name: "browser_activate_element".into(),

@@ -1655,6 +1655,7 @@ mod tests {
             input_revision: 1,
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
+                command_confirmation: None,
                 item_id: "inspect-directory".into(),
                 provider_id: "file.workspace".into(),
                 tool_name: "inspect_workbook_directory".into(),

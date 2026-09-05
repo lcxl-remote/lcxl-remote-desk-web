@@ -14,3 +14,4 @@ pub mod model_probe_observation;
 pub mod model_provider;
 pub mod turn_usage;
 pub mod usage_retention;
+pub mod web_search_config;

@@ -53,7 +53,9 @@ use sha2::{Digest, Sha256};
 
 use crate::model_dial::SignalModelSeam;
 
-pub(crate) fn oss_central_capability_readiness() -> Vec<CentralCapabilityReadiness> {
+pub(crate) fn oss_central_capability_readiness(
+    search_configured: bool,
+) -> Vec<CentralCapabilityReadiness> {
     let mut readiness = [
         ACTION_PREVIEW_CAPABILITY_ID,
         WEB_RESEARCH_FETCH_CAPABILITY_ID,
@@ -61,16 +63,14 @@ pub(crate) fn oss_central_capability_readiness() -> Vec<CentralCapabilityReadine
     .into_iter()
     .map(CentralCapabilityReadiness::ready)
     .collect::<Vec<_>>();
-    readiness.push(
-        if crate::web_research::production_search_config().is_some() {
-            CentralCapabilityReadiness::ready(WEB_RESEARCH_SEARCH_CAPABILITY_ID)
-        } else {
-            CentralCapabilityReadiness::unavailable(
+    readiness.push(if search_configured {
+        CentralCapabilityReadiness::ready(WEB_RESEARCH_SEARCH_CAPABILITY_ID)
+    } else {
+        CentralCapabilityReadiness::unavailable(
             WEB_RESEARCH_SEARCH_CAPABILITY_ID,
             desk_agent_protocol::capability_provider::CapabilityBlockedReason::AdapterUnavailable,
         )
-        },
-    );
+    });
     readiness
 }
 
@@ -158,6 +158,7 @@ fn latest_committed_answer(
 }
 
 async fn current_capability_projection(
+    db: &DatabaseConnection,
     connections: &SharedConnectionMap,
     target_connection_id: &str,
     model_capabilities: ModelCapabilities,
@@ -167,7 +168,15 @@ async fn current_capability_projection(
     u64,
     Option<ComputerUseReadiness>,
 ) {
-    let provider_registry = device_assistant_provider_registry();
+    let search_binding = match Box::pin(crate::web_search_config::read(db)).await {
+        Ok(config) => config.binding(),
+        Err(_) => {
+            log::warn!("Web Search configuration is unavailable");
+            None
+        }
+    };
+    let provider_registry =
+        device_assistant_provider_registry().with_web_search_binding(search_binding);
     let target_is_live = {
         let connections = connections.read().await;
         connections.contains_key(target_connection_id)
@@ -198,7 +207,7 @@ async fn current_capability_projection(
         &provider_registry,
         desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
         generated_at_unix_ms,
-        oss_central_capability_readiness(),
+        oss_central_capability_readiness(provider_registry.web_search_binding().is_some()),
         readiness,
     )
     .expect("validated Computer Use readiness must match the static Provider registry");
@@ -338,6 +347,7 @@ pub async fn send_capability_inventory(
         })
         .unwrap_or_default();
     let (registry, inventory, generated_at_unix_ms, _) = current_capability_projection(
+        &db,
         connections.as_ref(),
         &target_connection_id,
         model_capabilities,
@@ -410,6 +420,7 @@ pub async fn update_context(
         })?;
         let (registry, inventory, now_unix_ms, readiness) =
             current_capability_projection(
+                &db,
                 connections.as_ref(),
                 &target_connection_id,
                 ModelCapabilities {
@@ -930,6 +941,7 @@ async fn run_turn_inner(
     }
     let model_name = config.model.clone().unwrap_or_default();
     let (provider_registry, inventory, _, readiness) = current_capability_projection(
+        &db,
         connections.as_ref(),
         &target_connection_id,
         ModelCapabilities {
@@ -941,6 +953,17 @@ async fn run_turn_inner(
         .as_ref()
         .map(|readiness| readiness.revision)
         .unwrap_or(1);
+    let provider_registry = match crate::command_policy::current(
+        &db,
+        connections.as_ref(),
+        &target_connection_id,
+        &actor_id,
+    )
+    .await
+    {
+        Ok(policy) => provider_registry.with_command_policy(policy),
+        Err(_) => provider_registry,
+    };
     let office_selected = ask.selected_capability_ids.iter().any(|capability_id| {
         capability_id == desk_diagnose_core::device_assistant::OFFICE_DOCUMENT_CAPABILITY_ID
     });
@@ -1608,6 +1631,7 @@ async fn run_turn_inner(
         response_format: ResponseFormatSpec::None,
         system_prompt,
         max_steps_per_turn: config.max_steps_per_turn,
+        response_locale: ask.locale.clone(),
         max_same_tool_per_turn: config.max_same_tool_calls_per_turn,
         clock: &clock,
         heartbeat: Some(&heartbeat),

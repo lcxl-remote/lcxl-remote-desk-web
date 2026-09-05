@@ -188,17 +188,14 @@ impl ReadCallPreflight {
                 (1, Vec::new())
             }
             crate::web_research::WEB_SEARCH_TOOL_NAME => {
-                scope.resources = crate::capability_grant::exact_external_query_resource_scope(
-                    &canonical_input_digest_sha256,
-                );
+                let search = registry.web_search_binding().ok_or_else(unavailable)?;
+                scope.resources = search.resource_scope(&canonical_input_digest_sha256);
                 (
                     u32::from(
                         crate::web_research::validate_search_call(call, current_user_message)?
                             .max_results(),
                     ),
-                    vec![DestinationIdentity::WebResearch {
-                        connector_id: crate::web_research::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
-                    }],
+                    vec![search.destination()?],
                 )
             }
             _ => return Err(unavailable()),

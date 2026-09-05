@@ -394,6 +394,7 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
     .await
     .unwrap();
     let (registry, inventory, _, _) = current_capability_projection(
+        &db,
         connections.as_ref(),
         &host,
         ModelCapabilities { image_input: false },

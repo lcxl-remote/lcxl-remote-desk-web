@@ -9,6 +9,46 @@ pub const WEB_FETCH_TOOL_NAME: &str = "fetch_public_web_page";
 pub const WEB_SEARCH_TOOL_NAME: &str = "search_public_web";
 pub const BRAVE_WEB_SEARCH_CONNECTOR_ID: &str = "brave_web_v1";
 
+/// Server-selected destination and configuration version, never model input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchBinding {
+    pub connector_id: String,
+    pub revision: u64,
+}
+
+pub fn search_connector_metadata(id: &str) -> Option<(&'static str, bool)> {
+    match id {
+        "brave_web_v1" => Some(("Brave Web Search", true)),
+        "tavily_search_v1" => Some(("Tavily Search", true)),
+        "duckduckgo_html_v1" => Some(("DuckDuckGo", false)),
+        _ => None,
+    }
+}
+
+impl SearchBinding {
+    pub fn destination(
+        &self,
+    ) -> Result<desk_agent_protocol::data_lineage::DestinationIdentity, AgentError> {
+        if search_connector_metadata(&self.connector_id).is_none() {
+            return Err(invalid("Web Search connector is not supported"));
+        }
+        Ok(
+            desk_agent_protocol::data_lineage::DestinationIdentity::WebResearch {
+                connector_id: self.connector_id.clone(),
+            },
+        )
+    }
+
+    pub fn resource_scope(&self, input_digest: &str) -> Vec<String> {
+        let mut scope = crate::capability_grant::exact_external_query_resource_scope(input_digest);
+        scope.push(format!(
+            "web_search_config:{}:{}",
+            self.connector_id, self.revision
+        ));
+        scope
+    }
+}
+
 const MAX_URL_BYTES: usize = 2_048;
 const MAX_QUERY_BYTES: usize = 256;
 const MAX_QUERY_WORDS: usize = 50;
@@ -184,6 +224,29 @@ fn invalid(message: impl Into<String>) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_binding_changes_scope_on_provider_or_revision_change() {
+        let mut seen = std::collections::HashSet::new();
+        for connector in ["brave_web_v1", "tavily_search_v1", "duckduckgo_html_v1"] {
+            for revision in 0..3 {
+                let binding = SearchBinding {
+                    connector_id: connector.into(),
+                    revision,
+                };
+                assert!(binding.destination().is_ok());
+                assert!(seen.insert(binding.resource_scope(&"a".repeat(64))));
+            }
+        }
+        assert!(
+            SearchBinding {
+                connector_id: "model-selected".into(),
+                revision: 0
+            }
+            .destination()
+            .is_err()
+        );
+    }
 
     fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
         ToolCall {

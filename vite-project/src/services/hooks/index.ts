@@ -15,6 +15,8 @@ export type { LogoutAccountMutationKey } from "./authController/useLogoutAccount
 export type { RedeemCodeMutationKey } from "./authController/useRedeemCode.ts";
 export type { GetBrowserExtensionPairingQueryKey } from "./browserExtensionController/useGetBrowserExtensionPairing.ts";
 export type { GetBrowserExtensionPairingSuspenseQueryKey } from "./browserExtensionController/useGetBrowserExtensionPairingSuspense.ts";
+export type { QueryComputerUseApplicationPolicyMutationKey } from "./computerUsePolicyController/useQueryComputerUseApplicationPolicy.ts";
+export type { UpdateComputerUseApplicationPolicyMutationKey } from "./computerUsePolicyController/useUpdateComputerUseApplicationPolicy.ts";
 export type { ListConnectionsQueryKey } from "./connectionController/useListConnections.ts";
 export type { ListConnectionsSuspenseQueryKey } from "./connectionController/useListConnectionsSuspense.ts";
 export type { VerifyConnectionMutationKey } from "./connectionController/useVerifyConnection.ts";
@@ -110,6 +112,10 @@ export type { QueryVirtualDisplaySettingsQueryKey } from "./virtualDisplayContro
 export type { QueryVirtualDisplaySettingsSuspenseQueryKey } from "./virtualDisplayController/useQueryVirtualDisplaySettingsSuspense.ts";
 export type { UninstallDriverMutationKey } from "./virtualDisplayController/useUninstallDriver.ts";
 export type { UpdateVirtualDisplaySettingsMutationKey } from "./virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
+export type { GetWebSearchQueryKey } from "./webSearchController/useGetWebSearch.ts";
+export type { GetWebSearchSuspenseQueryKey } from "./webSearchController/useGetWebSearchSuspense.ts";
+export type { TestWebSearchMutationKey } from "./webSearchController/useTestWebSearch.ts";
+export type { UpdateWebSearchMutationKey } from "./webSearchController/useUpdateWebSearch.ts";
 export { queryAiPolicySettingsQueryKey } from "./aiModelController/useQueryAiPolicySettings.ts";
 export { queryAiPolicySettingsQueryOptions } from "./aiModelController/useQueryAiPolicySettings.ts";
 export { useQueryAiPolicySettings } from "./aiModelController/useQueryAiPolicySettings.ts";
@@ -161,6 +167,12 @@ export { useGetBrowserExtensionPairing } from "./browserExtensionController/useG
 export { getBrowserExtensionPairingSuspenseQueryKey } from "./browserExtensionController/useGetBrowserExtensionPairingSuspense.ts";
 export { getBrowserExtensionPairingSuspenseQueryOptions } from "./browserExtensionController/useGetBrowserExtensionPairingSuspense.ts";
 export { useGetBrowserExtensionPairingSuspense } from "./browserExtensionController/useGetBrowserExtensionPairingSuspense.ts";
+export { queryComputerUseApplicationPolicyMutationKey } from "./computerUsePolicyController/useQueryComputerUseApplicationPolicy.ts";
+export { queryComputerUseApplicationPolicyMutationOptions } from "./computerUsePolicyController/useQueryComputerUseApplicationPolicy.ts";
+export { useQueryComputerUseApplicationPolicy } from "./computerUsePolicyController/useQueryComputerUseApplicationPolicy.ts";
+export { updateComputerUseApplicationPolicyMutationKey } from "./computerUsePolicyController/useUpdateComputerUseApplicationPolicy.ts";
+export { updateComputerUseApplicationPolicyMutationOptions } from "./computerUsePolicyController/useUpdateComputerUseApplicationPolicy.ts";
+export { useUpdateComputerUseApplicationPolicy } from "./computerUsePolicyController/useUpdateComputerUseApplicationPolicy.ts";
 export { listConnectionsQueryKey } from "./connectionController/useListConnections.ts";
 export { listConnectionsQueryOptions } from "./connectionController/useListConnections.ts";
 export { useListConnections } from "./connectionController/useListConnections.ts";
@@ -446,3 +458,15 @@ export { useUninstallDriver } from "./virtualDisplayController/useUninstallDrive
 export { updateVirtualDisplaySettingsMutationKey } from "./virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
 export { updateVirtualDisplaySettingsMutationOptions } from "./virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
 export { useUpdateVirtualDisplaySettings } from "./virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
+export { getWebSearchQueryKey } from "./webSearchController/useGetWebSearch.ts";
+export { getWebSearchQueryOptions } from "./webSearchController/useGetWebSearch.ts";
+export { useGetWebSearch } from "./webSearchController/useGetWebSearch.ts";
+export { getWebSearchSuspenseQueryKey } from "./webSearchController/useGetWebSearchSuspense.ts";
+export { getWebSearchSuspenseQueryOptions } from "./webSearchController/useGetWebSearchSuspense.ts";
+export { useGetWebSearchSuspense } from "./webSearchController/useGetWebSearchSuspense.ts";
+export { testWebSearchMutationKey } from "./webSearchController/useTestWebSearch.ts";
+export { testWebSearchMutationOptions } from "./webSearchController/useTestWebSearch.ts";
+export { useTestWebSearch } from "./webSearchController/useTestWebSearch.ts";
+export { updateWebSearchMutationKey } from "./webSearchController/useUpdateWebSearch.ts";
+export { updateWebSearchMutationOptions } from "./webSearchController/useUpdateWebSearch.ts";
+export { useUpdateWebSearch } from "./webSearchController/useUpdateWebSearch.ts";

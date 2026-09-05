@@ -45,10 +45,10 @@ use desk_agent_protocol::computer_use::{
     UiSemanticAction,
 };
 use desk_agent_protocol::data_lineage::{
-    ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, DestinationIdentity,
-    RetentionBoundary, Sensitivity,
+    ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, RetentionBoundary,
+    Sensitivity,
 };
-use desk_agent_protocol::exec::{ApprovalId, CommandDraft, ExecRequestId};
+use desk_agent_protocol::exec::{ApprovalId, ExecRequestId};
 use desk_agent_protocol::remote_tool::{
     MAX_REMOTE_TOOL_RESULT_BYTES, REMOTE_TOOL_TIMEOUT_SECS, RemoteToolOutput, RemoteToolRequest,
     RemoteToolResponse, RemoteToolResponseChunk,
@@ -59,8 +59,7 @@ use desk_agent_protocol::{
     ProtocolVersion, ReadContextInput, RequestId, TargetRef,
 };
 use desk_diagnose_core::capability_grant::{
-    CapabilityGrantCall, canonical_compiled_scope, exact_command_resource_scope,
-    exact_external_query_resource_scope, exact_external_url_resource_scope,
+    CapabilityGrantCall, canonical_compiled_scope, exact_external_url_resource_scope,
     fresh_object_resource_scope, match_capability_grant,
 };
 use desk_diagnose_core::chat::ToolCall;
@@ -666,7 +665,6 @@ pub struct SignalDeviceAssistantTools {
     turn_id: String,
     policy_revision: i64,
     readiness_revision: u64,
-    max_command_runtime_ms: u32,
     exec_tools: crate::agent_exec::SignalAgentTools,
     model_egress_policy: Option<desk_diagnose_core::model_egress::ModelEgressPolicy>,
     original_input: OnceLock<object_read::OriginalInput>,
@@ -822,12 +820,12 @@ impl SignalDeviceAssistantTools {
             run_id.clone(),
             desk_agent_protocol::evidence::EvidenceSnapshot::record(
                 "device-assistant-command",
-                "pre-approved safe-template command dispatch",
+                "owner-approved exact command dispatch",
                 chrono::Utc::now().to_rfc3339(),
                 Vec::new(),
             ),
-            ExecAdmissionPolicy::TemplateOnly,
-            desk_agent_protocol::RiskLevel::High,
+            ExecAdmissionPolicy::OwnerInteractive,
+            desk_agent_protocol::RiskLevel::Critical,
             available_exec_shells,
             max_command_runtime_ms,
         );
@@ -856,7 +854,6 @@ impl SignalDeviceAssistantTools {
             turn_id,
             policy_revision,
             readiness_revision,
-            max_command_runtime_ms,
             exec_tools,
             model_egress_policy: None,
             original_input: OnceLock::new(),
@@ -1073,11 +1070,40 @@ impl SignalDeviceAssistantTools {
         desk_diagnose_core::provider_preflight::classify_provider_call(capability, call)
     }
 
+    async fn current_search_config(
+        &self,
+    ) -> Result<desk_signal_facade::web_search::SearchConfig, AgentError> {
+        let config = crate::web_search_config::read(&self.db)
+            .await
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "Web Search configuration is unavailable",
+                    false,
+                    true,
+                )
+            })?;
+        if config.binding().as_ref() != self.provider_registry.web_search_binding()
+            || !config.configured()
+        {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Web Search configuration changed; request fresh authorization",
+                false,
+                true,
+            ));
+        }
+        Ok(config)
+    }
+
     async fn verify_current_readiness(
         &self,
         capability: &desk_diagnose_core::provider_registry::CapabilityDescriptor,
     ) -> Result<(), AgentError> {
         if capability.wire.execution_locality == ExecutionLocality::Central {
+            if capability.wire.tool_name == WEB_SEARCH_TOOL_NAME {
+                self.current_search_config().await?;
+            }
             return Ok(());
         }
         let current = crate::computer_use_readiness::global_computer_use_readiness_cache()
@@ -1159,7 +1185,18 @@ impl SignalDeviceAssistantTools {
         if capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExternalQuery]
         {
-            resource_scope = exact_external_query_resource_scope(&canonical_input_digest_sha256);
+            resource_scope = self
+                .provider_registry
+                .web_search_binding()
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        "Web Search configuration is unavailable",
+                        false,
+                        true,
+                    )
+                })?
+                .resource_scope(&canonical_input_digest_sha256);
         }
         if let Some(preflight) = &read_preflight {
             resource_scope = preflight.resource_scope().to_vec();
@@ -1178,10 +1215,19 @@ impl SignalDeviceAssistantTools {
         let export_destinations = if capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExternalQuery]
         {
-            vec![DestinationIdentity::WebResearch {
-                connector_id: desk_diagnose_core::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID
-                    .into(),
-            }]
+            vec![
+                self.provider_registry
+                    .web_search_binding()
+                    .ok_or_else(|| {
+                        error(
+                            AgentErrorKind::PermissionDenied,
+                            "Web Search configuration is unavailable",
+                            false,
+                            true,
+                        )
+                    })?
+                    .destination()?,
+            ]
         } else {
             Vec::new()
         };
@@ -1565,67 +1611,24 @@ impl SignalDeviceAssistantTools {
                 true,
             ));
         }
-        let command: CommandDraft =
-            serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
-                error(
-                    AgentErrorKind::InvalidInput,
-                    format!("invalid confirmed command input: {decode_error}"),
-                    false,
-                    true,
-                )
-            })?;
-        command.validate().map_err(|validation_error| {
-            error(
-                AgentErrorKind::InvalidInput,
-                format!("invalid confirmed command input: {validation_error}"),
-                false,
-                true,
-            )
-        })?;
-        let shell = desk_diagnose_core::exec_tools::canonical_exec_shell(&command.shell)
-            .ok_or_else(|| {
-                error(
-                    AgentErrorKind::InvalidInput,
-                    "confirmed command shell is not supported",
-                    false,
-                    true,
-                )
-            })?;
-        let mut validation_input = desk_agent_protocol::ExecInput {
-            target: desk_agent_protocol::ExecTarget::Shell {
-                shell: shell.into(),
-            },
-            command: command.command,
-            cwd: command.cwd,
-            io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
-            timeout_ms: command.timeout_ms,
-            max_stdout_bytes: 65_536,
-            max_stderr_bytes: 65_536,
-        };
-        desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(
-            &mut validation_input,
-            self.max_command_runtime_ms,
-        );
-        let classified = desk_diagnose_core::exec_classify::classify_command_with_policy(
-            &validation_input,
-            &[],
-            desk_agent_protocol::exec_policy::builtin_blocklist(),
-            ExecAdmissionPolicy::TemplateOnly,
-        );
-        let Some(command_plan) = classified.draft else {
-            return Ok(ExecOutcome::Rejected {
-                reason: Some(classified.classification.impact),
-            });
-        };
-        if classified.classification.decision
-            != desk_agent_protocol::exec::ExecDecision::ConfirmRequired
-            || command_plan.execution_basis
-                != desk_agent_protocol::exec::ExecExecutionBasis::Template
-        {
-            return Ok(ExecOutcome::Rejected {
-                reason: Some("the command does not match a safe template".into()),
-            });
-        }
+        let session = self.authoritative_session().await?;
+        let (canonical_input_json, canonical_input_digest_sha256) =
+            Self::canonical_call_input(call)?;
+        let confirmation =
+            desk_diagnose_core::command_confirmation::CommandConfirmation::approved_for_call(
+                &session,
+                &canonical_input_json,
+            )?
+            .clone();
+        let policy = crate::command_policy::current(
+            &self.db,
+            self.connections.as_ref(),
+            &self.target_connection_id,
+            &self.actor_id,
+        )
+        .await?;
+        policy.revalidate(&confirmation, &canonical_input_json, session.input_revision)?;
+        let validation_input = confirmation.validation_input.clone();
 
         let capability = self
             .provider_registry
@@ -1647,26 +1650,7 @@ impl SignalDeviceAssistantTools {
             .provider_for_capability(&capability.wire.capability_id)
             .expect("registered command capability has a Provider");
         self.verify_current_readiness(capability).await?;
-        let session = self.authoritative_session().await?;
-        let (canonical_input_json, canonical_input_digest_sha256) =
-            Self::canonical_call_input(call)?;
-        let identity = desk_agent_protocol::exec::CanonicalCommandIdentity {
-            schema_version: desk_agent_protocol::exec::COMMAND_DRAFT_SCHEMA_VERSION,
-            target_device_id: self.target_device_id.clone(),
-            policy_revision: self.policy_revision,
-            input_revision: session.input_revision,
-            plan: command_plan,
-            canonical_input_digest_sha256: canonical_input_digest_sha256.clone(),
-        };
-        identity.validate().map_err(|validation_error| {
-            error(
-                AgentErrorKind::Internal,
-                format!("failed to freeze exact command identity: {validation_error}"),
-                false,
-                false,
-            )
-        })?;
-        let resource_scope = exact_command_resource_scope(&canonical_input_digest_sha256);
+        let resource_scope = confirmation.resource_scope()?;
         let operation_scope = vec!["execute_confirmed_command".into()];
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
             error(
@@ -1752,7 +1736,7 @@ impl SignalDeviceAssistantTools {
             canonical_input_json: &canonical_input_json,
             call: call_authority.clone(),
         };
-        let prepared = store.prepare(prepare()).await.map_err(|db_error| {
+        let _prepared = store.prepare(prepare()).await.map_err(|db_error| {
             error(
                 AgentErrorKind::PermissionDenied,
                 format!("command call authorization failed: {db_error}"),
@@ -1790,8 +1774,40 @@ impl SignalDeviceAssistantTools {
                     ));
                 }
             };
+        let origin =
+            desk_diagnose_core::action_result::ActionResultOrigin::capture_confirmed_command(
+                &self.provider_registry,
+                &session,
+                call,
+                now_unix_ms,
+            )?;
+        let completion_context = origin
+            .command_completion
+            .as_ref()
+            .ok_or_else(completion::invalid)?;
+        let model_export = self
+            .model_egress_policy
+            .as_ref()
+            .map(|policy| {
+                crate::capability_grant_store::computer_export::ComputerExportContext::capture_command(
+                    policy,
+                    &session,
+                    completion_context,
+                )
+            })
+            .transpose()
+            .map_err(|_| completion::invalid())?;
         match store
-            .claim_dispatch(&dispatch_id, now_unix_ms)
+            .claim_command_dispatch(
+                &dispatch_id,
+                now_unix_ms,
+                &self.target_connection_id,
+                &ctx.conversation_id,
+                &ctx.tool_call_id,
+                confirmation.plan.timeout_ms,
+                &origin,
+                model_export.as_ref(),
+            )
             .await
             .map_err(|db_error| {
                 error(
@@ -1803,9 +1819,20 @@ impl SignalDeviceAssistantTools {
             })? {
             DispatchClaimResult::Claimed(_) => {}
             DispatchClaimResult::OutcomeUnknown { .. } => {
+                let task = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+                    .find(&server_call_id, &dispatch_id)
+                    .await?
+                    .ok_or_else(|| {
+                        error(
+                            AgentErrorKind::Internal,
+                            "command recovery task is missing",
+                            false,
+                            false,
+                        )
+                    })?;
                 return Ok(ExecOutcome::Unknown(
                     desk_diagnose_core::session::ActionIdentity::new(
-                        prepared.work_id,
+                        task.id,
                         server_call_id,
                         dispatch_id,
                         desk_diagnose_core::session::WorkKind::AgentExec,
@@ -1814,22 +1841,54 @@ impl SignalDeviceAssistantTools {
             }
         }
 
-        let result = self
-            .exec_tools
-            .execute_preapproved(
-                validation_input,
-                ctx,
-                ExecRequestId(server_call_id.clone()),
-                dispatch_id.clone(),
-                ApprovalId(grant_id),
-            )
-            .await;
+        let checked = store
+            .validate_claimed_dispatch(&dispatch_id, prepare())
+            .await
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "command authority changed before send",
+                    false,
+                    true,
+                )
+            });
+        let result = if let Err(error) = checked {
+            Err(error)
+        } else {
+            self.exec_tools
+                .execute_preapproved(
+                    validation_input,
+                    &confirmation,
+                    &canonical_input_json,
+                    ctx,
+                    ExecRequestId(server_call_id.clone()),
+                    dispatch_id.clone(),
+                    ApprovalId(grant_id),
+                )
+                .await
+        };
         match result {
             Ok(ExecOutcome::Executed {
                 output,
                 event_id,
-                data_envelope,
+                data_envelope: _,
             }) => {
+                let exec_store =
+                    crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone());
+                let task = exec_store
+                    .find(&server_call_id, &dispatch_id)
+                    .await?
+                    .ok_or_else(|| completion::invalid())?;
+                let (durable_output, receipt) = exec_store
+                    .command_result(&task)
+                    .await?
+                    .ok_or_else(|| completion::invalid())?;
+                if durable_output.content != output.content
+                    || durable_output.image_data_url != output.image_data_url
+                {
+                    return Err(completion::invalid());
+                }
+                let data_envelope = Some(receipt.envelope);
                 let (_, result_digest_sha256) = tool_output_fingerprint(&output)?;
                 store
                     .record_dispatch_completion(
@@ -1858,6 +1917,9 @@ impl SignalDeviceAssistantTools {
                 })
             }
             Ok(ExecOutcome::Rejected { reason }) => {
+                crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+                    .mark_unsent(&dispatch_id)
+                    .await?;
                 let digest = format!(
                     "{:x}",
                     Sha256::digest(reason.as_deref().unwrap_or("command rejected").as_bytes())
@@ -1901,6 +1963,9 @@ impl SignalDeviceAssistantTools {
             Ok(other @ ExecOutcome::Dispatched(_)) => Ok(other),
             Ok(other) => Ok(other),
             Err(exec_error) => {
+                crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+                    .mark_unsent(&dispatch_id)
+                    .await?;
                 let digest = format!("{:x}", Sha256::digest(exec_error.message.as_bytes()));
                 store
                     .record_dispatch_completion(
@@ -4334,7 +4399,8 @@ impl SignalDeviceAssistantTools {
         }
         if call.name == WEB_SEARCH_TOOL_NAME {
             let validated = validate_search_call(call, &self.current_user_message)?;
-            return search_public_web(validated, &call.id)
+            let config = self.current_search_config().await?;
+            return search_public_web(&config, validated, &call.id)
                 .await
                 .map_err(Into::into);
         }
@@ -5144,6 +5210,29 @@ impl ToolSeam for SignalDeviceAssistantTools {
             execution_id,
         )
         .await?;
+        let outcome = if matches!(&outcome, WaitOutcome::Completed { .. }) {
+            let exec_store = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone());
+            let task = exec_store
+                .find(action_request_id, execution_id)
+                .await?
+                .ok_or_else(completion::invalid)?;
+            if task.conversation_id != self.run_id {
+                return Err(completion::invalid());
+            }
+            let (output, receipt) = exec_store
+                .command_result(&task)
+                .await?
+                .ok_or_else(completion::invalid)?;
+            WaitOutcome::CompletedWithReceipt {
+                action: receipt.action,
+                original_call_id: task.tool_call_id,
+                output,
+                event_id: task.event_id,
+                data_envelope: receipt.envelope,
+            }
+        } else {
+            outcome
+        };
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
             error(
                 AgentErrorKind::Internal,
@@ -5154,7 +5243,8 @@ impl ToolSeam for SignalDeviceAssistantTools {
         })?;
         let store = SignalCapabilityGrantStore::new(self.db.clone());
         match &outcome {
-            WaitOutcome::Completed { output, .. } => {
+            WaitOutcome::Completed { output, .. }
+            | WaitOutcome::CompletedWithReceipt { output, .. } => {
                 let (_, result_digest_sha256) = tool_output_fingerprint(output)?;
                 store
                     .record_dispatch_completion(
@@ -5195,7 +5285,6 @@ impl ToolSeam for SignalDeviceAssistantTools {
             // A receipt-bearing Provider completion already has its own durable
             // lineage. It must not be recorded as a legacy command completion.
             WaitOutcome::StillRunning
-            | WaitOutcome::CompletedWithReceipt { .. }
             | WaitOutcome::FailedWithReceipt { .. }
             | WaitOutcome::UnknownWithIdentity { .. } => {}
         }

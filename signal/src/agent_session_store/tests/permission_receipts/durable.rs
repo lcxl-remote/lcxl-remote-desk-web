@@ -325,7 +325,7 @@ async fn schema_upgrade_keeps_old_decisions_readable_without_inventing_pending_w
     let saved = state(&store).await;
     store
         .db
-        .execute_unprepared("DROP TABLE agent_permission_resume; PRAGMA user_version = 9")
+        .execute_unprepared("DROP TABLE agent_permission_resume; DROP TABLE web_search_config; PRAGMA user_version = 9")
         .await
         .unwrap();
     crate::db::initialize_schema(&store.db).await.unwrap();

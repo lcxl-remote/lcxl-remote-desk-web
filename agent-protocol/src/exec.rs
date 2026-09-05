@@ -361,12 +361,28 @@ impl CanonicalCommandIdentity {
         if self.policy_revision < 1 || self.input_revision == 0 {
             return Err(CommandContractError::InvalidRevision);
         }
-        if self.plan.execution_basis != ExecExecutionBasis::Template
-            || self.plan.template_id.trim().is_empty()
+        let valid_basis = match self.plan.execution_basis {
+            ExecExecutionBasis::Template => !self.plan.template_id.trim().is_empty(),
+            ExecExecutionBasis::OwnerBlocklistOnly => {
+                self.plan.template_id.is_empty() && self.plan.risk == RiskLevel::Critical
+            }
+        };
+        if !valid_basis
             || self.plan.program.trim().is_empty()
+            || self.plan.program.contains('\0')
+            || self.plan.argv.iter().any(|arg| arg.contains('\0'))
+            || self
+                .plan
+                .cwd
+                .as_ref()
+                .is_some_and(|cwd| cwd.is_empty() || cwd.contains('\0'))
             || self.plan.argv.len() > 256
             || self.plan.timeout_ms == 0
             || self.plan.timeout_ms > MAX_COMMAND_DRAFT_TIMEOUT_MS
+            || self.plan.max_stdout_bytes == 0
+            || self.plan.max_stdout_bytes > crate::exec_policy::MAX_OUTPUT_BYTES
+            || self.plan.max_stderr_bytes == 0
+            || self.plan.max_stderr_bytes > crate::exec_policy::MAX_OUTPUT_BYTES
         {
             return Err(CommandContractError::InvalidSealedPlan);
         }
@@ -794,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_command_identity_accepts_only_template_plan_and_exact_digest() {
+    fn canonical_command_identity_requires_valid_basis_limits_and_exact_digest() {
         let mut identity = CanonicalCommandIdentity {
             schema_version: COMMAND_DRAFT_SCHEMA_VERSION,
             target_device_id: "device-1".into(),
@@ -810,6 +826,15 @@ mod tests {
             identity.validate(),
             Err(CommandContractError::InvalidSealedPlan)
         );
+        identity.plan.template_id.clear();
+        identity.plan.risk = RiskLevel::Critical;
+        identity.validate().unwrap();
+        identity.plan.max_stdout_bytes = 0;
+        assert_eq!(
+            identity.validate(),
+            Err(CommandContractError::InvalidSealedPlan)
+        );
+        identity.plan = sample_draft();
         identity.plan.execution_basis = ExecExecutionBasis::Template;
         identity.canonical_input_digest_sha256 = "not-a-digest".into();
         assert_eq!(

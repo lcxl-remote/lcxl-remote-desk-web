@@ -1,0 +1,1 @@
+{"type":"object","required":["provider","display_name","requires_api_key"],"properties":{"display_name":{"type":"string"},"provider":{"type":"string","enum":["duck_duck_go","brave","tavily"],"x-readme-ref-name":"SearchProvider"},"requires_api_key":{"type":"boolean"}},"x-readme-ref-name":"SearchProviderInfo"}

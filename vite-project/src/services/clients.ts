@@ -4,8 +4,59 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, GetBrowserExtensionPairingQueryResponse, GetBrowserExtensionPairing500, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, OpenExecPtyCarrierQueryResponse, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryDeviceAssistantSettingsQueryResponse, UpdateDeviceAssistantSettingsMutationRequest, UpdateDeviceAssistantSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetDeviceAssistantSessionQueryResponse, GetDeviceAssistantSessionQueryParams, CancelDeviceAssistantBackgroundTaskMutationRequest, CancelDeviceAssistantBackgroundTaskMutationResponse, RevokeDeviceAssistantCapabilityGrantMutationRequest, RevokeDeviceAssistantCapabilityGrantMutationResponse, DisposeDeviceAssistantUnknownOutcomeMutationRequest, DisposeDeviceAssistantUnknownOutcomeMutationResponse, DecideDeviceAssistantPermissionMutationRequest, DecideDeviceAssistantPermissionMutationResponse, ListDeviceAssistantSessionsQueryResponse, ListDeviceAssistantSessionsQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, GetWebSearchQueryResponse, UpdateWebSearchMutationRequest, UpdateWebSearchMutationResponse, TestWebSearchMutationRequest, TestWebSearchMutationResponse, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, GetBrowserExtensionPairingQueryResponse, GetBrowserExtensionPairing500, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, OpenExecPtyCarrierQueryResponse, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, UpdateComputerUseApplicationPolicyMutationRequest, UpdateComputerUseApplicationPolicyMutationResponse, QueryComputerUseApplicationPolicyMutationResponse, QueryDeviceAssistantSettingsQueryResponse, UpdateDeviceAssistantSettingsMutationRequest, UpdateDeviceAssistantSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetDeviceAssistantSessionQueryResponse, GetDeviceAssistantSessionQueryParams, CancelDeviceAssistantBackgroundTaskMutationRequest, CancelDeviceAssistantBackgroundTaskMutationResponse, RevokeDeviceAssistantCapabilityGrantMutationRequest, RevokeDeviceAssistantCapabilityGrantMutationResponse, DisposeDeviceAssistantUnknownOutcomeMutationRequest, DisposeDeviceAssistantUnknownOutcomeMutationResponse, DecideDeviceAssistantPermissionMutationRequest, DecideDeviceAssistantPermissionMutationResponse, ListDeviceAssistantSessionsQueryResponse, ListDeviceAssistantSessionsQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
+
+function getGetWebSearchUrl() {
+  const res = { method: 'GET', url: `/api/admin/system/web-search` as const }
+  return res
+}
+
+/**
+ * {@link /api/admin/system/web-search}
+ */
+export async function getWebSearch(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetWebSearchQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetWebSearchUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUpdateWebSearchUrl() {
+  const res = { method: 'PUT', url: `/api/admin/system/web-search` as const }
+  return res
+}
+
+/**
+ * {@link /api/admin/system/web-search}
+ */
+export async function updateWebSearch(data: UpdateWebSearchMutationRequest, config: Partial<RequestConfig<UpdateWebSearchMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateWebSearchMutationResponse, ResponseErrorConfig<Error>, UpdateWebSearchMutationRequest>({ method : "PUT", url : getUpdateWebSearchUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getTestWebSearchUrl() {
+  const res = { method: 'POST', url: `/api/admin/system/web-search/test` as const }
+  return res
+}
+
+/**
+ * {@link /api/admin/system/web-search/test}
+ */
+export async function testWebSearch(data: TestWebSearchMutationRequest, config: Partial<RequestConfig<TestWebSearchMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<TestWebSearchMutationResponse, ResponseErrorConfig<Error>, TestWebSearchMutationRequest>({ method : "POST", url : getTestWebSearchUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
 
 function getChangePasswordUrl() {
   const res = { method: 'PATCH', url: `/api/auth/credentials` as const }
@@ -534,6 +585,42 @@ export async function updateCollectionPolicySettings(data: UpdateCollectionPolic
   const requestData = data
 
   const res = await request<UpdateCollectionPolicySettingsMutationResponse, ResponseErrorConfig<Error>, UpdateCollectionPolicySettingsMutationRequest>({ method : "POST", url : getUpdateCollectionPolicySettingsUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getUpdateComputerUseApplicationPolicyUrl() {
+  const res = { method: 'POST', url: `/api/desk/settings/computer-use-applications` as const }
+  return res
+}
+
+/**
+ * @summary Update the local Computer Use application restriction
+ * {@link /api/desk/settings/computer-use-applications}
+ */
+export async function updateComputerUseApplicationPolicy(data: UpdateComputerUseApplicationPolicyMutationRequest, config: Partial<RequestConfig<UpdateComputerUseApplicationPolicyMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateComputerUseApplicationPolicyMutationResponse, ResponseErrorConfig<Error>, UpdateComputerUseApplicationPolicyMutationRequest>({ method : "POST", url : getUpdateComputerUseApplicationPolicyUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getQueryComputerUseApplicationPolicyUrl() {
+  const res = { method: 'POST', url: `/api/desk/settings/computer-use-applications/query` as const }
+  return res
+}
+
+/**
+ * @summary Read the local Computer Use application restriction
+ * {@link /api/desk/settings/computer-use-applications/query}
+ */
+export async function queryComputerUseApplicationPolicy(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<QueryComputerUseApplicationPolicyMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getQueryComputerUseApplicationPolicyUrl().url.toString(), ... requestConfig })
   return res.data
 }
 

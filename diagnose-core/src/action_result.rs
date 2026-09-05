@@ -1,5 +1,7 @@
 //! Frozen action-result provenance and immutable, generation-bound receipts.
-//! These records describe data; they never authorize an effect or an export.
+//! These records alone never authorize an effect or an export. Exact commands
+//! additionally freeze a bounded interpretation context, which runtimes must
+//! validate against durable dispatch, current ownership and revocation state.
 
 use desk_agent_protocol::{
     AgentError, AgentErrorKind,
@@ -20,6 +22,8 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionResultOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_completion: Option<crate::command_completion::CommandCompletionContext>,
     pub schema_version: u16,
     pub turn_fence: AssistantTurnFence,
     pub tool_call_id: String,
@@ -33,6 +37,59 @@ pub struct ActionResultOrigin {
 }
 
 impl ActionResultOrigin {
+    /// An approved exact command produces new device data. Freeze its result
+    /// window at dispatch, independently of the model proposal's cache TTL.
+    /// Dispatch still requires the caller's live one-shot grant reservation.
+    pub fn capture_confirmed_command(
+        registry: &ProviderRegistry,
+        session: &PersistedAgentSession,
+        call: &ToolCall,
+        now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
+        if call.name != crate::command_confirmation::COMMAND_TOOL {
+            return Err(invalid());
+        }
+        let canonical = crate::permission_tools::canonical_tool_permission_input_json(
+            &call.name,
+            serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
+        )
+        .map_err(|_| invalid())?;
+        let confirmation = crate::command_confirmation::CommandConfirmation::approved_for_call(
+            session, &canonical,
+        )?;
+        let parent = session
+            .conversation
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == ChatRole::Assistant
+                    && message.tool_calls.iter().any(|candidate| {
+                        candidate.id == call.id
+                            && candidate.name == call.name
+                            && same_json(&candidate.arguments_json, &call.arguments_json)
+                    })
+            })
+            .and_then(|message| message.data_envelope.as_ref())
+            .ok_or_else(invalid)?;
+        if crate::model_egress::envelope_expires_by(parent, now_unix_ms) {
+            return Err(invalid());
+        }
+        let [destination] = parent.allowed_destinations.as_slice() else {
+            return Err(invalid());
+        };
+        let completion = crate::command_completion::CommandCompletionContext::capture(
+            session,
+            destination.clone(),
+            now_unix_ms,
+            confirmation.plan.timeout_ms,
+        )?;
+        let mut origin = Self::capture(registry, session, call)?;
+        origin.retention.expires_at_unix_ms = Some(completion.expires_at_unix_ms);
+        origin.command_completion = Some(completion);
+        origin.validate()?;
+        Ok(origin)
+    }
+
     /// Freeze the registry and server-resolved input lineage before approval or
     /// dispatch. A later completion never consults the current registry.
     pub fn capture(
@@ -97,6 +154,7 @@ impl ActionResultOrigin {
             }
         }
         let origin = Self {
+            command_completion: None,
             schema_version: 1,
             turn_fence: AssistantTurnFence::from_session(session)?.ok_or_else(invalid)?,
             tool_call_id: call.id.clone(),
@@ -113,6 +171,15 @@ impl ActionResultOrigin {
     }
 
     pub fn validate(&self) -> Result<(), AgentError> {
+        if let Some(completion) = &self.command_completion {
+            completion.validate()?;
+            if self.tool_name != crate::command_confirmation::COMMAND_TOOL
+                || self.ephemeral
+                || self.retention.expires_at_unix_ms != Some(completion.expires_at_unix_ms)
+            {
+                return Err(invalid());
+            }
+        }
         self.turn_fence.validate()?;
         self.retention.validate().map_err(|_| invalid())?;
         if self.schema_version != 1
@@ -358,6 +425,101 @@ mod tests {
             "generation",
             crate::session::WorkKind::CapabilityProvider,
         )
+    }
+
+    #[test]
+    fn confirmed_command_freezes_new_result_window_without_extending_proposal() {
+        use crate::dynamic_run::{GrantRequestItem, PermissionRequest, PermissionRequestState};
+        let (mut session, mut call) = prepared();
+        let mut policy = crate::command_confirmation::test_policy();
+        policy.actor_id = session.actor_id.clone();
+        policy.target_device_id = session.device_id.clone();
+        policy.max_runtime_ms = 600_000;
+        call.name = crate::command_confirmation::COMMAND_TOOL.into();
+        call.arguments_json = crate::permission_tools::canonical_tool_permission_input_json(&call.name,
+            serde_json::json!({"schema_version":1,"shell":"bash","command":"du -d 1 /tmp","timeout_ms":600000})).unwrap();
+        let confirmation = policy
+            .prepare(&call.arguments_json, session.input_revision)
+            .unwrap();
+        let proposal = session.conversation.last_mut().unwrap();
+        proposal.tool_calls = vec![ToolCallRef {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments_json: call.arguments_json.clone(),
+        }];
+        let old_envelope = proposal.data_envelope.clone();
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        assert!(
+            ActionResultOrigin::capture_confirmed_command(&registry, &session, &call, 1000)
+                .is_err()
+        );
+        session.permission_requests.push(PermissionRequest {
+            schema_version: 1,
+            request_id: "approval".into(),
+            input_revision: 1,
+            state: PermissionRequestState::Approved,
+            created_at: "now".into(),
+            items: vec![GrantRequestItem {
+                command_confirmation: Some(confirmation.clone()),
+                item_id: "command".into(),
+                provider_id: "file.workspace".into(),
+                tool_name: call.name.clone(),
+                expected_effect: registry
+                    .capability_for_tool(&call.name)
+                    .unwrap()
+                    .wire
+                    .effect,
+                resource_scope: confirmation.resource_scope().unwrap(),
+                operation_scope: vec![call.name.clone()],
+                export_destinations: vec![],
+                canonical_input_json: Some(call.arguments_json.clone()),
+                canonical_input_digest_sha256: Some(
+                    confirmation.canonical_input_digest_sha256.clone(),
+                ),
+                suggested_ttl_seconds: 300,
+                suggested_max_uses: 1,
+                reason: "approved".into(),
+            }],
+        });
+        let origin =
+            ActionResultOrigin::capture_confirmed_command(&registry, &session, &call, 1000)
+                .unwrap();
+        assert_eq!(origin.retention.expires_at_unix_ms, Some(901_000));
+        assert_eq!(
+            session.conversation.last().unwrap().data_envelope,
+            old_envelope
+        );
+        let output = ToolRunOutput {
+            content: "du completed".into(),
+            image_data_url: None,
+        };
+        let receipt = origin
+            .receipt(
+                ActionIdentity::agent_exec(9, "request", "generation"),
+                1,
+                321_000,
+                &output,
+            )
+            .unwrap();
+        assert_eq!(receipt.envelope.retention.expires_at_unix_ms, Some(901_000));
+        assert!(receipt.envelope.allowed_destinations.is_empty());
+        let mut legacy = origin.clone();
+        legacy.command_completion = None;
+        legacy.retention.expires_at_unix_ms = Some(7000);
+        assert_eq!(
+            legacy
+                .receipt(
+                    ActionIdentity::agent_exec(9, "request", "generation"),
+                    1,
+                    321_000,
+                    &output
+                )
+                .unwrap()
+                .envelope
+                .retention
+                .expires_at_unix_ms,
+            Some(7000)
+        );
     }
 
     #[test]

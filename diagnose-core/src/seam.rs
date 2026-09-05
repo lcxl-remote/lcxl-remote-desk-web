@@ -293,6 +293,12 @@ pub enum ContextCompressionAuditOutcome {
 /// (text + tool calls + stop reason + usage).
 #[async_trait(?Send)]
 pub trait ModelSeam {
+    /// One server-validated command completion, interpreted without old history
+    /// or checkpoint compression. The transport must revalidate durable authority.
+    fn command_completion_event_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Exact data-egress policy for Device Assistant context transformations.
     /// Ordinary diagnostic/copilot seams leave this unset. A strict seam must
     /// also enforce the same policy inside `call`, before its transport starts.

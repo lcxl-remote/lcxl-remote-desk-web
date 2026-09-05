@@ -59,7 +59,7 @@ fn is_loopback_url_host(url: &url::Url) -> bool {
 }
 
 #[allow(clippy::result_large_err)]
-fn validate_local_mutation(req: &HttpRequest) -> Result<(), DeskError> {
+pub(super) fn validate_local_mutation(req: &HttpRequest) -> Result<(), DeskError> {
     let peer = req
         .peer_addr()
         .ok_or_else(|| permission_error("Local permission requests require a TCP peer address"))?;

@@ -288,6 +288,7 @@ fn deps<'a>(
     clock: &'a dyn Fn() -> String,
 ) -> LoopDeps<'a> {
     LoopDeps {
+        response_locale: None,
         session_seam: sess,
         model,
         tools,
@@ -689,6 +690,7 @@ async fn stage2_dynamic_readonly_rehearsal_has_no_fixed_workflow_or_mutation_pat
     ];
     let clock = || "2026-08-26T00:00:00Z".to_string();
     let deps = LoopDeps {
+        response_locale: None,
         session_seam: &sess,
         model: &model,
         tools: &tools,

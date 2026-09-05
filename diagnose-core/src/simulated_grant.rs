@@ -129,6 +129,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![
                 GrantRequestItem {
+                    command_confirmation: None,
                     item_id: "session".into(),
                     provider_id: "desktop.session".into(),
                     tool_name: "inspect_desktop_session".into(),
@@ -143,6 +144,7 @@ mod tests {
                     reason: "inspect the selected session".into(),
                 },
                 GrantRequestItem {
+                    command_confirmation: None,
                     item_id: "ui".into(),
                     provider_id: "desktop.ui".into(),
                     tool_name: "inspect_desktop_ui".into(),

@@ -323,6 +323,8 @@ pub struct LoopDeps<'a> {
     /// in the persisted conversation, so a prompt-version bump applies to
     /// in-flight conversations.
     pub system_prompt: ChatMessage,
+    /// Explicit control-end preference. Missing values preserve the saved locale.
+    pub response_locale: Option<String>,
     /// Per-turn model→tool step budget (circuit breaker). Diagnose passes
     /// [`crate::MAX_STEPS_PER_TURN`]; the latency-sensitive terminal copilot
     /// passes a tighter bound.
@@ -452,6 +454,18 @@ async fn run_or_resume(
         } else {
             session.conversation.push(message);
         }
+    }
+    if newer_user_inputs_after_request == 0
+        && session.trigger_origin == crate::session::TriggerOrigin::User
+        && let Some(locale) = deps.response_locale.as_deref().filter(|locale| {
+            !locale.is_empty()
+                && locale.len() <= 64
+                && locale
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        session.response_locale = Some(locale.to_owned());
     }
     if let Err(error) = deps.session_seam.save(&mut session).await {
         return match settle_if_superseded(deps, &session, sink).await? {
@@ -758,6 +772,21 @@ async fn prepare_model_context(
     compression_attempted: &mut bool,
     sink: &mut dyn TurnSink,
 ) -> Result<crate::model_context::ModelContextView, AgentError> {
+    if let Some(event_id) = deps.model.command_completion_event_id() {
+        let projected = crate::command_completion::project_request(
+            ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
+            session,
+            event_id,
+        )?;
+        // This is an ephemeral exact-result view, not a replacement history
+        // checkpoint. The assembled request below still enforces the byte cap.
+        return Ok(crate::model_context::ModelContextView {
+            messages: projected.messages,
+            policy_key: pinned_context.key(),
+            floor_group_head_message_id: None,
+            floor_advanced: false,
+        });
+    }
     loop {
         if pinned_context.strategy
             == crate::model_context::ContextManagementStrategy::CheckpointSummary
@@ -1351,11 +1380,31 @@ async fn run_inner(
             .iter()
             .map(|tool| tool.spec.clone())
             .collect::<Vec<_>>();
-        let request_requirements = tool_requirements.union(
-            crate::model_capability::ModelRequirements::for_messages(&session.conversation),
-        );
+        let completion_messages = deps
+            .model
+            .command_completion_event_id()
+            .map(|event_id| {
+                crate::command_completion::project_request(
+                    ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
+                    session,
+                    event_id,
+                )
+                .map(|request| request.messages)
+            })
+            .transpose()?;
+        let request_requirements =
+            tool_requirements.union(crate::model_capability::ModelRequirements::for_messages(
+                completion_messages
+                    .as_deref()
+                    .unwrap_or(&session.conversation),
+            ));
         let pinned_context = deps.model.context_policy(request_requirements).await?;
         let mut system_prompt = deps.system_prompt.clone();
+        if let Some(locale) = session.response_locale.as_deref() {
+            system_prompt.text.push_str(&format!(
+                "\n\nWrite natural-language answers and progress explanations in BCP-47 locale {locale}. Tool names, commands, and JSON fields remain unchanged."
+            ));
+        }
         let mut disclosure_projection = None;
         if disclosure_enabled {
             let providers = deps.provider_registry.ok_or_else(|| AgentError {
@@ -1435,13 +1484,21 @@ async fn run_inner(
             sink,
         )
         .await?;
+        // Snapshot occupancy using the same projected history and reserved budget.
+        session.context_usage_basis = Some(crate::context_usage::ContextUsageBasis::observe(
+            &session.conversation,
+            &context_view.messages,
+            &history_policy,
+        ));
         // Assemble the model request: a freshly built system prompt prepended to a
         // trailing, budget-trimmed window of the stored conversation. The system
         // prompt is never persisted, so it is added here on every call.
         let mut messages = Vec::with_capacity(session.conversation.len() + 3);
         messages.push(system_prompt);
         messages.extend(context_view.messages);
-        if session.surface == AgentSessionSurface::DeviceAssistant {
+        if session.surface == AgentSessionSurface::DeviceAssistant
+            && deps.model.command_completion_event_id().is_none()
+        {
             // Put the server-owned input watermark at the recency edge of the
             // request. Some OpenAI-compatible models underweight a system prompt
             // when several durable user follow-ups are batched; this marker makes
@@ -1653,8 +1710,6 @@ async fn run_inner(
         // message is in this request is cleared once the model reacts to it (the
         // assistant answer / tool-call save below), so it never fires an automation
         // turn for a result the model already handled.
-        let request_message_ids: HashSet<String> =
-            messages.iter().map(|m| m.message_id.clone()).collect();
         let request = ModelRequest {
             messages,
             tools: specs,
@@ -1664,6 +1719,16 @@ async fn run_inner(
             use_case: crate::model_profile::ModelUseCase::Agent,
             caller_output_hard_cap: None,
         };
+        let request = if let Some(event_id) = deps.model.command_completion_event_id() {
+            crate::command_completion::project_request(request, session, event_id)?
+        } else {
+            request
+        };
+        let request_message_ids: HashSet<String> = request
+            .messages
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect();
         let assembled_request_cost = request
             .messages
             .iter()
@@ -2671,6 +2736,8 @@ async fn run_inner(
                             let result = crate::conversation_history::load_history_page(
                                 call,
                                 &session.conversation,
+                                deps.model.model_egress_policy()?.as_ref(),
+                                current_unix_ms(deps.clock)?,
                             )
                             .and_then(|result| {
                                 session

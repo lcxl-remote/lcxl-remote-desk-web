@@ -59,6 +59,94 @@ pub struct SignalAgentExecStore {
 }
 
 impl SignalAgentExecStore {
+    /// Reconstruct only from the frozen dispatch origin and persist the first
+    /// receipt before delivery. No current input/model may relabel this result.
+    pub(crate) async fn command_result(
+        &self,
+        task: &agent_exec_task::Model,
+    ) -> Result<
+        Option<(
+            desk_diagnose_core::seam::ToolRunOutput,
+            desk_diagnose_core::action_result::ActionResultReceipt,
+        )>,
+        AgentError,
+    > {
+        use crate::{
+            capability_grant_store::CapabilityDispatchPayload,
+            entity::agent_capability_dispatch_outbox as outbox,
+        };
+        if task.status != STATUS_DONE {
+            return Ok(None);
+        }
+        for _ in 0..3 {
+            let Some(row) = outbox::Entity::find()
+                .filter(outbox::Column::DispatchId.eq(&task.execution_generation))
+                .one(&self.db)
+                .await
+                .map_err(|_| internal("command origin unavailable"))?
+            else {
+                return Ok(None);
+            };
+            let mut payload: CapabilityDispatchPayload = serde_json::from_str(&row.payload_json)
+                .map_err(|_| internal("invalid command origin"))?;
+            let origin = payload
+                .command_origin
+                .as_ref()
+                .ok_or_else(|| internal("command origin is missing"))?;
+            if payload.call_id != task.exec_request_id
+                || payload.dispatch_id != task.execution_generation
+                || origin.tool_name != desk_diagnose_core::command_confirmation::COMMAND_TOOL
+                || origin.tool_call_id != task.tool_call_id
+                || origin.turn_fence.conversation_id != task.conversation_id
+            {
+                return Err(internal("command result does not match original dispatch"));
+            }
+            let output = desk_diagnose_core::seam::ToolRunOutput {
+                content: task
+                    .result_text
+                    .clone()
+                    .ok_or_else(|| internal("command result is missing"))?,
+                image_data_url: None,
+            };
+            let action = desk_diagnose_core::session::ActionIdentity::agent_exec(
+                task.id,
+                &task.exec_request_id,
+                &task.execution_generation,
+            );
+            if let Some(receipt) = payload.command_receipt {
+                receipt.validate_for(origin, action, 1, &output)?;
+                return Ok(Some((output, receipt)));
+            }
+            let receipt = origin.receipt(
+                action,
+                1,
+                task.updated_at
+                    .timestamp_millis()
+                    .try_into()
+                    .map_err(|_| internal("invalid command result clock"))?,
+                &output,
+            )?;
+            payload.command_receipt = Some(receipt.clone());
+            let saved = outbox::Entity::update_many()
+                .col_expr(
+                    outbox::Column::PayloadJson,
+                    Expr::value(
+                        serde_json::to_string(&payload)
+                            .map_err(|_| internal("invalid command receipt"))?,
+                    ),
+                )
+                .filter(outbox::Column::Id.eq(row.id))
+                .filter(outbox::Column::PayloadJson.eq(row.payload_json))
+                .exec(&self.db)
+                .await
+                .map_err(|_| internal("command receipt could not be saved"))?;
+            if saved.rows_affected == 1 {
+                return Ok(Some((output, receipt)));
+            }
+        }
+        Err(internal("command receipt changed concurrently"))
+    }
+
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
@@ -222,7 +310,7 @@ impl SignalAgentExecStore {
             .map_err(|e| internal(format!("load pending agent execution deliveries: {e}")))
     }
 
-    async fn publish_once(&self) -> Result<(), AgentError> {
+    pub(crate) async fn publish_once(&self) -> Result<(), AgentError> {
         let sessions = SignalAgentSessionStore::new(self.db.clone());
         for task in self.pending_deliveries().await? {
             let now = Utc::now().to_rfc3339();
@@ -236,15 +324,44 @@ impl SignalAgentExecStore {
                     )
                     .await?
             } else {
+                let envelope = if let Some((_, receipt)) = self.command_result(&task).await? {
+                    use crate::capability_grant_store::{
+                        CapabilityDispatchCompletion, CapabilityDispatchOutcome,
+                        SignalCapabilityGrantStore,
+                    };
+                    // This settles receipt delivery, not the command's exit
+                    // status: an authenticated timeout is also a final result.
+                    let completion = CapabilityDispatchCompletion {
+                        dispatch_id: task.execution_generation.clone(),
+                        call_id: task.exec_request_id.clone(),
+                        generation: 1,
+                        outcome: CapabilityDispatchOutcome::Succeeded,
+                        result_digest_sha256: receipt.envelope.digest_sha256.clone(),
+                    };
+                    SignalCapabilityGrantStore::new(self.db.clone())
+                        .record_dispatch_completion(
+                            &completion,
+                            Utc::now().timestamp_millis() as u64,
+                        )
+                        .await
+                        .map_err(|_| {
+                            internal("command completion authority could not be settled")
+                        })?;
+                    Some(receipt.envelope)
+                } else {
+                    None
+                };
                 sessions
-                    .deliver_completion(
+                    .deliver_work_completion_with_envelope(
                         &task.conversation_id,
                         task.id,
+                        desk_diagnose_core::session::WorkKind::AgentExec,
                         &task.event_id,
                         &task.execution_generation,
                         &task.tool_call_id,
                         &task.exec_request_id,
                         task.result_text.as_deref().unwrap_or("execution completed"),
+                        envelope,
                         &now,
                     )
                     .await?
@@ -356,7 +473,7 @@ impl SignalAgentExecStore {
                     .pending_auto_trigger(&task.conversation_id, &task.event_id)
                     .await?
                     .is_some_and(|latest| latest.automation_turns_used >= MAX_AUTO_FOLLOW_UP_TURNS);
-                if exhausted {
+                if exhausted || !error.retryable {
                     Ok(!matches!(
                         sessions
                             .prune_auto_trigger(

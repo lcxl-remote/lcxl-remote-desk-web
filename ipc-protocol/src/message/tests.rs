@@ -16,6 +16,24 @@ use desk_signal_facade::model::terminal::{
 };
 use std::collections::BTreeMap;
 
+#[test]
+fn application_policy_publication_and_exact_ack_round_trip() {
+    let policy = ComputerUseApplicationPolicyPayload {
+        operation_id: "application-policy-1".into(),
+        revision: 23,
+        allowed_application_paths: vec!["/Applications/Test.app/Contents/MacOS/Test".into()],
+    };
+    assert!(
+        matches!(wincode_round_trip(&ServiceToWorker::UpdateComputerUseApplicationPolicy(policy.clone())),
+        ServiceToWorker::UpdateComputerUseApplicationPolicy(decoded) if decoded == policy)
+    );
+    let ack = WorkerToService::ComputerUseApplicationPolicyApplied(policy.clone());
+    assert!(ack.connection_id().is_none());
+    assert!(
+        matches!(wincode_round_trip(&ack), WorkerToService::ComputerUseApplicationPolicyApplied(decoded) if decoded == policy)
+    );
+}
+
 /// The spawn report round-trips both ways, including the containment identity
 /// the daemon needs to reclaim a tree it has lost track of.
 #[test]

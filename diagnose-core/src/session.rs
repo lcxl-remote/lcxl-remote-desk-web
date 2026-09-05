@@ -444,6 +444,9 @@ pub type PendingAutoTrigger = PendingWorkTrigger;
 /// Direct runtime keeps in memory).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedAgentSession {
+    /// Presentation preference only; never used as execution authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_locale: Option<String>,
     pub conversation_id: String,
     /// Validated client continuation intent. The storage key remains the
     /// subject-namespaced `conversation_id`; this value exists so an authorized
@@ -470,6 +473,8 @@ pub struct PersistedAgentSession {
     pub capability_disclosure: crate::capability_disclosure::CapabilityDisclosureState,
     #[serde(default)]
     pub model_context_state: ModelContextState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage_basis: Option<crate::context_usage::ContextUsageBasis>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_notices: Vec<ContextNotice>,
     /// User-selected context metadata and opaque ContentRefs. Raw file,
@@ -819,6 +824,7 @@ impl PersistedAgentSession {
         if version == 0 {
             session.conversation_schema_version = CONVERSATION_SCHEMA_VERSION;
             session.model_context_state = ModelContextState::default();
+            session.context_usage_basis = None;
             session.context_notices.clear();
             for message in &mut session.conversation {
                 if message.role == crate::chat::ChatRole::Assistant
@@ -858,6 +864,7 @@ impl PersistedAgentSession {
     ) -> Self {
         Self {
             conversation_id: conversation_id.into(),
+            response_locale: None,
             client_conversation_id: None,
             surface: AgentSessionSurface::Unknown,
             conversation_schema_version: CONVERSATION_SCHEMA_VERSION,
@@ -866,6 +873,7 @@ impl PersistedAgentSession {
             capability_disclosure: crate::capability_disclosure::CapabilityDisclosureState::default(
             ),
             model_context_state: ModelContextState::default(),
+            context_usage_basis: None,
             context_notices: Vec::new(),
             context_attachments: Vec::new(),
             visual_evidence: Vec::new(),
@@ -1921,6 +1929,7 @@ mod tests {
             input_revision: 1,
             state,
             items: vec![GrantRequestItem {
+                command_confirmation: None,
                 item_id: format!("item-{id}"),
                 provider_id: "file.artifact".into(),
                 tool_name: "create_text_artifact".into(),

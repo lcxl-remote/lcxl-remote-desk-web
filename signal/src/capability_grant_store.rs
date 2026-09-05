@@ -108,6 +108,12 @@ pub struct PreparedCapabilityCall {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDispatchPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_origin: Option<desk_diagnose_core::action_result::ActionResultOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_receipt: Option<desk_diagnose_core::action_result::ActionResultReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) command_export: Option<computer_export::ComputerExportContext>,
     pub dispatch_id: String,
     pub grant_id: String,
     pub reservation_id: String,
@@ -622,6 +628,9 @@ impl SignalCapabilityGrantStore {
             &format!("{}:{}", request.call_id, request.generation),
         );
         let dispatch_payload = CapabilityDispatchPayload {
+            command_origin: None,
+            command_receipt: None,
+            command_export: None,
             dispatch_id: dispatch_id.clone(),
             grant_id: request.grant_id.to_string(),
             reservation_id: reservation.reservation_id.clone(),
@@ -702,6 +711,51 @@ impl SignalCapabilityGrantStore {
         dispatch_id: &str,
         now_unix_ms: u64,
     ) -> Result<DispatchClaimResult, DbErr> {
+        self.claim_dispatch_inner(dispatch_id, now_unix_ms, None)
+            .await
+    }
+
+    /// The original exec task and the irreversible send claim commit together.
+    /// A crash cannot leave a claimed command with a fabricated recovery id.
+    pub(crate) async fn claim_command_dispatch(
+        &self,
+        dispatch_id: &str,
+        now_unix_ms: u64,
+        target_connection_id: &str,
+        conversation_id: &str,
+        tool_call_id: &str,
+        timeout_ms: u32,
+        origin: &desk_diagnose_core::action_result::ActionResultOrigin,
+        model_export: Option<&computer_export::ComputerExportContext>,
+    ) -> Result<DispatchClaimResult, DbErr> {
+        self.claim_dispatch_inner(
+            dispatch_id,
+            now_unix_ms,
+            Some((
+                target_connection_id,
+                conversation_id,
+                tool_call_id,
+                timeout_ms,
+                origin,
+                model_export,
+            )),
+        )
+        .await
+    }
+
+    async fn claim_dispatch_inner(
+        &self,
+        dispatch_id: &str,
+        now_unix_ms: u64,
+        command: Option<(
+            &str,
+            &str,
+            &str,
+            u32,
+            &desk_diagnose_core::action_result::ActionResultOrigin,
+            Option<&computer_export::ComputerExportContext>,
+        )>,
+    ) -> Result<DispatchClaimResult, DbErr> {
         let txn = self.db.begin().await?;
         let outbox = agent_capability_dispatch_outbox::Entity::find()
             .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
@@ -720,7 +774,7 @@ impl SignalCapabilityGrantStore {
                 "capability dispatch is already claimed; automatic retry is forbidden".into(),
             ));
         }
-        let payload: CapabilityDispatchPayload =
+        let mut payload: CapabilityDispatchPayload =
             serde_json::from_str(&outbox.payload_json).map_err(json_error)?;
         if payload.dispatch_id != dispatch_id || payload.work_id != outbox.work_id {
             txn.rollback().await.ok();
@@ -755,6 +809,59 @@ impl SignalCapabilityGrantStore {
         if claimed.rows_affected != 1 || dispatching.rows_affected != 1 {
             txn.rollback().await.ok();
             return Err(DbErr::Custom("capability dispatch claim conflicted".into()));
+        }
+        if let Some((target, conversation, call, timeout, origin, model_export)) = command {
+            if payload.tool_name != desk_diagnose_core::command_confirmation::COMMAND_TOOL {
+                return Err(DbErr::Custom(
+                    "command claim requires a command capability".into(),
+                ));
+            }
+            let work = agent_action_item::Entity::find_by_id(outbox.work_id)
+                .one(&txn)
+                .await?
+                .ok_or_else(|| DbErr::Custom("command authority work missing".into()))?;
+            if work.conversation_id != conversation
+                || target.is_empty()
+                || call.is_empty()
+                || origin.validate().is_err()
+                || origin.tool_call_id != call
+                || origin.tool_name != payload.tool_name
+                || origin.provider_id != payload.provider_id
+                || origin.turn_fence.conversation_id != conversation
+                || origin.turn_fence.actor_id != work.actor_id
+                || origin.turn_fence.device_id != work.target_device_id
+                || origin.turn_fence.turn_id != work.turn_id
+                || origin.turn_fence.input_revision != payload.input_revision
+            {
+                return Err(DbErr::Custom("command claim subject mismatch".into()));
+            }
+            use crate::entity::agent_exec_task;
+            agent_exec_task::ActiveModel {
+                exec_request_id: Set(payload.call_id.clone()),
+                execution_generation: Set(dispatch_id.into()),
+                conversation_id: Set(conversation.into()),
+                tool_call_id: Set(call.into()),
+                target_connection_id: Set(target.into()),
+                status: Set(crate::agent_exec_store::STATUS_DISPATCHING.into()),
+                event_id: Set(format!("signal-exec:{}:done", payload.call_id)),
+                delivery_state: Set(crate::agent_exec_store::DELIVERY_PENDING.into()),
+                deadline: Set(now + chrono::Duration::milliseconds(i64::from(timeout) + 60000)),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await?;
+            payload.command_origin = Some(origin.clone());
+            payload.command_export = model_export.cloned();
+            agent_capability_dispatch_outbox::Entity::update_many()
+                .col_expr(
+                    agent_capability_dispatch_outbox::Column::PayloadJson,
+                    Expr::value(serde_json::to_string(&payload).map_err(json_error)?),
+                )
+                .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))
+                .exec(&txn)
+                .await?;
         }
         txn.commit().await?;
         Ok(DispatchClaimResult::Claimed(payload))
@@ -1759,6 +1866,357 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
         });
+    }
+
+    #[tokio::test]
+    async fn command_send_claim_creates_original_exec_task_atomically_and_never_replays() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("command-claim.db");
+        let db = file_db(&path).await;
+        db.execute(
+            &Schema::new(db.get_database_backend())
+                .create_table_from_entity(crate::entity::agent_exec_task::Entity),
+        )
+        .await
+        .unwrap();
+        insert_session(&db, 1, 1).await;
+        let mut grant = grant(1);
+        grant.tool_name = desk_diagnose_core::command_confirmation::COMMAND_TOOL.into();
+        let row = agent_session::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+        let policy = desk_diagnose_core::model_egress::ModelEgressPolicy {
+            destination: desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                connection_id: "fixture-model".into(),
+                connection_revision: 1,
+                model_id: "fixture".into(),
+                profile_revision: 1,
+            },
+            selected_source_tools: [grant.tool_name.clone()].into_iter().collect(),
+            export_authorization_id: "original-owner-selection".into(),
+            now_unix_ms: Utc::now().timestamp_millis() as u64,
+            byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
+            omit_finite_retention_historical_turns: false,
+        };
+        // Dispatch occurred 5m20s ago; the approved runtime is ten minutes.
+        let completion = desk_diagnose_core::command_completion::CommandCompletionContext::capture(
+            &session,
+            policy.destination.clone(),
+            policy.now_unix_ms - 320_000,
+            600_000,
+        )
+        .unwrap();
+        let export =
+            computer_export::ComputerExportContext::capture_command(&policy, &session, &completion)
+                .unwrap();
+        let store = SignalCapabilityGrantStore::new(db.clone());
+        store.issue(&grant).await.unwrap();
+        let resources = vec!["root:selected".into()];
+        let operations = vec!["create_new".into()];
+        let input = r#"{"command":"df -h"}"#;
+        let digest = format!("{:x}", Sha256::digest(input.as_bytes()));
+        // This fixture tests durable identity/claim transactions, not classification.
+        let make_request = || {
+            let mut value = request("command-call", input, &digest, &resources, &operations, 1);
+            value.call.tool_name = desk_diagnose_core::command_confirmation::COMMAND_TOOL;
+            value
+        };
+        store.prepare(make_request()).await.unwrap();
+        let origin = desk_diagnose_core::action_result::ActionResultOrigin {
+            command_completion: Some(completion.clone()),
+            schema_version: 1,
+            turn_fence: desk_diagnose_core::action_turn_fence::AssistantTurnFence {
+                schema_version: 1,
+                conversation_id: "run-1".into(),
+                turn_id: "turn-1".into(),
+                actor_id: "actor-1".into(),
+                device_id: "device-1".into(),
+                input_revision: 1,
+                lease_token: 1,
+            },
+            tool_call_id: "original-model-call".into(),
+            provider_id: "file.workspace".into(),
+            tool_name: desk_diagnose_core::command_confirmation::COMMAND_TOOL.into(),
+            source_object_id: "device-1:original-model-call".into(),
+            source_envelope_ids: vec!["original-envelope".into()],
+            sensitivity: desk_agent_protocol::data_lineage::Sensitivity::Secret,
+            retention: desk_agent_protocol::data_lineage::RetentionBoundary {
+                expires_at_unix_ms: Some(completion.expires_at_unix_ms),
+                delete_with_run: true,
+            },
+            ephemeral: false,
+        };
+        let DispatchIntentResult::Recorded { dispatch_id, .. } =
+            store.record_dispatch_intent(make_request()).await.unwrap()
+        else {
+            panic!("expected command intent")
+        };
+        assert!(
+            store
+                .claim_command_dispatch(
+                    &dispatch_id,
+                    600,
+                    "host",
+                    "wrong-run",
+                    "original-model-call",
+                    10000,
+                    &origin,
+                    None
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            crate::entity::agent_exec_task::Entity::find()
+                .count(&db)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(matches!(
+            store
+                .claim_command_dispatch(
+                    &dispatch_id,
+                    600,
+                    "host",
+                    "run-1",
+                    "original-model-call",
+                    10000,
+                    &origin,
+                    Some(&export)
+                )
+                .await
+                .unwrap(),
+            DispatchClaimResult::Claimed(_)
+        ));
+        let task = crate::agent_exec_store::SignalAgentExecStore::new(db.clone())
+            .find("command-call", &dispatch_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.tool_call_id, "original-model-call");
+        assert_eq!(task.target_connection_id, "host");
+        let other_store = SignalCapabilityGrantStore::new(db.clone());
+        assert!(
+            other_store
+                .claim_command_dispatch(
+                    &dispatch_id,
+                    700,
+                    "host",
+                    "run-1",
+                    "original-model-call",
+                    10000,
+                    &origin,
+                    None
+                )
+                .await
+                .is_err()
+        );
+        let exec_store = crate::agent_exec_store::SignalAgentExecStore::new(db.clone());
+        let finished = exec_store
+            .finalize(
+                "host",
+                &dispatch_id,
+                &desk_agent_protocol::edge_exec::EdgeExecDisposition::Executed {
+                    outcome: desk_agent_protocol::AgentOutcome::Err(
+                        desk_agent_protocol::AgentError {
+                            kind: desk_agent_protocol::AgentErrorKind::Internal,
+                            message: "fixture-result".into(),
+                            retryable: false,
+                            safe_for_model: true,
+                            error_code: None,
+                        },
+                    ),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let first = exec_store.command_result(&finished).await.unwrap().unwrap();
+        assert_eq!(
+            first.1.envelope.retention.expires_at_unix_ms,
+            Some(completion.expires_at_unix_ms)
+        );
+        let mut message = desk_diagnose_core::chat::ChatMessage::untrusted_output(
+            &finished.event_id,
+            &finished.tool_call_id,
+            &finished.exec_request_id,
+            &first.0.content,
+        );
+        message.data_envelope = Some(first.1.envelope.clone());
+        session.conversation.push(message);
+        session
+            .pending_auto_triggers
+            .push(desk_diagnose_core::session::PendingWorkTrigger {
+                work_id: finished.id,
+                kind: desk_diagnose_core::session::WorkKind::AgentExec,
+                execution_id: dispatch_id.clone(),
+                tool_call_id: finished.tool_call_id.clone(),
+                event_id: finished.event_id.clone(),
+                chain_id: session.chain_id.clone(),
+                resolution_org_id: None,
+                since: Utc::now().to_rfc3339(),
+            });
+        assert_eq!(
+            store
+                .completion_export(&session, &finished.event_id, &policy.destination)
+                .await
+                .unwrap(),
+            export
+        );
+        for change in ["input", "chain", "policy", "output", "envelope", "event"] {
+            let mut changed = session.clone();
+            match change {
+                "input" => changed.input_revision += 1,
+                "chain" => changed.chain_id = "new-user-chain".into(),
+                "policy" => changed.policy_revision += 1,
+                "output" => changed
+                    .conversation
+                    .last_mut()
+                    .unwrap()
+                    .text
+                    .push_str(" changed"),
+                "envelope" => changed.conversation.last_mut().unwrap().data_envelope = None,
+                "event" => changed.pending_auto_triggers[0].work_id += 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                store
+                    .completion_export(&changed, &finished.event_id, &policy.destination)
+                    .await
+                    .is_err(),
+                "{change}"
+            );
+        }
+        let other_destination = desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "other-model".into(),
+            connection_revision: 1,
+            model_id: "fixture".into(),
+            profile_revision: 1,
+        };
+        assert!(
+            store
+                .completion_export(&session, &finished.event_id, &other_destination)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            first.1.envelope.sensitivity,
+            desk_agent_protocol::data_lineage::Sensitivity::Secret
+        );
+        let original_dispatch = agent_capability_dispatch_outbox::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        for change in ["missing-export", "expired-export", "unselected-command"] {
+            let mut payload: serde_json::Value =
+                serde_json::from_str(&original_dispatch.payload_json).unwrap();
+            match change {
+                "missing-export" => {
+                    payload.as_object_mut().unwrap().remove("command_export");
+                }
+                "expired-export" => {
+                    payload["command_export"]["captured_at_unix_ms"] = serde_json::json!(1);
+                    payload["command_export"]["expires_at_unix_ms"] = serde_json::json!(2);
+                }
+                "unselected-command" => {
+                    payload["command_export"]["selected_source_tools"] = serde_json::json!([])
+                }
+                _ => unreachable!(),
+            }
+            let mut changed: agent_capability_dispatch_outbox::ActiveModel =
+                original_dispatch.clone().into();
+            changed.payload_json = Set(payload.to_string());
+            changed.update(&db).await.unwrap();
+            assert!(
+                store
+                    .completion_export(&session, &finished.event_id, &policy.destination)
+                    .await
+                    .is_err(),
+                "{change}"
+            );
+        }
+        let mut restored: agent_capability_dispatch_outbox::ActiveModel =
+            original_dispatch.clone().into();
+        restored.payload_json = Set(original_dispatch.payload_json);
+        restored.update(&db).await.unwrap();
+        store
+            .revoke(
+                &grant.grant_id,
+                &grant.actor_id,
+                &grant.target_device_id,
+                policy.now_unix_ms,
+                "owner revoked",
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .completion_export(&session, &finished.event_id, &policy.destination)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            first.1.envelope.provenance.source_envelope_ids,
+            vec!["original-envelope"]
+        );
+        // A non-retryable pre-claim failure (no model configuration in this
+        // fixture) must not keep this completed command pending forever.
+        let mut stored: agent_session::ActiveModel = row.into();
+        stored.state_json = Set(session.encode_json_for_storage().unwrap());
+        stored.update(&db).await.unwrap();
+        exec_store.publish_once().await.unwrap();
+        exec_store.publish_once().await.unwrap();
+        let settled = agent_session::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let settled = PersistedAgentSession::decode_json(&settled.state_json).unwrap();
+        assert!(settled.pending_auto_triggers.is_empty());
+        assert_eq!(settled.automation_turns_used, 0);
+        assert_eq!(settled.conversation.len(), session.conversation.len());
+        assert_eq!(
+            agent_capability_dispatch_outbox::Entity::find()
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "completed"
+        );
+        let reloaded = exec_store
+            .find("command-call", &dispatch_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let replay = exec_store.command_result(&reloaded).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.delivery_state,
+            crate::agent_exec_store::DELIVERY_CONSUMED
+        );
+        assert_eq!(replay.0.content, first.0.content);
+        assert_eq!(replay.1, first.1);
+        assert_eq!(
+            crate::entity::agent_exec_task::Entity::find()
+                .count(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            agent_capability_grant::Entity::find()
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .remaining_uses,
+            0
+        );
     }
 
     async fn kill_child_at_boundary(path: &Path, marker: &Path, phase: &str) {

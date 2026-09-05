@@ -1,3 +1,4 @@
+import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 
 import { useEffect, useRef, useState, useCallback } from "react"
 import { Terminal } from "@xterm/xterm"
@@ -5,7 +6,7 @@ import { FitAddon } from "@xterm/addon-fit"
 import { WebLinksAddon } from "@xterm/addon-web-links"
 import "@xterm/xterm/css/xterm.css"
 import { useTranslation } from "react-i18next"
-import { Bot, Loader2, TerminalSquare } from "lucide-react"
+import { Loader2, TerminalSquare } from "lucide-react"
 import { Sparkles, WandSparkles } from "lucide-react"
 import { readSessionGrant } from "@/features/desk/session-grant"
 import { Button } from "@/components/ui/button"
@@ -578,7 +579,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                     >
                         {assistantContext.pending
                             ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            : <Bot className="h-4 w-4 mr-2" />}
+                            : <AiAssistantIcon className="h-4 w-4 mr-2" />}
                         {assistantContext.added
                             ? t('pages.deskTerminal.assistant.added')
                             : t('pages.deskTerminal.assistant.add')}

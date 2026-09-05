@@ -1,0 +1,1 @@
+{"type":"object","required":["provider","latency_ms","result_count"],"properties":{"latency_ms":{"type":"integer","format":"int64","minimum":0},"provider":{"type":"string","enum":["duck_duck_go","brave","tavily"],"x-readme-ref-name":"SearchProvider"},"result_count":{"type":"integer","minimum":0}},"x-readme-ref-name":"SearchTestResult"}

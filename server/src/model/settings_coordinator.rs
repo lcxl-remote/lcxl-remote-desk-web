@@ -187,6 +187,9 @@ impl SettingsCoordinator {
     /// an error abandons the whole commit with the host untouched. The
     /// candidate is persisted before it becomes the live settings, so a failed
     /// write leaves both the file and the process on the previous values.
+    /// An application-policy worker acknowledgement failure happens after
+    /// persistence: the new file remains authoritative, old workers are retired,
+    /// and the caller must report failure and require a reload/restart.
     ///
     /// The locale is canonicalized here rather than trusted from the caller,
     /// and the process-wide locale only moves once the file is on disk.
@@ -266,7 +269,7 @@ impl SettingsCoordinator {
         F: FnOnce(&mut Settings) -> Result<(), DeskError>,
         E: FnOnce(&Settings),
     {
-        let (outcome, published) = {
+        let (outcome, published, application_policy) = {
             let mut live = self.settings.write().await;
             let mut candidate = live.clone();
             change(&mut candidate)?;
@@ -299,6 +302,9 @@ impl SettingsCoordinator {
                 .clone()
                 .unwrap_or_else(|| crate::locale::DEFAULT_LOCALE.to_string());
             let security = candidate.security.clone();
+            let application_policy = (candidate.computer_use.application_policy()
+                != live.computer_use.application_policy())
+            .then(|| candidate.computer_use.application_policy());
             *live = candidate;
 
             let (policy_changed, seq, snapshot) = {
@@ -320,6 +326,7 @@ impl SettingsCoordinator {
                     policy_changed,
                 },
                 policy_changed.then_some(snapshot),
+                application_policy,
             )
             // The settings write guard drops here, before anything is sent to
             // the worker. `WorkerManager::start_worker` takes its own lock and
@@ -333,6 +340,16 @@ impl SettingsCoordinator {
         }
         if let Some(locale) = outcome.locale_changed_to.as_deref() {
             self.send_locale(locale).await;
+        }
+        if let Some(policy) = application_policy
+            && let Some(manager) = self.worker_manager.get()
+        {
+            manager
+                .publish_application_policy(policy, POLICY_ACK_TIMEOUT)
+                .await
+                .map_err(|error| {
+                    DeskError::new_custom_error(DeskErrorCode::PRECONDITION_FAILED, &error)
+                })?;
         }
         Ok(outcome)
     }
@@ -732,6 +749,92 @@ mod tests {
         worker_manager.install_active_for_test(ipc_tx).await;
         coordinator.bind_worker_manager(worker_manager);
         (coordinator, ipc_rx)
+    }
+
+    #[tokio::test]
+    async fn application_policy_commit_waits_for_exact_worker_ack_and_persists() {
+        use crate::model::settings::ComputerUseApplicationPolicyUpdate;
+        let dir = tempfile::tempdir().unwrap();
+        let (coordinator, mut receiver) = coordinator_with_worker(&dir.path().join("config")).await;
+        let manager = coordinator.worker_manager().unwrap();
+        let commit = coordinator.commit(|settings| {
+            settings
+                .computer_use
+                .update_application_policy(ComputerUseApplicationPolicyUpdate {
+                    expected_revision: 0,
+                    allowed_application_paths: vec![],
+                })
+        });
+        let worker = async {
+            match receiver.recv().await.unwrap() {
+                ServiceToWorker::UpdateComputerUseApplicationPolicy(payload) => {
+                    assert_eq!(payload.revision, 1);
+                    manager.note_application_policy_applied(payload);
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+        };
+        let (result, ()) = tokio::join!(commit, worker);
+        result.unwrap();
+        let live = coordinator.settings.read().await;
+        assert_eq!(live.computer_use.revision, 1);
+        assert_eq!(
+            Settings::load_readonly(&live.args)
+                .unwrap()
+                .computer_use
+                .application_policy(),
+            live.computer_use.application_policy()
+        );
+    }
+
+    #[tokio::test]
+    async fn application_policy_worker_failure_is_not_reported_as_success() {
+        use crate::model::settings::ComputerUseApplicationPolicyUpdate;
+        let dir = tempfile::tempdir().unwrap();
+        let (coordinator, receiver) = coordinator_with_worker(&dir.path().join("config")).await;
+        drop(receiver);
+        assert!(
+            coordinator
+                .commit(|settings| settings.computer_use.update_application_policy(
+                    ComputerUseApplicationPolicyUpdate {
+                        expected_revision: 0,
+                        allowed_application_paths: vec![],
+                    }
+                ))
+                .await
+                .is_err()
+        );
+        assert_eq!(coordinator.settings.read().await.computer_use.revision, 1);
+        assert!(
+            coordinator
+                .worker_manager()
+                .unwrap()
+                .send_to_worker(ServiceToWorker::Shutdown)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn application_policy_disk_failure_keeps_live_policy_and_worker_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coordinator, mut receiver) =
+            coordinator_with_worker(&dir.path().join("missing/config")).await;
+        // A regular file cannot become the settings parent directory.
+        std::fs::write(dir.path().join("missing"), b"not a directory").unwrap();
+        assert!(
+            coordinator
+                .commit(|settings| settings.computer_use.update_application_policy(
+                    crate::model::settings::ComputerUseApplicationPolicyUpdate {
+                        expected_revision: 0,
+                        allowed_application_paths: vec![],
+                    }
+                ))
+                .await
+                .is_err()
+        );
+        assert_eq!(coordinator.settings.read().await.computer_use.revision, 0);
+        assert!(receiver.try_recv().is_err());
     }
 
     /// The point of publishing: a worker enforcing the policy is told the moment

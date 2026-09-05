@@ -37,7 +37,7 @@ export function normalizeAgentOutcome(raw: WireAgentOutcome): AgentOutcome {
 }
 
 export type ObservationEntry = {
-    phase: 'idle' | 'pending' | 'ready' | 'error';
+    phase: 'idle' | 'scheduled' | 'pending' | 'ready' | 'error';
     requestId: string | null;
     outcome: AgentOutcome | null;
 };
@@ -91,6 +91,7 @@ type Props = {
     subscribe: (handler: SignalingSubscriber) => () => void;
     sendMessage: SendMessage;
     timeoutMs?: number;
+    enabled?: boolean;
 };
 
 const idleEntry = (): ObservationEntry => ({
@@ -104,6 +105,7 @@ export function useDeviceAssistantObservation({
     subscribe,
     sendMessage,
     timeoutMs = 15_000,
+    enabled = true,
 }: Props) {
     const [entries, setEntries] = useState<Record<ObservationKind, ObservationEntry>>({
         desktop_session_inspect: idleEntry(),
@@ -111,8 +113,21 @@ export function useDeviceAssistantObservation({
     });
     const pending = useRef(new Map<string, ObservationKind>());
     const timers = useRef(new Map<string, number>());
+    const delayedTimer = useRef<number | null>(null);
+    const [remainingSeconds, setRemainingSeconds] = useState(0);
+    const scope = useRef({ deskId, enabled });
+    scope.current = { deskId, enabled };
+
+    const cancelDelayedUi = useCallback(() => {
+        if (delayedTimer.current !== null) window.clearTimeout(delayedTimer.current);
+        delayedTimer.current = null;
+        setRemainingSeconds(0);
+        setEntries((current) => current.desktop_ui_inspect.phase === 'scheduled'
+            ? { ...current, desktop_ui_inspect: idleEntry() } : current);
+    }, []);
 
     useEffect(() => subscribe((message: SignalingMessage) => {
+        if (!scope.current.enabled || scope.current.deskId !== deskId) return;
         if (message.signaling_type !== SIGNALING_TYPE_CODE_AGENT_CAPABILITY_COMPLETED) return;
         const requestId = message.request_id;
         if (!requestId) return;
@@ -133,16 +148,24 @@ export function useDeviceAssistantObservation({
                 outcome,
             },
         }));
-    }), [subscribe]);
+    }), [subscribe, deskId]);
 
-    useEffect(() => () => {
-        timers.current.forEach((timer) => window.clearTimeout(timer));
-        timers.current.clear();
-        pending.current.clear();
-    }, []);
+    useEffect(() => {
+        cancelDelayedUi();
+        setEntries({ desktop_session_inspect: idleEntry(), desktop_ui_inspect: idleEntry() });
+        return () => {
+            if (delayedTimer.current !== null) window.clearTimeout(delayedTimer.current);
+            delayedTimer.current = null;
+            timers.current.forEach((timer) => window.clearTimeout(timer));
+            timers.current.clear();
+            pending.current.clear();
+        };
+    }, [deskId, enabled, cancelDelayedUi]);
 
     const invoke = useCallback((kind: ObservationKind, params: Record<string, unknown>) => {
-        if (!deskId) return null;
+        if (!deskId || !enabled || scope.current.deskId !== deskId || !scope.current.enabled) return null;
+        if ([...pending.current.values()].includes(kind)) return null;
+        if (kind === 'desktop_ui_inspect' && delayedTimer.current !== null) return null;
         const requestId = sendMessage(
             SIGNALING_TYPE_CODE_INVOKE_AGENT_CAPABILITY,
             {
@@ -153,7 +176,7 @@ export function useDeviceAssistantObservation({
                         params: { kind: { kind, params } },
                     },
                 },
-                reason: 'Device Assistant read-only observation preview',
+                reason: 'AI Assistant read-only observation preview',
             },
             deskId,
         );
@@ -184,7 +207,7 @@ export function useDeviceAssistantObservation({
         }, timeoutMs);
         timers.current.set(requestId, timer);
         return requestId;
-    }, [deskId, sendMessage, timeoutMs]);
+    }, [deskId, enabled, sendMessage, timeoutMs]);
 
     const inspectSession = useCallback(() => invoke('desktop_session_inspect', {
         include_active_application: true,
@@ -197,5 +220,29 @@ export function useDeviceAssistantObservation({
         max_bytes: 262_144,
     }), [invoke]);
 
-    return { entries, inspectSession, inspectUi };
+    const scheduleUi = useCallback(() => {
+        if (!deskId || !enabled || delayedTimer.current !== null
+            || [...pending.current.values()].includes('desktop_ui_inspect')) return;
+        const targetDeskId = deskId;
+        const due = Date.now() + 5_000;
+        setEntries((current) => ({ ...current, desktop_ui_inspect: { ...idleEntry(), phase: 'scheduled' } }));
+        setRemainingSeconds(5);
+        const tick = () => {
+            if (scope.current.deskId !== targetDeskId || !scope.current.enabled) {
+                cancelDelayedUi();
+                return;
+            }
+            const remaining = Math.max(0, Math.ceil((due - Date.now()) / 1_000));
+            setRemainingSeconds(remaining);
+            if (remaining === 0) {
+                delayedTimer.current = null;
+                inspectUi();
+            } else {
+                delayedTimer.current = window.setTimeout(tick, 1_000);
+            }
+        };
+        delayedTimer.current = window.setTimeout(tick, 1_000);
+    }, [cancelDelayedUi, deskId, enabled, inspectUi]);
+
+    return { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds };
 }

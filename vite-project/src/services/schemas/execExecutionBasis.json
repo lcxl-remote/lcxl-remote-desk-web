@@ -1,0 +1,1 @@
+{"type":"string","description":"The trust basis under which an execution draft was produced.\n\nThis is classification metadata. It is compared as part of the full draft\nbut deliberately excluded from the worker-field fingerprint.","enum":["template","owner_blocklist_only"],"x-readme-ref-name":"ExecExecutionBasis"}

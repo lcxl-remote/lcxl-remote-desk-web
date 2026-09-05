@@ -87,6 +87,16 @@ server 内置信令、STUN 与 TURN。跨 NAT 连接时：
 
 对于多会话主机或采集安全界面，运行 [service-daemon 模式](/zh/guide/startup-modes)，或用 `--startup-mode signaling` 把信令服务单独拆出。
 
+## 本地 Computer Use 应用策略
+
+被控端的 **系统设置 → AI 策略 → 应用限制 → 高级** 提供可选的完整可执行路径限制。读取和保存同时要求 owner 登录态、内核报告的 loopback 对端以及匹配的 loopback Origin/Host。请通过 `localhost` 或 `127.0.0.1` 打开本地页面；远端页面和 Manager 不代理此策略。
+
+`computer_use.allowed_application_paths = []` 表示**不额外限制应用**，不再表示拒绝所有应用；已有非空列表继续生效。macOS 应填写可执行文件路径（例如 `/System/Applications/Calculator.app/Contents/MacOS/Calculator`），不是 `.app` 目录。该策略作用于通用 UI 观察、语义 UI 操作及裸输入回退，不授予模型外发或动作权限，不替代 TCC、精确目标绑定和助手总开关。
+
+保存检查当前 revision，经设置协调器持久化，并等待全部存活 worker（含便携模式）精确确认。确认失败会返回错误并停止旧 worker，请重启被控端后重新读取策略；磁盘失败则保留原有生效值。不要在运行中直接改配置文件绕过版本检查。
+
+同机验证可选择 **5 秒后观察**，然后切换目标应用。请求观察的是执行时的被控端前台应用，不提供后台应用读取；取消、切换设备、关闭助手和离开页面都会撤销倒计时且不采集内容。
+
 ## 公网部署加固
 
 把 server 暴露到公网时（通常置于终结 TLS 的反向代理之后），注意：
@@ -100,7 +110,8 @@ server 内置信令、STUN 与 TURN。跨 NAT 连接时：
   - `relaxed`（默认）——允许私网 / 回环目标（本地模型网关，如 `http://localhost:11434`）。
   - `strict`——拒绝私网 / 回环 / CGNAT / ULA 目标；连接期再校验解析到的 IP（防 DNS 重绑定）。当不可信用户可配置供应商时使用。
 - **`LRD_ENFORCE_PUBLIC_TLS`**——是否允许以**明文**（`http`）拨号**公网**目标。默认 `true`（仅显式设为 `false` / `0` / `no` / `off` 才关闭）。开启时，对公网地址的明文拨号会在连接前被拒（api_key 绝不明文外泄）；私网 / 回环 / 局域网目标始终豁免，云元数据段无论如何始终拦截。与 SSRF 模式正交：要放行公网明文供应商，关闭本开关即可，**无需**切到 `relaxed`（那会额外放开私网目标）。
-- **`LRD_BRAVE_SEARCH_API_KEY`**——可选的服务端 Brave Web Search 凭据。设置且格式有效时，Device Assistant 才会把 `search_public_web` 标为可用；未设置时该能力明确 unavailable。查询仍须逐字来自当前用户消息并通过一次精确 ExportData 授权。凭据不会发送给模型、浏览器控制端或被控端，也不会进入工具输出或 Debug 文本。
+- **Web Search**——在中央服务器的**系统设置 → 网页搜索**（`/system/web-search`）配置，内嵌及独立信令模式均支持。首次初始化默认 DuckDuckGo，无需 API Key；也可选择 Brave 或 Tavily 并填写对应密钥。配置持久化于 signal 的 SQLite 数据库，不再读取 `LRD_BRAVE_SEARCH_API_KEY`；已有开发环境密钥需在新页面重新填写。密钥只写不回显，切换厂商清除前一家密钥；选择 API 厂商后缺少密钥时不可用，不会自动回退。
+- **测试与授权**——加载和保存配置不触发搜索。**测试连接**仅发送固定公开词“Rust programming language”，可能消耗厂商配额，不保存当前编辑、不使用会话内容；它是独立于设备 AI 助手任务的管理连接测试。助手查询仍须逐字来自当前用户消息，通过精确 ExportData 授权并遵循助手总开关。切换厂商或更新配置后，旧搜索授权不能用于后续派发；配置冲突或保存结果不确定时请重新加载。DuckDuckGo 免 API 配置不代表无限请求，限流、验证码及异常页面正常报错，不伪装为空结果；模型费用另计。
 - **没有运行时 API 文档端点**：server 不提供 Swagger UI / ReDoc / RapiDoc / Scalar，也不提供 `/openapi.json`，公网上因此没有这一类可被探测的面。需要规范时用离线 `dump-openapi` 生成（见 [REST API 参考](/zh/reference/api)）。
 - 把 server 置于反向代理之后，由其终结 TLS、透传 `Host`，并为信令转发 WebSocket `Upgrade` 头。
 - 同机原生反向代理通常从 loopback 连接，可直接使用默认信任；代理容器通常从 bridge/container 地址连接，必须显式加入其实际 peer CIDR。若 Docker 或四层代理已经丢失真实源地址且不提供 XFF，应用无法恢复，所有客户端只能共享一个限流 bucket。

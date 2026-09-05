@@ -746,6 +746,14 @@ pub struct UpdateSecurityPolicyPayload {
     pub snapshot: PolicySnapshot,
 }
 
+/// Trusted daemon publication; never accepted from a signaling peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerUseApplicationPolicyPayload {
+    pub operation_id: String,
+    pub revision: u64,
+    pub allowed_application_paths: Vec<String>,
+}
+
 /// What a worker did with a published policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 #[serde(tag = "type", content = "payload")]

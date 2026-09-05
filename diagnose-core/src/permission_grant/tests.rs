@@ -7,6 +7,7 @@ use crate::dynamic_run::{
     PermissionItemDecision, PermissionRequest, PermissionRequestState,
 };
 use crate::session::AgentSessionSurface;
+use desk_agent_protocol::capability_grant::CapabilityRiskTier;
 use desk_agent_protocol::capability_provider::CapabilityEffect;
 use desk_agent_protocol::data_lineage::{
     ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, RetentionBoundary,
@@ -39,6 +40,7 @@ fn decision_fixture() -> (
         input_revision: 1,
         state: PermissionRequestState::Pending,
         items: vec![GrantRequestItem {
+            command_confirmation: None,
             item_id: "inspect".into(),
             provider_id: "desktop.session".into(),
             tool_name: "inspect_desktop_session".into(),
@@ -65,6 +67,89 @@ fn decision_fixture() -> (
         },
     }];
     (session, request, decisions)
+}
+
+#[test]
+fn owner_freeform_approval_is_exact_one_shot_and_rechecks_the_frozen_policy() {
+    let (mut session, mut request, mut decisions) = decision_fixture();
+    session.actor_id = "1".into();
+    session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
+    session.turn_start_scope.mode = ExecutionMode::ConfirmEachAction;
+    let policy = crate::command_confirmation::test_policy();
+    let canonical = serde_json::json!({"schema_version":1,"shell":"bash",
+        "command":"du -d 1 \"a directory\" | sort -n\ndf -h", "timeout_ms":20000})
+    .to_string();
+    let snapshot = policy.prepare(&canonical, 1).unwrap();
+    let registry = crate::device_assistant::device_assistant_provider_registry()
+        .with_command_policy(policy.clone());
+    let capability = registry
+        .capability_for_tool(crate::command_confirmation::COMMAND_TOOL)
+        .unwrap();
+    let provider = registry
+        .provider_for_capability(&capability.wire.capability_id)
+        .unwrap();
+    let item = &mut request.items[0];
+    item.provider_id = provider.wire.provider_id.clone();
+    item.tool_name = capability.wire.tool_name.clone();
+    item.expected_effect = capability.wire.effect;
+    item.resource_scope = snapshot.resource_scope().unwrap();
+    item.operation_scope = vec![crate::command_confirmation::COMMAND_TOOL.into()];
+    item.canonical_input_json = Some(canonical);
+    item.canonical_input_digest_sha256 = Some(snapshot.canonical_input_digest_sha256.clone());
+    item.command_confirmation = Some(snapshot);
+    item.suggested_max_uses = 1;
+    decisions[0].decision = PermissionItemDecision::Approve {
+        resource_scope: item.resource_scope.clone(),
+        operation_scope: item.operation_scope.clone(),
+        export_destinations: vec![],
+        ttl_seconds: 60,
+        max_uses: 1,
+    };
+    let inventory = vec![CapabilityAvailability {
+        provider_id: provider.wire.provider_id.clone(),
+        capability_id: capability.wire.capability_id.clone(),
+        tool_name: capability.wire.tool_name.clone(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let build = |registry: &ProviderRegistry, request: &PermissionRequest| {
+            build_permission_grants(
+                &session,
+                request,
+                &decisions,
+                &PermissionGrantIssuanceContext {
+                    surface,
+                    registry,
+                    inventory: &inventory,
+                    readiness_revision: 7,
+                    now_unix_ms: 1000,
+                    implicit_fresh_object_refs: &[],
+                },
+                None,
+            )
+        };
+        let grants = build(&registry, &request).unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].remaining_uses, 1);
+        assert_eq!(grants[0].risk_tier, CapabilityRiskTier::R3);
+        assert_eq!(grants[0].resource_scope, request.items[0].resource_scope);
+        let mut changed = policy.clone();
+        changed.target_session_id.push_str("-new");
+        assert!(build(&registry.clone().with_command_policy(changed), &request).is_err());
+        let mut missing = request.clone();
+        missing.items[0].command_confirmation = None;
+        assert!(build(&registry, &missing).is_err());
+        let mut changed = policy.clone();
+        changed.admission_policy = desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly;
+        assert!(build(&registry.clone().with_command_policy(changed), &request).is_err());
+    }
 }
 
 fn compile(

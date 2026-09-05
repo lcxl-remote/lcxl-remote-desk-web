@@ -5,6 +5,7 @@ use desk_agent_protocol::data_lineage::{RetentionBoundary, Sensitivity};
 pub(super) fn original(output: &ToolRunOutput, ephemeral: bool) -> DataEnvelope {
     use crate::{action_result::ActionResultOrigin, action_turn_fence::AssistantTurnFence};
     ActionResultOrigin {
+        command_completion: None,
         schema_version: 1,
         turn_fence: AssistantTurnFence {
             schema_version: 1,

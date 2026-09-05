@@ -2728,6 +2728,8 @@ dependencies = [
  "desk-utils",
  "futures",
  "futures-util",
+ "http 1.4.0",
+ "kuchikiki",
  "log",
  "reqwest 0.12.28",
  "serde",

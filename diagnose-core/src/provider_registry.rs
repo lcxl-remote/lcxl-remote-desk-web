@@ -192,16 +192,66 @@ impl ProviderRegistryBuilder {
                 }
             }
         }
-        Ok(ProviderRegistry { providers })
+        Ok(ProviderRegistry {
+            providers,
+            web_search_binding: None,
+            command_policy: None,
+        })
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ProviderRegistry {
     providers: BTreeMap<String, ProviderDescriptor>,
+    web_search_binding: Option<crate::web_research::SearchBinding>,
+    command_policy: Option<crate::command_confirmation::CommandPolicyContext>,
 }
 
 impl ProviderRegistry {
+    /// Per-request authority supplied by the runtime after authenticating the
+    /// owner. It is not included in the discoverable capability catalog.
+    pub fn with_command_policy(
+        mut self,
+        policy: crate::command_confirmation::CommandPolicyContext,
+    ) -> Self {
+        for provider in self.providers.values_mut() {
+            for capability in &mut provider.capabilities {
+                if capability.tool_spec.name == crate::command_confirmation::COMMAND_TOOL {
+                    if let Some(start) = capability
+                        .tool_spec
+                        .description
+                        .find(" Current device shells:")
+                    {
+                        capability.tool_spec.description.truncate(start);
+                    }
+                    capability.tool_spec.parameters_schema["properties"]["shell"]["enum"] =
+                        serde_json::json!(policy.available_shells);
+                    capability.tool_spec.description.push_str(&format!(
+                        " Current device shells: {}. Effective runtime ceiling: {} ms; stdout/stderr each bounded to 65536 bytes. Changes require fresh approval.",
+                        policy.available_shells.join(", "), policy.max_runtime_ms));
+                }
+            }
+        }
+        self.command_policy = Some(policy);
+        self
+    }
+
+    pub fn command_policy(&self) -> Option<&crate::command_confirmation::CommandPolicyContext> {
+        self.command_policy.as_ref()
+    }
+
+    pub fn with_web_search_binding(
+        mut self,
+        binding: Option<crate::web_research::SearchBinding>,
+    ) -> Self {
+        self.web_search_binding = binding;
+        self
+    }
+
+    pub fn web_search_binding(&self) -> Option<&crate::web_research::SearchBinding> {
+        self.web_search_binding.as_ref()
+    }
+
     pub fn providers(&self) -> impl ExactSizeIterator<Item = &ProviderDescriptor> {
         self.providers.values()
     }

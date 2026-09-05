@@ -365,9 +365,10 @@ async fn dispatch_read_context(
                     "desktop observation requires a session context",
                 ));
             };
-            let ceiling = settings.read().await.computer_use.clone();
+            let settings = settings.clone();
             let output = run_blocking(move || {
-                computer_use_broker.inspect_desktop_session(&params, &ceiling)
+                let settings = settings.blocking_read();
+                computer_use_broker.inspect_desktop_session(&params, &settings.computer_use)
             })
             .await??;
             Ok(OperationOutput::ReadContext(
@@ -380,10 +381,12 @@ async fn dispatch_read_context(
                     "desktop UI observation requires a session context",
                 ));
             };
-            let ceiling = settings.read().await.computer_use.clone();
-            let output =
-                run_blocking(move || computer_use_broker.inspect_desktop_ui(&params, &ceiling))
-                    .await??;
+            let settings = settings.clone();
+            let output = run_blocking(move || {
+                let settings = settings.blocking_read();
+                computer_use_broker.inspect_desktop_ui(&params, &settings.computer_use)
+            })
+            .await??;
             Ok(OperationOutput::ReadContext(
                 ReadContextOutput::DesktopUiInspect(output),
             ))
@@ -671,10 +674,13 @@ mod tests {
                     desk_agent_protocol::computer_use::ObjectKind::DesktopSession
                 );
                 assert!(!output.interactive_session_incarnation.is_empty());
-                assert!(
-                    output.active_application.is_none(),
-                    "empty local allowlist must hide the foreground application"
-                );
+                if let Some(application) = output.active_application {
+                    assert_eq!(
+                        application.object_kind,
+                        desk_agent_protocol::computer_use::ObjectKind::Application
+                    );
+                    assert!(!application.token.is_empty());
+                }
             }
             Err(error) => assert_eq!(
                 error.kind,
@@ -713,10 +719,13 @@ mod tests {
             desk_agent_protocol::computer_use::ObjectKind::DesktopSession
         );
         assert!(!output.interactive_session_incarnation.is_empty());
-        assert!(
-            output.active_application.is_none(),
-            "empty local allowlist must hide the foreground application"
-        );
+        if let Some(application) = output.active_application {
+            assert_eq!(
+                application.object_kind,
+                desk_agent_protocol::computer_use::ObjectKind::Application
+            );
+            assert!(!application.token.is_empty());
+        }
     }
 
     /// Raw `exec` is rejected in the worker too; the daemon already blocks it

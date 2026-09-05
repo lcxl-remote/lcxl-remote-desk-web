@@ -15,6 +15,63 @@ import type { SignalingSubscriber } from './use-desk-signaling';
 import { useDeviceAssistantChat } from './use-device-assistant-chat';
 
 describe('useDeviceAssistantChat', () => {
+    it('keeps the concrete turn error after snapshot refresh and clears it on a new turn', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'failed-session', seq: 10, active: false,
+            messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
+        } }) }));
+        const sendMessage = vi.fn((type: number) => type === SIGNALING_TYPE_CODE_SELECT_DEVICE_ASSISTANT_SESSION
+            ? 'session-request' : 'turn-request');
+        const { result } = renderHook(() => useDeviceAssistantChat({ deskId: 'failed-desk', connected: true,
+            subscribe: (handler) => { subscriber = handler; return () => undefined; }, sendMessage }));
+        act(() => subscriber?.({ request_id: 'session-request',
+            signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_SESSION_SELECTED,
+            signaling_data: { revision: 1, target: { target_id: 'desktop', display_name: 'Desktop',
+                foreground: true, remote_desktop_ready: true, terminal_ready: true, file_ready: true, assistant_ready: true } },
+            response_state: { error_code: 0, message: '' },
+        }));
+        act(() => { expect(result.current.start('continue')).toBe(true); });
+        await act(async () => subscriber?.({ request_id: 'turn-request',
+            signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
+            signaling_data: { seq: 1, kind: 'error', error: { message: 'Context authorization expired.' } },
+        }));
+        await waitFor(() => expect(result.current.messages.at(-1)?.id).toBe('user-1'));
+        expect(result.current.error).toBe('Context authorization expired.');
+        expect(result.current.status).toBe('error');
+        act(() => { expect(result.current.start('another question')).toBe(true); });
+        expect(result.current.error).toBeNull();
+        act(() => result.current.reset());
+        expect(result.current.error).toBeNull();
+    });
+
+    it('restores server context usage and clears it for a new conversation', async () => {
+        localStorage.setItem('device-assistant-conversation:budget-desk', 'budget-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'budget-session', seq: 1, active: false, messages: [],
+            contextUsage: { usedBytes: 200, limitBytes: 1000, strategy: 'checkpoint_summary' },
+        } }) }));
+        const { result } = renderHook(() => useDeviceAssistantChat({ deskId: 'budget-desk',
+            subscribe: () => () => undefined, sendMessage: vi.fn() }));
+        await waitFor(() => expect(result.current.contextUsage?.usedBytes).toBe(200));
+        act(() => result.current.reset());
+        expect(result.current.contextUsage).toBeNull();
+    });
+
+    it('opens history through its continuation id without sending a cancel or a question', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'old-session', seq: 1, active: false, messages: [],
+        } }) }));
+        const sendMessage = vi.fn();
+        const { result } = renderHook(() => useDeviceAssistantChat({ deskId: 'desk-history',
+            subscribe: () => () => undefined, sendMessage }));
+        act(() => { expect(result.current.selectConversation('old-conversation')).toBe(true); });
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(fetch).toHaveBeenCalledWith(expect.stringContaining('conversation=old-conversation'), expect.anything());
+        expect(localStorage.getItem('device-assistant-conversation:desk-history')).toBe('old-conversation');
+        expect(sendMessage).not.toHaveBeenCalled();
+    });
+
     beforeEach(() => localStorage.clear());
     afterEach(() => {
         vi.useRealTimers();
@@ -169,6 +226,32 @@ describe('useDeviceAssistantChat', () => {
                 staleReason: 'worker_respawned',
             }),
         ]);
+    });
+
+    it.each(['execution failed: command timed out after 240000 ms', 'exit_code=0\n12G /example'])('shows a durable command receipt without waiting for an AI answer: %s', async (output) => {
+        localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: true,
+            json: async () => ({ data: {
+                sessionId: 'session-1', seq: 34, active: false,
+                messages: [
+                    { id: 'call', role: 'assistant', text: '', toolCalls: [{ id: 'command-1', name: 'execute_confirmed_command', argumentsJson: '{}' }] },
+                    { id: 'running', role: 'tool', toolCallId: 'command-1', text: '{"status":"background_running"}' },
+                    { id: 'waiting', role: 'assistant', text: 'Waiting for the background command.' },
+                    { id: 'finished', role: 'untrusted_output', toolCallId: 'command-1', backgroundTaskId: 'exec-1', text: output },
+                ],
+            } }),
+        })));
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
+        }));
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(result.current.messages).toEqual([
+            { id: 'waiting', role: 'assistant', text: 'Waiting for the background command.' },
+            { id: 'finished', role: 'tool_result', text: output },
+        ]);
+        expect(result.current.tools[0].status).toBe(output.startsWith('execution failed:') ? 'failed' : 'ok');
+        expect(result.current.status).toBe('done');
     });
 
     it('attaches only the opaque owner-selected window reference', () => {

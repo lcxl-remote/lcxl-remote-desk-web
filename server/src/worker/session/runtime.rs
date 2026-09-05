@@ -679,6 +679,7 @@ impl WorkerSession {
         spawn_inbound_reader(
             event_rx,
             Arc::clone(&policy_mirror),
+            shared_settings.clone(),
             writer_tx.clone(),
             service_msg_tx,
         );
@@ -804,7 +805,7 @@ impl WorkerSession {
                                 ServiceToWorker::Init(_) => {
                                     warn!("Received duplicate Init, ignoring");
                                 }
-                                ServiceToWorker::UpdateSecurityPolicy(_) => {
+                                ServiceToWorker::UpdateSecurityPolicy(_) | ServiceToWorker::UpdateComputerUseApplicationPolicy(_) => {
                                     // Applied on the transport reader task, ahead of this
                                     // loop, so a policy change is never queued behind the
                                     // approval prompt it would resolve. Arriving here means
@@ -1918,6 +1919,7 @@ impl WorkerSession {
                                     );
                                     let action_writer = writer_tx.clone();
                                     let action_broker = computer_use_broker.clone();
+                                    let application_settings = shared_settings.clone();
                                     tokio::spawn(async move {
                                         let generation = plan.execution_generation.clone();
                                         let step = plan.actions.into_iter().next().expect("preflight checked one action");
@@ -1926,13 +1928,17 @@ impl WorkerSession {
                                             let action = action.clone();
                                             let broker = action_broker.clone();
                                             let generation_for_call = generation.clone();
-                                            let ceiling = ceiling.clone();
                                             let result = tokio::task::spawn_blocking(move || -> Result<_, desk_agent_protocol::AgentError> {
+                                                // Re-read at dispatch, and keep the read lock through
+                                                // the native call so a tightening cannot acknowledge
+                                                // while an older application policy is still in use.
+                                                let settings = application_settings.blocking_read();
+                                                let ceiling = &settings.computer_use;
                                                 broker.require_writer_lease(&generation_for_call)?;
                                                 let result = broker.execute_ui_action(
                                                     &target,
                                                     &action,
-                                                    &ceiling,
+                                                    ceiling,
                                                 )?;
                                                 // Human/browser input may arrive while the AX call is
                                                 // in flight. Never bless a read-back gathered after
@@ -1995,14 +2001,15 @@ impl WorkerSession {
                                             let action = action.clone();
                                             let broker = action_broker.clone();
                                             let generation_for_call = generation.clone();
-                                            let ceiling = ceiling.clone();
                                             let selected_display = selected_display.clone();
                                             let result = tokio::task::spawn_blocking(move || -> Result<_, desk_agent_protocol::AgentError> {
+                                                let settings = application_settings.blocking_read();
+                                                let ceiling = &settings.computer_use;
                                                 broker.require_writer_lease(&generation_for_call)?;
                                                 let result = broker.execute_raw_input(
                                                     &target,
                                                     &action,
-                                                    &ceiling,
+                                                    ceiling,
                                                     &selected_display,
                                                 )?;
                                                 broker.require_writer_lease(&generation_for_call)?;
@@ -3150,12 +3157,33 @@ impl WorkerSession {
 pub(super) fn spawn_inbound_reader(
     mut event_rx: Box<dyn EventReceiver<ServiceToWorker>>,
     policy_mirror: Arc<PolicyMirror>,
+    settings: Arc<SharedSettings>,
     ack_tx: mpsc::UnboundedSender<WorkerToService>,
     service_msg_tx: mpsc::UnboundedSender<Option<ServiceToWorker>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match event_rx.recv().await {
+                Some(ServiceToWorker::UpdateComputerUseApplicationPolicy(mut payload)) => {
+                    let settings = settings.clone();
+                    let ack_tx = ack_tx.clone();
+                    // Native calls may hold a read lease. Do not let draining
+                    // those leases strand Shutdown in the inbound reader.
+                    tokio::spawn(async move {
+                        let mut settings = settings.write().await;
+                        if payload.revision > settings.computer_use.revision {
+                            settings.computer_use.revision = payload.revision;
+                            settings.computer_use.allowed_application_paths =
+                                payload.allowed_application_paths.clone();
+                        }
+                        payload.revision = settings.computer_use.revision;
+                        payload.allowed_application_paths =
+                            settings.computer_use.allowed_application_paths.clone();
+                        let _ = ack_tx.send(WorkerToService::ComputerUseApplicationPolicyApplied(
+                            payload,
+                        ));
+                    });
+                }
                 Some(ServiceToWorker::UpdateSecurityPolicy(payload)) => {
                     let outcome = policy_mirror.apply(payload.snapshot);
                     // An error means the writer queue is gone, i.e. the session

@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { useToast } from "@/hooks/use-toast"
+import { ComputerUseApplicationPolicySettings } from './computer-use-application-policy';
 
 const EXECUTION_MODES = ["suggest_only", "read_only", "confirm_each_action"] as const
 const MIN_CONCURRENT_EXECUTIONS = 1
@@ -238,6 +239,7 @@ export function AiPolicySettings() {
                 </CardContent>
             </Card>
 
+            <ComputerUseApplicationPolicySettings />
             <Card>
                 <CardHeader>
                     <CardTitle>{t("pages.aiPolicy.title")}</CardTitle>

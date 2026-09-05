@@ -16,18 +16,14 @@ use sha2::{Digest, Sha256};
 
 use crate::capability_availability::CapabilityAvailability;
 use crate::capability_grant::{
-    canonical_compiled_scope, exact_command_resource_scope, exact_external_query_resource_scope,
-    exact_external_url_resource_scope, fresh_object_resource_scope,
+    canonical_compiled_scope, exact_external_url_resource_scope, fresh_object_resource_scope,
 };
 use crate::chat::{ToolCall, ToolSpec};
-use crate::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID;
 use crate::dynamic_run::{
     GrantRequestItem, MAX_PERMISSION_REASON_BYTES, MAX_PERMISSION_REQUEST_ITEMS,
     MAX_PERMISSION_SCOPE_VALUES, PERMISSION_REQUEST_SCHEMA_VERSION, PermissionRequest,
     PermissionRequestState,
 };
-use crate::exec_classify::classify_command;
-use crate::exec_tools::canonical_exec_shell;
 use crate::provider_registry::ProviderRegistry;
 use crate::registry::{RegisteredTool, ToolEffect};
 
@@ -837,40 +833,19 @@ pub fn build_permission_request(
                 "exact URL/query/command permissions require exact_input so the approved input is immutable",
             ));
         }
-        if exact_command {
+        let command_confirmation = if exact_command {
             let canonical = canonical_input_json
                 .as_deref()
                 .expect("ExactCommand exact input was checked");
-            let draft: desk_agent_protocol::exec::CommandDraft = serde_json::from_str(canonical)
-                .map_err(|error| invalid(format!("decode exact command input: {error}")))?;
-            draft
-                .validate()
-                .map_err(|error| invalid(format!("validate exact command input: {error}")))?;
-            let shell = canonical_exec_shell(&draft.shell)
-                .ok_or_else(|| invalid("exact command shell is not supported"))?;
-            let input = desk_agent_protocol::ExecInput {
-                target: desk_agent_protocol::ExecTarget::Shell {
-                    shell: shell.to_string(),
-                },
-                command: draft.command,
-                cwd: draft.cwd,
-                io_mode: desk_agent_protocol::exec::ExecIoMode::NonInteractive,
-                timeout_ms: draft.timeout_ms,
-                max_stdout_bytes: 65_536,
-                max_stderr_bytes: 65_536,
-            };
-            let classified = classify_command(&input);
-            if classified.classification.decision
-                != desk_agent_protocol::exec::ExecDecision::ConfirmRequired
-                || classified.draft.as_ref().is_none_or(|plan| {
-                    plan.execution_basis != desk_agent_protocol::exec::ExecExecutionBasis::Template
-                })
-            {
-                return Err(invalid(
-                    "exact command does not match a server-owned safe template",
-                ));
-            }
-        }
+            Some(
+                registry
+                    .command_policy()
+                    .ok_or_else(|| invalid("command execution has no trusted policy context"))?
+                    .prepare(canonical, input_revision)?,
+            )
+        } else {
+            None
+        };
         let compiled_scope = canonical_compiled_scope(
             &capability.wire.authorization_hint.resources,
             capability.wire.effect,
@@ -884,17 +859,19 @@ pub fn build_permission_request(
                     .expect("ExternalUrl exact input was checked"),
             )
         } else if exact_external_query {
-            exact_external_query_resource_scope(
-                canonical_input_digest_sha256
-                    .as_deref()
-                    .expect("ExternalQuery exact input was checked"),
-            )
+            registry
+                .web_search_binding()
+                .ok_or_else(|| invalid("Web Search is not configured"))?
+                .resource_scope(
+                    canonical_input_digest_sha256
+                        .as_deref()
+                        .expect("ExternalQuery exact input was checked"),
+                )
         } else if exact_command {
-            exact_command_resource_scope(
-                canonical_input_digest_sha256
-                    .as_deref()
-                    .expect("ExactCommand exact input was checked"),
-            )
+            command_confirmation
+                .as_ref()
+                .expect("exact command was prepared")
+                .resource_scope()?
         } else {
             compiled_scope.as_ref().map_or_else(
                 || normalize_scope(item.resource_scope),
@@ -913,9 +890,10 @@ pub fn build_permission_request(
             ),
             export_destinations: if exact_external_query {
                 vec![
-                    desk_agent_protocol::data_lineage::DestinationIdentity::WebResearch {
-                        connector_id: BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
-                    },
+                    registry
+                        .web_search_binding()
+                        .ok_or_else(|| invalid("Web Search is not configured"))?
+                        .destination()?,
                 ]
             } else if exact_outlook_handoff {
                 vec![
@@ -957,6 +935,7 @@ pub fn build_permission_request(
             },
             canonical_input_json,
             canonical_input_digest_sha256,
+            command_confirmation,
             suggested_ttl_seconds: item.suggested_ttl_seconds.clamp(1, MAX_REQUEST_TTL_SECONDS),
             suggested_max_uses: if inherently_r3
                 || exact_command
@@ -1239,7 +1218,11 @@ mod tests {
 
     #[test]
     fn external_query_permission_fixes_input_scope_and_connector_destination() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::device_assistant::device_assistant_provider_registry()
+            .with_web_search_binding(Some(crate::web_research::SearchBinding {
+                connector_id: "brave_web_v1".into(),
+                revision: 3,
+            }));
         let missing = r#"{"items":[{"item_id":"search","provider_id":"web.search","tool_name":"search_public_web","expected_effect":"export_data","suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Search public sources"}]}"#;
         assert!(
             build_permission_request(
@@ -1264,6 +1247,10 @@ mod tests {
         let item = &request.items[0];
         assert_eq!(item.operation_scope, vec!["search_public_web"]);
         assert!(item.resource_scope[0].starts_with("external_query_input:sha256:"));
+        assert!(
+            item.resource_scope
+                .contains(&"web_search_config:brave_web_v1:3".into())
+        );
         assert_eq!(
             item.export_destinations,
             vec![
@@ -1323,7 +1310,10 @@ mod tests {
 
     #[test]
     fn command_permission_requires_exact_input_and_forces_one_shot_scope() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let mut policy = crate::command_confirmation::test_policy();
+        policy.admission_policy = desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly;
+        let registry = crate::device_assistant::device_assistant_provider_registry()
+            .with_command_policy(policy);
         let missing = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"execute_confirmed_command","expected_effect":"execute_command","suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
         assert!(
             build_permission_request(
@@ -1365,11 +1355,7 @@ mod tests {
             "2026-08-26T00:00:00Z".into(),
         )
         .unwrap_err();
-        assert!(
-            error
-                .message
-                .contains("does not match a server-owned safe template")
-        );
+        assert!(error.message.contains("command rejected by current policy"));
     }
 
     #[test]
@@ -1900,6 +1886,7 @@ mod tests {
             input_revision: 1,
             state: PermissionRequestState::Approved,
             items: vec![GrantRequestItem {
+                command_confirmation: None,
                 item_id: "activate".into(),
                 provider_id: grant.provider_id.clone(),
                 tool_name: grant.tool_name.clone(),

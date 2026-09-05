@@ -100,6 +100,32 @@ pub fn build_permission_grants(
             .registry
             .provider(&requested.provider_id)
             .ok_or_else(|| internal("approved permission Provider is no longer registered"))?;
+        if requested.tool_name == crate::command_confirmation::COMMAND_TOOL {
+            let confirmation = requested.command_confirmation.as_ref().ok_or_else(|| {
+                internal("command confirmation is missing; request permission again")
+            })?;
+            if confirmation.actor_id != session.actor_id
+                || confirmation.target_device_id != session.device_id
+                || confirmation.policy_revision != session.policy_revision
+                || confirmation.resource_scope()? != *resource_scope
+            {
+                return Err(internal(
+                    "command confirmation does not match this owner decision",
+                ));
+            }
+            context
+                .registry
+                .command_policy()
+                .ok_or_else(|| internal("command policy is unavailable"))?
+                .revalidate(
+                    confirmation,
+                    requested
+                        .canonical_input_json
+                        .as_deref()
+                        .ok_or_else(|| internal("command input is missing"))?,
+                    session.input_revision,
+                )?;
+        }
         let capability = provider
             .capabilities
             .iter()
@@ -391,11 +417,10 @@ pub fn build_permission_grants(
             )
         );
         let export_destinations = if exact_external_query {
-            vec![DestinationIdentity::WebResearch {
-                connector_id: crate::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
-            }]
-            .into_iter()
+            requested.export_destinations.iter()
+            .filter(|destination| matches!(destination, DestinationIdentity::WebResearch { connector_id } if crate::web_research::search_connector_metadata(connector_id).is_some()))
             .filter(|destination| export_destinations.contains(destination))
+            .cloned()
             .collect()
         } else if exact_ui_action {
             requested

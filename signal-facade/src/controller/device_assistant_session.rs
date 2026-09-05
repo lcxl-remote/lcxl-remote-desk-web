@@ -430,6 +430,7 @@ fn stale_reason_name(reason: AttachmentStaleReason) -> &'static str {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAssistantSessionSnapshotDto {
+    pub context_usage: Option<ContextUsageDto>,
     /// Opaque recovery selector; ownership is rechecked on every read or stop.
     pub session_id: String,
     /// Monotonic session-store snapshot version used for out-of-order reconciliation.
@@ -470,6 +471,24 @@ pub struct DeviceAssistantSessionSnapshotDto {
     pub context_notices: Vec<ContextNoticeDto>,
     /// Durable selection metadata only; no UI tree, cells, files or screenshots.
     pub context_attachments: Vec<ContextAttachmentDto>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsageDto {
+    pub used_bytes: u64,
+    pub limit_bytes: u64,
+    pub strategy: String,
+}
+
+impl From<desk_diagnose_core::context_usage::ContextUsage> for ContextUsageDto {
+    fn from(value: desk_diagnose_core::context_usage::ContextUsage) -> Self {
+        Self {
+            used_bytes: value.used_bytes as u64,
+            limit_bytes: value.limit_bytes as u64,
+            strategy: value.strategy,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -845,6 +864,23 @@ pub struct GrantRequestItemDto {
     pub suggested_max_uses: u32,
     pub reason: String,
     pub external_send_confirmation: Option<ExternalSendConfirmationDto>,
+    pub command_confirmation: Option<CommandConfirmationDto>,
+}
+
+/// Owner-visible projection of the exact persisted command plan.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandConfirmationDto {
+    pub command: String,
+    pub shell: String,
+    pub cwd: Option<String>,
+    pub target_device_id: String,
+    pub target_session_id: String,
+    pub timeout_ms: u32,
+    pub max_stdout_bytes: u32,
+    pub max_stderr_bytes: u32,
+    pub execution_basis: desk_agent_protocol::exec::ExecExecutionBasis,
+    pub one_shot: bool,
 }
 
 fn external_send_confirmation(
@@ -970,6 +1006,28 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                         &item.tool_name,
                         item.canonical_input_json.as_deref(),
                     );
+                    let command_confirmation =
+                        item.command_confirmation
+                            .as_ref()
+                            .filter(|confirmation| {
+                                item.tool_name
+                                    == desk_diagnose_core::command_confirmation::COMMAND_TOOL
+                                    && item.canonical_input_json.as_deref().is_some_and(
+                                        |canonical| confirmation.validate(canonical).is_ok(),
+                                    )
+                            })
+                            .map(|confirmation| CommandConfirmationDto {
+                                command: confirmation.proposal.command.clone(),
+                                shell: confirmation.proposal.shell.clone(),
+                                cwd: confirmation.plan.cwd.clone(),
+                                target_device_id: confirmation.target_device_id.clone(),
+                                target_session_id: confirmation.target_session_id.clone(),
+                                timeout_ms: confirmation.plan.timeout_ms,
+                                max_stdout_bytes: confirmation.plan.max_stdout_bytes,
+                                max_stderr_bytes: confirmation.plan.max_stderr_bytes,
+                                execution_basis: confirmation.plan.execution_basis,
+                                one_shot: true,
+                            });
                     GrantRequestItemDto {
                         item_id: item.item_id,
                         provider_id: item.provider_id,
@@ -982,6 +1040,7 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                         suggested_max_uses: item.suggested_max_uses,
                         reason: item.reason,
                         external_send_confirmation,
+                        command_confirmation,
                     }
                 })
                 .collect(),
@@ -1013,6 +1072,21 @@ pub struct DeviceAssistantSessionListDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_usage_exposes_only_budget_metadata() {
+        let dto = ContextUsageDto::from(desk_diagnose_core::context_usage::ContextUsage {
+            used_bytes: 42,
+            limit_bytes: 128,
+            strategy: "checkpoint_summary".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(dto).unwrap(),
+            serde_json::json!({
+                "usedBytes": 42, "limitBytes": 128, "strategy": "checkpoint_summary"
+            })
+        );
+    }
 
     fn slack_exact_send_json() -> String {
         use desk_agent_protocol::{

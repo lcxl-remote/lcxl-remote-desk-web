@@ -114,6 +114,14 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
+                        <Link to="/system/web-search" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <CardTitle className="text-lg">{t('pages.webSearch.title')}</CardTitle>
+                                    <CardDescription>{t('pages.webSearch.description')}</CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
                     </div>
                 </div>
             )}

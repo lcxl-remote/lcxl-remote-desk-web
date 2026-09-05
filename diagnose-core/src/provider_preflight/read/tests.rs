@@ -186,7 +186,12 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
 
 #[test]
 fn central_web_authority_is_exact_and_fixes_the_search_destination() {
-    let registry = device_assistant_provider_registry();
+    let registry = device_assistant_provider_registry().with_web_search_binding(Some(
+        crate::web_research::SearchBinding {
+            connector_id: "brave_web_v1".into(),
+            revision: 3,
+        },
+    ));
     let destination = destination();
     let original = ReadContextSelection {
         tool_names: vec!["search_public_web".into()],
