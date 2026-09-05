@@ -63,6 +63,11 @@ fn canonical_mobile_contract_decodes_with_the_shared_protocol() {
 fn canonical_feature_profile_and_mutations_keep_fail_closed_fields_explicit() {
     let root = contract();
     assert_eq!(root["snapshot"]["sessionId"], "session-1");
+    assert_eq!(root["snapshot"]["capabilityGrants"][0]["inputRevision"], 3);
+    assert_eq!(
+        root["snapshot"]["permissionRequests"][0]["items"][0].get("externalSendConfirmation"),
+        Some(&Value::Null),
+    );
     let profiles = &root["feature_profiles"];
     assert_eq!(profiles["oss"]["device_assistant"]["schema_version"], 1);
     assert_eq!(profiles["oss"]["device_assistant"]["turn_stream"], true);
