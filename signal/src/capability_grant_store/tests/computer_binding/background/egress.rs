@@ -90,6 +90,7 @@ async fn fixture(
     use desk_diagnose_core::seam::ModelSeam;
     let context = crate::model_dial::SignalModelSeam::from_config(config)
         .unwrap()
+        .with_context_db(f.store.db.clone())
         .context_policy(desk_diagnose_core::model_capability::ModelRequirements::TEXT_ONLY)
         .await
         .unwrap();
@@ -374,7 +375,12 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             Some(&original.receipt.envelope)
         );
         assert_eq!(row.version, after.version);
-        assert!(after.pending_auto_triggers.is_empty(), "{case}");
+        assert!(
+            after.pending_auto_triggers.is_empty(),
+            "{case}: turn={:?}, pending={:?}",
+            after.turn_state,
+            after.pending_auto_triggers
+        );
         assert_eq!(
             agent_action_item::Entity::find()
                 .one(&f.store.db)

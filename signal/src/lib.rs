@@ -12,6 +12,7 @@ pub mod capability_grant_store;
 mod command_policy;
 pub mod computer_cancel_dispatch;
 pub mod computer_use_readiness;
+pub mod context_management_config;
 pub mod control_authorizer;
 pub mod controller;
 pub mod db;

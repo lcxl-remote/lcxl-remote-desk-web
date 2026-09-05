@@ -8,6 +8,51 @@ use crate::{chat::ChatRole, seam::ModelRequest, session::PersistedAgentSession};
 
 pub const COMPLETION_GRACE_MS: u64 = 5 * 60 * 1000;
 
+pub const INTERPRETATION_INSTRUCTION: &str = "\n\nThis is a completed-command result interpretation, not an action turn. No tools are available. Summarize only the supplied result in the conversation language. Do not emit tool invocation markup, tool-call JSON, or claim to start further operations. If more investigation is needed, explain that it has not been performed and requires a normal user-confirmed action turn.";
+
+/// Detect invocation structures, not a casual reference to a protocol name.
+/// These bytes are never parsed into executable operations.
+pub fn contains_tool_invocation(text: &str) -> bool {
+    let mut fenced = false;
+    let visible = text
+        .lines()
+        .filter(|line| {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                return false;
+            }
+            !fenced && !line.trim_start().starts_with('>')
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (visible.contains("<｜｜DSML｜｜tool_calls>") && visible.contains("<｜｜DSML｜｜invoke name="))
+        || (visible.contains("<tool_calls>") && visible.contains("<invoke name="))
+        || serde_json::from_str::<serde_json::Value>(visible.trim())
+            .ok()
+            .is_some_and(|value| {
+                value
+                    .get("tool_calls")
+                    .and_then(|calls| calls.as_array())
+                    .is_some_and(|calls| {
+                        calls.iter().any(|call| {
+                            call.pointer("/function/name")
+                                .and_then(|name| name.as_str())
+                                .is_some()
+                        })
+                    })
+            })
+}
+
+pub fn invalid_interpretation_error() -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::InvalidInput,
+        message: "The command result is saved, but the model returned an invalid tool invocation instead of interpreting it. No additional command was executed.".into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandCompletionContext {
@@ -129,6 +174,24 @@ fn denied() -> AgentError {
 mod tests {
     use super::*;
     use crate::{chat::ChatMessage, prompt::ResponseFormatSpec};
+
+    #[test]
+    fn detects_invocations_without_treating_protocol_discussion_as_execution() {
+        let markup = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"exec\">";
+        assert!(contains_tool_invocation(markup));
+        assert!(contains_tool_invocation(
+            r#"{"tool_calls":[{"function":{"name":"exec","arguments":"{}"}}]}"#
+        ));
+        assert!(!contains_tool_invocation(
+            "The DSML tool_calls marker is malformed."
+        ));
+        assert!(!contains_tool_invocation(&format!(
+            "Example:\n```xml\n{markup}\n```"
+        )));
+        assert!(!contains_tool_invocation(
+            "780G is used. Further investigation has not been performed."
+        ));
+    }
 
     fn destination() -> DestinationIdentity {
         DestinationIdentity::Model {

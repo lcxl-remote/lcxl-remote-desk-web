@@ -855,7 +855,11 @@ impl SignalBackgroundTaskStore {
                     .await
                     .map_err(agent_error)?
                     .is_some_and(|latest| latest.automation_turns_used >= MAX_AUTO_FOLLOW_UP_TURNS);
-                if exhausted || error.kind == desk_agent_protocol::AgentErrorKind::PermissionDenied
+                // Terminal validation failures must not redial the same result.
+                // Transient failures retain the existing bounded retry path.
+                if exhausted
+                    || !error.retryable
+                    || error.kind == desk_agent_protocol::AgentErrorKind::PermissionDenied
                 {
                     Ok(!matches!(
                         sessions

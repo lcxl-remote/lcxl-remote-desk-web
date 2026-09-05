@@ -24,6 +24,55 @@ export type AdaptiveResolutionParams = {
     min_delta_px?: number;
 };
 
+export const agentErrorKindEnum = {
+    permission_denied: "permission_denied",
+    approval_required: "approval_required",
+    risk_blocked: "risk_blocked",
+    unsupported_capability: "unsupported_capability",
+    unsupported_platform: "unsupported_platform",
+    target_offline: "target_offline",
+    session_unavailable: "session_unavailable",
+    host_at_capacity: "host_at_capacity",
+    timeout: "timeout",
+    cancelled: "cancelled",
+    output_limit_exceeded: "output_limit_exceeded",
+    invalid_input: "invalid_input",
+    redaction_failed: "redaction_failed",
+    transport_error: "transport_error",
+    content_blocked: "content_blocked",
+    content_safety_unavailable: "content_safety_unavailable",
+    internal: "internal"
+} as const;
+
+export type AgentErrorKindEnumKey = (typeof agentErrorKindEnum)[keyof typeof agentErrorKindEnum];
+
+export type AgentErrorKind = AgentErrorKindEnumKey;
+
+export type AgentError = {
+    /**
+     * @description Optional machine-readable business code (a `DeskErrorCode` value) so the\ncontrol end can localize the error instead of showing the raw English\n`message`. `None` for errors without a dedicated code (the UI falls back\nto `message`). Optional on the wire so both roles — the manager and the\nopen-source single-instance signal — interoperate unchanged; an older or\ncode-less producer simply omits it.
+     * @type integer,null, int32
+    */
+    error_code?: number | null;
+    /**
+     * @type string
+    */
+    kind: AgentErrorKind;
+    /**
+     * @description Human-readable. When `safe_for_model = false` the orchestrator must\nhand the model a generic message instead of this one, so policy detail\ndoes not leak into the prompt. The control-end UI always receives the\nfull message (the `safe_for_model` gate is on the server → model edge,\nnot the server → control-end edge).
+     * @type string
+    */
+    message: string;
+    /**
+     * @type boolean
+    */
+    retryable: boolean;
+    /**
+     * @type boolean
+    */
+    safe_for_model: boolean;
+};
+
 export const executionModeEnum = {
     suggest_only: "suggest_only",
     read_only: "read_only",
@@ -1094,6 +1143,27 @@ export type ContextAttachmentDto = {
     state: string;
 };
 
+export const contextManagementStrategyDtoEnum = {
+    window: "window",
+    checkpoint_summary: "checkpoint_summary"
+} as const;
+
+export type ContextManagementStrategyDtoEnumKey = (typeof contextManagementStrategyDtoEnum)[keyof typeof contextManagementStrategyDtoEnum];
+
+export type ContextManagementStrategyDto = ContextManagementStrategyDtoEnumKey;
+
+export type ContextManagementDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @type string
+    */
+    strategy: ContextManagementStrategyDto;
+};
+
 export const contextNoticeKindDtoEnum = {
     trimmed: "trimmed",
     compacted: "compacted"
@@ -1105,6 +1175,10 @@ export type ContextNoticeKindDto = ContextNoticeKindDtoEnumKey;
 
 export type ContextNoticeDto = {
     /**
+     * @type string,null
+    */
+    afterMessageId?: string | null;
+    /**
      * @minLength 0
      * @type integer,null, int32
     */
@@ -1114,6 +1188,10 @@ export type ContextNoticeDto = {
      * @type integer,null, int32
     */
     coveredMessageCount?: number | null;
+    /**
+     * @type string,null
+    */
+    createdAt?: string | null;
     /**
      * @type string
     */
@@ -2398,6 +2476,7 @@ export type DeviceAssistantSessionSnapshotDto = {
     */
     sessionId: string;
     taskStatusProjection?: (null | TaskStatusProjectionDto);
+    terminalError?: (null | AgentError);
     unresolvedOutcome?: (null | UnknownOutcomeDto);
     /**
      * @description Recent screen observations, bound to epoch/turn/tool/frame. Durable\nsnapshots contain no pixel bytes; live previews arrive on AgentEvent.
@@ -4668,6 +4747,35 @@ export type RestResponseConnectionVerifyResult = {
     success: boolean;
 };
 
+export type RestResponseContextManagementDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+        /**
+         * @type string
+        */
+        strategy: ContextManagementStrategyDto;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseCreateApiTokenResult = {
     /**
      * @type integer, int32
@@ -4854,6 +4962,7 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
         */
         sessionId: string;
         taskStatusProjection?: (null | TaskStatusProjectionDto);
+        terminalError?: (null | AgentError);
         unresolvedOutcome?: (null | UnknownOutcomeDto);
         /**
          * @description Recent screen observations, bound to epoch/turn/tool/frame. Durable\nsnapshots contain no pixel bytes; live previews arrive on AgentEvent.
@@ -7181,6 +7290,18 @@ export type UnknownOutcomeDispositionResponse = {
     disposed: boolean;
 };
 
+export type UpdateContextManagementRequest = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+    /**
+     * @type string
+    */
+    strategy: ContextManagementStrategyDto;
+};
+
 /**
  * @description Verify the current credentials and optionally replace either credential.
 */
@@ -7297,6 +7418,27 @@ export type VirtualDisplaySettings = {
      * @type integer | undefined, int32
     */
     prompt_ms?: number;
+};
+
+export type GetContextManagement200 = RestResponseContextManagementDto;
+
+export type GetContextManagementQueryResponse = GetContextManagement200;
+
+export type GetContextManagementQuery = {
+    Response: GetContextManagement200;
+    Errors: any;
+};
+
+export type UpdateContextManagement200 = RestResponseContextManagementDto;
+
+export type UpdateContextManagementMutationRequest = UpdateContextManagementRequest;
+
+export type UpdateContextManagementMutationResponse = UpdateContextManagement200;
+
+export type UpdateContextManagementMutation = {
+    Response: UpdateContextManagement200;
+    Request: UpdateContextManagementMutationRequest;
+    Errors: any;
 };
 
 export type GetWebSearch200 = RestResponseSearchConfigPublic;

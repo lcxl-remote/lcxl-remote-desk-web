@@ -20,6 +20,9 @@ export type { UpdateComputerUseApplicationPolicyMutationKey } from "./computerUs
 export type { ListConnectionsQueryKey } from "./connectionController/useListConnections.ts";
 export type { ListConnectionsSuspenseQueryKey } from "./connectionController/useListConnectionsSuspense.ts";
 export type { VerifyConnectionMutationKey } from "./connectionController/useVerifyConnection.ts";
+export type { GetContextManagementQueryKey } from "./contextManagementAdminController/useGetContextManagement.ts";
+export type { GetContextManagementSuspenseQueryKey } from "./contextManagementAdminController/useGetContextManagementSuspense.ts";
+export type { UpdateContextManagementMutationKey } from "./contextManagementAdminController/useUpdateContextManagement.ts";
 export type { CancelDeviceAssistantBackgroundTaskMutationKey } from "./deviceAssistantSessionController/useCancelDeviceAssistantBackgroundTask.ts";
 export type { DecideDeviceAssistantPermissionMutationKey } from "./deviceAssistantSessionController/useDecideDeviceAssistantPermission.ts";
 export type { DisposeDeviceAssistantUnknownOutcomeMutationKey } from "./deviceAssistantSessionController/useDisposeDeviceAssistantUnknownOutcome.ts";
@@ -182,6 +185,15 @@ export { useListConnectionsSuspense } from "./connectionController/useListConnec
 export { useVerifyConnection } from "./connectionController/useVerifyConnection.ts";
 export { verifyConnectionMutationKey } from "./connectionController/useVerifyConnection.ts";
 export { verifyConnectionMutationOptions } from "./connectionController/useVerifyConnection.ts";
+export { getContextManagementQueryKey } from "./contextManagementAdminController/useGetContextManagement.ts";
+export { getContextManagementQueryOptions } from "./contextManagementAdminController/useGetContextManagement.ts";
+export { useGetContextManagement } from "./contextManagementAdminController/useGetContextManagement.ts";
+export { getContextManagementSuspenseQueryKey } from "./contextManagementAdminController/useGetContextManagementSuspense.ts";
+export { getContextManagementSuspenseQueryOptions } from "./contextManagementAdminController/useGetContextManagementSuspense.ts";
+export { useGetContextManagementSuspense } from "./contextManagementAdminController/useGetContextManagementSuspense.ts";
+export { updateContextManagementMutationKey } from "./contextManagementAdminController/useUpdateContextManagement.ts";
+export { updateContextManagementMutationOptions } from "./contextManagementAdminController/useUpdateContextManagement.ts";
+export { useUpdateContextManagement } from "./contextManagementAdminController/useUpdateContextManagement.ts";
 export { cancelDeviceAssistantBackgroundTaskMutationKey } from "./deviceAssistantSessionController/useCancelDeviceAssistantBackgroundTask.ts";
 export { cancelDeviceAssistantBackgroundTaskMutationOptions } from "./deviceAssistantSessionController/useCancelDeviceAssistantBackgroundTask.ts";
 export { useCancelDeviceAssistantBackgroundTask } from "./deviceAssistantSessionController/useCancelDeviceAssistantBackgroundTask.ts";

@@ -1,10 +1,12 @@
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 import { AssistantContextMeter } from './assistant-context-meter';
+import { AssistantContextNotices, noticeMessageId } from './assistant-context-notices';
 import { AssistantPermissionDisclosure } from './assistant-permission-disclosure';
+import { AssistantPermissionRecords } from './assistant-permission-records';
 import { AssistantHistory } from './assistant-history';
 import { capabilityDescriptionKey } from './assistant-capability-copy';
 import { CommandConfirmationCard, validCommandReview } from './device-assistant-command';
-import { type FormEvent, useEffect, useRef, useState } from 'react';
+import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, ArrowLeft, Check, Copy, Eye, LoaderCircle, Monitor, Puzzle, RefreshCw, Send, ShieldCheck, Sparkles, X } from 'lucide-react';
@@ -801,6 +803,7 @@ function DeviceAssistantWorkspace({
                             </div>
                         )}
                         {chat.messages.map((message) => (
+                            <Fragment key={message.id}>
                             <div
                                 key={message.id}
                                 className={`max-w-[90%] rounded-lg px-3 py-2 text-sm ${
@@ -815,7 +818,10 @@ function DeviceAssistantWorkspace({
                                     : <p className={message.role === 'tool_result' ? 'max-h-64 overflow-auto whitespace-pre-wrap break-words' : 'whitespace-pre-wrap'}>{message.text}</p>}
                                 {message.role === 'tool_result' && <p className="mt-2 text-xs text-muted-foreground">{t('pages.deviceAssistant.commandResultHint')}</p>}
                             </div>
+                            <AssistantContextNotices notices={chat.contextNotices.filter(notice => noticeMessageId(notice, chat.messages) === message.id)} />
+                            </Fragment>
                         ))}
+                        <AssistantContextNotices historical notices={chat.contextNotices.filter(notice => !noticeMessageId(notice, chat.messages))} />
                         {chat.partial && (
                             <MarkdownContent disableLinks className="max-w-[90%] rounded-lg bg-muted px-3 py-2 text-sm">
                                 {chat.partial}
@@ -910,15 +916,8 @@ function DeviceAssistantWorkspace({
                             ))}
                         </div>
                     )}
-                    {chat.permissionRequests.length > 0 && (
-                        <div data-testid="device-assistant-permission-requests" className="space-y-3 rounded-md border border-amber-500/40 p-3">
-                            <div>
-                                <p className="text-sm font-medium">{t('pages.deviceAssistant.permissionTitle')}</p>
-                                <p className="text-xs text-muted-foreground">
-                                    {t('pages.deviceAssistant.permissionDescription')}
-                                </p>
-                            </div>
-                            {chat.permissionRequests.map((request) => (
+                    <AssistantPermissionRecords key={`${deskId}:${chat.conversationId}`} requests={chat.permissionRequests}>
+                            {(request) => (
                                 <AssistantPermissionDisclosure key={request.requestId} state={request.state} tools={request.items.map((item) => item.toolName)}>
                                     <div className="flex flex-wrap items-center justify-between gap-2">
                                         <span className="text-xs text-muted-foreground">
@@ -1218,9 +1217,8 @@ function DeviceAssistantWorkspace({
                                         </p>
                                     )}
                                 </AssistantPermissionDisclosure>
-                            ))}
-                        </div>
-                    )}
+                            )}
+                    </AssistantPermissionRecords>
                     {featureProfile.exec_pty && Object.entries(exec.entries).map(([row, entry]) => {
                         const rowIndex = Number(row);
                         return (
@@ -1289,9 +1287,6 @@ function DeviceAssistantWorkspace({
                         />
                         <div className="flex items-center justify-between gap-3">
                             <AssistantContextMeter usage={chat.contextUsage} draft={question} />
-                            <p className="text-xs text-muted-foreground">
-                                {t('pages.deviceAssistant.workspace.reviewNotice')}
-                            </p>
                             <Button type="submit" disabled={!assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
                                 <Send className="mr-2 h-4 w-4" />
                                 {t('pages.deviceAssistant.send')}

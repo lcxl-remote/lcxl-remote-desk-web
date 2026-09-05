@@ -509,6 +509,17 @@ async fn run_or_resume(
         _ => TurnState::Idle,
     };
     session.finish_turn(terminal, (deps.clock)());
+    session.terminal_error = match &result {
+        Err(error) | Ok(LoopOutcome::ContentSafetyUnavailable(error)) => Some(error.clone()),
+        Ok(LoopOutcome::ProtocolError(error)) => Some(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: error.to_string(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        }),
+        _ => None,
+    };
     if terminal == TurnState::Idle && !matches!(&result, Ok(LoopOutcome::Superseded { .. })) {
         session.handled_input_seq = session.latest_input_seq;
     }
@@ -803,13 +814,34 @@ async fn prepare_model_context(
             .await);
         }
         let protection = session.context_protection_set();
-        let plan = match crate::model_context::plan_model_context(
-            &session.conversation,
-            &session.model_context_state,
-            pinned_context,
-            &protection,
-            session.version,
-        ) {
+        let eligibility = deps
+            .model
+            .model_egress_policy()?
+            .map(|policy| {
+                crate::model_context::reconcile_context_eligibility(
+                    &policy,
+                    &session.conversation,
+                    &session.model_context_state,
+                    pinned_context,
+                    &protection,
+                    session.version,
+                )
+            })
+            .transpose();
+        let planned = match eligibility {
+            Ok(Some(Some(plan))) => {
+                Ok(crate::model_context::ContextBuildPlan::NeedsFloorReconciliation(plan))
+            }
+            Ok(_) => crate::model_context::plan_model_context(
+                &session.conversation,
+                &session.model_context_state,
+                pinned_context,
+                &protection,
+                session.version,
+            ),
+            Err(error) => Err(error),
+        };
+        let plan = match planned {
             Ok(plan) => plan,
             Err(error)
                 if pinned_context.strategy
@@ -825,7 +857,10 @@ async fn prepare_model_context(
             Err(error) => return Err(model_context_error(error)),
         };
 
-        if let Some(policy) = deps.model.model_egress_policy()?
+        if !matches!(
+            &plan,
+            crate::model_context::ContextBuildPlan::NeedsFloorReconciliation(_)
+        ) && let Some(policy) = deps.model.model_egress_policy()?
             && crate::model_context::authorize_context_checkpoint(
                 &policy,
                 &session.model_context_state,
@@ -851,8 +886,10 @@ async fn prepare_model_context(
                 let previous_notices = session.context_notices.clone();
                 session.model_context_state = ready.next_state;
                 if floor_advanced {
-                    session
-                        .add_context_notice(crate::model_context::ContextNotice::trimmed(turn_id));
+                    session.record_context_notice(
+                        crate::model_context::ContextNotice::trimmed(turn_id),
+                        (deps.clock)(),
+                    );
                 }
                 if changed || floor_advanced {
                     if pinned_context.strategy
@@ -899,7 +936,10 @@ async fn prepare_model_context(
                         .await);
                     }
                 };
-                session.add_context_notice(crate::model_context::ContextNotice::trimmed(turn_id));
+                session.record_context_notice(
+                    crate::model_context::ContextNotice::trimmed(turn_id),
+                    (deps.clock)(),
+                );
                 if deps
                     .heartbeat
                     .is_some_and(|heartbeat| !heartbeat.is_healthy())
@@ -1183,11 +1223,14 @@ async fn prepare_model_context(
                 let previous_state = session.model_context_state.clone();
                 let previous_notices = session.context_notices.clone();
                 session.model_context_state = next_state;
-                session.add_context_notice(crate::model_context::ContextNotice::compacted(
-                    turn_id,
-                    generation,
-                    covered_message_count,
-                ));
+                session.record_context_notice(
+                    crate::model_context::ContextNotice::compacted(
+                        turn_id,
+                        generation,
+                        covered_message_count,
+                    ),
+                    (deps.clock)(),
+                );
                 if deps
                     .heartbeat
                     .is_some_and(|heartbeat| !heartbeat.is_healthy())
@@ -1251,6 +1294,7 @@ async fn run_inner(
     };
     let mut same_tool: HashMap<String, u32> = HashMap::new();
     let mut compression_attempted = false;
+    let mut completion_protocol_retries: u8 = 0;
     let mut empty_end_turn_retries: u8 = 0;
     let mut truncated_turn_retries: u8 = 0;
     let mut permission_protocol_retries: u8 = 0;
@@ -1400,6 +1444,14 @@ async fn run_inner(
             ));
         let pinned_context = deps.model.context_policy(request_requirements).await?;
         let mut system_prompt = deps.system_prompt.clone();
+        if deps.model.command_completion_event_id().is_some() {
+            system_prompt
+                .text
+                .push_str(crate::command_completion::INTERPRETATION_INSTRUCTION);
+            if completion_protocol_retries > 0 {
+                system_prompt.text.push_str("\nYour previous response was discarded for emitting a tool invocation. Return only a natural-language interpretation; no additional operation has been executed.");
+            }
+        }
         if let Some(locale) = session.response_locale.as_deref() {
             system_prompt.text.push_str(&format!(
                 "\n\nWrite natural-language answers and progress explanations in BCP-47 locale {locale}. Tool names, commands, and JSON fields remain unchanged."
@@ -1484,12 +1536,15 @@ async fn run_inner(
             sink,
         )
         .await?;
-        // Snapshot occupancy using the same projected history and reserved budget.
-        session.context_usage_basis = Some(crate::context_usage::ContextUsageBasis::observe(
-            &session.conversation,
-            &context_view.messages,
-            &history_policy,
-        ));
+        // Completion-only projections do not replace the regular conversation's
+        // occupancy baseline. New results/replies still count via usage().
+        if deps.model.command_completion_event_id().is_none() {
+            session.context_usage_basis = Some(crate::context_usage::ContextUsageBasis::observe(
+                &session.conversation,
+                &context_view.messages,
+                &history_policy,
+            ));
+        }
         // Assemble the model request: a freshly built system prompt prepended to a
         // trailing, budget-trimmed window of the stored conversation. The system
         // prompt is never persisted, so it is added here on every call.
@@ -1815,7 +1870,15 @@ async fn run_inner(
                 current_input_revision,
             });
         }
-        let turn = deps.model.call(request, sink).await?;
+        // Interpretation is published only after protocol and safety validation.
+        let completion_only = deps.model.command_completion_event_id().is_some();
+        let turn = if completion_only {
+            deps.model
+                .call(request, &mut crate::seam::NullTurnSink)
+                .await?
+        } else {
+            deps.model.call(request, sink).await?
+        };
         if let Some(current_input_revision) = input_revision_advanced(deps, session).await? {
             return Ok(LoopOutcome::Superseded {
                 previous_input_revision: session.input_revision,
@@ -1823,6 +1886,16 @@ async fn run_inner(
             });
         }
         session.record_step(turn.usage);
+        if completion_only
+            && (!turn.tool_calls.is_empty()
+                || crate::command_completion::contains_tool_invocation(&turn.text))
+        {
+            if completion_protocol_retries >= 1 {
+                return Err(crate::command_completion::invalid_interpretation_error());
+            }
+            completion_protocol_retries += 1;
+            continue;
+        }
 
         // Reasoning models may spend the entire completion allowance on opaque
         // reasoning and return neither user-visible text nor a tool call. Treat

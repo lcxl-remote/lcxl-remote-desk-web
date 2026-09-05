@@ -6,6 +6,7 @@ import type { AiProvenance } from '@/components/ai-generated-mark';
 import type {
     BackgroundTaskDto,
     CapabilityGrantDto,
+    ContextNoticeDto,
     PermissionDecisionBody,
     PermissionRequestDto,
 } from '@/services/types';
@@ -31,6 +32,7 @@ import {
 const PREVIEW_TOOL = 'preview_computer_action';
 
 export type DeviceAssistantMessage = {
+    contextBoundaryIds?: string[];
     id: string;
     role: 'user' | 'assistant' | 'tool_result';
     text: string;
@@ -166,6 +168,8 @@ type PersistedSnapshotMessage = {
 };
 
 type PersistedSnapshot = {
+    terminalError?: { message: string } | null;
+    contextNotices?: ContextNoticeDto[];
     contextUsage?: AssistantContextUsage | null;
     sessionId: string;
     seq: number;
@@ -228,6 +232,13 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
             }
         }
     }
+    let lastVisible: DeviceAssistantMessage | undefined;
+    for (const raw of snapshot.messages) {
+        lastVisible = messages.find(message => message.id === raw.id) ?? lastVisible;
+        if (lastVisible && lastVisible.id !== raw.id) {
+            lastVisible.contextBoundaryIds = [...(lastVisible.contextBoundaryIds ?? []), raw.id];
+        }
+    }
     return {
         messages,
         tools,
@@ -262,6 +273,7 @@ export function useDeviceAssistantChat({
 }: Props) {
     const targetSelectionEnabled = connected !== undefined;
     const [contextUsage, setContextUsage] = useState<AssistantContextUsage | null>(null);
+    const [contextNotices, setContextNotices] = useState<ContextNoticeDto[]>([]);
     const [messages, setMessages] = useState<DeviceAssistantMessage[]>([]);
     const [tools, setTools] = useState<DeviceAssistantToolActivity[]>([]);
     const [draft, setDraft] = useState<ComputerActionDraftPreview | null>(null);
@@ -384,6 +396,7 @@ export function useDeviceAssistantChat({
                 requestOrder: expectedRequestOrder,
             };
             setContextUsage(snapshot.contextUsage ?? null);
+            setContextNotices([...new Map((snapshot.contextNotices ?? []).map(notice => [notice.id, notice])).values()]);
             const projected = projectPersistedSnapshot(snapshot);
             setAttachments(projected.attachments);
             setTaskStatusProjection(projected.taskStatusProjection);
@@ -415,6 +428,9 @@ export function useDeviceAssistantChat({
                 if (snapshot.active) {
                     setStatus('modeling');
                     setError(null);
+                } else if (snapshot.terminalError) {
+                    setStatus('error');
+                    setError(snapshot.terminalError.message);
                 } else if (projected.unresolvedOutcome) {
                     setStatus('outcome_unknown');
                     setError(null);
@@ -518,6 +534,7 @@ export function useDeviceAssistantChat({
         setAttachments([]);
         setVisualEvidence([]);
         setContextUsage(null);
+        setContextNotices([]);
         setRemoteActive(false);
         activeRequest.current = null;
         contextRequest.current = null;
@@ -582,6 +599,7 @@ export function useDeviceAssistantChat({
             setAttachments([]);
             setVisualEvidence([]);
             setContextUsage(null);
+            setContextNotices([]);
             setRemoteActive(false);
             setStatus('idle');
             if (event.newValue) void loadSnapshot(event.newValue, true);
@@ -1018,6 +1036,7 @@ export function useDeviceAssistantChat({
         setAttachments([]);
         setVisualEvidence([]);
         setContextUsage(null);
+        setContextNotices([]);
         setRemoteActive(false);
         setContextUpdating(false);
         setTaskStatusProjection(null);
@@ -1053,8 +1072,10 @@ export function useDeviceAssistantChat({
         hydrating, reset, conversationStorageScope, loadSnapshot]);
 
     return {
+        conversationId: conversationId.current,
         selectConversation,
         contextUsage,
+        contextNotices,
         messages,
         tools,
         draft,

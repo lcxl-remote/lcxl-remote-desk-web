@@ -74,6 +74,31 @@ pub struct CompressorProvenanceV1 {
     pub created_turn_id: String,
 }
 
+impl CompressorProvenanceV1 {
+    pub fn for_call(
+        policy: &PinnedContextPolicy,
+        provider_identity_sha256: String,
+        model_identity_sha256: String,
+        connection_revision: u64,
+        provider_call_key: String,
+        created_at: &str,
+        turn_id: &str,
+    ) -> Self {
+        Self {
+            source_context_key: policy.source_context_key.as_str().into(),
+            provider_identity_sha256,
+            model_identity_sha256,
+            connection_revision,
+            model_profile_revision: policy.profile_revision,
+            prompt_version: CONTEXT_SUMMARY_PROMPT_VERSION.into(),
+            schema_version: CONTEXT_SUMMARY_SCHEMA_VERSION,
+            provider_call_key,
+            created_at: created_at.into(),
+            created_turn_id: turn_id.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextSummaryV1 {

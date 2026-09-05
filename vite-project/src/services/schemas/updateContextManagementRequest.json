@@ -1,0 +1,1 @@
+{"type":"object","required":["expectedRevision","strategy"],"properties":{"expectedRevision":{"type":"integer","format":"int64","minimum":0},"strategy":{"type":"string","enum":["window","checkpoint_summary"],"x-readme-ref-name":"ContextManagementStrategyDto"}},"additionalProperties":false,"x-readme-ref-name":"UpdateContextManagementRequest"}

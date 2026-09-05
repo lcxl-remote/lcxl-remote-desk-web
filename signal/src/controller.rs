@@ -1,5 +1,6 @@
 pub mod ai_usage;
 pub mod connection;
+pub mod context_management;
 pub mod device_assistant_session;
 pub mod device_code;
 pub mod exec_pty;

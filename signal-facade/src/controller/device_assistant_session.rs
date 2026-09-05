@@ -320,6 +320,8 @@ impl From<desk_diagnose_core::model_context::ContextNoticeKind> for ContextNotic
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextNoticeDto {
+    pub created_at: Option<String>,
+    pub after_message_id: Option<String>,
     pub id: String,
     pub turn_id: String,
     pub kind: ContextNoticeKindDto,
@@ -330,6 +332,8 @@ pub struct ContextNoticeDto {
 impl From<desk_diagnose_core::model_context::ContextNotice> for ContextNoticeDto {
     fn from(notice: desk_diagnose_core::model_context::ContextNotice) -> Self {
         Self {
+            created_at: notice.created_at,
+            after_message_id: notice.after_message_id,
             id: notice.id,
             turn_id: notice.turn_id,
             kind: notice.kind.into(),
@@ -430,6 +434,8 @@ fn stale_reason_name(reason: AttachmentStaleReason) -> &'static str {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAssistantSessionSnapshotDto {
+    /// Persisted owner-visible failure for the current terminal turn.
+    pub terminal_error: Option<desk_agent_protocol::AgentError>,
     pub context_usage: Option<ContextUsageDto>,
     /// Opaque recovery selector; ownership is rechecked on every read or stop.
     pub session_id: String,

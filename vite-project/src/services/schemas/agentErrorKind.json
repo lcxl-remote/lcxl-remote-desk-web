@@ -1,0 +1,1 @@
+{"type":"string","enum":["permission_denied","approval_required","risk_blocked","unsupported_capability","unsupported_platform","target_offline","session_unavailable","host_at_capacity","timeout","cancelled","output_limit_exceeded","invalid_input","redaction_failed","transport_error","content_blocked","content_safety_unavailable","internal"],"x-readme-ref-name":"AgentErrorKind"}

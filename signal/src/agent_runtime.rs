@@ -95,6 +95,14 @@ struct MeteredSignalModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredSignalModel {
+    fn context_compression_provenance(
+        &self,
+        turn_id: &str,
+        created_at: &str,
+    ) -> Result<desk_diagnose_core::model_context::CompressorProvenanceV1, AgentError> {
+        self.inner
+            .context_compression_provenance(turn_id, created_at)
+    }
     async fn context_policy(
         &self,
         requirements: desk_diagnose_core::model_capability::ModelRequirements,
@@ -152,6 +160,14 @@ struct CompletionModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for CompletionModel {
+    fn context_compression_provenance(
+        &self,
+        turn_id: &str,
+        created_at: &str,
+    ) -> Result<desk_diagnose_core::model_context::CompressorProvenanceV1, AgentError> {
+        self.inner
+            .context_compression_provenance(turn_id, created_at)
+    }
     fn command_completion_event_id(&self) -> Option<&str> {
         self.command_completion.then_some(self.event_id.as_str())
     }
@@ -290,7 +306,7 @@ pub async fn resume_completion_turn(
     let config = model_provider::load(&db).await.map_err(|error| {
         transport_error(format!("failed to load model provider config: {error}"))
     })?;
-    let seam = SignalModelSeam::from_config(&config)?;
+    let seam = SignalModelSeam::from_config(&config)?.with_context_db(db.clone());
     let turn_id = uuid::Uuid::new_v4().to_string();
     let model: Box<dyn ModelSeam> = if session.surface == AgentSessionSurface::DeviceAssistant {
         // Legacy completions lacking an original export selection stay visible

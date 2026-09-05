@@ -32,6 +32,14 @@ pub(crate) struct MeteredModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredModel {
+    fn context_compression_provenance(
+        &self,
+        turn_id: &str,
+        created_at: &str,
+    ) -> Result<desk_diagnose_core::model_context::CompressorProvenanceV1, AgentError> {
+        self.inner
+            .context_compression_provenance(turn_id, created_at)
+    }
     fn model_egress_policy(&self) -> Result<Option<ModelEgressPolicy>, AgentError> {
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
             .map_err(|_| transport_error("system clock predates the Unix epoch"))?;

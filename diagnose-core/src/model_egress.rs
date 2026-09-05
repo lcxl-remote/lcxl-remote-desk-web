@@ -50,22 +50,9 @@ pub struct AuthorizedModelRequest {
 }
 
 impl ModelEgressPolicy {
-    pub fn authorize_request(
-        &self,
-        mut request: ModelRequest,
-    ) -> Result<AuthorizedModelRequest, ModelEgressError> {
-        self.destination
-            .validate()
-            .map_err(|error| ModelEgressError::InvalidPolicy(error.to_string()))?;
-        if self.export_authorization_id.trim().is_empty()
-            || self.byte_cap == 0
-            || self.byte_cap > MAX_SINK_BYTES
-        {
-            return Err(ModelEgressError::InvalidPolicy(
-                "invalid export authorization id or byte cap".into(),
-            ));
-        }
-
+    pub(crate) fn retained_history_ids(&self, messages: &[ChatMessage]) -> HashSet<String> {
+        let mut request =
+            ModelRequest::text_only(messages.to_vec(), crate::prompt::ResponseFormatSpec::None);
         // The browser-visible transcript remains intact, but a removed context
         // authorization must also remove prior turns derived from that context
         // from the next provider request. Dropping the complete turn keeps tool
@@ -222,6 +209,32 @@ impl ModelEgressPolicy {
             });
         }
 
+        request
+            .messages
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect()
+    }
+
+    pub fn authorize_request(
+        &self,
+        mut request: ModelRequest,
+    ) -> Result<AuthorizedModelRequest, ModelEgressError> {
+        self.destination
+            .validate()
+            .map_err(|error| ModelEgressError::InvalidPolicy(error.to_string()))?;
+        if self.export_authorization_id.trim().is_empty()
+            || self.byte_cap == 0
+            || self.byte_cap > MAX_SINK_BYTES
+        {
+            return Err(ModelEgressError::InvalidPolicy(
+                "invalid export authorization id or byte cap".into(),
+            ));
+        }
+        let retained = self.retained_history_ids(&request.messages);
+        request
+            .messages
+            .retain(|message| retained.contains(&message.message_id));
         let mut projected_envelopes = Vec::with_capacity(request.messages.len());
         let mut payloads = Vec::with_capacity(request.messages.len());
         for message in &mut request.messages {

@@ -2409,6 +2409,10 @@ async fn rejected_compression_summary_records_usage_but_no_checkpoint_or_notice(
     let stored = sess.inner.borrow();
     let stored = stored.as_ref().unwrap();
     assert_eq!(stored.turn_state, TurnState::Failed);
+    assert_eq!(stored.terminal_error.as_ref(), Some(&error));
+    let restored =
+        PersistedAgentSession::decode_json(&serde_json::to_string(stored).unwrap()).unwrap();
+    assert_eq!(restored.terminal_error, Some(error.clone()));
     assert_eq!(stored.current_turn_steps, 0);
     assert_eq!(stored.current_turn_tokens.input_tokens, Some(10));
     assert_eq!(stored.current_turn_tokens.output_tokens, Some(5));

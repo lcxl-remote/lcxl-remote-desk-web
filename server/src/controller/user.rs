@@ -140,6 +140,12 @@ mod tests {
                     web::scope("/api")
                         .wrap(from_fn(enforce_device_scope))
                         .service(desk_signal::controller::web_search::get_web_search)
+                        .service(
+                            desk_signal::controller::context_management::get_context_management,
+                        )
+                        .service(
+                            desk_signal::controller::context_management::update_context_management,
+                        )
                         .service(desk_signal::controller::web_search::update_web_search)
                         .service(desk_signal::controller::web_search::test_web_search)
                         .route("/probe", web::get().to(protected_probe)),
@@ -190,6 +196,14 @@ mod tests {
             DeskErrorCode::PERMISSION_ERROR.code()
         );
         for (method, uri) in [
+            (
+                actix_web::http::Method::GET,
+                "/api/admin/system/ai-context-management",
+            ),
+            (
+                actix_web::http::Method::PUT,
+                "/api/admin/system/ai-context-management",
+            ),
             (actix_web::http::Method::GET, "/api/admin/system/web-search"),
             (actix_web::http::Method::PUT, "/api/admin/system/web-search"),
             (

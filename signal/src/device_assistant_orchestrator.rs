@@ -735,7 +735,7 @@ async fn run_turn_inner(
         }
     };
     let seam = match SignalModelSeam::from_config(&config) {
-        Ok(seam) => seam,
+        Ok(seam) => seam.with_context_db(db.clone()),
         Err(error) => {
             stream_event(
                 connections.as_ref(),
@@ -1876,6 +1876,7 @@ async fn run_turn_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod compaction;
     mod original_input;
     mod permission_object;
     use desk_agent_protocol::data_lineage::Sensitivity;
@@ -2149,7 +2150,9 @@ mod tests {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let model = MeteredModel {
-            inner: SignalModelSeam::from_config(&config).unwrap(),
+            inner: SignalModelSeam::from_config(&config)
+                .unwrap()
+                .with_context_db(db.clone()),
             db: db.clone(),
             model_name: "fake-model".into(),
             destination: destination.clone(),
@@ -2233,7 +2236,9 @@ mod tests {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let model = MeteredModel {
-            inner: SignalModelSeam::from_config(&config).unwrap(),
+            inner: SignalModelSeam::from_config(&config)
+                .unwrap()
+                .with_context_db(db.clone()),
             db: db.clone(),
             model_name: "fake-model".into(),
             destination: destination.clone(),

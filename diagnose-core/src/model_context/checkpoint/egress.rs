@@ -18,6 +18,91 @@ use crate::{
 // Reserve one lineage slot for a prior checkpoint's own model-output envelope.
 const MAX_SUMMARY_SOURCES: usize = desk_agent_protocol::data_lineage::MAX_LINEAGE_ITEMS - 1;
 
+/// Reconcile the model-only floor before freezing compression sources. Never
+/// delete transcript data or extend a source's authority/retention boundary.
+pub fn reconcile_context_eligibility(
+    egress: &ModelEgressPolicy,
+    conversation: &[ChatMessage],
+    state: &ModelContextState,
+    policy: &PinnedContextPolicy,
+    protection: &ContextProtectionSet,
+    version: i64,
+) -> Result<Option<FloorReconciliationPlan>, ModelContextError> {
+    if policy.strategy != ContextManagementStrategy::CheckpointSummary || conversation.is_empty() {
+        return Ok(None);
+    }
+    let groups = group_messages(conversation, &policy.source_context_key)?;
+    let protected = protected_group_indices(conversation, &groups, protection)?;
+    let key = policy.key();
+    let entry = state.entries.iter().find(|entry| entry.policy_key == key);
+    let floor = resolve_floor(conversation, &groups, entry)?;
+    let retained = egress.retained_history_ids(conversation);
+    let current_turn = conversation
+        .iter()
+        .rev()
+        .find_map(|message| message.turn_id.as_ref());
+    let cutoff = egress
+        .now_unix_ms
+        .saturating_add(crate::model_egress::MODEL_CALL_RETENTION_HEADROOM_MS);
+    let last_invalid = groups
+        .iter()
+        .enumerate()
+        .skip(floor)
+        .filter_map(|(index, group)| {
+            let ineligible = conversation[group.start..group.end].iter().any(|message| {
+                !retained.contains(&message.message_id)
+                    || message
+                        .data_envelope
+                        .as_ref()
+                        .and_then(|envelope| envelope.retention.expires_at_unix_ms)
+                        .is_some_and(|expiry| expiry <= cutoff)
+            });
+            ineligible.then_some(index)
+        })
+        .max();
+    if let Some(last) = last_invalid {
+        if protected.range(..=last).next().is_some()
+            || conversation[..groups[last].end]
+                .iter()
+                .any(|message| current_turn.is_some() && message.turn_id.as_ref() == current_turn)
+        {
+            return Err(ModelContextError::InvalidProtectionReference(
+                conversation[groups[last].start].message_id.clone(),
+            ));
+        }
+        return floor_reconciliation_plan(
+            conversation,
+            state,
+            policy,
+            version,
+            &groups,
+            last + 1,
+            None,
+        )
+        .map(Some);
+    }
+    if entry.and_then(|entry| entry.checkpoint.as_ref()).is_some()
+        && authorize_context_checkpoint(egress, state, &key, conversation).is_err()
+    {
+        // A checkpoint summarizes only groups before its floor. Keep that
+        // monotonic floor when dropping a summary that may no longer be sent.
+        if floor == 0 {
+            return Err(ModelContextError::StaleCompressionPlan);
+        }
+        return floor_reconciliation_plan(
+            conversation,
+            state,
+            policy,
+            version,
+            &groups,
+            floor,
+            None,
+        )
+        .map(Some);
+    }
+    Ok(None)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextSummarySourceV1 {

@@ -93,6 +93,7 @@ pub async fn get_device_assistant_session(
             })?;
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
                 DeviceAssistantSessionSnapshotDto {
+                    terminal_error: snapshot.terminal_error,
                     session_id,
                     context_usage: snapshot.context_usage.map(Into::into),
                     seq: snapshot.seq,

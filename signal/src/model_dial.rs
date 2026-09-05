@@ -201,6 +201,10 @@ fn transport_error(message: impl Into<String>) -> AgentError {
 
 /// Signal's model seam over a single resolved provider.
 pub struct SignalModelSeam {
+    context_db: Option<sea_orm::DatabaseConnection>,
+    context_policy: tokio::sync::OnceCell<desk_diagnose_core::model_context::PinnedContextPolicy>,
+    compression_call_key: std::cell::RefCell<Option<String>>,
+    connection_revision: u64,
     dialect: Dialect,
     base_url: String,
     api_key: String,
@@ -235,6 +239,11 @@ impl SignalModelSeam {
             &model,
         );
         Ok(Self {
+            context_db: None,
+            context_policy: tokio::sync::OnceCell::new(),
+            compression_call_key: std::cell::RefCell::new(None),
+            connection_revision: u64::try_from(config.connection_revision)
+                .map_err(|_| config_error("invalid connection revision"))?,
             dialect: Dialect::from_protocol(protocol)?,
             base_url,
             api_key,
@@ -254,6 +263,12 @@ impl SignalModelSeam {
             Dialect::OpenAiCompatible => format!("{base}/chat/completions"),
             Dialect::Anthropic => format!("{base}/v1/messages"),
         }
+    }
+
+    /// Inject the same central store that owns the conversation and provider.
+    pub fn with_context_db(mut self, db: sea_orm::DatabaseConnection) -> Self {
+        self.context_db = Some(db);
+        self
     }
 
     fn build_body(&self, request: &ModelRequest) -> Result<Value, AgentError> {
@@ -302,14 +317,55 @@ impl ModelSeam for SignalModelSeam {
                 "the selected AI model does not satisfy the request capabilities",
             ));
         }
-        desk_diagnose_core::model_context::PinnedContextPolicy::window(
-            self.source_context_key.clone(),
-            self.profile.profile_revision,
-            self.profile
-                .max_context_bytes()
-                .map_err(|error| config_error(error.to_string()))?,
+        self.context_policy
+            .get_or_try_init(|| async {
+                let db = self
+                    .context_db
+                    .as_ref()
+                    .ok_or_else(|| config_error("central context configuration is unavailable"))?;
+                let config = crate::context_management_config::read(db)
+                    .await
+                    .map_err(|_| config_error("context configuration could not be loaded"))?;
+                config
+                    .pin(
+                        self.source_context_key.clone(),
+                        self.profile.profile_revision,
+                        self.profile
+                            .max_context_bytes()
+                            .map_err(|e| config_error(e.to_string()))?,
+                    )
+                    .map_err(|e| config_error(e.to_string()))
+            })
+            .await
+            .cloned()
+    }
+
+    fn context_compression_provenance(
+        &self,
+        turn_id: &str,
+        created_at: &str,
+    ) -> Result<desk_diagnose_core::model_context::CompressorProvenanceV1, AgentError> {
+        use sha2::{Digest, Sha256};
+        let key = self
+            .compression_call_key
+            .borrow()
+            .clone()
+            .ok_or_else(|| config_error("compression call has not completed"))?;
+        let policy = self
+            .context_policy
+            .get()
+            .ok_or_else(|| config_error("context policy is not pinned"))?;
+        Ok(
+            desk_diagnose_core::model_context::CompressorProvenanceV1::for_call(
+                policy,
+                format!("{:x}", Sha256::digest(self.base_url.as_bytes())),
+                format!("{:x}", Sha256::digest(self.model.as_bytes())),
+                self.connection_revision,
+                format!("{:x}", Sha256::digest(key.as_bytes())),
+                created_at,
+                turn_id,
+            ),
         )
-        .map_err(|error| config_error(error.to_string()))
     }
 
     async fn call(
@@ -450,6 +506,9 @@ impl ModelSeam for SignalModelSeam {
             }
         }
         let turn = state.into_turn();
+        if request.use_case == desk_diagnose_core::model_profile::ModelUseCase::ContextCompression {
+            *self.compression_call_key.borrow_mut() = Some(uuid::Uuid::new_v4().to_string());
+        }
         log::info!(
             "[model-dial] completed model turn: stop_reason={:?}, tool_call_count={}",
             turn.stop_reason,
@@ -1273,6 +1332,182 @@ fn append_block_string(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[actix_web::test]
+    async fn compression_transport_records_real_call_provenance_without_tools() {
+        use desk_diagnose_core::model_context::*;
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+                if let Some(end) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    if bytes.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let frame = json!({"choices":[{"delta":{"content":"{\"goals\":[{\"text\":\"Earlier goal\",\"source_message_ids\":[\"old\"]}]}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}});
+            let body = format!("data: {frame}\n\ndata: [DONE]\n\n");
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let config = ModelProviderConfig {
+            base_url: Some(format!("http://{address}/v1")),
+            model: Some("test".into()),
+            api_key: Some("test-only".into()),
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        };
+        let seam = SignalModelSeam::from_config(&config).unwrap();
+        let policy = desk_diagnose_core::model_context::PlatformContextPolicy::default()
+            .pin(
+                seam.source_context_key.clone(),
+                seam.profile.profile_revision,
+                131_072,
+            )
+            .unwrap();
+        seam.context_policy.set(policy.clone()).unwrap();
+        let conversation = [("old", 70_000), ("recent", 68_000)]
+            .into_iter()
+            .map(|(id, size)| {
+                ChatMessage::text(id, ChatRole::User, "x".repeat(size))
+                    .with_turn_id(format!("turn-{id}"))
+            })
+            .collect::<Vec<_>>();
+        let state = ModelContextState::default();
+        let ContextBuildPlan::NeedsCompression(plan) = plan_model_context(
+            &conversation,
+            &state,
+            &policy,
+            &ContextProtectionSet::default(),
+            7,
+        )
+        .unwrap() else {
+            panic!("oversized history must require compression");
+        };
+        assert!(
+            seam.context_compression_provenance("turn", "2026-09-05T00:00:00Z")
+                .is_err()
+        );
+        let mut request = ModelRequest::text_only(
+            compression_request_messages(&plan),
+            ResponseFormatSpec::None,
+        );
+        request.use_case = desk_diagnose_core::model_profile::ModelUseCase::ContextCompression;
+        request.tool_choice = ToolChoice::None;
+        request.caller_output_hard_cap =
+            Some(desk_diagnose_core::model_context::CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS);
+        let result = seam
+            .call(request, &mut desk_diagnose_core::seam::NullTurnSink)
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert!(result.tool_calls.is_empty());
+        let provenance = seam
+            .context_compression_provenance("turn", "2026-09-05T00:00:00Z")
+            .unwrap();
+        assert_eq!(
+            provenance.source_context_key,
+            seam.source_context_key.as_str()
+        );
+        assert_eq!(
+            provenance.connection_revision,
+            config.connection_revision as u64
+        );
+        assert!(!provenance.provider_call_key.is_empty());
+        let summary = parse_validated_context_summary(&result.text, &plan, provenance).unwrap();
+        let (next, view) =
+            apply_validated_checkpoint(&plan, summary, &conversation, &state, 7).unwrap();
+        assert!(
+            view.messages
+                .iter()
+                .any(|message| message.text.contains("Earlier goal"))
+        );
+        let restored: ModelContextState =
+            serde_json::from_str(&serde_json::to_string(&next).unwrap()).unwrap();
+        assert!(matches!(
+            plan_model_context(
+                &conversation,
+                &restored,
+                &policy,
+                &ContextProtectionSet::default(),
+                7
+            )
+            .unwrap(),
+            ContextBuildPlan::Ready(_)
+        ));
+    }
+    #[actix_web::test]
+    async fn oss_policy_is_durable_pinned_and_provenance_requires_a_completed_call() {
+        use sea_orm::ConnectionTrait;
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        db.execute(
+            &sea_orm::Schema::new(db.get_database_backend())
+                .create_table_from_entity(crate::entity::context_management_config::Entity),
+        )
+        .await
+        .unwrap();
+        let config = ModelProviderConfig {
+            base_url: Some("https://example.test/v1".into()),
+            model: Some("test".into()),
+            api_key: Some("test-only".into()),
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        };
+        let mut seam = SignalModelSeam::from_config(&config).unwrap();
+        seam.context_db = Some(db.clone());
+        let first = seam
+            .context_policy(ModelRequirements::TEXT_ONLY)
+            .await
+            .unwrap();
+        assert_eq!(first.strategy.as_str(), "checkpoint_summary");
+        assert!(seam.context_compression_provenance("turn", "now").is_err());
+        crate::context_management_config::update(
+            &db,
+            &desk_signal_facade::context_management::UpdateContextManagementRequest {
+                expected_revision: 0,
+                strategy:
+                    desk_signal_facade::context_management::ContextManagementStrategyDto::Window,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            seam.context_policy(ModelRequirements::TEXT_ONLY)
+                .await
+                .unwrap(),
+            first
+        );
+        let mut next = SignalModelSeam::from_config(&config).unwrap();
+        next.context_db = Some(db);
+        assert_eq!(
+            next.context_policy(ModelRequirements::TEXT_ONLY)
+                .await
+                .unwrap()
+                .strategy
+                .as_str(),
+            "window"
+        );
+    }
     use desk_diagnose_core::chat::{ToolCallRef, ToolSpec};
     use desk_utils::ssrf::ProviderSsrfMode;
 

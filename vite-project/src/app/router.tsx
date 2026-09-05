@@ -177,6 +177,10 @@ export const router = createBrowserRouter([
                         path: 'web-search',
                         lazy: async () => ({ Component: (await import('@/features/settings/web-search-settings')).WebSearchSettings }),
                     },
+                    {
+                        path: 'context-management',
+                        lazy: async () => ({ Component: (await import('@/features/settings/context-management-settings')).ContextManagementSettings }),
+                    },
                 ]
             },
             {

@@ -48,6 +48,159 @@ fn history() -> Vec<ChatMessage> {
     vec![user("old", 9000), user("recent", 8000)]
 }
 
+#[test]
+fn expired_history_reconciles_before_compression_without_mutating_transcript() {
+    let mut conversation = history();
+    conversation[0]
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(500);
+    let original = conversation.clone();
+    let state = ModelContextState::default();
+    let repair = reconcile_context_eligibility(
+        &policy(),
+        &conversation,
+        &state,
+        &context_policy(),
+        &ContextProtectionSet::default(),
+        7,
+    )
+    .unwrap()
+    .unwrap();
+    let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
+    let ContextBuildPlan::Ready(ready) = plan_model_context(
+        &conversation,
+        &next,
+        &context_policy(),
+        &ContextProtectionSet::default(),
+        7,
+    )
+    .unwrap() else {
+        panic!("eligible tail should fit without compression");
+    };
+    assert_eq!(ready.view.messages.len(), 1);
+    assert_eq!(ready.view.messages[0].message_id, "recent");
+    assert_eq!(conversation, original);
+    assert!(
+        reconcile_context_eligibility(
+            &policy(),
+            &conversation,
+            &next,
+            &context_policy(),
+            &ContextProtectionSet::default(),
+            8
+        )
+        .unwrap()
+        .is_none()
+    );
+    let mut protection = ContextProtectionSet::default();
+    protection.protect_message("old");
+    assert!(
+        reconcile_context_eligibility(
+            &policy(),
+            &conversation,
+            &state,
+            &context_policy(),
+            &protection,
+            7
+        )
+        .is_err()
+    );
+    conversation[1]
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(500);
+    assert!(
+        reconcile_context_eligibility(
+            &policy(),
+            &conversation,
+            &state,
+            &context_policy(),
+            &ContextProtectionSet::default(),
+            7
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn expired_checkpoint_is_removed_without_reopening_its_covered_prefix() {
+    let conversation = history();
+    let (state, _) = checkpoint(&conversation);
+    let mut later = policy();
+    later.now_unix_ms = 1_000_000;
+    let repair = reconcile_context_eligibility(
+        &later,
+        &conversation,
+        &state,
+        &context_policy(),
+        &ContextProtectionSet::default(),
+        8,
+    )
+    .unwrap()
+    .unwrap();
+    let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
+    assert!(next.entries[0].checkpoint.is_none());
+    assert_eq!(
+        next.entries[0].floor_group_head_message_id,
+        state.entries[0].floor_group_head_message_id
+    );
+    assert!(
+        reconcile_context_eligibility(
+            &later,
+            &conversation,
+            &next,
+            &context_policy(),
+            &ContextProtectionSet::default(),
+            9
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
+fn expired_standalone_background_result_cannot_strand_the_next_user_turn() {
+    let mut output = user("background-result", 100);
+    output.role = ChatRole::UntrustedOutput;
+    output.turn_id = None;
+    output
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(500);
+    let conversation = vec![user("old", 100), output, user("recent", 100)];
+    let state = ModelContextState::default();
+    let repair = reconcile_context_eligibility(
+        &policy(),
+        &conversation,
+        &state,
+        &context_policy(),
+        &ContextProtectionSet::default(),
+        7,
+    )
+    .unwrap()
+    .unwrap();
+    let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
+    let ContextBuildPlan::Ready(ready) = plan_model_context(
+        &conversation,
+        &next,
+        &context_policy(),
+        &ContextProtectionSet::default(),
+        7,
+    )
+    .unwrap() else {
+        panic!("only the new user turn should remain");
+    };
+    assert_eq!(ready.view.messages.len(), 1);
+    assert_eq!(ready.view.messages[0].message_id, "recent");
+}
+
 fn plan(conversation: &[ChatMessage], state: &ModelContextState) -> CompressionPlan {
     match plan_model_context(
         conversation,

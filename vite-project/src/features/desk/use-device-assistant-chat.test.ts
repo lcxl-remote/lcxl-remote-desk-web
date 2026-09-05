@@ -15,6 +15,19 @@ import type { SignalingSubscriber } from './use-desk-signaling';
 import { useDeviceAssistantChat } from './use-device-assistant-chat';
 
 describe('useDeviceAssistantChat', () => {
+    it('restores the durable terminal error in a newly opened page', async () => {
+        localStorage.setItem('device-assistant-conversation:restore-error', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 10, active: false,
+            terminalError: { message: 'model context compression failed: stale_context' },
+            messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
+        } }) }));
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'restore-error', connected: true,
+            subscribe: () => () => undefined, sendMessage: () => 'select' }));
+        await waitFor(() => expect(result.current.error).toBe('model context compression failed: stale_context'));
+        expect(result.current.status).toBe('error');
+        unmount();
+    });
     it('keeps the concrete turn error after snapshot refresh and clears it on a new turn', async () => {
         let subscriber: SignalingSubscriber | null = null;
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
@@ -50,12 +63,18 @@ describe('useDeviceAssistantChat', () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
             sessionId: 'budget-session', seq: 1, active: false, messages: [],
             contextUsage: { usedBytes: 200, limitBytes: 1000, strategy: 'checkpoint_summary' },
+            contextNotices: [
+                { id: 'notice-1', turnId: 'turn-1', kind: 'compacted' },
+                { id: 'notice-1', turnId: 'turn-1', kind: 'compacted' },
+            ],
         } }) }));
         const { result } = renderHook(() => useDeviceAssistantChat({ deskId: 'budget-desk',
             subscribe: () => () => undefined, sendMessage: vi.fn() }));
         await waitFor(() => expect(result.current.contextUsage?.usedBytes).toBe(200));
+        expect(result.current.contextNotices).toEqual([{ id: 'notice-1', turnId: 'turn-1', kind: 'compacted' }]);
         act(() => result.current.reset());
         expect(result.current.contextUsage).toBeNull();
+        expect(result.current.contextNotices).toEqual([]);
     });
 
     it('opens history through its continuation id without sending a cancel or a question', async () => {
@@ -365,6 +384,7 @@ describe('useDeviceAssistantChat', () => {
                         seq: 12,
                         active: false,
                         messages: [{ id: 'answer-12', role: 'assistant', text: 'newest answer' }],
+                        contextNotices: [{ id: 'new-notice', turnId: 'new-turn', kind: 'compacted' }],
                         contextAttachments: [],
                         backgroundTasks: [{
                             taskId: 'task-1',
@@ -396,6 +416,7 @@ describe('useDeviceAssistantChat', () => {
                         seq: 11,
                         active: true,
                         messages: [{ id: 'answer-11', role: 'assistant', text: 'older answer' }],
+                        contextNotices: [{ id: 'old-notice', turnId: 'old-turn', kind: 'trimmed' }],
                         contextAttachments: [],
                         backgroundTasks: [{
                             taskId: 'task-1',
@@ -419,6 +440,7 @@ describe('useDeviceAssistantChat', () => {
         expect(result.current.messages.at(-1)?.text).toBe('newest answer');
         expect(result.current.backgroundTasks[0]?.state).toBe('succeeded');
         expect(result.current.running).toBe(false);
+        expect(result.current.contextNotices.map(notice => notice.id)).toEqual(['new-notice']);
     });
 
     it('isolates an old request after the selected conversation changes', async () => {

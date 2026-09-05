@@ -154,6 +154,7 @@ impl SignalAgentSessionStore {
             _ => None,
         };
         Ok(Some(SessionSnapshot {
+            terminal_error: session.terminal_error,
             context_usage: session
                 .context_usage_basis
                 .as_ref()
@@ -841,6 +842,7 @@ pub enum EventAppend {
 
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
+    pub terminal_error: Option<desk_agent_protocol::AgentError>,
     pub context_usage: Option<desk_diagnose_core::context_usage::ContextUsage>,
     pub client_conversation_id: Option<String>,
     pub seq: i64,
@@ -883,6 +885,7 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         _ => None,
     };
     Ok(SessionSnapshot {
+        terminal_error: session.terminal_error,
         context_usage: session
             .context_usage_basis
             .as_ref()

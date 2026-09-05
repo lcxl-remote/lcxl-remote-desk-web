@@ -3,6 +3,12 @@ import zh from '@/locales/zh-CN/pages';
 import en from '@/locales/en-US/pages';
 
 describe('assistant capability disclosure', () => {
+    it('removes the redundant composer notice without removing detailed approval guidance', () => {
+        for (const locale of [zh, en]) {
+            expect(Object.keys(locale)).not.toContain('pages.deviceAssistant.workspace.reviewNotice');
+            expect(locale['pages.deviceAssistant.disclosure']).toBeTruthy();
+        }
+    });
     it('distinguishes draft handoff from separately confirmed sending in both languages', () => {
         expect(zh['pages.deviceAssistant.disclosure']).toContain('不能用草稿授权代替发送授权');
         expect(en['pages.deviceAssistant.disclosure']).toContain('draft authorization does not authorize sending');

@@ -36,9 +36,7 @@ impl ContextManagementStrategy {
     }
 }
 
-/// Cluster-shared product policy selected by the manager control plane. The OSS
-/// signal does not persist this value and continues to construct a local Window
-/// policy directly.
+/// Product policy persisted by the central service, independent of deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlatformContextPolicy {
@@ -52,8 +50,40 @@ impl Default for PlatformContextPolicy {
         Self {
             schema_version: PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION,
             revision: 0,
-            strategy: ContextManagementStrategy::Window,
+            strategy: ContextManagementStrategy::CheckpointSummary,
         }
+    }
+}
+
+impl PlatformContextPolicy {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.schema_version != PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION {
+            return Err("unsupported context-management schema version");
+        }
+        Ok(())
+    }
+
+    pub fn candidate(&self, strategy: ContextManagementStrategy) -> Result<Self, &'static str> {
+        self.validate()?;
+        Ok(Self {
+            schema_version: PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION,
+            revision: self.revision.checked_add(1).ok_or("revision overflow")?,
+            strategy,
+        })
+    }
+
+    pub fn pin(
+        &self,
+        source: SourceContextKey,
+        profile_revision: i64,
+        budget: usize,
+    ) -> Result<PinnedContextPolicy, ModelContextError> {
+        self.validate()
+            .map_err(|_| ModelContextError::UnsupportedStrategy)?;
+        let mut policy = PinnedContextPolicy::window(source, profile_revision, budget)?;
+        policy.strategy = self.strategy;
+        policy.platform_context_policy_revision = self.revision;
+        Ok(policy)
     }
 }
 
@@ -240,6 +270,10 @@ pub enum ContextNoticeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextNotice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_message_id: Option<String>,
     pub id: String,
     pub turn_id: String,
     pub kind: ContextNoticeKind,
@@ -254,6 +288,8 @@ impl ContextNotice {
         let turn_id = turn_id.into();
         Self {
             id: format!("context-trimmed:{turn_id}"),
+            created_at: None,
+            after_message_id: None,
             turn_id,
             kind: ContextNoticeKind::Trimmed,
             checkpoint_generation: None,
@@ -269,6 +305,8 @@ impl ContextNotice {
         let turn_id = turn_id.into();
         Self {
             id: format!("context-compacted:{turn_id}:{generation}"),
+            created_at: None,
+            after_message_id: None,
             turn_id,
             kind: ContextNoticeKind::Compacted,
             checkpoint_generation: Some(generation),
@@ -912,14 +950,17 @@ mod tests {
     }
 
     #[test]
-    fn platform_policy_defaults_to_window_revision_zero_and_revision_is_keyed() {
+    fn platform_policy_defaults_to_summary_revision_zero_and_revision_is_keyed() {
         let platform = PlatformContextPolicy::default();
         assert_eq!(
             platform.schema_version,
             PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION
         );
         assert_eq!(platform.revision, 0);
-        assert_eq!(platform.strategy, ContextManagementStrategy::Window);
+        assert_eq!(
+            platform.strategy,
+            ContextManagementStrategy::CheckpointSummary
+        );
 
         let zero =
             PinnedContextPolicy::checkpoint_summary(source("same"), 1, MIN_MODEL_CONTEXT_BYTES, 0)
@@ -928,6 +969,29 @@ mod tests {
             PinnedContextPolicy::checkpoint_summary(source("same"), 1, MIN_MODEL_CONTEXT_BYTES, 1)
                 .unwrap();
         assert_ne!(zero.key(), one.key());
+        let window = platform
+            .candidate(ContextManagementStrategy::Window)
+            .unwrap();
+        assert_eq!(window.revision, 1);
+        let pinned = window
+            .pin(source("same"), 1, MIN_MODEL_CONTEXT_BYTES)
+            .unwrap();
+        assert_eq!(pinned.strategy, ContextManagementStrategy::Window);
+        assert_ne!(pinned.key(), zero.key());
+        let mut invalid = platform.clone();
+        invalid.schema_version += 1;
+        assert!(
+            invalid
+                .pin(source("same"), 1, MIN_MODEL_CONTEXT_BYTES)
+                .is_err()
+        );
+        invalid = platform;
+        invalid.revision = u64::MAX;
+        assert!(
+            invalid
+                .candidate(ContextManagementStrategy::Window)
+                .is_err()
+        );
     }
 
     #[test]

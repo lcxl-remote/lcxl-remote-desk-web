@@ -7,6 +7,7 @@ pub mod agent_permission_resume;
 pub mod agent_run_event;
 pub mod agent_session;
 pub mod ai_usage;
+pub mod context_management_config;
 pub mod device_code;
 pub mod host_remote_access_state;
 pub mod model_egress_receipt;

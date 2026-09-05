@@ -344,6 +344,8 @@ pub fn configure_api_surface(
                             .service(test_model_provider),
                     )
                     .service(desk_signal::controller::web_search::get_web_search)
+                    .service(desk_signal::controller::context_management::get_context_management)
+                    .service(desk_signal::controller::context_management::update_context_management)
                     .service(desk_signal::controller::web_search::update_web_search)
                     .service(desk_signal::controller::web_search::test_web_search)
                     // Usage-retention windows govern both rollup tables; the row

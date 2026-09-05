@@ -176,7 +176,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 11;
+const SIGNAL_SCHEMA_VERSION: i32 = 12;
 const MIGRATION_LOCK_TABLE: &str = "signal_schema_migration_lock";
 const LEGACY_TABLES: [&str; 8] = [
     "agent_exec_task",
@@ -253,6 +253,15 @@ pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbE
                     )
                     .await?;
                 }
+                11 => {
+                    validate_v11_schema(&txn, &tables).await?;
+                    create_entity(
+                        &txn,
+                        &Schema::new(txn.get_database_backend()),
+                        crate::entity::context_management_config::Entity,
+                    )
+                    .await?;
+                }
                 other => {
                     return Err(DbErr::Custom(format!(
                         "no signal database migration registered from version {other}"
@@ -288,6 +297,12 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, agent_run_event::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_permission_resume::Entity).await?;
     create_entity(db, &schema, crate::entity::web_search_config::Entity).await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::context_management_config::Entity,
+    )
+    .await?;
 
     for index in [
         Index::create()
@@ -649,6 +664,28 @@ async fn validate_v1_schema<C: ConnectionTrait>(
 }
 
 async fn validate_latest_schema<C: ConnectionTrait>(
+    db: &C,
+    tables: &HashSet<String>,
+) -> Result<(), DbErr> {
+    let mut previous = tables.clone();
+    if !previous.remove("context_management_config") {
+        return Err(DbErr::Custom(
+            "signal schema v12 is missing context_management_config".into(),
+        ));
+    }
+    validate_v11_schema(db, &previous).await?;
+    let columns = table_columns(db, "context_management_config").await?;
+    for column in ["id", "config_json"] {
+        if !columns.contains(column) {
+            return Err(DbErr::Custom(format!(
+                "context_management_config missing {column}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_v11_schema<C: ConnectionTrait>(
     db: &C,
     tables: &HashSet<String>,
 ) -> Result<(), DbErr> {
@@ -1257,7 +1294,7 @@ mod tests {
              DROP TABLE agent_action_item; \
              DROP TABLE model_probe_observation; \
              ALTER TABLE model_provider DROP COLUMN exec_approval_timeout_secs; \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; PRAGMA user_version = 1",
+             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 1",
         )
         .await
         .unwrap();
@@ -1302,7 +1339,7 @@ mod tests {
              VALUES (1, 'open_ai_chat_completions', 'test', 0, 'https://example.test', \
                'secret', 1, '{}', 'max_tokens', 512, 4096, 131072, 1, 1, 'json_object', \
                'confirm_each_action', 20, 40, '2026-08-21T00:00:00Z'); \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; PRAGMA user_version = 2",
+             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 2",
         )
         .await
         .unwrap();
@@ -1330,7 +1367,7 @@ mod tests {
              DROP TABLE agent_capability_grant; \
              DROP TABLE agent_run_event; \
              DROP TABLE model_egress_receipt; \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; PRAGMA user_version = 4",
+             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 4",
         )
         .await
         .unwrap();
@@ -1358,7 +1395,7 @@ mod tests {
              DROP TABLE agent_grant_reservation; \
              DROP TABLE agent_capability_grant; \
              DROP TABLE agent_run_event; \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; PRAGMA user_version = 5",
+             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 5",
         )
         .await
         .unwrap();
@@ -1385,7 +1422,7 @@ mod tests {
             "DROP TABLE agent_capability_dispatch_outbox; \
              DROP TABLE agent_grant_reservation; \
              DROP TABLE agent_capability_grant; \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; PRAGMA user_version = 6",
+             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 6",
         )
         .await
         .unwrap();
@@ -1427,7 +1464,7 @@ mod tests {
         db.execute_unprepared(
             "ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_binding_json; \
             ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_acceptance_json; \
-            DROP TABLE agent_permission_resume; DROP TABLE web_search_config; PRAGMA user_version = 7",
+            DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 7",
         )
         .await
         .unwrap();
@@ -1502,7 +1539,7 @@ mod tests {
         .insert(&db)
         .await
         .unwrap();
-        db.execute_unprepared("ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_background_json; ALTER TABLE agent_session DROP COLUMN snapshot_seq; ALTER TABLE agent_session DROP COLUMN snapshot_fingerprint; DROP TABLE agent_permission_resume; DROP TABLE web_search_config; PRAGMA user_version = 8").await.unwrap();
+        db.execute_unprepared("ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_background_json; ALTER TABLE agent_session DROP COLUMN snapshot_seq; ALTER TABLE agent_session DROP COLUMN snapshot_fingerprint; DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 8").await.unwrap();
         initialize_schema(&db).await.unwrap();
         initialize_schema(&db).await.unwrap();
         assert_eq!(
@@ -1546,7 +1583,7 @@ mod tests {
     async fn v10_adds_search_configuration_without_importing_credentials() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         create_latest_schema(&db).await.unwrap();
-        db.execute_unprepared("DROP TABLE web_search_config; PRAGMA user_version = 10")
+        db.execute_unprepared("DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 10")
             .await
             .unwrap();
         initialize_schema(&db).await.unwrap();
@@ -1562,6 +1599,37 @@ mod tests {
             .await
             .unwrap();
         assert!(initialize_schema(&db).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn v11_adds_compaction_configuration_and_preserves_explicit_choice() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_latest_schema(&db).await.unwrap();
+        db.execute_unprepared("DROP TABLE context_management_config; PRAGMA user_version = 11")
+            .await
+            .unwrap();
+        initialize_schema(&db).await.unwrap();
+        let config = crate::context_management_config::read(&db).await.unwrap();
+        assert_eq!(config.strategy.as_str(), "checkpoint_summary");
+        crate::context_management_config::update(
+            &db,
+            &desk_signal_facade::context_management::UpdateContextManagementRequest {
+                expected_revision: 0,
+                strategy:
+                    desk_signal_facade::context_management::ContextManagementStrategyDto::Window,
+            },
+        )
+        .await
+        .unwrap();
+        initialize_schema(&db).await.unwrap();
+        assert_eq!(
+            crate::context_management_config::read(&db)
+                .await
+                .unwrap()
+                .strategy
+                .as_str(),
+            "window"
+        );
     }
 
     #[tokio::test]

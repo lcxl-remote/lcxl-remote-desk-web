@@ -531,6 +531,9 @@ pub struct PersistedAgentSession {
 
     // ---- The two orthogonal machines ----
     pub turn_state: TurnState,
+    /// Owner-visible terminal failure, never part of provider conversation input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_error: Option<desk_agent_protocol::AgentError>,
     pub execution_state: ExecutionState,
 
     /// Completed background results the model has not yet reacted to — the
@@ -890,6 +893,7 @@ impl PersistedAgentSession {
             current_request_id: None,
             current_turn_id: None,
             turn_state: TurnState::Idle,
+            terminal_error: None,
             execution_state: ExecutionState::None,
             pending_auto_triggers: Vec::new(),
             latest_input_seq: 0,
@@ -1007,6 +1011,16 @@ impl PersistedAgentSession {
             self.context_notices.drain(..excess);
         }
         true
+    }
+
+    /// Bind an event to the persisted history boundary, never to UI refresh time.
+    pub fn record_context_notice(&mut self, mut notice: ContextNotice, created_at: String) -> bool {
+        notice.created_at = Some(created_at);
+        notice.after_message_id = self
+            .conversation
+            .last()
+            .map(|message| message.message_id.clone());
+        self.add_context_notice(notice)
     }
 
     /// Idempotently attach immutable context metadata. Reusing a client request
@@ -1204,6 +1218,7 @@ impl PersistedAgentSession {
         // prior owner whose lease was taken over now holds a stale token.
         self.lease_token = self.lease_token.wrapping_add(1);
         self.turn_state = TurnState::Running;
+        self.terminal_error = None;
         self.current_turn_id = Some(turn_id.into());
         self.current_request_id = request_id;
         self.active_control_connection_id = connection_id;
@@ -1304,6 +1319,7 @@ impl PersistedAgentSession {
     /// reacts — see [`Self::clear_reacted_auto_triggers`].
     pub fn finish_turn(&mut self, terminal: TurnState, now: impl Into<String>) {
         self.turn_state = terminal;
+        self.terminal_error = None;
         self.updated_at = now.into();
     }
 
@@ -1887,6 +1903,36 @@ pub fn narrow_scope(start: &AgentScope, latest: &AgentScope) -> AgentScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::ChatMessage;
+    #[test]
+    fn context_notice_keeps_original_time_and_boundary_across_retries_and_restore() {
+        let mut state = session();
+        state
+            .conversation
+            .push(ChatMessage::text("first", ChatRole::User, "question"));
+        assert!(state.record_context_notice(
+            ContextNotice::trimmed("turn"),
+            "2026-09-05T15:00:00Z".into()
+        ));
+        state
+            .conversation
+            .push(ChatMessage::text("later", ChatRole::Assistant, "answer"));
+        assert!(!state.record_context_notice(
+            ContextNotice::trimmed("turn"),
+            "2026-09-05T16:00:00Z".into()
+        ));
+        let restored: PersistedAgentSession =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored.context_notices.len(), 1);
+        assert_eq!(
+            restored.context_notices[0].after_message_id.as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            restored.context_notices[0].created_at.as_deref(),
+            Some("2026-09-05T15:00:00Z")
+        );
+    }
     use crate::context_attachment::{
         AttachmentBounds, AttachmentObjectRef, AttachmentState, CONTEXT_ATTACHMENT_SCHEMA_VERSION,
         ContextAttachmentKind,
@@ -2235,11 +2281,19 @@ mod tests {
         s.conversation
             .push(ChatMessage::text("a1", ChatRole::Assistant, "checking..."));
         s.finish_turn(TurnState::Failed, "t");
+        s.terminal_error = Some(desk_agent_protocol::AgentError {
+            kind: desk_agent_protocol::AgentErrorKind::Internal,
+            message: "model context compression failed: stale_context".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        });
         assert_eq!(s.turn_state, TurnState::Failed);
 
         // A second turn can be claimed from the failed state, history intact.
         s.begin_turn("t2", None, None, 7, s.scope_snapshot.clone(), "t")
             .expect("reclaim from failed");
+        assert!(s.terminal_error.is_none());
         assert_eq!(s.turn_state, TurnState::Running);
         assert_eq!(s.conversation.len(), 2, "history preserved across reclaim");
 

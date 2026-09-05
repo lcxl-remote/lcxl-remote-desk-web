@@ -2,13 +2,23 @@
 
 ## AI Assistant conversations
 
+Before resuming an older conversation, the model view excludes expired or no-longer-authorized history. It may advance past complete message groups and show a trimming notice; the original transcript stays intact. This is not a fallback after failed compression and never extends data permissions. Invalid protected context required by the current task still fails and must be selected or read again. New terminal errors are saved with the conversation, so refreshing or reopening displays the same specific reason; a new turn clears the previous error. Errors not saved before upgrading cannot be reconstructed.
+
+System settings → Context management (`/system/context-management`) switches between checkpoint summaries and window trimming. Summaries are on by default. Changes apply on the next turn and survive restarts. Compaction makes an additional call to the current model and may incur charges; failures are explicit, without silent fallback to trimming.
+
+Isolated background command interpretation does not reset the regular conversation's context meter baseline; new results and replies still count. Actual summary compaction and history-window trimming produce distinct short system notices in the conversation area, also restored with the session. These notices do not mean the original chat was deleted. A baseline overwritten by an older version's isolated interpretation refreshes on the next regular model preparation.
+
 AI natural-language replies use the interface language supplied when sending a message. Permission resumes and background follow-ups inherit the saved conversation language. This preference does not change tools, commands, JSON fields, or permissions. Existing conversations without a saved preference record it on the next normal message.
 
 On continuation, AI retrieves history on demand. Content whose authorization has expired, is near expiry, or does not cover the current model is not sent again. AI is told that some history is unavailable and may need fresh authorized evidence. The original UI history is not deleted, and historical commands are not automatically replayed.
 
 The ring at the left of the Send row shows context budget occupancy. Hover or focus it to see the compaction/trimming threshold, used bytes, remaining budget, and estimated text draft increase. The threshold is the latest prepared history budget after reserving system prompt and tool overhead. Summaries, retained messages, and subsequent replies and tool results count toward usage. Tool or context changes can alter the next budget, and the draft estimate excludes attachments not yet read; remaining bytes are not an exact character allowance. Usage is recalculated from the retained window after compaction/trimming. Missing usage displays “—”, not zero; an existing conversation needs a new model request preparation to produce this metadata.
 
-Permission requests remain expanded while pending or needing revalidation. Approved, partially approved, denied, withdrawn, or replaced requests collapse by default, showing tool names and the decision. Click to review full details. Approval does not imply successful execution.
+Only pending requests or requests needing revalidation appear in the main area. Resolved requests are hidden by default; use the Permission request history icon to review their status and details in a scrollable panel. Approval does not imply successful execution.
+
+Compaction/trimming notices stay at their recorded message boundary and display the server-recorded time; later messages do not move them. Unlocated older records appear in collapsed history, with missing times marked as unrecorded rather than replaced by refresh time.
+
+Background command interpretation has no tools. Invocation markup emitted as prose is withheld and corrected at most once; a repeated failure produces an explicit error. The original command result remains available, and commands in prose are never executed.
 
 The conversation header contains **Conversation history**, **New conversation**, and the connection status. History lists the 100 most recent conversations for the current device; select one to restore and continue it. You can browse the list during a task or request, but switch only after it finishes. Empty conversations use only the input placeholder, without a duplicate explanatory paragraph.
 
