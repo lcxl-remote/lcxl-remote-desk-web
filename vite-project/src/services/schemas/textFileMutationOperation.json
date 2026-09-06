@@ -1,0 +1,1 @@
+{"type":"string","description":"Device facts, not authorization. A recovery location must be retained even\nwhen a mutation crossed the commit point but could not be verified.","enum":["update","delete"],"x-readme-ref-name":"TextFileMutationOperation"}

@@ -237,6 +237,12 @@ pub(crate) fn project(
         if completed.output.is_some() || verified {
             return Err(invalid());
         }
+    } else if desk_diagnose_core::provider_preflight::text_file::is_text_mutation(action) {
+        desk_diagnose_core::provider_preflight::text_file::validate_completion(
+            &plan.actions[0].target,
+            action,
+            completed,
+        )?;
     } else {
         validate_output(action, &plan.device_id, completed)?;
     }

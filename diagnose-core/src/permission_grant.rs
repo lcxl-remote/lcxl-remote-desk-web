@@ -152,72 +152,96 @@ pub fn build_permission_grants(
                 "approved permission capability is no longer ready; refresh and decide again",
             ));
         }
-        let original_read =
-            if crate::input_read_context::live_read::target_kind(&requested.tool_name).is_some() {
-                let original = original_reads
-                    .ok_or_else(|| internal("original live read selection is missing"))?;
-                original.validate()?;
-                let message =
-                    crate::permission_resume::latest_user_requirement(&session.conversation)
-                        .ok_or_else(|| internal("original live input is missing"))?;
-                let destination = message
-                    .data_envelope
-                    .as_ref()
-                    .and_then(|envelope| envelope.allowed_destinations.first())
-                    .ok_or_else(|| internal("original live destination is missing"))?;
-                crate::input_read_context::live_read::validate_input(
-                    original,
-                    message,
-                    destination,
-                    context.now_unix_ms,
-                )?;
-                let target = crate::input_read_context::live_read::target(
-                    original,
-                    &requested.tool_name,
-                    context.now_unix_ms,
-                )?;
-                Some((
-                    vec![target.object_ref.clone()],
-                    crate::input_read_context::live_read::expiry(original, target)?,
-                ))
-            } else if requires_objects(&requested.tool_name) {
-                let original = original_reads
-                    .ok_or_else(|| internal("original object read selection is missing"))?;
-                original.validate()?;
-                let destination = original
-                    .object_attachments
-                    .first()
-                    .and_then(|object| object.envelope.allowed_destinations.first())
-                    .ok_or_else(|| internal("original object destination is missing"))?;
-                crate::input_read_context::validate_current_objects(
-                    session,
-                    &original.object_attachments,
-                    destination,
-                    context.now_unix_ms,
-                )?;
-                let binding = ObjectReadBinding {
-                    original,
-                    destination,
-                    now_unix_ms: context.now_unix_ms,
-                };
-                let call = crate::chat::ToolCall {
-                    id: requested.item_id.clone(),
-                    name: requested.tool_name.clone(),
-                    arguments_json: "{}".into(),
-                };
-                let expiry = binding.expiry(&call)?;
-                let references = binding
-                    .selected(&call)?
-                    .into_iter()
-                    .map(|object| {
-                        serde_json::from_str::<ObjectRef>(&object.object_ref.opaque_token)
-                            .map_err(|_| internal("invalid original object reference"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Some((references, expiry))
-            } else {
-                None
+        let result_read_call = crate::chat::ToolCall {
+            id: requested.item_id.clone(),
+            name: requested.tool_name.clone(),
+            arguments_json: requested
+                .canonical_input_json
+                .clone()
+                .unwrap_or_else(|| "{}".into()),
+        };
+        let result_read =
+            crate::provider_preflight::text_file::uses_session_file_read(&result_read_call)?;
+        let original_read = if result_read {
+            let message = crate::permission_resume::latest_user_requirement(&session.conversation)
+                .ok_or_else(|| internal("original file read input missing"))?;
+            let destination = message
+                .data_envelope
+                .as_ref()
+                .and_then(|e| e.allowed_destinations.first())
+                .ok_or_else(|| internal("original file read destination missing"))?;
+            let read = crate::provider_preflight::text_file::ResultFileRead::build(
+                session,
+                &result_read_call,
+                destination,
+                context.now_unix_ms,
+            )?;
+            Some((vec![read.reference().clone()], read.valid_until_unix_ms))
+        } else if crate::input_read_context::live_read::target_kind(&requested.tool_name).is_some()
+        {
+            let original = original_reads
+                .ok_or_else(|| internal("original live read selection is missing"))?;
+            original.validate()?;
+            let message = crate::permission_resume::latest_user_requirement(&session.conversation)
+                .ok_or_else(|| internal("original live input is missing"))?;
+            let destination = message
+                .data_envelope
+                .as_ref()
+                .and_then(|envelope| envelope.allowed_destinations.first())
+                .ok_or_else(|| internal("original live destination is missing"))?;
+            crate::input_read_context::live_read::validate_input(
+                original,
+                message,
+                destination,
+                context.now_unix_ms,
+            )?;
+            let target = crate::input_read_context::live_read::target(
+                original,
+                &requested.tool_name,
+                context.now_unix_ms,
+            )?;
+            Some((
+                vec![target.object_ref.clone()],
+                crate::input_read_context::live_read::expiry(original, target)?,
+            ))
+        } else if requires_objects(&requested.tool_name) {
+            let original = original_reads
+                .ok_or_else(|| internal("original object read selection is missing"))?;
+            original.validate()?;
+            let destination = original
+                .object_attachments
+                .first()
+                .and_then(|object| object.envelope.allowed_destinations.first())
+                .ok_or_else(|| internal("original object destination is missing"))?;
+            crate::input_read_context::validate_current_objects(
+                session,
+                &original.object_attachments,
+                destination,
+                context.now_unix_ms,
+            )?;
+            let binding = ObjectReadBinding {
+                original,
+                destination,
+                now_unix_ms: context.now_unix_ms,
             };
+            let call = crate::chat::ToolCall {
+                id: requested.item_id.clone(),
+                name: requested.tool_name.clone(),
+                arguments_json: "{}".into(),
+            };
+            let expiry = binding.expiry(&call)?;
+            let references = binding
+                .selected(&call)?
+                .into_iter()
+                .map(|object| {
+                    serde_json::from_str::<ObjectRef>(&object.object_ref.opaque_token)
+                        .map_err(|_| internal("invalid original object reference"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some((references, expiry))
+        } else {
+            None
+        };
         let sensitive_content = capability.wire.data_policy.reads.iter().any(|category| {
             !matches!(
                 category,
@@ -233,7 +257,37 @@ pub fn build_permission_grants(
             desk_agent_protocol::Capability::DesktopUiActionConfirmed
                 | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
         );
-        let resource_scope = if exact_ui_action {
+        let text_mutation = crate::provider_preflight::text_file::TextMutationPreflight::supports(
+            &requested.tool_name,
+        );
+        let resource_scope = if text_mutation {
+            let call = crate::chat::ToolCall {
+                id: requested.item_id.clone(),
+                name: requested.tool_name.clone(),
+                arguments_json: requested
+                    .canonical_input_json
+                    .clone()
+                    .ok_or_else(|| internal("text mutation requires exact input"))?,
+            };
+            let preflight =
+                crate::provider_preflight::text_file::TextMutationPreflight::from_session(
+                    session,
+                    context.surface,
+                    &call,
+                    context.now_unix_ms,
+                )?;
+            preflight
+                .resource_scope()
+                .iter()
+                .filter(|scope| {
+                    resource_scope.contains(scope)
+                        || resource_scope
+                            .iter()
+                            .any(|s| s == "selected:server_resolved")
+                })
+                .cloned()
+                .collect()
+        } else if exact_ui_action {
             #[derive(serde::Deserialize)]
             struct DesktopActionTarget {
                 target: ObjectRef,
@@ -296,6 +350,23 @@ pub fn build_permission_grants(
                 .map(|_| requested.resource_scope.clone());
             let object_refs = if exact_requested_scope.is_some() {
                 Vec::new()
+            } else if crate::provider_preflight::ArtifactCallPreflight::supports(
+                &requested.tool_name,
+            ) {
+                let call = crate::chat::ToolCall {
+                    id: requested.item_id.clone(),
+                    name: requested.tool_name.clone(),
+                    arguments_json: requested
+                        .canonical_input_json
+                        .clone()
+                        .unwrap_or_else(|| "{}".into()),
+                };
+                vec![
+                    crate::file_scope::select_output_directory(session, &call, context.now_unix_ms)
+                        .map_err(|_| {
+                            internal("select one current approved conversation directory")
+                        })?,
+                ]
             } else if let Some((references, _)) = &original_read {
                 references.clone()
             } else {
@@ -373,7 +444,7 @@ pub fn build_permission_grants(
             CapabilityRiskSignals {
                 sensitive_content,
                 external_egress: capability.wire.data_policy.may_export_data,
-                destructive_or_overwrite: false,
+                destructive_or_overwrite: text_mutation,
                 unpredictable_input: false,
             },
         );
@@ -432,6 +503,15 @@ pub fn build_permission_grants(
         } else {
             export_destinations.clone()
         };
+        crate::file_scope::validate_artifact_scope(
+            session,
+            &requested.tool_name,
+            &resource_scope,
+            context.now_unix_ms,
+        )
+        .map_err(|_| {
+            internal("file operation requires a current approved conversation directory")
+        })?;
         grants.push(CapabilityGrant {
             schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
             grant_id,

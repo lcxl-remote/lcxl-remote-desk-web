@@ -4,6 +4,7 @@
 //! local reads and confirmed mutations. Reads use server-stamped remote-tool
 //! frames; writes use exact durable grants and sealed Computer Action plans.
 
+pub(crate) mod directory;
 mod object_read;
 
 use std::collections::HashMap;
@@ -746,6 +747,7 @@ fn exact_selected_batch_file(roots: &[ObjectRef]) -> Result<ObjectRef, AgentErro
     Ok(file)
 }
 
+#[cfg(test)]
 fn validate_selected_batch_destination(
     roots: &[ObjectRef],
     destination: &ObjectRef,
@@ -771,6 +773,14 @@ fn validate_selected_batch_destination(
 
 fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind> {
     match action {
+        ComputerActionKind::File(action)
+            if matches!(
+                action,
+                FilePatchAction::UpdateText { .. } | FilePatchAction::DeleteText { .. }
+            ) =>
+        {
+            Some(ObjectKind::File)
+        }
         ComputerActionKind::Ui(_) => Some(ObjectKind::UiElement),
         ComputerActionKind::RawInput(_) => Some(ObjectKind::Application),
         ComputerActionKind::SpreadsheetLive(_) => Some(ObjectKind::Range),
@@ -891,10 +901,6 @@ impl SignalDeviceAssistantTools {
         Ok((canonical, digest))
     }
 
-    fn validate_batch_destination(&self, destination: &ObjectRef) -> Result<(), AgentError> {
-        validate_selected_batch_destination(&self.selected_file_roots, destination)
-    }
-
     fn preflight_selected_context(
         &self,
         call: &ToolCall,
@@ -913,6 +919,9 @@ impl SignalDeviceAssistantTools {
             return Ok(());
         }
         build_read_operation(call)?;
+        if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
+            return Ok(());
+        }
         if matches!(
             call.name.as_str(),
             "inspect_selected_numbers_with_iwork"
@@ -1161,19 +1170,31 @@ impl SignalDeviceAssistantTools {
             &capability.wire.authorization_hint.resources,
             capability.wire.effect,
         );
-        let read_preflight = if capability.wire.execution_locality == ExecutionLocality::Edge {
-            self.validate_original_objects().await?;
-            Some(
-                desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build(
+        let read_preflight =
+            if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
+                self.validate_original_objects().await?;
+                Some(
+                desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build_file_result(
                     &self.provider_registry,
                     ProductSurface::OssPersonalOwner,
                     call,
                     &self.object_binding()?,
+                    &session,
                 )?,
             )
-        } else {
-            None
-        };
+            } else if capability.wire.execution_locality == ExecutionLocality::Edge {
+                self.validate_original_objects().await?;
+                Some(
+                    desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build(
+                        &self.provider_registry,
+                        ProductSurface::OssPersonalOwner,
+                        call,
+                        &self.object_binding()?,
+                    )?,
+                )
+            } else {
+                None
+            };
         let mut resource_scope = compiled_scope.as_ref().map_or_else(
             || vec!["target:current_device".to_string()],
             |scope| scope.resources.clone(),
@@ -1488,6 +1509,18 @@ impl SignalDeviceAssistantTools {
                         &output,
                         &grant.limits,
                     )?;
+                    if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(
+                        call,
+                    )? {
+                        let binding = self.object_binding()?;
+                        desk_diagnose_core::provider_preflight::text_file::ResultFileRead::build(
+                            &self.authoritative_session().await?,
+                            call,
+                            binding.destination,
+                            post_now,
+                        )?
+                        .validate_output(&output)?;
+                    }
                     Ok::<_, AgentError>(post_grant)
                 }
                 .await;
@@ -2061,9 +2094,22 @@ impl SignalDeviceAssistantTools {
                         ProductSurface::OssPersonalOwner,
                         call,
                         self.object_binding()?.original,
+                        &desk_diagnose_core::file_scope::approved_directories(
+                            &self.authoritative_session().await?,
+                            now_unix_ms,
+                        )
+                        .map_err(|_| desk_diagnose_core::directory_tools::unavailable())?,
                         now_unix_ms,
                     )?,
                 )
+            } else {
+                None
+            };
+        let shared_text =
+            if desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::supports(
+                &call.name,
+            ) {
+                Some(desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::from_session(&self.authoritative_session().await?, ProductSurface::OssPersonalOwner, call, now_unix_ms)?)
             } else {
                 None
             };
@@ -2087,6 +2133,22 @@ impl SignalDeviceAssistantTools {
             adapter_kind,
             action_name,
         ) = match call.name.as_str() {
+            "update_text_file" | "delete_text_file" => {
+                let input = shared_text.as_ref().expect("text mutation preflight");
+                let directory = match input.action() {
+                    FilePatchAction::UpdateText { directory, .. }
+                    | FilePatchAction::DeleteText { directory, .. } => directory.clone(),
+                    _ => unreachable!(),
+                };
+                (
+                    input.target().clone(),
+                    vec![directory, input.target().clone()],
+                    ComputerActionKind::File(input.action().clone()),
+                    input.required_capability(),
+                    ComputerUseAdapterKind::FileSystem,
+                    "recoverable text file change",
+                )
+            }
             EXECUTE_CONFIRMED_UI_ACTION_TOOL => {
                 let (target, action) =
                     desk_diagnose_core::provider_preflight::ui_action_from_call(call)?;
@@ -2189,7 +2251,6 @@ impl SignalDeviceAssistantTools {
             "patch_selected_numbers_copy" => {
                 let args: SpreadsheetBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                self.validate_batch_destination(&args.output.destination_parent)?;
                 let authority_refs =
                     vec![args.target.clone(), args.output.destination_parent.clone()];
                 (
@@ -2207,7 +2268,6 @@ impl SignalDeviceAssistantTools {
             "replace_selected_pages_copy_body" => {
                 let args: DocumentBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                self.validate_batch_destination(&args.output.destination_parent)?;
                 let authority_refs =
                     vec![args.target.clone(), args.output.destination_parent.clone()];
                 (
@@ -2225,7 +2285,6 @@ impl SignalDeviceAssistantTools {
             "patch_selected_keynote_copy" => {
                 let args: PresentationBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                self.validate_batch_destination(&args.output.destination_parent)?;
                 let authority_refs =
                     vec![args.target.clone(), args.output.destination_parent.clone()];
                 (
@@ -2310,7 +2369,9 @@ impl SignalDeviceAssistantTools {
             readiness_revision: self.readiness_revision,
             now_unix_ms,
         };
-        let call_authority = if let Some(preflight) = &shared_iwork {
+        let call_authority = if let Some(preflight) = &shared_text {
+            preflight.grant_call(&subject)?
+        } else if let Some(preflight) = &shared_iwork {
             preflight.grant_call(&subject)?
         } else {
             CapabilityGrantCall {
@@ -2709,6 +2770,9 @@ impl SignalDeviceAssistantTools {
             LocalDraft(LocalDraftArgs),
         }
 
+        let action_call = desk_diagnose_core::provider_preflight::without_directory_selector(call)?;
+        let canonical_call = call;
+        let call = &action_call;
         let (args, required_capability, _operation, orchestrator_grant) = match call.name.as_str() {
             "create_text_artifact_in_selected_directory" => (
                 ArtifactRequest::Text(serde_json::from_str(&call.arguments_json).map_err(
@@ -2849,12 +2913,21 @@ impl SignalDeviceAssistantTools {
                 ));
             }
         };
-        let selected_directories = self
-            .selected_file_roots
-            .iter()
-            .filter(|object_ref| object_ref.object_kind == ObjectKind::Directory)
-            .cloned()
-            .collect::<Vec<_>>();
+        let call = canonical_call;
+        let current_session = self.authoritative_session().await?;
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
+            .map_err(|_| desk_diagnose_core::directory_tools::unavailable())?;
+        let selected_directories = vec![
+            desk_diagnose_core::file_scope::select_output_directory(&current_session, call, now_ms)
+                .map_err(|_| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        "Select an approved conversation directory before creating a file",
+                        false,
+                        true,
+                    )
+                })?,
+        ];
         if selected_directories.len() != 1 {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
@@ -2868,7 +2941,7 @@ impl SignalDeviceAssistantTools {
                 &self.provider_registry,
                 ProductSurface::OssPersonalOwner,
                 call,
-                &self.selected_file_roots,
+                &selected_directories,
                 u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
                     error(
                         AgentErrorKind::Internal,
@@ -4520,7 +4593,9 @@ impl SignalDeviceAssistantTools {
                 },
             });
         }
-        if capability == desk_agent_protocol::Capability::FileMetadataRead {
+        if capability == desk_agent_protocol::Capability::FileMetadataRead
+            && !desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)?
+        {
             if self.selected_file_roots.is_empty() {
                 return Err(error(
                     AgentErrorKind::PermissionDenied,
@@ -4558,7 +4633,9 @@ impl SignalDeviceAssistantTools {
                 }),
             });
         }
-        if capability == desk_agent_protocol::Capability::FileContentRead {
+        if capability == desk_agent_protocol::Capability::FileContentRead
+            && desk_diagnose_core::provider_preflight::text_file::read_result_id(call)?.is_none()
+        {
             let files = self
                 .selected_file_roots
                 .iter()
@@ -4679,29 +4756,46 @@ impl SignalDeviceAssistantTools {
             .into());
         }
         let uses_selected_objects = self.uses_selected_objects(call)?;
-        let object_expiry = if uses_selected_objects {
-            self.validate_original_objects().await?;
-            // Rebind from the model's original bounded request; legacy defaults
-            // above cannot widen either the owner's or model's read limit.
-            let (_, mut bounded) = build_read_operation(call)?;
-            let binding = self.object_binding()?;
-            binding.bind(call, &mut bounded)?;
-            input = bounded;
-            Some(
-                chrono::DateTime::from_timestamp_millis(binding.expiry(call)? as i64)
-                    .ok_or_else(|| {
-                        error(
-                            AgentErrorKind::Internal,
-                            "invalid object expiry",
-                            false,
-                            false,
-                        )
-                    })?
-                    .to_rfc3339(),
-            )
-        } else {
-            None
-        };
+        let object_expiry =
+            if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
+                self.validate_original_objects().await?;
+                let binding = self.object_binding()?;
+                let result =
+                    desk_diagnose_core::provider_preflight::text_file::ResultFileRead::build(
+                        &self.authoritative_session().await?,
+                        call,
+                        binding.destination,
+                        binding.now_unix_ms,
+                    )?;
+                result.bind(&mut input)?;
+                Some(
+                    chrono::DateTime::from_timestamp_millis(result.valid_until_unix_ms as i64)
+                        .ok_or_else(desk_diagnose_core::directory_tools::unavailable)?
+                        .to_rfc3339(),
+                )
+            } else if uses_selected_objects {
+                self.validate_original_objects().await?;
+                // Rebind from the model's original bounded request; legacy defaults
+                // above cannot widen either the owner's or model's read limit.
+                let (_, mut bounded) = build_read_operation(call)?;
+                let binding = self.object_binding()?;
+                binding.bind(call, &mut bounded)?;
+                input = bounded;
+                Some(
+                    chrono::DateTime::from_timestamp_millis(binding.expiry(call)? as i64)
+                        .ok_or_else(|| {
+                            error(
+                                AgentErrorKind::Internal,
+                                "invalid object expiry",
+                                false,
+                                false,
+                            )
+                        })?
+                        .to_rfc3339(),
+                )
+            } else {
+                None
+            };
         desk_diagnose_core::provider_preflight::read::limits::bind(
             &self.provider_registry,
             call,
@@ -4924,6 +5018,19 @@ impl SignalDeviceAssistantTools {
 
 #[async_trait(?Send)]
 impl ToolSeam for SignalDeviceAssistantTools {
+    async fn resolve_directory_candidate(
+        &self,
+        path: &str,
+    ) -> Result<desk_agent_protocol::computer_use::FileDirectoryResolveOutput, AgentError> {
+        directory::resolve_candidate(
+            self.connections.as_ref(),
+            &self.target_connection_id,
+            &self.actor_id,
+            &self.target_device_id,
+            path,
+        )
+        .await
+    }
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
         self.verified_read_labels
             .lock()
@@ -5133,6 +5240,8 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 | "patch_selected_numbers_copy"
                 | "replace_selected_pages_copy_body"
                 | "patch_selected_keynote_copy"
+                | "update_text_file"
+                | "delete_text_file"
         ) {
             return self.authorize_and_execute_semantic_action(call).await;
         }

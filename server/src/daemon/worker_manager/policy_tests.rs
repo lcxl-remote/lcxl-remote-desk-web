@@ -9,22 +9,29 @@ use super::*;
 
 #[tokio::test]
 async fn application_policy_timeout_or_inexact_ack_retires_the_worker() {
-    for acknowledge_wrong_revision in [false, true] {
+    for mismatch in ["timeout", "revision", "application_scope"] {
         let (manager, _worker_rx) = test_manager();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         manager.install_active_for_test(tx).await;
-        let policy = crate::model::settings::ComputerUseApplicationPolicy {
+        let policy = desk_ipc_protocol::message::ComputerUseLocalPolicyPayload {
+            operation_id: String::new(),
             revision: 1,
             allowed_application_paths: vec![],
         };
-        let publish = manager.publish_application_policy(policy, Duration::from_millis(20));
+        let publish = manager.publish_local_policy(policy, Duration::from_millis(20));
         let worker = async {
-            if let Some(ServiceToWorker::UpdateComputerUseApplicationPolicy(mut payload)) =
+            if let Some(ServiceToWorker::UpdateComputerUseLocalPolicy(mut payload)) =
                 rx.recv().await
             {
-                if acknowledge_wrong_revision {
-                    payload.revision = 0;
-                    manager.note_application_policy_applied(payload);
+                if mismatch != "timeout" {
+                    if mismatch == "revision" {
+                        payload.revision = 0;
+                    } else {
+                        payload
+                            .allowed_application_paths
+                            .push("/mismatched-application".into());
+                    }
+                    manager.note_local_policy_applied(payload);
                 }
             } else {
                 panic!("expected application policy");
@@ -32,7 +39,7 @@ async fn application_policy_timeout_or_inexact_ack_retires_the_worker() {
         };
         let (result, ()) = tokio::join!(publish, worker);
         assert!(result.is_err());
-        assert!(manager.application_policy_acks.lock().unwrap().is_empty());
+        assert!(manager.local_policy_acks.lock().unwrap().is_empty());
         assert!(
             manager
                 .send_to_worker(ServiceToWorker::Shutdown)

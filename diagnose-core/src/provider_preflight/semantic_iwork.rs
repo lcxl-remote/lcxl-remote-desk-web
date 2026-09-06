@@ -147,6 +147,7 @@ impl IworkCallPreflight {
         surface: ProductSurface,
         call: &ToolCall,
         original: &ReadContextSelection,
+        approved_directories: &[ObjectRef],
         now_unix_ms: u64,
     ) -> Result<Self, AgentError> {
         original.validate()?;
@@ -193,7 +194,7 @@ impl IworkCallPreflight {
         };
         let validate_destination = |destination: &ObjectRef| {
             if destination.object_kind != ObjectKind::Directory
-                || !selected_refs.contains(destination)
+                || !approved_directories.contains(destination)
             {
                 return Err(unavailable());
             }

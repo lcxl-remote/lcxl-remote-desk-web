@@ -1,6 +1,7 @@
 //! SQLite-backed agent sessions for the single-node OSS signal central brain.
 
 mod assistant_snapshot;
+mod file_scope;
 mod live_context;
 mod object_context;
 pub use live_context::UpdateLiveContext;
@@ -154,6 +155,7 @@ impl SignalAgentSessionStore {
             _ => None,
         };
         Ok(Some(SessionSnapshot {
+            file_scope: session.file_scope,
             terminal_error: session.terminal_error,
             context_usage: session
                 .context_usage_basis
@@ -842,6 +844,7 @@ pub enum EventAppend {
 
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
+    pub file_scope: desk_diagnose_core::file_scope::SessionFileScope,
     pub terminal_error: Option<desk_agent_protocol::AgentError>,
     pub context_usage: Option<desk_diagnose_core::context_usage::ContextUsage>,
     pub client_conversation_id: Option<String>,
@@ -885,6 +888,7 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         _ => None,
     };
     Ok(SessionSnapshot {
+        file_scope: session.file_scope,
         terminal_error: session.terminal_error,
         context_usage: session
             .context_usage_basis
@@ -1235,6 +1239,20 @@ impl SessionSeam for SignalAgentSessionStore {
         }
         session.version = new_version;
         Ok(())
+    }
+
+    async fn propose_directory(
+        &self,
+        session: &mut PersistedAgentSession,
+        proposal: desk_diagnose_core::file_scope::DirectoryProposal,
+        now_unix_ms: u64,
+    ) -> Result<(), AgentError> {
+        let now = DateTime::<Utc>::from_timestamp_millis(
+            i64::try_from(now_unix_ms).map_err(|_| internal("invalid directory clock"))?,
+        )
+        .ok_or_else(|| internal("invalid directory clock"))?;
+        self.propose_file_scope_for_turn(session, proposal, now)
+            .await
     }
 
     async fn save_task_status_update(

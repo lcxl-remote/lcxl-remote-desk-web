@@ -805,7 +805,7 @@ impl WorkerSession {
                                 ServiceToWorker::Init(_) => {
                                     warn!("Received duplicate Init, ignoring");
                                 }
-                                ServiceToWorker::UpdateSecurityPolicy(_) | ServiceToWorker::UpdateComputerUseApplicationPolicy(_) => {
+                                ServiceToWorker::UpdateSecurityPolicy(_) | ServiceToWorker::UpdateComputerUseLocalPolicy(_) => {
                                     // Applied on the transport reader task, ahead of this
                                     // loop, so a policy change is never queued behind the
                                     // approval prompt it would resolve. Arriving here means
@@ -1773,6 +1773,11 @@ impl WorkerSession {
                                     let selected_display = action_settings.desk.video_device_name.clone();
                                     drop(action_settings);
                                     let lease = crate::worker::agent::computer_use_writer::WriterLeaseRequest {
+                                        scope: if cfg!(target_os = "macos") && matches!(&plan.actions[0].action, ComputerActionKind::File(_)) {
+                                            crate::worker::agent::computer_use_writer::WriterLeaseScope::FileWorker
+                                        } else {
+                                            crate::worker::agent::computer_use_writer::WriterLeaseScope::InteractiveSession
+                                        },
                                         work_id: plan.work_id.clone(),
                                         action_request_id: plan.action_request_id.clone(),
                                         execution_generation: plan.execution_generation.clone(),
@@ -1799,10 +1804,10 @@ impl WorkerSession {
                                             )
                                             .map_err(|error| error.message),
                                         ComputerActionKind::File(_) => ceiling
-                                            .file_artifact_create_enabled()
+                                            .enabled
                                             .then_some(())
                                             .ok_or_else(|| {
-                                                "artifact creation is disabled by the host-local ceiling"
+                                                "Computer Use is disabled on the device"
                                                     .to_string()
                                             }),
                                         ComputerActionKind::Browser(request) => {
@@ -2297,12 +2302,52 @@ impl WorkerSession {
                                             );
                                             return;
                                         }
+                                        if desk_diagnose_core::provider_preflight::text_file::is_text_mutation(&step.action) {
+                                            let target = step.target.clone();
+                                            let ComputerActionKind::File(action) = step.action.clone() else { unreachable!() };
+                                            let broker = action_broker.clone();
+                                            let generation_for_call = generation.clone();
+                                            let result = tokio::task::spawn_blocking(move || {
+                                                #[cfg(target_os = "macos")]
+                                                {
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    crate::worker::agent::file_reference_store::text_mutation::execute(
+                                                        &target, &action,
+                                                        || broker.require_writer_lease(&generation_for_call).map(|_| ()),
+                                                    )
+                                                }
+                                                #[cfg(not(target_os = "macos"))]
+                                                {
+                                                    let _ = (target, action, broker, generation_for_call);
+                                                    Err::<(desk_agent_protocol::computer_use::TextFileMutationOutput, &'static str), _>(desk_agent_protocol::AgentError {
+                                                        kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
+                                                        message: "Native text mutation is not implemented on this platform".into(),
+                                                        retryable: false, safe_for_model: true, error_code: None,
+                                                    })
+                                                }
+                                            }).await;
+                                            action_broker.release_writer_lease(&generation);
+                                            let (class, facts, message, output) = match result {
+                                                Ok(Ok((output, message))) => (
+                                                    if output.verified { ComputerActionResultClass::Verified } else { ComputerActionResultClass::OutcomeUnknown },
+                                                    vec![ComputerActionStepFact { index: 0, changed: true, verified: output.verified, summary: message.into() }],
+                                                    Some(message.into()), Some(ComputerActionOutput::TextFileMutation(output)),
+                                                ),
+                                                Ok(Err(error)) => (ComputerActionResultClass::Failed, vec![], Some(error.message), None),
+                                                Err(_) => (ComputerActionResultClass::OutcomeUnknown, vec![], Some("Text worker ended without a verified receipt; do not retry automatically".into()), None),
+                                            };
+                                            let _ = action_writer.send(WorkerToService::ComputerActionCompleted(ComputerActionCompletedPayload {
+                                                request_id: payload.request_id, connection_id: payload.connection_id,
+                                                completed: ComputerActionCompleted { work_id: plan.work_id, action_request_id: plan.action_request_id,
+                                                    execution_generation: generation, result: class, facts, message, output },
+                                            }));
+                                            return;
+                                        }
                                         let result = match step.action {
                                             ComputerActionKind::File(FilePatchAction::CreateTextArtifact {
                                                 file_name,
                                                 content_utf8,
                                             }) => {
-                                                let allowed_roots = ceiling.allowed_file_roots.clone();
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
@@ -2310,7 +2355,6 @@ impl WorkerSession {
                                                     broker.require_writer_lease(&generation_for_call)?;
                                                     crate::worker::agent::file_reference_store::create_text_artifact(
                                                         &target,
-                                                        &allowed_roots,
                                                         &file_name,
                                                         &content_utf8,
                                                     )
@@ -2326,7 +2370,6 @@ impl WorkerSession {
                                                     file_name,
                                                 },
                                             ) => {
-                                                let allowed_roots = ceiling.allowed_file_roots.clone();
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
@@ -2344,7 +2387,6 @@ impl WorkerSession {
                                                     let bytes = crate::worker::agent::spreadsheet_file::materialize_preview_xlsx(&preview_id)?;
                                                     crate::worker::agent::file_reference_store::create_binary_artifact(
                                                         &target,
-                                                        &allowed_roots,
                                                         &file_name,
                                                         &bytes,
                                                     )
@@ -2364,7 +2406,6 @@ impl WorkerSession {
                                                     formula_policy_digest_sha256,
                                                 },
                                             ) => {
-                                                let allowed_roots = ceiling.allowed_file_roots.clone();
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
@@ -2388,7 +2429,6 @@ impl WorkerSession {
                                                     )?;
                                                     crate::worker::agent::file_reference_store::create_binary_artifact(
                                                         &target,
-                                                        &allowed_roots,
                                                         &file_name,
                                                         &bytes,
                                                     )
@@ -2406,7 +2446,6 @@ impl WorkerSession {
                                                     web_sources,
                                                 },
                                             ) => {
-                                                let allowed_roots = ceiling.allowed_file_roots.clone();
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
@@ -2428,7 +2467,6 @@ impl WorkerSession {
                                                     )?;
                                                     crate::worker::agent::file_reference_store::create_binary_artifact(
                                                         &target,
-                                                        &allowed_roots,
                                                         &file_name,
                                                         &bytes,
                                                     )
@@ -2444,7 +2482,6 @@ impl WorkerSession {
                                                     draft,
                                                 },
                                             ) => {
-                                                let allowed_roots = ceiling.allowed_file_roots.clone();
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
@@ -2472,7 +2509,6 @@ impl WorkerSession {
                                                         })?;
                                                     crate::worker::agent::file_reference_store::create_binary_artifact(
                                                         &target,
-                                                        &allowed_roots,
                                                         &file_name,
                                                         &bytes,
                                                     )
@@ -2487,7 +2523,7 @@ impl WorkerSession {
                                         action_broker.release_writer_lease(&generation);
                                         let (class, facts, message, output) = match result {
                                             Ok((artifact, media_type)) => {
-                                                let output = (artifact.byte_len > 0).then(|| {
+                                                let output = Some({
                                                     let output = desk_agent_protocol::computer_use::CreatedFileArtifactOutput {
                                                         file: artifact.file.clone(),
                                                         file_name: artifact.file_name.clone(),
@@ -3164,7 +3200,7 @@ pub(super) fn spawn_inbound_reader(
     tokio::spawn(async move {
         loop {
             match event_rx.recv().await {
-                Some(ServiceToWorker::UpdateComputerUseApplicationPolicy(mut payload)) => {
+                Some(ServiceToWorker::UpdateComputerUseLocalPolicy(mut payload)) => {
                     let settings = settings.clone();
                     let ack_tx = ack_tx.clone();
                     // Native calls may hold a read lease. Do not let draining
@@ -3179,9 +3215,8 @@ pub(super) fn spawn_inbound_reader(
                         payload.revision = settings.computer_use.revision;
                         payload.allowed_application_paths =
                             settings.computer_use.allowed_application_paths.clone();
-                        let _ = ack_tx.send(WorkerToService::ComputerUseApplicationPolicyApplied(
-                            payload,
-                        ));
+                        let _ =
+                            ack_tx.send(WorkerToService::ComputerUseLocalPolicyApplied(payload));
                     });
                 }
                 Some(ServiceToWorker::UpdateSecurityPolicy(payload)) => {

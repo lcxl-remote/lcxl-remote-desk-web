@@ -282,7 +282,7 @@ pub enum ServiceToWorker {
     /// higher-sequence policy and answers on
     /// [`WorkerToService::SecurityPolicyApplied`] with what it ended up holding.
     UpdateSecurityPolicy(UpdateSecurityPolicyPayload),
-    UpdateComputerUseApplicationPolicy(ComputerUseApplicationPolicyPayload),
+    UpdateComputerUseLocalPolicy(ComputerUseLocalPolicyPayload),
 
     /// Local host UI requested Wayland Portal authorization.
     AuthorizeWaylandPortal(AuthorizeWaylandPortalPayload),
@@ -316,7 +316,7 @@ impl ServiceToWorker {
                         | Self::RefreshCapabilities
                         | Self::SetLocale(_)
                         | Self::UpdateSecurityPolicy(_)
-                        | Self::UpdateComputerUseApplicationPolicy(_)
+                        | Self::UpdateComputerUseLocalPolicy(_)
                 ) || matches!(
                     self,
                     Self::ApplyMediaSettings(payload) if payload.media_kind == MediaKind::Video
@@ -561,7 +561,7 @@ pub enum WorkerToService {
     /// policy arrived. The daemon compares this against what it published to
     /// tell a converged worker from one that is still behind.
     SecurityPolicyApplied(SecurityPolicyAppliedPayload),
-    ComputerUseApplicationPolicyApplied(ComputerUseApplicationPolicyPayload),
+    ComputerUseLocalPolicyApplied(ComputerUseLocalPolicyPayload),
 
     /// Worker → daemon: a user answered a prompt with "remember this". Only the
     /// daemon can store it, so the worker forwards the answer along with the
@@ -591,7 +591,7 @@ impl WorkerToService {
                     | Self::RemoteAccessStateApplied(_)
                     | Self::LocaleApplied(_)
                     | Self::SecurityPolicyApplied(_)
-                    | Self::ComputerUseApplicationPolicyApplied(_)
+                    | Self::ComputerUseLocalPolicyApplied(_)
             ),
         }
     }
@@ -640,7 +640,7 @@ impl WorkerToService {
             | Self::RemoteAccessStateApplied(_)
             | Self::LocaleApplied(_)
             | Self::SecurityPolicyApplied(_)
-            | Self::ComputerUseApplicationPolicyApplied(_)
+            | Self::ComputerUseLocalPolicyApplied(_)
             | Self::RememberSecurityDecision(_) => None,
         }
     }

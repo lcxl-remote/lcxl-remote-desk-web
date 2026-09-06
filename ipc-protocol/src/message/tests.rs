@@ -18,19 +18,19 @@ use std::collections::BTreeMap;
 
 #[test]
 fn application_policy_publication_and_exact_ack_round_trip() {
-    let policy = ComputerUseApplicationPolicyPayload {
+    let policy = ComputerUseLocalPolicyPayload {
         operation_id: "application-policy-1".into(),
         revision: 23,
         allowed_application_paths: vec!["/Applications/Test.app/Contents/MacOS/Test".into()],
     };
     assert!(
-        matches!(wincode_round_trip(&ServiceToWorker::UpdateComputerUseApplicationPolicy(policy.clone())),
-        ServiceToWorker::UpdateComputerUseApplicationPolicy(decoded) if decoded == policy)
+        matches!(wincode_round_trip(&ServiceToWorker::UpdateComputerUseLocalPolicy(policy.clone())),
+        ServiceToWorker::UpdateComputerUseLocalPolicy(decoded) if decoded == policy)
     );
-    let ack = WorkerToService::ComputerUseApplicationPolicyApplied(policy.clone());
+    let ack = WorkerToService::ComputerUseLocalPolicyApplied(policy.clone());
     assert!(ack.connection_id().is_none());
     assert!(
-        matches!(wincode_round_trip(&ack), WorkerToService::ComputerUseApplicationPolicyApplied(decoded) if decoded == policy)
+        matches!(wincode_round_trip(&ack), WorkerToService::ComputerUseLocalPolicyApplied(decoded) if decoded == policy)
     );
 }
 

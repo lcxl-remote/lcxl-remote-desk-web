@@ -149,6 +149,7 @@ fn live_iwork_calls_bind_exact_original_objects_and_authority() {
             ProductSurface::ManagerPersonalOwner,
             &call,
             &original(read_tool, target.clone()),
+            &[],
             NOW,
         )
         .unwrap();
@@ -188,6 +189,7 @@ fn changed_or_missing_original_live_target_fails_closed() {
             ProductSurface::ManagerPersonalOwner,
             &call,
             &original("inspect_live_document", changed),
+            &[],
             NOW,
         )
         .is_err()
@@ -203,6 +205,7 @@ fn changed_or_missing_original_live_target_fails_closed() {
                 object_attachments: vec![],
                 live_targets: vec![],
             },
+            &[],
             NOW,
         )
         .is_err()
@@ -227,6 +230,7 @@ fn live_iwork_calls_accept_fresh_read_target_from_same_worker_incarnation() {
         ProductSurface::ManagerPersonalOwner,
         &call,
         &original("inspect_live_presentation", frozen),
+        &[],
         NOW,
     )
     .unwrap();
@@ -259,6 +263,7 @@ fn fresh_read_target_outlives_original_short_readiness_lease() {
         ProductSurface::ManagerPersonalOwner,
         &call,
         &selection,
+        &[],
         NOW,
     )
     .unwrap();
@@ -288,6 +293,7 @@ fn original_live_target_still_expires_with_original_readiness_lease() {
             ProductSurface::ManagerPersonalOwner,
             &call,
             &selection,
+            &[],
             NOW,
         )
         .is_err()
@@ -324,6 +330,7 @@ fn live_iwork_calls_reject_untrusted_derived_targets() {
                 ProductSurface::ManagerPersonalOwner,
                 &call,
                 &original("inspect_live_presentation", frozen.clone()),
+                &[],
                 NOW,
             )
             .is_err(),
@@ -393,12 +400,41 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             ProductSurface::ManagerPersonalOwner,
             &call,
             &original,
+            std::slice::from_ref(&directory),
             NOW,
         )
         .unwrap();
         assert_eq!(preflight.required_capability(), capability);
         assert_eq!(preflight.action().required_capability(), capability);
         assert_eq!(preflight.resource_scope().len(), 2);
+
+        // Selecting a source or attaching a directory is not directory consent.
+        assert!(
+            IworkCallPreflight::build(
+                &device_assistant_provider_registry(),
+                ProductSurface::ManagerPersonalOwner,
+                &call,
+                &original,
+                &[],
+                NOW
+            )
+            .is_err()
+        );
+        let mut source_only = original.clone();
+        source_only
+            .object_attachments
+            .retain(|attachment| attachment.kind != ContextAttachmentKind::DirectorySelection);
+        assert!(
+            IworkCallPreflight::build(
+                &device_assistant_provider_registry(),
+                ProductSurface::ManagerPersonalOwner,
+                &call,
+                &source_only,
+                std::slice::from_ref(&directory),
+                NOW
+            )
+            .is_ok()
+        );
 
         let mut changed = call.clone();
         let mut changed_json: serde_json::Value =
@@ -411,6 +447,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
                 ProductSurface::ManagerPersonalOwner,
                 &changed,
                 &original,
+                std::slice::from_ref(&directory),
                 NOW,
             )
             .is_err()

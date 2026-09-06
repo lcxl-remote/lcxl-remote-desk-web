@@ -302,9 +302,9 @@ impl SettingsCoordinator {
                 .clone()
                 .unwrap_or_else(|| crate::locale::DEFAULT_LOCALE.to_string());
             let security = candidate.security.clone();
-            let application_policy = (candidate.computer_use.application_policy()
-                != live.computer_use.application_policy())
-            .then(|| candidate.computer_use.application_policy());
+            let application_policy = (candidate.computer_use.local_policy()
+                != live.computer_use.local_policy())
+            .then(|| candidate.computer_use.local_policy());
             *live = candidate;
 
             let (policy_changed, seq, snapshot) = {
@@ -345,7 +345,7 @@ impl SettingsCoordinator {
             && let Some(manager) = self.worker_manager.get()
         {
             manager
-                .publish_application_policy(policy, POLICY_ACK_TIMEOUT)
+                .publish_local_policy(policy, POLICY_ACK_TIMEOUT)
                 .await
                 .map_err(|error| {
                     DeskError::new_custom_error(DeskErrorCode::PRECONDITION_FAILED, &error)
@@ -767,9 +767,9 @@ mod tests {
         });
         let worker = async {
             match receiver.recv().await.unwrap() {
-                ServiceToWorker::UpdateComputerUseApplicationPolicy(payload) => {
+                ServiceToWorker::UpdateComputerUseLocalPolicy(payload) => {
                     assert_eq!(payload.revision, 1);
-                    manager.note_application_policy_applied(payload);
+                    manager.note_local_policy_applied(payload);
                 }
                 other => panic!("unexpected message: {other:?}"),
             }

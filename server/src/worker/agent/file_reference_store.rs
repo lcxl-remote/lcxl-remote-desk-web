@@ -34,6 +34,9 @@ const MAX_SELECTED_ROOTS: usize = 32;
 const MAX_DIRECTORY_ENTRIES: usize = 256;
 const MAX_TEXT_READ_BYTES: u32 = 64 * 1024;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod text_mutation;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileIdentity {
     primary: u64,
@@ -148,6 +151,73 @@ pub fn configure_durable_artifact_store(data_root: Option<&Path>) {
 /// row; it must not break ordinary file-manager browsing.
 pub fn issue(path: &Path) -> Result<ObjectRef, AgentError> {
     issue_with_lifetime(path, super::PERMISSION_FLOW_TTL_SECONDS, false)
+}
+
+/// Resolve only the candidate directory itself. No children or contents are read.
+pub fn resolve_directory(
+    candidate: &str,
+) -> Result<desk_agent_protocol::computer_use::FileDirectoryResolveOutput, AgentError> {
+    let path = Path::new(candidate);
+    if candidate.is_empty()
+        || candidate.len() > 4096
+        || candidate.chars().any(char::is_control)
+        || !path.is_absolute()
+        || path.parent().is_none()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "directory candidate must be one bounded absolute non-root path",
+            false,
+        ));
+    }
+    let selected = open_verified(path)?;
+    if !selected.metadata.is_dir() {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "directory candidate is not a directory",
+            false,
+        ));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|_| {
+        error(
+            AgentErrorKind::InvalidInput,
+            "directory candidate cannot be resolved",
+            false,
+        )
+    })?;
+    let reopened = open_verified(&canonical)?;
+    if !reopened.metadata.is_dir()
+        || reopened.identity != selected.identity
+        || canonical.parent().is_none()
+    {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "directory candidate changed during resolution",
+            false,
+        ));
+    }
+    let canonical_path = canonical
+        .to_str()
+        .filter(|path| path.len() <= 4096 && !path.chars().any(char::is_control))
+        .ok_or_else(|| {
+            error(
+                AgentErrorKind::InvalidInput,
+                "directory path is not bounded UTF-8",
+                false,
+            )
+        })?
+        .to_string();
+    let directory =
+        issue_opened_with_lifetime(&canonical, reopened, DURABLE_ARTIFACT_REF_TTL_SECS, true)?;
+    Ok(
+        desk_agent_protocol::computer_use::FileDirectoryResolveOutput {
+            canonical_path,
+            directory,
+        },
+    )
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -277,7 +347,9 @@ fn reload_durable_artifacts(state: &mut StoreState) {
     };
     let now = Utc::now();
     for (token, record) in registry.artifacts {
-        if record.expires_at <= now || record.object_kind != ObjectKind::File {
+        if record.expires_at <= now
+            || !matches!(record.object_kind, ObjectKind::File | ObjectKind::Directory)
+        {
             continue;
         }
         state.objects.insert(
@@ -665,6 +737,7 @@ fn enumerate_directory(
                     return Ok((rows, true));
                 }
                 rows.push(DirectoryEntryProjection {
+                    object_ref: None,
                     parent_snapshot_id: stored.snapshot_id.clone(),
                     display_name: display_name.chars().take(512).collect(),
                     is_directory,
@@ -770,7 +843,30 @@ fn enumerate_directory(
         if rows.len() >= max_entries {
             return Ok((rows, true));
         }
+        // macOS signs only the already-open immediate regular child. Future
+        // reads reopen and compare this identity; neither a path nor metadata
+        // alone grants content access. Do not follow links or mint directories.
+        #[cfg(target_os = "macos")]
+        let object_ref = if metadata.is_file() && name.to_str().is_ok() {
+            let identity = unix_file_identity(&child)
+                .map_err(|cause| io_error("read child identity", cause))?;
+            Some(issue_opened_with_lifetime(
+                &stored.path.join(name.to_str().unwrap()),
+                OpenedFile {
+                    handle: child,
+                    identity,
+                    metadata,
+                },
+                DURABLE_ARTIFACT_REF_TTL_SECS,
+                true,
+            )?)
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let object_ref = None;
         rows.push(DirectoryEntryProjection {
+            object_ref,
             parent_snapshot_id: stored.snapshot_id.clone(),
             display_name: display_name.chars().take(512).collect(),
             is_directory,
@@ -1051,7 +1147,6 @@ pub(super) fn revalidate_verified_native_file(
 #[cfg(target_os = "macos")]
 pub(super) fn validate_native_artifact_destination(
     directory: &ObjectRef,
-    allowed_roots: &[String],
     native_file_name: &str,
     native_extension: &str,
 ) -> Result<(), AgentError> {
@@ -1082,39 +1177,19 @@ pub(super) fn validate_native_artifact_destination(
             false,
         ));
     }
-    let allowlisted = allowed_roots.iter().any(|root| {
-        open_verified(Path::new(root))
-            .ok()
-            .filter(|opened| opened.metadata.is_dir())
-            .map(|opened| opened.identity)
-            == Some(selected.identity.clone())
-    });
-    if !allowlisted {
-        return Err(error(
-            AgentErrorKind::PermissionDenied,
-            "selected iWork output directory is not an exact host-approved artifact root",
-            false,
-        ));
-    }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 pub(super) fn prepare_native_artifact_stage(
     directory: &ObjectRef,
-    allowed_roots: &[String],
     native_file_name: &str,
     native_extension: &str,
     validation_extension: &str,
 ) -> Result<NativeArtifactStage, AgentError> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
-    validate_native_artifact_destination(
-        directory,
-        allowed_roots,
-        native_file_name,
-        native_extension,
-    )?;
+    validate_native_artifact_destination(directory, native_file_name, native_extension)?;
     if !matches!(validation_extension, ".pdf" | ".xlsx" | ".docx" | ".pptx") {
         return Err(error(
             AgentErrorKind::InvalidInput,
@@ -1128,20 +1203,6 @@ pub(super) fn prepare_native_artifact_stage(
         return Err(error(
             AgentErrorKind::InvalidInput,
             "selected iWork output directory changed after reference issuance",
-            false,
-        ));
-    }
-    let allowlisted = allowed_roots.iter().any(|root| {
-        open_verified(Path::new(root))
-            .ok()
-            .filter(|opened| opened.metadata.is_dir())
-            .map(|opened| opened.identity)
-            == Some(selected.identity.clone())
-    });
-    if !allowlisted {
-        return Err(error(
-            AgentErrorKind::PermissionDenied,
-            "selected iWork output directory is not an exact host-approved artifact root",
             false,
         ));
     }
@@ -1790,7 +1851,6 @@ pub fn read_verified_spreadsheet_inputs(
 #[cfg(windows)]
 pub fn create_binary_artifact(
     directory: &ObjectRef,
-    allowed_roots: &[String],
     file_name: &str,
     content_bytes: &[u8],
 ) -> Result<CreatedTextArtifact, AgentError> {
@@ -1925,26 +1985,6 @@ pub fn create_binary_artifact(
             false,
         ));
     }
-    let selected_identity = identity(&selected.handle).map_err(|cause| {
-        io_error(
-            "read selected directory identity",
-            std::io::Error::other(cause),
-        )
-    })?;
-    let allowlisted = allowed_roots.iter().any(|root| {
-        open_verified(Path::new(root))
-            .ok()
-            .filter(|opened| opened.metadata.is_dir())
-            .and_then(|opened| identity(&opened.handle).ok())
-            == Some(selected_identity)
-    });
-    if !allowlisted {
-        return Err(error(
-            AgentErrorKind::PermissionDenied,
-            "selected directory is not an exact host-approved artifact root",
-            false,
-        ));
-    }
     let result = (|| -> anyhow::Result<CreatedTextArtifact> {
         validate_name(file_name)?;
         let parent_identity = identity(&selected.handle)?;
@@ -1990,7 +2030,6 @@ pub fn create_binary_artifact(
 #[cfg(windows)]
 pub fn create_text_artifact(
     directory: &ObjectRef,
-    allowed_roots: &[String],
     file_name: &str,
     content_utf8: &str,
 ) -> Result<CreatedTextArtifact, AgentError> {
@@ -2001,13 +2040,12 @@ pub fn create_text_artifact(
             false,
         ));
     }
-    create_binary_artifact(directory, allowed_roots, file_name, content_utf8.as_bytes())
+    create_binary_artifact(directory, file_name, content_utf8.as_bytes())
 }
 
 #[cfg(target_os = "macos")]
 pub fn create_binary_artifact(
     directory: &ObjectRef,
-    allowed_roots: &[String],
     file_name: &str,
     content_bytes: &[u8],
 ) -> Result<CreatedTextArtifact, AgentError> {
@@ -2054,20 +2092,6 @@ pub fn create_binary_artifact(
         return Err(error(
             AgentErrorKind::InvalidInput,
             "selected directory changed after reference issuance",
-            false,
-        ));
-    }
-    let allowlisted = allowed_roots.iter().any(|root| {
-        open_verified(Path::new(root))
-            .ok()
-            .filter(|opened| opened.metadata.is_dir())
-            .map(|opened| opened.identity)
-            == Some(selected.identity.clone())
-    });
-    if !allowlisted {
-        return Err(error(
-            AgentErrorKind::PermissionDenied,
-            "selected directory is not an exact host-approved artifact root",
             false,
         ));
     }
@@ -2130,7 +2154,6 @@ pub fn create_binary_artifact(
 #[cfg(target_os = "macos")]
 pub fn create_text_artifact(
     directory: &ObjectRef,
-    allowed_roots: &[String],
     file_name: &str,
     content_utf8: &str,
 ) -> Result<CreatedTextArtifact, AgentError> {
@@ -2141,13 +2164,12 @@ pub fn create_text_artifact(
             false,
         ));
     }
-    create_binary_artifact(directory, allowed_roots, file_name, content_utf8.as_bytes())
+    create_binary_artifact(directory, file_name, content_utf8.as_bytes())
 }
 
 #[cfg(target_os = "linux")]
 pub fn create_binary_artifact(
     directory: &ObjectRef,
-    allowed_roots: &[String],
     file_name: &str,
     content_bytes: &[u8],
 ) -> Result<CreatedTextArtifact, AgentError> {
@@ -2212,20 +2234,6 @@ pub fn create_binary_artifact(
         return Err(error(
             AgentErrorKind::InvalidInput,
             "selected directory changed after reference issuance",
-            false,
-        ));
-    }
-    let allowlisted = allowed_roots.iter().any(|root| {
-        open_verified(Path::new(root))
-            .ok()
-            .filter(|opened| opened.metadata.is_dir())
-            .map(|opened| opened.identity)
-            == Some(selected.identity.clone())
-    });
-    if !allowlisted {
-        return Err(error(
-            AgentErrorKind::PermissionDenied,
-            "selected directory is not an exact host-approved artifact root",
             false,
         ));
     }
@@ -2311,7 +2319,6 @@ pub fn create_binary_artifact(
 #[cfg(target_os = "linux")]
 pub fn create_text_artifact(
     directory: &ObjectRef,
-    allowed_roots: &[String],
     file_name: &str,
     content_utf8: &str,
 ) -> Result<CreatedTextArtifact, AgentError> {
@@ -2322,13 +2329,12 @@ pub fn create_text_artifact(
             false,
         ));
     }
-    create_binary_artifact(directory, allowed_roots, file_name, content_utf8.as_bytes())
+    create_binary_artifact(directory, file_name, content_utf8.as_bytes())
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn create_binary_artifact(
     _directory: &ObjectRef,
-    _allowed_roots: &[String],
     _file_name: &str,
     _content_bytes: &[u8],
 ) -> Result<CreatedTextArtifact, AgentError> {
@@ -2342,7 +2348,6 @@ pub fn create_binary_artifact(
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn create_text_artifact(
     _directory: &ObjectRef,
-    _allowed_roots: &[String],
     _file_name: &str,
     _content_utf8: &str,
 ) -> Result<CreatedTextArtifact, AgentError> {
@@ -2647,6 +2652,82 @@ fn run_artifact_after_close_hook() {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn conversation_directory_reference_survives_restart_without_changing_identity() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let reference = resolve_directory(selected.to_str().unwrap())
+            .unwrap()
+            .directory;
+        let mut persisted = StoreState {
+            durable_registry_path: Some(temp.path().join("registry.json")),
+            ..StoreState::default()
+        };
+        persisted
+            .objects
+            .insert(reference.token.clone(), resolve(&reference).unwrap());
+        persist_durable_artifacts(&persisted).unwrap();
+        let mut restarted = StoreState {
+            durable_registry_path: persisted.durable_registry_path.clone(),
+            ..StoreState::default()
+        };
+        reload_durable_artifacts(&mut restarted);
+        let restored = restarted.objects.get(&reference.token).unwrap();
+        assert_eq!(restored.snapshot_id, reference.snapshot_id);
+        assert_eq!(
+            restored.identity,
+            open_verified(&selected).unwrap().identity
+        );
+        std::fs::rename(&selected, temp.path().join("old")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        assert_ne!(
+            restored.identity,
+            open_verified(&selected).unwrap().identity
+        );
+        assert!(
+            DateTime::parse_from_rfc3339(&reference.expires_at)
+                .unwrap()
+                .timestamp_millis()
+                > (Utc::now() + Duration::hours(23)).timestamp_millis()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn directory_resolution_returns_only_canonical_identity_without_contents() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("private-child-name.txt"),
+            b"private content",
+        )
+        .unwrap();
+        reset_worker_incarnation();
+        let output = resolve_directory(temp.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            output.canonical_path,
+            temp.path().canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(output.directory.object_kind, ObjectKind::Directory);
+        assert!(resolve(&output.directory).is_ok());
+        let encoded = serde_json::to_string(&output).unwrap();
+        assert!(!encoded.contains("private-child-name"));
+        assert!(!encoded.contains("private content"));
+        for path in ["/", "relative", "", "/private/tmp/../tmp"] {
+            assert!(resolve_directory(path).is_err());
+        }
+        assert!(
+            resolve_directory(temp.path().join("private-child-name.txt").to_str().unwrap())
+                .is_err()
+        );
+        let link = temp.path().join("directory-link");
+        std::os::unix::fs::symlink(temp.path(), &link).unwrap();
+        assert!(resolve_directory(link.to_str().unwrap()).is_err());
+    }
+
     #[test]
     fn selected_reference_survives_a_model_permission_round_trip() {
         let _guard = file_store_test_lock();
@@ -2694,10 +2775,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         reset_worker_incarnation();
         let directory = issue(temp.path()).unwrap();
-        let allowed = vec![temp.path().to_string_lossy().into_owned()];
         let stage =
-            prepare_native_artifact_stage(&directory, &allowed, "result.pages", ".pages", ".pdf")
-                .unwrap();
+            prepare_native_artifact_stage(&directory, "result.pages", ".pages", ".pdf").unwrap();
         std::fs::write(&stage.native_path, b"PK\x03\x04native-copy").unwrap();
         std::fs::write(&stage.validation_path, b"%PDF-1.7\nvalidation").unwrap();
         let published = stage.publish(b"PK\x03\x04", b"%PDF").unwrap();
@@ -2719,8 +2798,7 @@ mod tests {
         );
 
         let second =
-            prepare_native_artifact_stage(&directory, &allowed, "result.pages", ".pages", ".pdf")
-                .unwrap();
+            prepare_native_artifact_stage(&directory, "result.pages", ".pages", ".pdf").unwrap();
         std::fs::write(&second.native_path, b"PK\x03\x04second").unwrap();
         std::fs::write(&second.validation_path, b"%PDF-second").unwrap();
         let error = second.publish(b"PK\x03\x04", b"%PDF").unwrap_err();
@@ -2814,23 +2892,29 @@ mod tests {
 
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[test]
-    fn selected_exact_allowlisted_directory_creates_new_and_reads_back() {
+    fn selected_exact_directory_creates_new_and_reads_back() {
         let _guard = file_store_test_lock();
         let temp = tempfile::tempdir().unwrap();
         reset_worker_incarnation();
         let directory = issue(temp.path()).unwrap();
-        let allowed = vec![temp.path().to_string_lossy().to_string()];
         let created =
-            create_text_artifact(&directory, &allowed, "stage3-r2.txt", "verified artifact")
-                .unwrap();
+            create_text_artifact(&directory, "stage3-r2.txt", "verified artifact").unwrap();
         assert_eq!(created.byte_len, 17);
         assert_eq!(
             std::fs::read_to_string(temp.path().join("stage3-r2.txt")).unwrap(),
             "verified artifact"
         );
         assert!(
-            create_text_artifact(&directory, &allowed, "stage3-r2.txt", "overwrite").is_err(),
+            create_text_artifact(&directory, "stage3-r2.txt", "overwrite").is_err(),
             "FILE_CREATE must never overwrite an existing artifact"
+        );
+        let empty = create_text_artifact(&directory, "empty.txt", "").unwrap();
+        assert_eq!(empty.byte_len, 0);
+        assert_eq!(empty.sha256, format!("{:x}", Sha256::digest(b"")));
+        assert!(
+            std::fs::read(temp.path().join("empty.txt"))
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -2843,14 +2927,8 @@ mod tests {
         configure_durable_artifact_store(Some(data.path()));
         reset_worker_incarnation();
         let directory = issue(temp.path()).unwrap();
-        let allowed = vec![temp.path().to_string_lossy().to_string()];
-        let created = create_text_artifact(
-            &directory,
-            &allowed,
-            "restart-safe.txt",
-            "durable exact bytes",
-        )
-        .unwrap();
+        let created =
+            create_text_artifact(&directory, "restart-safe.txt", "durable exact bytes").unwrap();
 
         reset_worker_incarnation();
         let reopened = read_verified_bytes(&created.file, created.byte_len).unwrap();
@@ -2876,7 +2954,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         reset_worker_incarnation();
         let directory = issue(temp.path()).unwrap();
-        let allowed = vec![temp.path().to_string_lossy().to_string()];
         let target = temp.path().join("raced.txt");
         let displaced = temp.path().join("raced-original.txt");
         set_artifact_after_close_hook(Box::new(move || {
@@ -2884,7 +2961,7 @@ mod tests {
             std::fs::write(&target, b"same bytes").unwrap();
         }));
 
-        let error = create_text_artifact(&directory, &allowed, "raced.txt", "same bytes")
+        let error = create_text_artifact(&directory, "raced.txt", "same bytes")
             .expect_err("a same-byte replacement must not pass identity verification");
         assert!(error.message.contains("artifact identity changed"));
     }
@@ -2923,6 +3000,45 @@ mod tests {
         );
         assert!(!names.contains("hidden.txt"));
         assert!(!output.truncated);
+
+        #[cfg(target_os = "macos")]
+        {
+            let entry = output
+                .directory_entries
+                .iter()
+                .find(|entry| entry.display_name == "a.txt")
+                .unwrap();
+            let reference = entry
+                .object_ref
+                .as_ref()
+                .expect("native regular child reference");
+            assert_eq!(
+                read_text(&FileContentReadParams {
+                    file: reference.clone(),
+                    max_bytes: 1024
+                })
+                .unwrap()
+                .content_utf8,
+                "alpha"
+            );
+            assert!(
+                output
+                    .directory_entries
+                    .iter()
+                    .find(|entry| entry.display_name == "nested")
+                    .unwrap()
+                    .object_ref
+                    .is_none()
+            );
+            std::fs::write(temp.path().join("a.txt"), b"external replacement").unwrap();
+            assert!(
+                read_text(&FileContentReadParams {
+                    file: reference.clone(),
+                    max_bytes: 1024
+                })
+                .is_err()
+            );
+        }
 
         let bounded = inspect(&FileMetadataInspectParams {
             roots: vec![issue(temp.path()).unwrap()],
@@ -3144,22 +3260,18 @@ mod tests {
 
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[test]
-    fn different_allowlisted_directory_identity_is_rejected() {
+    fn replaced_directory_identity_is_rejected() {
         let _guard = file_store_test_lock();
         let selected = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
         reset_worker_incarnation();
         let directory = issue(selected.path()).unwrap();
-        let error = create_text_artifact(
-            &directory,
-            &[other.path().to_string_lossy().to_string()],
-            "denied.txt",
-            "no",
-        )
-        .unwrap_err();
-        assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
+        std::fs::rename(selected.path(), other.path().join("moved")).unwrap();
+        std::fs::create_dir(selected.path()).unwrap();
+        let error = create_text_artifact(&directory, "denied.txt", "no").unwrap_err();
+        assert_eq!(error.kind, AgentErrorKind::InvalidInput);
         assert!(!selected.path().join("denied.txt").exists());
-        assert!(!other.path().join("denied.txt").exists());
+        assert!(!other.path().join("moved/denied.txt").exists());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -622,6 +622,13 @@ impl SignalCapabilityGrantStore {
                 "reserved capability grant no longer matches call: {reason:?}"
             ))
         })?;
+        desk_diagnose_core::file_scope::validate_artifact_scope(
+            &session,
+            &grant.tool_name,
+            &grant.resource_scope,
+            request.call.now_unix_ms,
+        )
+        .map_err(|_| DbErr::Custom("conversation directory is no longer approved".into()))?;
 
         let dispatch_id = stable_id(
             "capability-dispatch",
@@ -781,6 +788,38 @@ impl SignalCapabilityGrantStore {
             return Err(DbErr::Custom(
                 "capability dispatch outbox payload disagrees with its authority row".into(),
             ));
+        }
+        if desk_diagnose_core::file_scope::requires_directory_scope(&payload.tool_name) {
+            let grant_row = agent_capability_grant::Entity::find()
+                .filter(agent_capability_grant::Column::GrantId.eq(&payload.grant_id))
+                .one(&txn)
+                .await?
+                .ok_or_else(|| DbErr::Custom("file dispatch grant missing".into()))?;
+            let grant = decode_grant(&grant_row)?;
+            let row = agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(&grant.run_id))
+                .filter(agent_session::Column::ActorId.eq(&grant.actor_id))
+                .filter(agent_session::Column::DeviceId.eq(&grant.target_device_id))
+                .one(&txn)
+                .await?
+                .ok_or_else(|| DbErr::Custom("file dispatch session missing".into()))?;
+            let session = PersistedAgentSession::decode_json(&row.state_json)
+                .map_err(|_| DbErr::Custom("invalid file dispatch session".into()))?;
+            if grant_row.status != GRANT_STATUS_ACTIVE
+                || session.actor_id != grant.actor_id
+                || session.device_id != grant.target_device_id
+                || session.conversation_id != grant.run_id
+                || grant.tool_name != payload.tool_name
+            {
+                return Err(DbErr::Custom("file dispatch authority changed".into()));
+            }
+            desk_diagnose_core::file_scope::validate_artifact_scope(
+                &session,
+                &grant.tool_name,
+                &grant.resource_scope,
+                now_unix_ms,
+            )
+            .map_err(|_| DbErr::Custom("conversation directory is no longer approved".into()))?;
         }
         let now = timestamp(now_unix_ms)?;
         let claimed = agent_capability_dispatch_outbox::Entity::update_many()

@@ -53,7 +53,8 @@ use super::browser_devtools_mcp::{
 };
 use super::browser_extension_bridge::{BrowserExtensionBridgeError, BrowserExtensionBroker};
 use super::computer_use_writer::{
-    InputPreemptionSource, WriterLeaseCoordinator, WriterLeaseRequest, WriterLeaseState,
+    InputPreemptionSource, WriterLeaseCoordinator, WriterLeaseRequest, WriterLeaseScope,
+    WriterLeaseState,
 };
 
 // A readiness report can be almost 25 seconds old when the signal starts a
@@ -833,6 +834,13 @@ impl ComputerUseBroker {
         let terminal_provider_supported = core_diagnostics_supported;
         let desktop_provider_supported = cfg!(any(windows, target_os = "macos"));
         let file_provider_supported = cfg!(any(windows, target_os = "linux", target_os = "macos"));
+        let artifact_reason = if !file_provider_supported {
+            Some(ComputerUseReadinessReason::UnsupportedPlatform)
+        } else if !ceiling.enabled {
+            Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
+        } else {
+            None
+        };
         let office_provider_supported = cfg!(windows);
         let iwork_provider_supported = cfg!(target_os = "macos");
         let outlook_provider_supported = cfg!(windows);
@@ -1394,13 +1402,8 @@ impl ComputerUseBroker {
                         version: spreadsheet_file_adapter_version.clone(),
                     },
                     supported: file_provider_supported,
-                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !file_provider_supported {
-                            ComputerUseReadinessReason::UnsupportedPlatform
-                        } else {
-                            ComputerUseReadinessReason::DisabledByLocalCeiling
-                        }),
+                    ready: file_provider_supported && ceiling.enabled,
+                    reason: artifact_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::SpreadsheetFormulaWorkbookCreateConfirmed,
@@ -1409,13 +1412,8 @@ impl ComputerUseBroker {
                         version: spreadsheet_file_adapter_version.clone(),
                     },
                     supported: file_provider_supported,
-                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !file_provider_supported {
-                            ComputerUseReadinessReason::UnsupportedPlatform
-                        } else {
-                            ComputerUseReadinessReason::DisabledByLocalCeiling
-                        }),
+                    ready: file_provider_supported && ceiling.enabled,
+                    reason: artifact_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::WordDocumentCreateConfirmed,
@@ -1424,13 +1422,38 @@ impl ComputerUseBroker {
                         version: spreadsheet_file_adapter_version,
                     },
                     supported: file_provider_supported,
-                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !file_provider_supported {
-                            ComputerUseReadinessReason::UnsupportedPlatform
-                        } else {
-                            ComputerUseReadinessReason::DisabledByLocalCeiling
-                        }),
+                    ready: file_provider_supported && ceiling.enabled,
+                    reason: artifact_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::FilePatchConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::FileSystem,
+                        version: desk_diagnose_core::device_assistant::TEXT_FILE_ADAPTER_VERSION
+                            .into(),
+                    },
+                    supported: cfg!(target_os = "macos"),
+                    ready: cfg!(target_os = "macos") && ceiling.enabled,
+                    reason: if !cfg!(target_os = "macos") {
+                        Some(ComputerUseReadinessReason::UnsupportedPlatform)
+                    } else {
+                        artifact_reason
+                    },
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::FileDeleteConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::FileSystem,
+                        version: desk_diagnose_core::device_assistant::TEXT_FILE_ADAPTER_VERSION
+                            .into(),
+                    },
+                    supported: cfg!(target_os = "macos"),
+                    ready: cfg!(target_os = "macos") && ceiling.enabled,
+                    reason: if !cfg!(target_os = "macos") {
+                        Some(ComputerUseReadinessReason::UnsupportedPlatform)
+                    } else {
+                        artifact_reason
+                    },
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::FileArtifactCreateConfirmed,
@@ -1439,13 +1462,8 @@ impl ComputerUseBroker {
                         version: file_artifact_adapter_version.clone(),
                     },
                     supported: file_provider_supported,
-                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !file_provider_supported {
-                            ComputerUseReadinessReason::UnsupportedPlatform
-                        } else {
-                            ComputerUseReadinessReason::DisabledByLocalCeiling
-                        }),
+                    ready: file_provider_supported && ceiling.enabled,
+                    reason: artifact_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::CommunicationLocalDraftCreateConfirmed,
@@ -1454,13 +1472,8 @@ impl ComputerUseBroker {
                         version: file_artifact_adapter_version,
                     },
                     supported: file_provider_supported,
-                    ready: file_provider_supported && ceiling.file_artifact_create_enabled(),
-                    reason: (!(file_provider_supported && ceiling.file_artifact_create_enabled()))
-                        .then_some(if !file_provider_supported {
-                            ComputerUseReadinessReason::UnsupportedPlatform
-                        } else {
-                            ComputerUseReadinessReason::DisabledByLocalCeiling
-                        }),
+                    ready: file_provider_supported && ceiling.enabled,
+                    reason: artifact_reason,
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::CommunicationOutlookNewHandoffConfirmed,
@@ -1896,7 +1909,7 @@ impl ComputerUseBroker {
             _ => None,
         };
         if let Some(output) = batch_output {
-            if !ceiling.file_artifact_create_enabled() {
+            if !ceiling.enabled {
                 return Err(error(
                     AgentErrorKind::PermissionDenied,
                     "iWork batch output requires the host-local artifact creation ceiling",
@@ -1927,7 +1940,6 @@ impl ComputerUseBroker {
                 verify_batch_source(source_file, &[".numbers"], source_sha256, *source_byte_len)?;
                 super::file_reference_store::validate_native_artifact_destination(
                     &batch.output.destination_parent,
-                    &ceiling.allowed_file_roots,
                     &batch.output.native_file_name,
                     ".numbers",
                 )?;
@@ -1944,7 +1956,6 @@ impl ComputerUseBroker {
                 verify_batch_source(source_file, &[".pages"], source_sha256, *source_byte_len)?;
                 super::file_reference_store::validate_native_artifact_destination(
                     &batch.output.destination_parent,
-                    &ceiling.allowed_file_roots,
                     &batch.output.native_file_name,
                     ".pages",
                 )?;
@@ -1961,7 +1972,6 @@ impl ComputerUseBroker {
                 verify_batch_source(source_file, &[".key"], source_sha256, *source_byte_len)?;
                 super::file_reference_store::validate_native_artifact_destination(
                     &batch.output.destination_parent,
-                    &ceiling.allowed_file_roots,
                     &batch.output.native_file_name,
                     ".key",
                 )?;
@@ -2063,6 +2073,14 @@ impl ComputerUseBroker {
     ) -> Result<SemanticActionResult, AgentError> {
         use super::macos_iwork_adapter::{IworkBatchExportFormat, IworkBatchOutput};
 
+        if !ceiling.enabled || !ceiling.iwork_semantic {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Computer Use or iWork is disabled on the device",
+                false,
+            ));
+        }
+
         let (result, published) = match (resolved, action) {
             (
                 ResolvedObject::IworkNumbersBatch {
@@ -2085,7 +2103,6 @@ impl ComputerUseBroker {
                 )?;
                 let stage = super::file_reference_store::prepare_native_artifact_stage(
                     &batch.output.destination_parent,
-                    &ceiling.allowed_file_roots,
                     &batch.output.native_file_name,
                     ".numbers",
                     ".xlsx",
@@ -2137,7 +2154,6 @@ impl ComputerUseBroker {
                 )?;
                 let stage = super::file_reference_store::prepare_native_artifact_stage(
                     &batch.output.destination_parent,
-                    &ceiling.allowed_file_roots,
                     &batch.output.native_file_name,
                     ".pages",
                     ".pdf",
@@ -2181,7 +2197,6 @@ impl ComputerUseBroker {
                     verify_batch_source(&source_file, &[".key"], &source_sha256, source_byte_len)?;
                 let stage = super::file_reference_store::prepare_native_artifact_stage(
                     &batch.output.destination_parent,
-                    &ceiling.allowed_file_roots,
                     &batch.output.native_file_name,
                     ".key",
                     ".pdf",
@@ -2616,6 +2631,12 @@ impl ComputerUseBroker {
         &self,
         request: WriterLeaseRequest,
     ) -> Result<WriterLeaseState, AgentError> {
+        if request.scope == WriterLeaseScope::FileWorker {
+            self.validate_file_worker_incarnation(&request.interactive_session_incarnation)?;
+            return self
+                .writer_lease
+                .acquire(request, self.human_input_epoch.load(Ordering::SeqCst));
+        }
         let active_incarnation = self
             .active_session_incarnation
             .lock()
@@ -2646,6 +2667,10 @@ impl ComputerUseBroker {
             execution_generation,
             self.human_input_epoch.load(Ordering::SeqCst),
         )?;
+        if state.request.scope == WriterLeaseScope::FileWorker {
+            self.validate_file_worker_incarnation(&state.request.interactive_session_incarnation)?;
+            return Ok(state);
+        }
         let active_incarnation = self
             .active_session_incarnation
             .lock()
@@ -2667,6 +2692,22 @@ impl ComputerUseBroker {
             ));
         }
         Ok(state)
+    }
+
+    fn validate_file_worker_incarnation(&self, incarnation: &str) -> Result<(), AgentError> {
+        // File actions have no foreground UI dependency. The server-issued
+        // readiness incarnation still binds them to this exact worker, while
+        // the shared coordinator enforces single-writer, expiry and preemption.
+        if incarnation.split_once(':').map(|(_, nonce)| nonce)
+            != Some(self.current_incarnation_nonce().as_str())
+        {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "file writer lease targets a stale worker incarnation",
+                false,
+            ));
+        }
+        Ok(())
     }
 
     pub fn cancel_writer_lease(
@@ -3476,6 +3517,7 @@ mod tests {
         *broker.active_session_incarnation.lock().unwrap() = Some("session-before-respawn".into());
         broker
             .acquire_writer_lease(WriterLeaseRequest {
+                scope: WriterLeaseScope::InteractiveSession,
                 work_id: "work-before-respawn".into(),
                 action_request_id: "action-before-respawn".into(),
                 execution_generation: "generation-before-respawn".into(),
@@ -3522,6 +3564,7 @@ mod tests {
         let broker = ComputerUseBroker::new();
         *broker.active_session_incarnation.lock().unwrap() = Some("session-current".into());
         let request = WriterLeaseRequest {
+            scope: WriterLeaseScope::InteractiveSession,
             work_id: "work".into(),
             action_request_id: "action".into(),
             execution_generation: "generation".into(),
@@ -3540,6 +3583,56 @@ mod tests {
     }
 
     #[test]
+    fn file_writer_without_observation_remains_worker_bound_and_preemptible() {
+        let broker = ComputerUseBroker::new();
+        let readiness = broker.readiness(
+            &ComputerUseSettings {
+                enabled: true,
+                observe: false,
+                ..Default::default()
+            },
+            false,
+            false,
+        );
+        assert!(broker.active_session_incarnation.lock().unwrap().is_none());
+        let request = WriterLeaseRequest {
+            scope: WriterLeaseScope::FileWorker,
+            work_id: "file-work".into(),
+            action_request_id: "file-action".into(),
+            execution_generation: "file-generation".into(),
+            approved_actor_id: "7".into(),
+            interactive_session_incarnation: readiness.interactive_session_incarnation,
+            expires_at: Utc::now() + Duration::seconds(30),
+        };
+        assert!(
+            broker
+                .acquire_writer_lease(WriterLeaseRequest {
+                    scope: WriterLeaseScope::InteractiveSession,
+                    ..request.clone()
+                })
+                .is_err()
+        );
+        broker.acquire_writer_lease(request.clone()).unwrap();
+        broker.require_writer_lease("file-generation").unwrap();
+        assert!(
+            broker
+                .acquire_writer_lease(WriterLeaseRequest {
+                    execution_generation: "competing-generation".into(),
+                    ..request.clone()
+                })
+                .is_err()
+        );
+        broker.note_external_input();
+        assert!(broker.require_writer_lease("file-generation").is_err());
+        broker.release_writer_lease("file-generation");
+        broker.acquire_writer_lease(request.clone()).unwrap();
+        broker.reset_worker_incarnation();
+        assert!(broker.require_writer_lease("file-generation").is_err());
+        broker.release_writer_lease("file-generation");
+        assert!(broker.acquire_writer_lease(request).is_err());
+    }
+
+    #[test]
     fn live_session_change_preempts_writer_and_invalidates_every_reference() {
         let broker = ComputerUseBroker::new();
         broker.update_active_session_incarnation(Some("session-a".into()));
@@ -3555,6 +3648,7 @@ mod tests {
             .unwrap();
         broker
             .acquire_writer_lease(WriterLeaseRequest {
+                scope: WriterLeaseScope::InteractiveSession,
                 work_id: "work".into(),
                 action_request_id: "action".into(),
                 execution_generation: "generation".into(),
@@ -3590,6 +3684,7 @@ mod tests {
         let initial_epoch = broker.human_input_epoch();
         broker
             .acquire_writer_lease(WriterLeaseRequest {
+                scope: WriterLeaseScope::InteractiveSession,
                 work_id: "macos-live-work".into(),
                 action_request_id: "macos-live-action".into(),
                 execution_generation: "macos-live-generation".into(),
@@ -3754,8 +3849,6 @@ mod tests {
         );
         let mut ceiling = enabled();
         ceiling.iwork_semantic = true;
-        ceiling.file_artifact_create = true;
-        ceiling.allowed_file_roots = vec![root.to_string_lossy().into_owned()];
         broker
             .preflight_iwork_action(&target, &action, &ceiling)
             .unwrap();
@@ -3840,7 +3933,7 @@ mod tests {
         let broker = ComputerUseBroker::new();
         let readiness = broker.readiness(&ComputerUseSettings::default(), false, false);
         readiness.validate().unwrap();
-        assert_eq!(readiness.capabilities.len(), 34);
+        assert_eq!(readiness.capabilities.len(), 36);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(
                 entry.capability,
@@ -3899,6 +3992,8 @@ mod tests {
                     | Capability::SpreadsheetFormulaWorkbookCreateConfirmed
                     | Capability::WordDocumentCreateConfirmed
                     | Capability::FileArtifactCreateConfirmed
+                    | Capability::FilePatchConfirmed
+                    | Capability::FileDeleteConfirmed
                     | Capability::CommunicationLocalDraftCreateConfirmed
                     | Capability::CommunicationOutlookNewHandoffConfirmed
                     | Capability::TerminalOutputRead
@@ -3924,6 +4019,40 @@ mod tests {
     }
 
     #[test]
+    fn text_mutations_follow_master_switch_without_granting_directory_authority() {
+        let broker = ComputerUseBroker::new();
+        for enabled in [false, true, false] {
+            let settings = ComputerUseSettings {
+                enabled,
+                ..Default::default()
+            };
+            let report = broker.readiness(&settings, false, false);
+            for capability in [
+                Capability::FilePatchConfirmed,
+                Capability::FileDeleteConfirmed,
+            ] {
+                let entry = report
+                    .capabilities
+                    .iter()
+                    .find(|entry| entry.capability == capability)
+                    .unwrap();
+                assert_eq!(entry.supported, cfg!(target_os = "macos"));
+                assert_eq!(entry.ready, enabled && cfg!(target_os = "macos"));
+                assert_eq!(
+                    entry.adapter.version,
+                    desk_diagnose_core::device_assistant::TEXT_FILE_ADAPTER_VERSION
+                );
+            }
+            assert!(
+                !report
+                    .context_references
+                    .iter()
+                    .any(|reference| reference.object_ref.object_kind == ObjectKind::Directory)
+            );
+        }
+    }
+
+    #[test]
     fn local_ceiling_change_advances_readiness_revision() {
         let broker = ComputerUseBroker::new();
         let first = broker.readiness(&ComputerUseSettings::default(), false, false);
@@ -3933,6 +4062,31 @@ mod tests {
         };
         let second = broker.readiness(&changed, false, false);
         assert!(second.revision > first.revision);
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    fn file_readiness_uses_only_master_switch_and_leaves_scope_to_the_conversation() {
+        let broker = ComputerUseBroker::new();
+        for enabled in [false, true] {
+            let settings = ComputerUseSettings {
+                enabled,
+                revision: u64::from(enabled),
+                ..Default::default()
+            };
+            let readiness = broker.readiness(&settings, false, false);
+            let entry = readiness
+                .capabilities
+                .iter()
+                .find(|entry| entry.capability == Capability::FileArtifactCreateConfirmed)
+                .unwrap();
+            assert!(entry.supported);
+            assert_eq!(entry.ready, enabled);
+            assert_eq!(
+                entry.reason,
+                (!enabled).then_some(ComputerUseReadinessReason::DisabledByLocalCeiling)
+            );
+        }
     }
 
     #[test]

@@ -27,6 +27,39 @@ pub const TAG: &str = "DeviceAssistantSession";
 pub(crate) mod recovery;
 pub use desk_signal_facade::controller::device_assistant_session::*;
 
+async fn read_file_recovery_receipt(
+    run: &str,
+    actor: &str,
+    device: &str,
+    action: &desk_diagnose_core::session::ActionIdentity,
+) -> Result<Option<String>, DeskSignalError> {
+    use crate::entity::agent_action_item as work;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let row = work::Entity::find_by_id(action.work_id)
+        .filter(work::Column::ConversationId.eq(run))
+        .filter(work::Column::ActorId.eq(actor))
+        .filter(work::Column::TargetDeviceId.eq(device))
+        .filter(work::Column::ActionRequestId.eq(&action.action_request_id))
+        .filter(work::Column::ExecutionId.eq(&action.execution_id))
+        .one(crate::db::get_db())
+        .await?;
+    let Some(raw) = row
+        .and_then(|row| row.result_json)
+        .filter(|raw| raw.len() <= 512 * 1024)
+    else {
+        return Ok(None);
+    };
+    let record: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    Ok(record.pointer("/unknown/native").and_then(|native| {
+        desk_diagnose_core::provider_preflight::text_file::unknown_text_recovery_receipt(
+            &native.to_string(),
+        )
+    }))
+}
+
 fn not_accessible() -> HttpResponse {
     HttpResponse::Ok().json(RestResponse::<()>::failed(
         DeskErrorCode::PERMISSION_ERROR,
@@ -77,8 +110,22 @@ pub async fn get_device_assistant_session(
             let background_tasks = snapshot.background_tasks;
             let capability_grants = snapshot.capability_grants;
             let snapshot = snapshot.session;
+            let file_recovery_receipt = match &snapshot.unresolved_action {
+                Some(action) => {
+                    read_file_recovery_receipt(&session_id, &actor_id, &target_audience, action)
+                        .await?
+                }
+                None => None,
+            };
             let evidence_summary =
                 build_evidence_summary(&snapshot.messages, &snapshot.context_attachments);
+            let permission_requests = snapshot
+                .permission_requests
+                .into_iter()
+                .map(|request| {
+                    PermissionRequestDto::with_file_evidence(request, &snapshot.messages)
+                })
+                .collect();
             let visual_evidence = desk_diagnose_core::visual_evidence::durable_projection(
                 &snapshot.visual_evidence,
                 u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
@@ -93,6 +140,7 @@ pub async fn get_device_assistant_session(
             })?;
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
                 DeviceAssistantSessionSnapshotDto {
+                    file_scope: snapshot.file_scope.into(),
                     terminal_error: snapshot.terminal_error,
                     session_id,
                     context_usage: snapshot.context_usage.map(Into::into),
@@ -106,17 +154,14 @@ pub async fn get_device_assistant_session(
                             action_request_id: action.action_request_id,
                             execution_id: action.execution_id,
                             work_kind: action.kind.as_str().to_string(),
+                            file_recovery_receipt,
                         }
                     }),
                     latest_input_seq: snapshot.latest_input_seq,
                     input_revision: snapshot.input_revision,
                     handled_input_seq: snapshot.handled_input_seq,
                     task_status_projection: snapshot.task_status_projection.map(Into::into),
-                    permission_requests: snapshot
-                        .permission_requests
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
+                    permission_requests,
                     background_tasks: background_tasks.into_iter().map(Into::into).collect(),
                     capability_grants: capability_grants.into_iter().map(Into::into).collect(),
                     evidence_summary,

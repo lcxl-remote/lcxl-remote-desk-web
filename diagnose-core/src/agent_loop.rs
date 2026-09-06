@@ -1444,6 +1444,14 @@ async fn run_inner(
             ));
         let pinned_context = deps.model.context_policy(request_requirements).await?;
         let mut system_prompt = deps.system_prompt.clone();
+        if session.surface == crate::session::AgentSessionSurface::DeviceAssistant {
+            system_prompt
+                .text
+                .push_str(&crate::directory_tools::scope_prompt(
+                    session,
+                    current_unix_ms(deps.clock)?,
+                ));
+        }
         if deps.model.command_completion_event_id().is_some() {
             system_prompt
                 .text
@@ -1589,6 +1597,7 @@ async fn run_inner(
                     "runtime-requested-artifacts-{turn_id}-{}",
                     session.input_revision
                 ),
+                current_unix_ms(deps.clock)?,
             )? {
                 messages.push(artifact_projection);
             }
@@ -2503,6 +2512,70 @@ async fn run_inner(
                                 }
                             }
                         }
+                        ToolEffect::DirectoryPlanning => {
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            let resolved = match crate::directory_tools::parse(call) {
+                                Ok(input) => deps
+                                    .tools
+                                    .resolve_directory_candidate(&input.path)
+                                    .await
+                                    .map(|resolved| (input, resolved)),
+                                Err(error) => Err(error),
+                            };
+                            let (input, resolved) = match resolved {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    append_internal_tool_result(
+                                        session,
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        mint(),
+                                        &call.id,
+                                        format!("tool error: {}", error.message),
+                                        "directory_resolution_failed",
+                                    )?;
+                                    deps.session_seam.save(session).await?;
+                                    finish_tool(session, &call.id, false, sink);
+                                    continue;
+                                }
+                            };
+                            let request_id = stable_lineage_id(
+                                "directory-proposal",
+                                &format!(
+                                    "{}:{}:{}",
+                                    session.conversation_id, session.input_revision, call.id
+                                ),
+                            );
+                            // Save the exact held state before the proposal transaction.
+                            // Resolution metadata is for the owner's UI, not model egress.
+                            deps.session_seam.save(session).await?;
+                            deps.session_seam
+                                .propose_directory(
+                                    session,
+                                    crate::directory_tools::proposal(
+                                        request_id.clone(),
+                                        input,
+                                        resolved,
+                                    ),
+                                    current_unix_ms(deps.clock)?,
+                                )
+                                .await?;
+                            append_internal_tool_result(session, turn.provider_meta.data_envelope.as_ref(),
+                                mint(), &call.id, serde_json::json!({"directory_request_id":request_id,
+                                    "state":"pending", "message":"Awaiting owner confirmation in Conversation directories. No file operation has been authorized."}).to_string(),
+                                "directory_proposal_pending")?;
+                            append_unstarted_tool_results(
+                                session,
+                                &turn.tool_calls[call_index + 1..],
+                                turn.provider_meta.data_envelope.as_ref(),
+                                &mut mint,
+                                "not executed: waiting for directory confirmation",
+                                "directory_pause_tool_call",
+                            )?;
+                            deps.session_seam.save(session).await?;
+                            finish_tool(session, &call.id, true, sink);
+                            sink.on_permission_requested(&request_id, 1);
+                            return Ok(LoopOutcome::PermissionRequested { request_id });
+                        }
                         ToolEffect::PermissionPlanning => {
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
                             let created_at = (deps.clock)();
@@ -2567,6 +2640,18 @@ async fn run_inner(
                                     inventory,
                                     deps.registry,
                                 )?;
+                                let now = chrono::DateTime::parse_from_rfc3339(&request.created_at)
+                                    .ok()
+                                    .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
+                                    .unwrap_or(0);
+                                for item in &request.items {
+                                    crate::provider_preflight::text_file::validate_read_permission_input(
+                                        &session,
+                                        &item.tool_name,
+                                        item.canonical_input_json.as_deref(),
+                                        now,
+                                    )?;
+                                }
                                 Ok(request)
                             });
                             match request {
@@ -3022,6 +3107,7 @@ fn verified_browser_result(message: &ChatMessage) -> Option<BrowserActionResult>
 fn requested_artifact_registry_projection(
     conversation: &[ChatMessage],
     message_id: &str,
+    now_unix_ms: u64,
 ) -> Result<Option<ChatMessage>, AgentError> {
     const MAX_REQUESTED_ARTIFACTS: usize = 4;
 
@@ -3038,14 +3124,79 @@ fn requested_artifact_registry_projection(
 
     let mut seen_tokens = HashSet::new();
     let mut selected = Vec::new();
+    let mut completed_text_file_operations = Vec::new();
     let mut source_envelopes = Vec::new();
     for message in conversation.iter().rev() {
-        if selected.len() >= MAX_REQUESTED_ARTIFACTS {
+        if selected.len() + completed_text_file_operations.len() >= MAX_REQUESTED_ARTIFACTS {
             break;
+        }
+        if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
+            continue;
+        }
+        let Some(source) = message.data_envelope.as_ref() else {
+            continue;
+        };
+        // This optional index must not revive an expired source or strand a
+        // fresh user turn. The owner can request fresh directory metadata and
+        // authorize a new read when old model-egress evidence has expired.
+        if crate::model_egress::envelope_expires_by(
+            source,
+            now_unix_ms.saturating_add(crate::model_egress::MODEL_CALL_RETENTION_HEADROOM_MS),
+        ) {
+            continue;
         }
         let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text) else {
             continue;
         };
+        if completion.result
+            != desk_agent_protocol::computer_use::ComputerActionResultClass::Verified
+        {
+            continue;
+        }
+        if let Some(ComputerActionOutput::TextFileMutation(output)) = &completion.output {
+            use desk_agent_protocol::computer_use::TextFileMutationOperation;
+            let tool = match output.operation {
+                TextFileMutationOperation::Update => "update_text_file",
+                TextFileMutationOperation::Delete => "delete_text_file",
+            };
+            if output.verified
+                && !output.original_file_name.is_empty()
+                && output.original_file_name.len() <= 512
+                && !output.original_file_name.chars().any(char::is_control)
+                && source.validate().is_ok()
+                && match output.operation {
+                    TextFileMutationOperation::Update => {
+                        output.updated_file.as_ref().is_some_and(|file| {
+                            file.validate().is_ok() && file.file_name == output.original_file_name
+                        })
+                    }
+                    TextFileMutationOperation::Delete => output.updated_file.is_none(),
+                }
+                && latest_user.text.contains(&output.original_file_name)
+                && source.provenance.source_provider_id
+                    == crate::device_assistant::TEXT_FILE_PROVIDER_ID
+                && source.provenance.source_tool_name == tool
+                && source.digest_sha256
+                    == format!("{:x}", sha2::Sha256::digest(message.text.as_bytes()))
+                && let Some(call_id) = &message.tool_call_id
+                && conversation
+                    .iter()
+                    .filter(|m| m.role == ChatRole::Assistant)
+                    .flat_map(|m| &m.tool_calls)
+                    .any(|call| call.id == *call_id && call.name == tool)
+            {
+                // Durable execution facts are not grant state. In particular,
+                // an exhausted one-shot grant must not be read as "not run".
+                completed_text_file_operations.push(serde_json::json!({
+                    "file_result_call_id": call_id,
+                    "file_name": output.original_file_name,
+                    "operation": output.operation,
+                    "result": "verified",
+                }));
+                source_envelopes.push(source.clone());
+            }
+            continue;
+        }
         let Some(ComputerActionOutput::FileArtifact(artifact)) = completion.output else {
             continue;
         };
@@ -3056,11 +3207,9 @@ fn requested_artifact_registry_projection(
             continue;
         }
         selected.push(artifact);
-        if let Some(envelope) = message.data_envelope.as_ref() {
-            source_envelopes.push(envelope.clone());
-        }
+        source_envelopes.push(source.clone());
     }
-    if selected.is_empty() {
+    if selected.is_empty() && completed_text_file_operations.is_empty() {
         return Ok(None);
     }
     selected.reverse();
@@ -3069,6 +3218,7 @@ fn requested_artifact_registry_projection(
         "schema_version": 1,
         "kind": "requested_artifact_registry",
         "artifacts": selected,
+        "completed_text_file_operations": completed_text_file_operations,
     }))
     .map_err(|error| AgentError {
         kind: AgentErrorKind::Internal,
@@ -3695,6 +3845,26 @@ pub(crate) fn bind_tool_input_envelopes(
     collect_identity_values(&arguments, &mut artifact_ids, &mut preview_ids);
     let mut source_ids = envelope.provenance.source_envelope_ids.clone();
     let has_explicit_input_lineage = !source_ids.is_empty();
+
+    if crate::provider_preflight::text_file::TextMutationPreflight::supports(&call.name)
+        || crate::provider_preflight::text_file::read_result_id(call)?.is_some()
+    {
+        let id = arguments
+            .get("file_result_call_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| crate::directory_tools::unavailable())?;
+        // Freeze authenticated source identity here. Current expiry and consent
+        // are independently revalidated by preflight and dispatch.
+        let source_id = if call.name == "read_selected_text_file" {
+            crate::provider_preflight::text_file::read_source_envelope_id(session, call)?
+        } else {
+            crate::provider_preflight::text_file::resolve_file_result(session, id, 1)?
+                .source_envelope_id()
+                .ok_or_else(crate::directory_tools::unavailable)?
+                .to_string()
+        };
+        source_ids.push(source_id);
+    }
 
     // A Word report may opt into an exact subset of one prior Web Search
     // result. The lookup below has already been enforced before dispatch; bind

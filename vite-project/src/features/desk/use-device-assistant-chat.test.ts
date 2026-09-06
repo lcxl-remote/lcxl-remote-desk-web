@@ -15,6 +15,42 @@ import type { SignalingSubscriber } from './use-desk-signaling';
 import { useDeviceAssistantChat } from './use-device-assistant-chat';
 
 describe('useDeviceAssistantChat', () => {
+    it('accepts directory acknowledgements only for the exact response type and conversation request', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _data?: unknown, _to?: string) => 'directory-wire');
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'directory-ack', connected: true,
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        act(() => { expect(result.current.updateDirectory({ kind: 'select_directory', path: '/private/tmp/test', purpose: 'test', expected_revision: 0 }, 'timeout')).toBe(true); });
+        const request = sendMessage.mock.calls.at(-1)?.[1] as { conversation_id: string; client_request_id: string };
+        const ack = { request_id: 'directory-wire', signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_OBJECT_CONTEXT_UPDATED,
+            signaling_data: { conversation_id: request.conversation_id, client_request_id: request.client_request_id, changed: true } };
+        act(() => subscriber?.({ ...ack, signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_CONTEXT_UPDATED }));
+        expect(result.current.contextUpdating).toBe(true);
+        act(() => subscriber?.({ ...ack, signaling_data: { ...ack.signaling_data, conversation_id: 'another-conversation' } }));
+        expect(result.current.contextUpdating).toBe(true);
+        act(() => subscriber?.({ ...ack, signaling_data: { ...ack.signaling_data, client_request_id: 'another-request' } }));
+        expect(result.current.contextUpdating).toBe(true);
+        await act(async () => subscriber?.(ack));
+        expect(result.current.contextUpdating).toBe(false);
+        unmount();
+    });
+    it('restores a pending directory proposal as permission required, not a missing-answer error', async () => {
+        localStorage.setItem('device-assistant-conversation:pending-directory', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 10, active: false,
+            fileScope: { revision: 1, directories: [{ requestId: 'directory-request', canonicalPath: '/private/tmp/test',
+                purpose: 'report', state: 'pending', source: 'model_proposal', referenceExpiresAt: '2030-01-01T00:00:00Z' }] },
+            messages: [{ id: 'user-1', role: 'user', text: 'create a report' }],
+        } }) }));
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'pending-directory', connected: true,
+            subscribe: () => () => undefined, sendMessage: () => 'select' }));
+        await waitFor(() => expect(result.current.status).toBe('permission_required'));
+        expect(result.current.error).toBeNull();
+        expect(result.current.fileScope.revision).toBe(1);
+        unmount();
+    });
     it('restores the durable terminal error in a newly opened page', async () => {
         localStorage.setItem('device-assistant-conversation:restore-error', 'saved-conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
@@ -1321,6 +1357,7 @@ describe('useDeviceAssistantChat', () => {
                         contextAttachments: [],
                         unresolvedOutcome: unresolved ? {
                             workId: 94,
+                            fileRecoveryReceipt: 'persisted device recovery receipt',
                             actionRequestId: 'action-94',
                             executionId: 'generation-94',
                             workKind: 'computer_action',
@@ -1338,6 +1375,7 @@ describe('useDeviceAssistantChat', () => {
 
         await waitFor(() => expect(result.current.status).toBe('outcome_unknown'));
         expect(result.current.unresolvedOutcome?.workId).toBe(94);
+        expect(result.current.unresolvedOutcome?.fileRecoveryReceipt).toBe('persisted device recovery receipt');
         await act(async () => {
             expect(await result.current.disposeUnknownOutcome()).toBe(true);
         });

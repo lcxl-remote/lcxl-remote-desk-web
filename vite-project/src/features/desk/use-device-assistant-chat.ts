@@ -1,4 +1,5 @@
 import type { AssistantContextUsage } from './assistant-context-meter';
+import type { AssistantFileScopeView, AssistantDirectoryOperation } from './assistant-file-scope';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { v4 } from 'uuid';
 
@@ -152,6 +153,7 @@ export type DeviceAssistantTaskStatusProjection = {
 };
 
 export type DeviceAssistantUnknownOutcome = {
+    fileRecoveryReceipt?: string | null;
     workId: number;
     actionRequestId: string;
     executionId: string;
@@ -168,6 +170,7 @@ type PersistedSnapshotMessage = {
 };
 
 type PersistedSnapshot = {
+    fileScope?: AssistantFileScopeView;
     terminalError?: { message: string } | null;
     contextNotices?: ContextNoticeDto[];
     contextUsage?: AssistantContextUsage | null;
@@ -281,6 +284,8 @@ export function useDeviceAssistantChat({
     const [status, setStatus] = useState('idle');
     const [error, setError] = useState<string | null>(null);
     const [attachments, setAttachments] = useState<DeviceAssistantContextAttachment[]>([]);
+    const [fileScope, setFileScope] = useState<AssistantFileScopeView>({ revision: 0, directories: [] });
+    const directorySelectors = useRef<{ conversationId: string; clientRequestId: string } | null>(null);
     const [hydrating, setHydrating] = useState(false);
     const [remoteActive, setRemoteActive] = useState(false);
     const [contextUpdating, setContextUpdating] = useState(false);
@@ -399,6 +404,7 @@ export function useDeviceAssistantChat({
             setContextNotices([...new Map((snapshot.contextNotices ?? []).map(notice => [notice.id, notice])).values()]);
             const projected = projectPersistedSnapshot(snapshot);
             setAttachments(projected.attachments);
+            setFileScope(snapshot.fileScope ?? { revision: 0, directories: [] });
             setTaskStatusProjection(projected.taskStatusProjection);
             setPermissionRequests(projected.permissionRequests);
             setBackgroundTasks(projected.backgroundTasks);
@@ -434,7 +440,8 @@ export function useDeviceAssistantChat({
                 } else if (projected.unresolvedOutcome) {
                     setStatus('outcome_unknown');
                     setError(null);
-                } else if (projected.permissionRequests.some((request) => request.state === 'pending')) {
+                } else if (projected.permissionRequests.some((request) => request.state === 'pending')
+                    || snapshot.fileScope?.directories.some(directory => directory.state === 'pending')) {
                     setStatus('permission_required');
                     setError(null);
                 } else if (projected.permissionRequests.some((request) =>
@@ -532,6 +539,8 @@ export function useDeviceAssistantChat({
         setStatus('idle');
         setError(null);
         setAttachments([]);
+        setFileScope({ revision: 0, directories: [] });
+        directorySelectors.current = null;
         setVisualEvidence([]);
         setContextUsage(null);
         setContextNotices([]);
@@ -597,6 +606,8 @@ export function useDeviceAssistantChat({
             setPartial('');
             setError(null);
             setAttachments([]);
+            setFileScope({ revision: 0, directories: [] });
+            directorySelectors.current = null;
             setVisualEvidence([]);
             setContextUsage(null);
             setContextNotices([]);
@@ -648,7 +659,13 @@ export function useDeviceAssistantChat({
             && contextRequest.current
             && message.request_id === contextRequest.current
         ) {
-            const ack = message.signaling_data as { error?: string | null };
+            const ack = message.signaling_data as { error?: string | null; conversation_id?: string; client_request_id?: string };
+            if (directorySelectors.current && (
+                message.signaling_type !== SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_OBJECT_CONTEXT_UPDATED
+                || ack?.conversation_id !== directorySelectors.current.conversationId
+                || ack?.client_request_id !== directorySelectors.current.clientRequestId
+            )) return;
+            directorySelectors.current = null;
             if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
             contextTimer.current = null;
             contextRequest.current = null;
@@ -813,6 +830,27 @@ export function useDeviceAssistantChat({
         }, 10_000);
         return true;
     }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage]);
+
+    const updateDirectory = useCallback((operation: AssistantDirectoryOperation, timeoutMessage: string) => {
+        if (contextRequest.current || !connected || hydrating) return false;
+        const currentConversationId = ensureConversation();
+        const clientRequestId = v4();
+        directorySelectors.current = { conversationId: currentConversationId, clientRequestId };
+        setContextUpdating(true);
+        setError(null);
+        contextRequest.current = sendMessage(SIGNALING_TYPE_CODE_UPDATE_DEVICE_ASSISTANT_OBJECT_CONTEXT, {
+            conversation_id: currentConversationId, client_request_id: clientRequestId, operation,
+        }, deskId);
+        contextTimer.current = window.setTimeout(() => {
+            directorySelectors.current = null;
+            contextTimer.current = null;
+            contextRequest.current = null;
+            setContextUpdating(false);
+            setError(timeoutMessage);
+            if (conversationId.current) void loadSnapshot(conversationId.current);
+        }, 35_000);
+        return true;
+    }, [connected, deskId, ensureConversation, hydrating, loadSnapshot, sendMessage]);
 
     const attachWindow = useCallback((objectRef: DeviceAssistantWindowRef, displaySummary: string) => {
         if (activeRequest.current || remoteActive || contextRequest.current) return false;
@@ -1034,6 +1072,8 @@ export function useDeviceAssistantChat({
         setStatus('idle');
         setError(null);
         setAttachments([]);
+        setFileScope({ revision: 0, directories: [] });
+        directorySelectors.current = null;
         setVisualEvidence([]);
         setContextUsage(null);
         setContextNotices([]);
@@ -1083,6 +1123,8 @@ export function useDeviceAssistantChat({
         status,
         error,
         attachments,
+        fileScope,
+        updateDirectory,
         visualEvidence,
         hydrating,
         contextUpdating,

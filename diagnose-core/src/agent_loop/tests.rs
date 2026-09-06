@@ -131,6 +131,30 @@ struct MemSession {
 }
 #[async_trait(?Send)]
 impl SessionSeam for MemSession {
+    async fn propose_directory(
+        &self,
+        session: &mut PersistedAgentSession,
+        proposal: crate::file_scope::DirectoryProposal,
+        now_unix_ms: u64,
+    ) -> Result<(), AgentError> {
+        let update = crate::file_scope::transaction::FileScopeUpdate {
+            subject: session
+                .file_scope_subject(
+                    &session.actor_id,
+                    &session.device_id,
+                    &session.conversation_id,
+                )
+                .unwrap(),
+            client_conversation_id: session.client_conversation_id.clone().unwrap(),
+            client_request_id: proposal.request_id.clone(),
+            expected_revision: session.file_scope.revision(),
+            mutation: crate::file_scope::transaction::FileScopeMutation::Propose { proposal },
+        };
+        let (next, _) =
+            crate::file_scope::transaction::prepare(session, &update, now_unix_ms).unwrap();
+        *session = next;
+        self.save(session).await
+    }
     async fn claim_turn(
         &self,
         params: ClaimTurnParams,
@@ -471,6 +495,25 @@ impl ToolSeam for BackgroundReadTools {
 }
 #[async_trait(?Send)]
 impl ToolSeam for RecordingTools {
+    async fn resolve_directory_candidate(
+        &self,
+        path: &str,
+    ) -> Result<desk_agent_protocol::computer_use::FileDirectoryResolveOutput, AgentError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("resolve-directory:{path}"));
+        Ok(
+            desk_agent_protocol::computer_use::FileDirectoryResolveOutput {
+                canonical_path: "/private/tmp/owner-only-path".into(),
+                directory: desk_agent_protocol::computer_use::ObjectRef {
+                    token: "not-for-model".into(),
+                    snapshot_id: "device-generation".into(),
+                    object_kind: desk_agent_protocol::computer_use::ObjectKind::Directory,
+                    expires_at: "2030-01-01T00:00:00Z".into(),
+                },
+            },
+        )
+    }
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
         self.calls.borrow_mut().push(call.name.clone());
         Ok(ToolRunOutput {
@@ -1544,6 +1587,68 @@ async fn task_status_tool_updates_projection_without_dispatch() {
 
 /// Permission planning persists a request and pauses. It never calls ToolSeam,
 /// and the persisted object is not a grant or dispatch instruction.
+#[tokio::test]
+async fn directory_planning_pauses_with_pending_consent_without_content_or_authority_egress() {
+    let sess = MemSession::default();
+    let mut initial = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    initial.adopt_client_metadata(
+        Some("client"),
+        crate::session::AgentSessionSurface::DeviceAssistant,
+    );
+    initial.latest_input_seq = 1;
+    initial.input_revision = 1;
+    *sess.inner.borrow_mut() = Some(initial);
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [tool_use_args(
+                "directory-call",
+                crate::directory_tools::REQUEST_DIRECTORY,
+                r#"{"path":"/tmp/work","purpose":"create a report"}"#,
+            )]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "must not read or execute".into(),
+    };
+    let registry = crate::directory_tools::registry();
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "create a report"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, LoopOutcome::PermissionRequested { .. }));
+    assert_eq!(
+        tools.calls.borrow().as_slice(),
+        &["resolve-directory:/tmp/work"]
+    );
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.file_scope.records().len(), 1);
+    assert_eq!(
+        stored.file_scope.records()[0].state,
+        crate::file_scope::DirectoryConsentState::Pending
+    );
+    assert!(stored.permission_requests.is_empty());
+    assert!(stored.unclosed_tool_call_ids().is_empty());
+    let conversation = serde_json::to_string(&stored.conversation).unwrap();
+    assert!(!conversation.contains("not-for-model"));
+    assert!(!conversation.contains("owner-only-path"));
+}
+
 #[tokio::test]
 async fn permission_planning_records_request_without_dispatch_or_grant() {
     let sess = MemSession::default();
@@ -3380,7 +3485,7 @@ async fn projection_metrics_capture_long_session_growth_but_bounded_model_input(
         long.loaded_capability_detail_utf8_bytes
     );
     assert_eq!(short.loaded_capability_count, long.loaded_capability_count);
-    assert_eq!(long.capability_registry_count, 49);
+    assert_eq!(long.capability_registry_count, 51);
     assert!(long.conversation_message_count > short.conversation_message_count);
     assert!(long.session_snapshot_json_bytes > short.session_snapshot_json_bytes);
     println!(
@@ -6788,7 +6893,7 @@ fn requested_artifact_projection_restores_only_verbatim_named_typed_artifact() {
     ));
 
     let projection =
-        requested_artifact_registry_projection(&[artifact.clone(), user.clone()], "projection")
+        requested_artifact_registry_projection(&[artifact.clone(), user.clone()], "projection", 0)
             .unwrap()
             .unwrap();
     assert!(projection.text.contains("artifact-token-1"));
@@ -6809,12 +6914,103 @@ fn requested_artifact_projection_restores_only_verbatim_named_typed_artifact() {
             .contains(&"artifact-envelope".to_string())
     );
 
-    user.text = "Prepare an unrelated manual-only draft".into();
+    let mut expired = artifact.clone();
+    expired
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(60_001);
     assert!(
-        requested_artifact_registry_projection(&[artifact, user], "projection-2")
+        requested_artifact_registry_projection(&[expired.clone(), user.clone()], "expired", 1)
             .unwrap()
             .is_none()
     );
+    assert!(
+        requested_artifact_registry_projection(&[expired, user.clone()], "still-live", 0)
+            .unwrap()
+            .is_some()
+    );
+    let mut spoofed = artifact.clone();
+    spoofed.role = ChatRole::User;
+    assert!(
+        requested_artifact_registry_projection(&[spoofed, user.clone()], "user-json", 0)
+            .unwrap()
+            .is_none()
+    );
+    user.text = "Prepare an unrelated manual-only draft".into();
+    assert!(
+        requested_artifact_registry_projection(&[artifact, user], "projection-2", 0)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn requested_file_operation_projection_requires_current_verified_device_evidence() {
+    let owner = crate::model_message_labels::model_bound_user_message(
+        "owner".into(),
+        "Finish notes.txt".into(),
+        desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "model".into(),
+            connection_revision: 1,
+            model_id: "test".into(),
+            profile_revision: 1,
+        },
+    )
+    .unwrap();
+    let proposal = ChatMessage::assistant_tool_calls(
+        "proposal",
+        "",
+        vec![crate::chat::ToolCallRef {
+            id: "delete-call".into(),
+            name: "delete_text_file".into(),
+            arguments_json: "{}".into(),
+        }],
+    );
+    let text = serde_json::json!({"work_id":"1","action_request_id":"action","execution_generation":"generation","result":"verified","facts":[],
+        "output":{"kind":"text_file_mutation","value":{"operation":"delete","original":{"token":"file","snapshot_id":"snapshot","object_kind":"file","expires_at":"2099-01-01T00:00:00Z"},
+        "original_file_name":"notes.txt","original_size_bytes":3,"original_sha256":"a".repeat(64),"recovery_path":"/private/tmp/recovery","verified":true,"updated_file":null}}}).to_string();
+    let mut receipt = ChatMessage::tool_result("receipt", "delete-call", text.clone());
+    receipt.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+        owner.data_envelope.as_ref(),
+        "delete-call",
+        &text,
+        "delete_text_file",
+    )
+    .unwrap();
+    receipt
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .provenance
+        .source_provider_id = crate::device_assistant::TEXT_FILE_PROVIDER_ID.into();
+    let project = |receipt: ChatMessage| {
+        requested_artifact_registry_projection(
+            &[proposal.clone(), receipt, owner.clone()],
+            "projection",
+            1000,
+        )
+        .unwrap()
+    };
+    let result = project(receipt.clone()).unwrap();
+    assert!(result.text.contains("completed_text_file_operations"));
+    assert!(result.text.contains("delete-call"));
+    assert!(result.text.contains("\"result\":\"verified\""));
+    assert!(!result.text.contains("/private/tmp/recovery"));
+    let mut forged = receipt.clone();
+    forged.role = ChatRole::User;
+    assert!(project(forged).is_none());
+    let mut changed = receipt.clone();
+    changed.text.push(' ');
+    assert!(project(changed).is_none());
+    receipt
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(61_000);
+    assert!(project(receipt).is_none());
 }
 
 #[test]

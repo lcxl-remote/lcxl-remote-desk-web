@@ -23,6 +23,60 @@ pub struct ReadCallPreflight {
 }
 
 impl ReadCallPreflight {
+    pub fn build_file_result(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        binding: &ObjectReadBinding<'_>,
+        session: &crate::session::PersistedAgentSession,
+    ) -> Result<Self, AgentError> {
+        binding.original.validate()?;
+        let capability = registry
+            .capability_for_tool(&call.name)
+            .ok_or_else(unavailable)?;
+        let provider = registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .ok_or_else(unavailable)?;
+        if !matches!(
+            surface,
+            ProductSurface::OssPersonalOwner | ProductSurface::ManagerPersonalOwner
+        ) || !capability.wire.surfaces.contains(&surface)
+            || call.id.is_empty()
+            || call.id.len() > 512
+            || !binding.original.tool_names.contains(&call.name)
+            || call.arguments_json.len() > capability.wire.limits.max_input_bytes as usize
+        {
+            return Err(unavailable());
+        }
+        let result = super::text_file::ResultFileRead::build(
+            session,
+            call,
+            binding.destination,
+            binding.now_unix_ms,
+        )?;
+        let canonical = canonical_tool_permission_input_json(
+            &call.name,
+            serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,
+        )
+        .map_err(|_| unavailable())?;
+        let compiled = canonical_compiled_scope(
+            &capability.wire.authorization_hint.resources,
+            capability.wire.effect,
+        )
+        .ok_or_else(unavailable)?;
+        Ok(Self {
+            capability: capability.clone(),
+            provider_id: provider.wire.provider_id.clone(),
+            surface,
+            canonical_input_digest_sha256: format!("{:x}", Sha256::digest(canonical.as_bytes())),
+            root_count: 1,
+            resource_scope: result.resource_scope(),
+            operation_scope: compiled.operations,
+            export_destinations: vec![],
+            risk_tier: classify_provider_call(capability, call)?,
+            valid_until_unix_ms: result.valid_until_unix_ms,
+        })
+    }
     /// The original binding is loaded from the accepted input. The runtime must
     /// independently verify current owner, input, lease, model and readiness.
     pub fn build(

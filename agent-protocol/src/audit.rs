@@ -750,6 +750,9 @@ pub fn summarize_output(output: &OperationOutput) -> String {
                 o.directory_entries.len(),
                 if o.truncated { " (truncated)" } else { "" }
             ),
+            R::FileDirectoryResolve(_) => {
+                "file.directory.resolve: one directory, no contents".into()
+            }
             R::FileContentRead(o) => format!("file.content.read: {} UTF-8 bytes", o.byte_len,),
             R::SpreadsheetFileInspect(o) => format!(
                 "spreadsheet.file.inspect: {} workbooks{}",

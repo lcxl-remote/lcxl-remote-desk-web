@@ -7,6 +7,55 @@ use serde_json::json;
 
 const NOW: u64 = 1_800_000_000_000;
 
+#[test]
+fn directory_selector_is_in_exact_input_but_never_becomes_a_native_path() {
+    let with_selector = call(
+        "create_text_artifact_in_selected_directory",
+        json!({"directory_request_id":"approved-directory", "file_name":"notes.txt", "content_utf8":"hello"}),
+    );
+    let action = artifact_action_from_call(&with_selector).unwrap();
+    let encoded = serde_json::to_string(&action).unwrap();
+    assert!(!encoded.contains("approved-directory"));
+    let preflight = ArtifactCallPreflight::build(
+        &device_assistant_provider_registry(),
+        ProductSurface::OssPersonalOwner,
+        &with_selector,
+        &[directory()],
+        NOW,
+    )
+    .unwrap();
+    assert!(
+        preflight
+            .canonical_input_json()
+            .contains("approved-directory")
+    );
+    let bad = call(
+        "create_text_artifact_in_selected_directory",
+        json!({"directory_request_id":{"token":"forged"}, "file_name":"notes.txt", "content_utf8":"hello"}),
+    );
+    assert!(artifact_action_from_call(&bad).is_err());
+}
+
+#[test]
+fn text_creation_accepts_empty_files_but_enforces_the_utf8_byte_budget() {
+    for content in [String::new(), "文".repeat(21_845)] {
+        assert!(
+            artifact_action_from_call(&call(
+                "create_text_artifact_in_selected_directory",
+                json!({"file_name":"notes.txt", "content_utf8":content})
+            ))
+            .is_ok()
+        );
+    }
+    assert!(
+        artifact_action_from_call(&call(
+            "create_text_artifact_in_selected_directory",
+            json!({"file_name":"notes.txt", "content_utf8":"文".repeat(21_846)})
+        ))
+        .is_err()
+    );
+}
+
 fn directory() -> ObjectRef {
     ObjectRef {
         token: "opaque-directory".into(),
@@ -147,7 +196,7 @@ fn artifact_preflight_rejects_ambiguous_directory_and_unbounded_inputs() {
     for invalid in [
         call(
             "create_text_artifact_in_selected_directory",
-            json!({"file_name":"notes.txt","content_utf8":""}),
+            json!({"file_name":"notes.txt","content_utf8":null}),
         ),
         call(
             "create_text_artifact_in_selected_directory",

@@ -157,6 +157,20 @@ pub enum DeviceAssistantObjectContextOperation {
         object_ref: ObjectRef,
         display_summary: String,
     },
+    DecideDirectory {
+        directory_request_id: String,
+        expected_revision: u64,
+        approve: bool,
+    },
+    SelectDirectory {
+        path: String,
+        purpose: String,
+        expected_revision: u64,
+    },
+    RevokeDirectory {
+        directory_request_id: String,
+        expected_revision: u64,
+    },
 }
 
 impl DeviceAssistantObjectContextUpdate {
@@ -170,6 +184,30 @@ impl DeviceAssistantObjectContextUpdate {
             "invalid Device Assistant object context client request id",
         )?;
         match &self.operation {
+            DeviceAssistantObjectContextOperation::SelectDirectory { path, purpose, .. } => {
+                if path.trim().is_empty()
+                    || path.len() > 4096
+                    || path.chars().any(char::is_control)
+                    || purpose.trim().is_empty()
+                    || purpose.len() > 2048
+                    || purpose.chars().any(char::is_control)
+                {
+                    Err("invalid Device Assistant directory selection")
+                } else {
+                    Ok(())
+                }
+            }
+            DeviceAssistantObjectContextOperation::DecideDirectory {
+                directory_request_id,
+                ..
+            }
+            | DeviceAssistantObjectContextOperation::RevokeDirectory {
+                directory_request_id,
+                ..
+            } => validate_wire_id(
+                directory_request_id,
+                "invalid Device Assistant directory request id",
+            ),
             DeviceAssistantObjectContextOperation::AttachFile {
                 object_ref,
                 display_summary,

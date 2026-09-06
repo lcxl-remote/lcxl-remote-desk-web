@@ -345,6 +345,22 @@ pub struct BatchDocumentSourceProjection {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
+pub struct FileDirectoryResolveParams {
+    /// One candidate directory; resolution does not enumerate or read children.
+    pub path: String,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct FileDirectoryResolveOutput {
+    pub canonical_path: String,
+    pub directory: ObjectRef,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
 pub struct FileMetadataInspectParams {
     pub roots: Vec<ObjectRef>,
     pub max_entries: u32,
@@ -384,6 +400,8 @@ pub struct FileMetadataProjection {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct DirectoryEntryProjection {
+    /// Device-issued regular-file identity; never authorizes reading or writing.
+    pub object_ref: Option<ObjectRef>,
     pub parent_snapshot_id: String,
     pub display_name: String,
     pub is_directory: bool,
@@ -398,7 +416,8 @@ pub struct FileMetadataInspectOutput {
     pub snapshot_id: String,
     pub entries: Vec<FileMetadataProjection>,
     /// Metadata-only, immediate children of explicitly selected directories.
-    /// These rows intentionally carry no reusable object reference.
+    /// A regular-file reference may be supplied by supported native adapters;
+    /// subsequent content reads and mutations require their own exact grants.
     #[serde(default)]
     pub directory_entries: Vec<DirectoryEntryProjection>,
     pub truncated: bool,
@@ -910,14 +929,153 @@ pub enum FilePatchAction {
         file_name: String,
         draft: crate::communication::LocalDraftDocument,
     },
-    ApplyTextPatch {
-        patch: String,
+    UpdateText {
+        directory: ObjectRef,
+        expected_sha256: String,
+        change: TextFileChange,
     },
     Copy {
         destination_parent: ObjectRef,
         new_name: String,
     },
+    DeleteText {
+        directory: ObjectRef,
+        expected_sha256: String,
+    },
+}
+
+/// Closed UTF-8 edits. No shell, executable patch format, or implicit overwrite.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TextFileChange {
+    ReplaceAll { content_utf8: String },
+    ReplaceOnce { before: String, after: String },
+}
+
+/// Device facts, not authorization. A recovery location must be retained even
+/// when a mutation crossed the commit point but could not be verified.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TextFileMutationOperation {
+    Update,
     Delete,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct TextFileMutationOutput {
+    pub operation: TextFileMutationOperation,
+    pub original: ObjectRef,
+    pub original_file_name: String,
+    pub original_size_bytes: u64,
+    pub original_sha256: String,
+    pub recovery_path: String,
+    pub verified: bool,
+    pub updated_file: Option<CreatedFileArtifactOutput>,
+}
+
+impl TextFileMutationOutput {
+    pub fn validate_for(
+        &self,
+        target: &ObjectRef,
+        action: &FilePatchAction,
+    ) -> Result<(), ComputerUseValidationError> {
+        let invalid = || {
+            ComputerUseValidationError::InvalidContextReference(
+                "text mutation receipt does not match approved action",
+            )
+        };
+        action.validate_text_mutation()?;
+        let (expected_sha256, update) = match action {
+            FilePatchAction::UpdateText {
+                expected_sha256, ..
+            } => (expected_sha256, true),
+            FilePatchAction::DeleteText {
+                expected_sha256, ..
+            } => (expected_sha256, false),
+            _ => return Err(invalid()),
+        };
+        if &self.original != target
+            || self.operation
+                != if update {
+                    TextFileMutationOperation::Update
+                } else {
+                    TextFileMutationOperation::Delete
+                }
+            || target.object_kind != ObjectKind::File
+            || self.original_file_name.is_empty()
+            || self.original_file_name.len() > 512
+            || self
+                .original_file_name
+                .chars()
+                .any(|c| c.is_control() || c == '/' || c == '\\')
+            || self.original_size_bytes > 65_536
+            || &self.original_sha256 != expected_sha256
+            || self.recovery_path.is_empty()
+            || self.recovery_path.len() > 4096
+            || self.recovery_path.chars().any(char::is_control)
+            || (self.updated_file.is_some() != (self.verified && update))
+        {
+            return Err(invalid());
+        }
+        if let Some(file) = &self.updated_file {
+            file.validate()?;
+            if file.media_type != "text/plain;charset=utf-8"
+                || file.size_bytes > 65_536
+                || file.file == *target
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FilePatchAction {
+    pub fn validate_text_mutation(&self) -> Result<(), ComputerUseValidationError> {
+        let (directory, digest, change) = match self {
+            Self::UpdateText {
+                directory,
+                expected_sha256,
+                change,
+            } => (directory, expected_sha256, Some(change)),
+            Self::DeleteText {
+                directory,
+                expected_sha256,
+            } => (directory, expected_sha256, None),
+            _ => return Ok(()),
+        };
+        let invalid =
+            || ComputerUseValidationError::InvalidContextReference("invalid exact text mutation");
+        if directory.object_kind != ObjectKind::Directory
+            || directory.token.is_empty()
+            || directory.snapshot_id.is_empty()
+            || directory.expires_at.is_empty()
+            || digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(invalid());
+        }
+        match change {
+            Some(TextFileChange::ReplaceAll { content_utf8 }) if content_utf8.len() > 65_536 => {
+                Err(invalid())
+            }
+            Some(TextFileChange::ReplaceOnce { before, after })
+                if before.is_empty() || before.len() > 65_536 || after.len() > 65_536 =>
+            {
+                Err(invalid())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
@@ -968,8 +1126,8 @@ impl ComputerActionKind {
             Self::File(FilePatchAction::CreateLocalCommunicationDraftArtifact { .. }) => {
                 Capability::CommunicationLocalDraftCreateConfirmed
             }
-            Self::File(FilePatchAction::Delete) => Capability::FileDeleteConfirmed,
-            Self::File(FilePatchAction::ApplyTextPatch { .. }) => Capability::FilePatchConfirmed,
+            Self::File(FilePatchAction::DeleteText { .. }) => Capability::FileDeleteConfirmed,
+            Self::File(FilePatchAction::UpdateText { .. }) => Capability::FilePatchConfirmed,
             Self::Browser(request) => match &request.action {
                 BrowserAction::TakeSnapshot { .. } | BrowserAction::WaitFor { .. } => {
                     Capability::BrowserPageObserve
@@ -1278,9 +1436,9 @@ fn validate_actions(
                 )
                 | (
                     ComputerActionKind::File(
-                        FilePatchAction::ApplyTextPatch { .. }
+                        FilePatchAction::UpdateText { .. }
                             | FilePatchAction::Copy { .. }
-                            | FilePatchAction::Delete
+                            | FilePatchAction::DeleteText { .. }
                     ),
                     ObjectKind::File
                 )
@@ -1311,6 +1469,9 @@ fn validate_actions(
             })?;
         }
         validate_live_document_action(&step.action)?;
+        if let ComputerActionKind::File(action) = &step.action {
+            action.validate_text_mutation()?;
+        }
         if let Some(output) = batch_document_output(&step.action) {
             if output.destination_parent.object_kind != ObjectKind::Directory {
                 return Err(ComputerUseValidationError::InvalidContextReference(
@@ -1639,6 +1800,7 @@ pub enum ComputerActionOutput {
     CommunicationHandoff(CommunicationDraftHandoff),
     BatchDocumentArtifact(BatchDocumentArtifact),
     FileArtifact(CreatedFileArtifactOutput),
+    TextFileMutation(TextFileMutationOutput),
 }
 
 #[derive(
@@ -1688,7 +1850,7 @@ impl CreatedFileArtifactOutput {
                 .any(|character| character.is_control() || "\\/:*?\"<>|".contains(character))
             || self.media_type.is_empty()
             || self.media_type.len() > 256
-            || self.size_bytes == 0
+            || (self.size_bytes == 0 && self.media_type != "text/plain;charset=utf-8")
             || self.digest_sha256.len() != 64
             || !self
                 .digest_sha256
@@ -2092,6 +2254,57 @@ mod tests {
     }
 
     #[test]
+    fn text_mutations_require_closed_bounded_inputs_and_complete_version() {
+        let mut directory = object("directory-token");
+        directory.object_kind = ObjectKind::Directory;
+        let update = |change| FilePatchAction::UpdateText {
+            directory: directory.clone(),
+            expected_sha256: "a".repeat(64),
+            change,
+        };
+        assert!(
+            update(TextFileChange::ReplaceAll {
+                content_utf8: String::new()
+            })
+            .validate_text_mutation()
+            .is_ok()
+        );
+        assert!(
+            update(TextFileChange::ReplaceAll {
+                content_utf8: "界".repeat(21_846)
+            })
+            .validate_text_mutation()
+            .is_err()
+        );
+        assert!(
+            update(TextFileChange::ReplaceOnce {
+                before: String::new(),
+                after: "new".into()
+            })
+            .validate_text_mutation()
+            .is_err()
+        );
+        let deletion = FilePatchAction::DeleteText {
+            directory,
+            expected_sha256: "partial-read".into(),
+        };
+        assert!(deletion.validate_text_mutation().is_err());
+        assert!(
+            serde_json::from_str::<TextFileChange>(
+                r#"{"kind":"replace_all","content_utf8":"new","script":"rm"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<FilePatchAction>(
+                r#"{"kind":"apply_text_patch","params":{"patch":"arbitrary program"}}"#
+            )
+            .is_err()
+        );
+        assert!(serde_json::from_str::<FilePatchAction>(r#"{"kind":"delete"}"#).is_err());
+    }
+
+    #[test]
     fn explicit_executor_acceptance_never_reinterprets_legacy_start_disposition() {
         let legacy = serde_json::json!({
             "work_id":"work", "action_request_id":"action", "execution_generation":"generation",
@@ -2140,6 +2353,35 @@ mod tests {
     }
 
     #[test]
+    fn empty_text_artifact_keeps_a_verified_reusable_reference() {
+        let digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let mut output = CreatedFileArtifactOutput {
+            file: ObjectRef {
+                token: "empty-file".into(),
+                snapshot_id: "worker:1".into(),
+                object_kind: ObjectKind::File,
+                expires_at: "2030-01-01T00:00:00Z".into(),
+            },
+            file_name: "empty.txt".into(),
+            media_type: "text/plain;charset=utf-8".into(),
+            size_bytes: 0,
+            digest_sha256: digest.into(),
+            content: ContentRef::Artifact {
+                artifact_id: "empty-file".into(),
+                sha256: digest.into(),
+                size_bytes: 0,
+                media_type: "text/plain;charset=utf-8".into(),
+            },
+        };
+        output.validate().unwrap();
+        output.digest_sha256 = "a".repeat(64);
+        assert!(output.validate().is_err());
+        output.digest_sha256 = digest.into();
+        output.media_type = "application/zip".into();
+        assert!(output.validate().is_err());
+    }
+
+    #[test]
     fn validation_rejects_mixed_snapshots_but_allows_multiple_steps_per_target() {
         let mut same_target = plan();
         same_target.actions.push(step("token-1"));
@@ -2164,7 +2406,16 @@ mod tests {
             Capability::DesktopUiActionConfirmed
         );
         assert_eq!(
-            ComputerActionKind::File(FilePatchAction::Delete).required_capability(),
+            ComputerActionKind::File(FilePatchAction::DeleteText {
+                directory: ObjectRef {
+                    object_kind: ObjectKind::Directory,
+                    token: "directory".into(),
+                    snapshot_id: "snapshot".into(),
+                    expires_at: "expiry".into()
+                },
+                expected_sha256: "a".repeat(64),
+            })
+            .required_capability(),
             Capability::FileDeleteConfirmed
         );
     }

@@ -90,14 +90,12 @@ fn preview_id(value: &str) -> bool {
 /// resolves it against the original Web result and freezes that envelope in
 /// [`crate::action_result::ActionResultOrigin`] before dispatch.
 pub fn artifact_action_from_call(call: &ToolCall) -> Result<FilePatchAction, AgentError> {
+    let call = without_directory_selector(call)?;
     match call.name.as_str() {
         "create_text_artifact_in_selected_directory" => {
             let args: TextArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-            if !safe_leaf(&args.file_name, None)
-                || args.content_utf8.is_empty()
-                || args.content_utf8.len() > 65_536
-            {
+            if !safe_leaf(&args.file_name, None) || args.content_utf8.len() > 65_536 {
                 return Err(unavailable());
             }
             Ok(FilePatchAction::CreateTextArtifact {
@@ -194,6 +192,26 @@ pub fn artifact_action_from_call(call: &ToolCall) -> Result<FilePatchAction, Age
         }
         _ => Err(unavailable()),
     }
+}
+
+/// The selector participates in canonical grant input but is not a worker path
+/// or file action argument. Its authority is resolved by the session store.
+pub fn without_directory_selector(call: &ToolCall) -> Result<ToolCall, AgentError> {
+    let mut args: serde_json::Value =
+        serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+    let args = args.as_object_mut().ok_or_else(unavailable)?;
+    if let Some(selector) = args.remove("directory_request_id") {
+        if selector
+            .as_str()
+            .is_none_or(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+        {
+            return Err(unavailable());
+        }
+    }
+    Ok(ToolCall {
+        arguments_json: serde_json::to_string(args).map_err(|_| unavailable())?,
+        ..call.clone()
+    })
 }
 
 pub struct ArtifactCallPreflight {

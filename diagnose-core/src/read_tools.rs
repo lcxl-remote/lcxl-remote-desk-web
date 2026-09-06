@@ -252,7 +252,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_selected_file_metadata",
             Capability::FileMetadataRead,
-            "Read bounded metadata for only the files or directories explicitly selected by the owner. For a selected directory this lists immediate children without recursion, following reparse points, or reading contents. Optional extension, byte-size, and RFC3339 modification-time filters are applied by the edge only to immediate file children.",
+            "Read bounded metadata for owner-selected objects, or supply directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_selected_text_file using this result call id and exact entry_name; content reading still requires a separate grant.",
             json!({
                 "type": "object",
                 "properties": {
@@ -263,6 +263,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                         "uniqueItems": true,
                         "default": []
                     },
+                    "directory_request_id": {"type":"string", "minLength":1, "maxLength":256},
                     "min_file_bytes": {"type": ["integer", "null"], "minimum": 0},
                     "max_file_bytes": {"type": ["integer", "null"], "minimum": 0},
                     "modified_after": {"type": ["string", "null"], "format": "date-time"},
@@ -274,10 +275,10 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_selected_text_file",
             Capability::FileContentRead,
-            "Read one explicitly owner-selected regular file as bounded UTF-8 text. The model cannot provide a path or object reference.",
+            "Read one owner-selected regular file, or a verified text file result from this conversation, as bounded UTF-8. For a previous creation/read/update result, provide file_result_call_id and request separate read permission with these exact arguments. A creation grant never authorizes reading or model egress. Never provide a path or object reference.",
             json!({
                 "type": "object",
-                "properties": {},
+                "properties": {"file_result_call_id": {"type":"string", "minLength":1, "maxLength":256}, "entry_name": {"type":"string", "minLength":1, "maxLength":512, "description":"Exact immediate regular-file name from the identified metadata result; omit for a creation/read/update result."}},
                 "additionalProperties": false
             }),
         ),
@@ -437,6 +438,8 @@ struct NoToolArgs {}
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelectedFileMetadataToolArgs {
+    #[serde(default)]
+    directory_request_id: Option<String>,
     #[serde(default)]
     file_extensions: Vec<String>,
     #[serde(default)]
@@ -628,6 +631,11 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
         }
         "inspect_selected_file_metadata" => {
             let args = parse_params::<SelectedFileMetadataToolArgs>(&call.arguments_json)?;
+            if args.directory_request_id.as_ref().is_some_and(|id| {
+                id.is_empty() || id.len() > 256 || id.chars().any(char::is_control)
+            }) {
+                return Err(bad_arguments("invalid conversation directory selector"));
+            }
             ContextKind::FileMetadataInspect(FileMetadataInspectParams {
                 // The central orchestrator replaces this empty placeholder with
                 // the exact edge-issued refs selected by the owner. The model
@@ -644,7 +652,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             })
         }
         "read_selected_text_file" => {
-            let _ = parse_params::<NoToolArgs>(&call.arguments_json)?;
+            crate::provider_preflight::text_file::read_result_id(call)?;
             ContextKind::FileContentRead(FileContentReadParams {
                 // Replaced centrally with the exact owner-attached file ref.
                 file: ObjectRef {

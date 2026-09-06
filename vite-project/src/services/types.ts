@@ -2004,6 +2004,45 @@ export type EvidenceSummaryDto = {
     truncated: boolean;
 };
 
+export type DirectoryConsentDto = {
+    /**
+     * @type string
+    */
+    canonicalPath: string;
+    /**
+     * @type string
+    */
+    purpose: string;
+    /**
+     * @type string
+    */
+    referenceExpiresAt: string;
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @type string
+    */
+    source: string;
+    /**
+     * @type string
+    */
+    state: string;
+};
+
+export type FileScopeDto = {
+    /**
+     * @type array
+    */
+    directories: DirectoryConsentDto[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
 export type SnapshotMessagePageDto = {
     /**
      * @type boolean
@@ -2120,6 +2159,86 @@ export type ExternalSendConfirmationDto = {
     subject?: string | null;
 };
 
+export const textFileChangeKindEnum = {
+    replace_all: "replace_all"
+} as const;
+
+export type TextFileChangeKindEnumKey = (typeof textFileChangeKindEnum)[keyof typeof textFileChangeKindEnum];
+
+export const textFileChangeKindEnum2 = {
+    replace_once: "replace_once"
+} as const;
+
+export type TextFileChangeKindEnum2Key = (typeof textFileChangeKindEnum2)[keyof typeof textFileChangeKindEnum2];
+
+/**
+ * @description Closed UTF-8 edits. No shell, executable patch format, or implicit overwrite.
+*/
+export type TextFileChange = ({
+    /**
+     * @type string
+    */
+    content_utf8: string;
+    /**
+     * @type string
+    */
+    kind: TextFileChangeKindEnumKey;
+} | {
+    /**
+     * @type string
+    */
+    after: string;
+    /**
+     * @type string
+    */
+    before: string;
+    /**
+     * @type string
+    */
+    kind: TextFileChangeKindEnum2Key;
+});
+
+export const textFileMutationOperationEnum = {
+    update: "update",
+    delete: "delete"
+} as const;
+
+export type TextFileMutationOperationEnumKey = (typeof textFileMutationOperationEnum)[keyof typeof textFileMutationOperationEnum];
+
+/**
+ * @description Device facts, not authorization. A recovery location must be retained even\nwhen a mutation crossed the commit point but could not be verified.
+*/
+export type TextFileMutationOperation = TextFileMutationOperationEnumKey;
+
+export type TextFileConfirmationDto = {
+    change?: (null | TextFileChange);
+    /**
+     * @type string
+    */
+    expectedSha256: string;
+    /**
+     * @type string
+    */
+    fileName: string;
+    /**
+     * @type string
+    */
+    fileResultCallId: string;
+    /**
+     * @type boolean
+    */
+    oneShot: boolean;
+    /**
+     * @description Device facts, not authorization. A recovery location must be retained even\nwhen a mutation crossed the commit point but could not be verified.
+     * @type string
+    */
+    operation: TextFileMutationOperation;
+    /**
+     * @type boolean
+    */
+    recoverable: boolean;
+};
+
 export type GrantRequestItemDto = {
     commandConfirmation?: (null | CommandConfirmationDto);
     /**
@@ -2161,6 +2280,7 @@ export type GrantRequestItemDto = {
      * @type integer, int32
     */
     suggestedTtlSeconds: number;
+    textFileConfirmation?: (null | TextFileConfirmationDto);
     /**
      * @type string
     */
@@ -2275,6 +2395,11 @@ export type UnknownOutcomeDto = {
      * @type string
     */
     executionId: string;
+    /**
+     * @description Device evidence for a recoverable text mutation, never authority to retry.
+     * @type string,null
+    */
+    fileRecoveryReceipt?: string | null;
     /**
      * @type integer, int64
     */
@@ -2429,6 +2554,10 @@ export type DeviceAssistantSessionSnapshotDto = {
      * @type object
     */
     evidenceSummary: EvidenceSummaryDto;
+    /**
+     * @type object
+    */
+    fileScope: FileScopeDto;
     /**
      * @minLength 0
      * @type integer, int64
@@ -4915,6 +5044,10 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
          * @type object
         */
         evidenceSummary: EvidenceSummaryDto;
+        /**
+         * @type object
+        */
+        fileScope: FileScopeDto;
         /**
          * @minLength 0
          * @type integer, int64

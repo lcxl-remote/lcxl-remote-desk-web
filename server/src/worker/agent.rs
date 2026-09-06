@@ -504,6 +504,28 @@ async fn dispatch_read_context(
                 ReadContextOutput::FileMetadataInspect(output),
             ))
         }
+        ContextKind::FileDirectoryResolve(params) => {
+            let Some(settings) = settings else {
+                return Err(unsupported(
+                    "directory resolution requires a session context",
+                ));
+            };
+            if !settings.read().await.computer_use.enabled {
+                return Err(AgentError {
+                    kind: AgentErrorKind::PermissionDenied,
+                    message: "Computer Use is disabled on this device".into(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                });
+            }
+            let output =
+                run_blocking(move || file_reference_store::resolve_directory(&params.path))
+                    .await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::FileDirectoryResolve(output),
+            ))
+        }
         ContextKind::TerminalOutputInspect(params) => {
             let output = run_blocking(move || terminal_reference_store::inspect(&params)).await??;
             Ok(OperationOutput::ReadContext(

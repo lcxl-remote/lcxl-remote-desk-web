@@ -574,6 +574,14 @@ pub struct ExecContext {
 /// approval + real execution via [`confirm_and_exec`](ToolSeam::confirm_and_exec).
 #[async_trait(?Send)]
 pub trait ToolSeam {
+    /// Resolve directory identity without enumerating it. Used only by the
+    /// internal proposal tool; no file read or mutation grant is created.
+    async fn resolve_directory_candidate(
+        &self,
+        _path: &str,
+    ) -> Result<desk_agent_protocol::computer_use::FileDirectoryResolveOutput, AgentError> {
+        Err(crate::directory_tools::unavailable())
+    }
     /// Run a read-only tool call and return its redacted result. The loop has
     /// already validated that the call names an exposed read tool.
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError>;
@@ -743,6 +751,16 @@ pub enum ClaimError {
 /// in DB with optimistic-concurrency CAS and is the authority across instances.
 #[async_trait(?Send)]
 pub trait SessionSeam {
+    /// Persist a model proposal under the exact held session version/lease and
+    /// advance only this transaction's state, never adopt another writer's state.
+    async fn propose_directory(
+        &self,
+        _session: &mut PersistedAgentSession,
+        _proposal: crate::file_scope::DirectoryProposal,
+        _now_unix_ms: u64,
+    ) -> Result<(), AgentError> {
+        Err(crate::directory_tools::unavailable())
+    }
     /// Atomically load-or-create the session for `conversation_id` and claim a
     /// turn (settled → `Running`), recomputing scope at the turn boundary,
     /// resetting the turn-level counters, and rotating the lease token. An

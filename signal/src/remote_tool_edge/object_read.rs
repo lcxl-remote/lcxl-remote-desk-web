@@ -42,6 +42,9 @@ impl SignalDeviceAssistantTools {
     }
 
     pub(super) fn uses_selected_objects(&self, call: &ToolCall) -> Result<bool, AgentError> {
+        if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
+            return Ok(false);
+        }
         let input = self.original_input.get().ok_or_else(denied)?;
         Ok(
             desk_diagnose_core::input_read_context::object_read::uses_selected_objects(

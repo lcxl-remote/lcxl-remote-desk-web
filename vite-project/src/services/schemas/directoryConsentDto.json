@@ -1,0 +1,1 @@
+{"type":"object","required":["requestId","canonicalPath","purpose","state","source","referenceExpiresAt"],"properties":{"canonicalPath":{"type":"string"},"purpose":{"type":"string"},"referenceExpiresAt":{"type":"string"},"requestId":{"type":"string"},"source":{"type":"string"},"state":{"type":"string"}},"x-readme-ref-name":"DirectoryConsentDto"}

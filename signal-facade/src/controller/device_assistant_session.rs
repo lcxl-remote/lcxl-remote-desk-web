@@ -85,6 +85,9 @@ pub struct UnknownOutcomeDto {
     pub action_request_id: String,
     pub execution_id: String,
     pub work_kind: String,
+    /// Device evidence for a recoverable text mutation, never authority to retry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_recovery_receipt: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -434,6 +437,7 @@ fn stale_reason_name(reason: AttachmentStaleReason) -> &'static str {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAssistantSessionSnapshotDto {
+    pub file_scope: FileScopeDto,
     /// Persisted owner-visible failure for the current terminal turn.
     pub terminal_error: Option<desk_agent_protocol::AgentError>,
     pub context_usage: Option<ContextUsageDto>,
@@ -477,6 +481,55 @@ pub struct DeviceAssistantSessionSnapshotDto {
     pub context_notices: Vec<ContextNoticeDto>,
     /// Durable selection metadata only; no UI tree, cells, files or screenshots.
     pub context_attachments: Vec<ContextAttachmentDto>,
+}
+
+#[derive(Debug, Default, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FileScopeDto {
+    pub revision: u64,
+    pub directories: Vec<DirectoryConsentDto>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryConsentDto {
+    pub request_id: String,
+    pub canonical_path: String,
+    pub purpose: String,
+    pub state: String,
+    pub source: String,
+    pub reference_expires_at: String,
+}
+
+impl From<desk_diagnose_core::file_scope::SessionFileScope> for FileScopeDto {
+    fn from(scope: desk_diagnose_core::file_scope::SessionFileScope) -> Self {
+        use desk_diagnose_core::file_scope::{DirectoryConsentSource, DirectoryConsentState};
+        Self {
+            revision: scope.revision(),
+            directories: scope
+                .records()
+                .iter()
+                .map(|record| DirectoryConsentDto {
+                    request_id: record.proposal.request_id.clone(),
+                    canonical_path: record.proposal.canonical_path.clone(),
+                    purpose: record.proposal.purpose.clone(),
+                    state: match record.state {
+                        DirectoryConsentState::Pending => "pending",
+                        DirectoryConsentState::Approved => "approved",
+                        DirectoryConsentState::Rejected => "rejected",
+                        DirectoryConsentState::Revoked => "revoked",
+                    }
+                    .into(),
+                    source: match record.proposal.source {
+                        DirectoryConsentSource::ModelProposal => "model_proposal",
+                        DirectoryConsentSource::OwnerSelection => "owner_selection",
+                    }
+                    .into(),
+                    reference_expires_at: record.proposal.directory.expires_at.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -871,6 +924,39 @@ pub struct GrantRequestItemDto {
     pub reason: String,
     pub external_send_confirmation: Option<ExternalSendConfirmationDto>,
     pub command_confirmation: Option<CommandConfirmationDto>,
+    pub text_file_confirmation: Option<TextFileConfirmationDto>,
+}
+
+mod text_file_confirmation;
+pub use text_file_confirmation::TextFileConfirmationDto;
+
+impl PermissionRequestDto {
+    pub fn with_file_evidence(
+        request: desk_diagnose_core::dynamic_run::PermissionRequest,
+        messages: &[desk_diagnose_core::chat::ChatMessage],
+    ) -> Self {
+        let reviews = request
+            .items
+            .iter()
+            .map(|item| {
+                if item.provider_id != desk_diagnose_core::device_assistant::TEXT_FILE_PROVIDER_ID
+                    || item.validate().is_err()
+                {
+                    return None;
+                }
+                text_file_confirmation::project(
+                    &item.tool_name,
+                    item.canonical_input_json.as_deref(),
+                    messages,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut dto = Self::from(request);
+        for (item, review) in dto.items.iter_mut().zip(reviews) {
+            item.text_file_confirmation = review;
+        }
+        dto
+    }
 }
 
 /// Owner-visible projection of the exact persisted command plan.
@@ -1047,6 +1133,7 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                         reason: item.reason,
                         external_send_confirmation,
                         command_confirmation,
+                        text_file_confirmation: None,
                     }
                 })
                 .collect(),

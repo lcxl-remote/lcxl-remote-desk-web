@@ -34,9 +34,10 @@ pub use semantic_raw_input::{RawInputCallPreflight, raw_input_from_call};
 mod semantic_iwork;
 pub use semantic_iwork::IworkCallPreflight;
 mod artifact;
+pub mod text_file;
 pub use artifact::{
     ArtifactCallPreflight, DOCX_ARTIFACT_MEDIA_TYPE, TEXT_ARTIFACT_MEDIA_TYPE,
-    XLSX_ARTIFACT_MEDIA_TYPE, artifact_action_from_call,
+    XLSX_ARTIFACT_MEDIA_TYPE, artifact_action_from_call, without_directory_selector,
 };
 mod communication;
 pub use communication::OutlookCallPreflight;
@@ -216,6 +217,9 @@ pub fn classify_provider_call(
     capability: &CapabilityDescriptor,
     call: &ToolCall,
 ) -> Result<CapabilityRiskTier, AgentError> {
+    if text_file::TextMutationPreflight::supports(&call.name) {
+        return Ok(CapabilityRiskTier::R3);
+    }
     let process_command_line_requested = capability
         .wire
         .data_policy

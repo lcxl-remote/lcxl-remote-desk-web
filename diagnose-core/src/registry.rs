@@ -42,6 +42,8 @@ pub enum ToolEffect {
     /// Loads a bounded, re-authorized page of older user-visible messages from
     /// this same conversation. It grants no device or execution authority.
     ConversationHistory,
+    /// Resolves one candidate directory and stores pending owner consent only.
+    DirectoryPlanning,
 }
 
 /// A tool registered with the agent loop: its model-facing spec, the capability
@@ -71,7 +73,8 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
         | ToolEffect::RunProjection
         | ToolEffect::PermissionPlanning
         | ToolEffect::CapabilityDiscovery
-        | ToolEffect::ConversationHistory => true,
+        | ToolEffect::ConversationHistory
+        | ToolEffect::DirectoryPlanning => true,
         ToolEffect::Mutating => matches!(
             mode,
             ExecutionMode::ConfirmEachAction
@@ -108,6 +111,9 @@ pub fn is_exposed(
     }
     if tool.effect == ToolEffect::ConversationHistory {
         return true;
+    }
+    if tool.effect == ToolEffect::DirectoryPlanning {
+        return origin.allows_new_mutation();
     }
     if !scope.granted.contains(&tool.required_capability) {
         return false;

@@ -36,27 +36,15 @@ pub struct ComputerUseSettings {
     pub generic_semantic_ui: bool,
     /// Allow raw input fallback after its independent beta gate.
     pub raw_input_fallback: bool,
-    /// Allow a future File Workspace Provider to create new artifacts. This is
-    /// a trusted host-local ceiling only: signaling and grants may narrow it,
-    /// but must never persist or widen it. No write Provider is registered by
-    /// merely enabling this field.
-    pub file_artifact_create: bool,
     /// Exact executable image paths whose application/window objects may be
     /// surfaced. Empty means no additional static application restriction.
     pub allowed_application_paths: Vec<String>,
-    /// Exact local roots available to future file adapters. Empty means no root.
-    pub allowed_file_roots: Vec<String>,
 }
 
 impl ComputerUseSettings {
     #[must_use]
     pub const fn observation_enabled(&self) -> bool {
         self.enabled && self.observe
-    }
-
-    #[must_use]
-    pub fn file_artifact_create_enabled(&self) -> bool {
-        self.enabled && self.file_artifact_create && !self.allowed_file_roots.is_empty()
     }
 
     #[must_use]
@@ -98,6 +86,16 @@ pub struct ComputerUseApplicationPolicy {
 pub struct ComputerUseApplicationPolicyUpdate {
     pub expected_revision: u64,
     pub allowed_application_paths: Vec<String>,
+}
+
+impl ComputerUseSettings {
+    pub fn local_policy(&self) -> desk_ipc_protocol::message::ComputerUseLocalPolicyPayload {
+        desk_ipc_protocol::message::ComputerUseLocalPolicyPayload {
+            operation_id: String::new(),
+            revision: self.revision,
+            allowed_application_paths: self.allowed_application_paths.clone(),
+        }
+    }
 }
 
 impl ComputerUseSettings {
@@ -177,10 +175,7 @@ mod tests {
         assert!(!settings.communication_handoff);
         assert!(!settings.generic_semantic_ui);
         assert!(!settings.raw_input_fallback);
-        assert!(!settings.file_artifact_create);
-        assert!(!settings.file_artifact_create_enabled());
         assert!(settings.allowed_application_paths.is_empty());
-        assert!(settings.allowed_file_roots.is_empty());
         assert_eq!(
             serde_json::from_str::<ComputerUseSettings>("{}").unwrap(),
             settings
@@ -263,20 +258,5 @@ mod tests {
             })
             .unwrap();
         assert!(settings.application_allowed(&path));
-    }
-
-    #[test]
-    fn artifact_create_requires_master_local_gate_and_an_approved_root() {
-        let mut settings = ComputerUseSettings {
-            file_artifact_create: true,
-            ..Default::default()
-        };
-        assert!(!settings.file_artifact_create_enabled());
-        settings.enabled = true;
-        assert!(!settings.file_artifact_create_enabled());
-        settings.allowed_file_roots.push(r"C:\approved".into());
-        assert!(settings.file_artifact_create_enabled());
-        settings.file_artifact_create = false;
-        assert!(!settings.file_artifact_create_enabled());
     }
 }

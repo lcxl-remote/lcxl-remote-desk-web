@@ -111,6 +111,8 @@ fn capability_enables_mutation(capability: &desk_agent_protocol::Capability) -> 
         desk_agent_protocol::Capability::DesktopUiActionConfirmed
             | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
             | desk_agent_protocol::Capability::FileArtifactCreateConfirmed
+            | desk_agent_protocol::Capability::FilePatchConfirmed
+            | desk_agent_protocol::Capability::FileDeleteConfirmed
             | desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed
             | desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed
             | desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed
@@ -539,6 +541,19 @@ pub(crate) async fn apply_object_context_update(
             Some(update.conversation_id.clone()),
             AgentSessionSurface::DeviceAssistant,
         );
+    if let Some(directory_update) = desk_diagnose_core::file_scope::transaction::from_owner_decision(
+        update,
+        desk_diagnose_core::file_scope::FileScopeSubject {
+            actor_id: params.actor_id.clone(),
+            device_id: params.device_id.clone(),
+            conversation_id: params.run_id.clone(),
+        },
+    ) {
+        return Ok(store
+            .update_file_scope(&directory_update, chrono::Utc::now())
+            .await?
+            .changed);
+    }
     if let Some(changed) = store.replay_object_context(&params).await? {
         return Ok(changed);
     }
@@ -564,12 +579,32 @@ pub async fn update_object_context(
     db: DatabaseConnection,
     request_id: String,
     browser_connection_id: String,
-    _target_connection_id: String,
+    target_connection_id: String,
     actor_user_id: i32,
     target_device_id: String,
     update: DeviceAssistantObjectContextUpdate,
 ) {
-    let result = apply_object_context_update(db, actor_user_id, target_device_id, &update).await;
+    let result = if let desk_agent_protocol::device_assistant::DeviceAssistantObjectContextOperation::SelectDirectory { path, .. } = &update.operation {
+        async {
+            use desk_diagnose_core::file_scope::{FileScopeSubject, transaction};
+            update.validate().map_err(transport_error)?;
+            let subject = FileScopeSubject {
+                actor_id: actor_user_id.to_string(), device_id: target_device_id.clone(),
+                conversation_id: derive_conversation_key(&actor_user_id.to_string(), &target_device_id, Some(&update.conversation_id), ""),
+            };
+            let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+                .with_client_metadata(Some(update.conversation_id.clone()), AgentSessionSurface::DeviceAssistant);
+            if let Some(receipt) = store.read_file_scope_receipt(&subject, &update.conversation_id, &update.client_request_id).await? {
+                transaction::match_owner_selection(&receipt, &update, &subject).map_err(|_| transport_error("Directory selection conflicts with its original request"))?;
+                return Ok(receipt.changed);
+            }
+            let resolved = crate::remote_tool_edge::directory::resolve_candidate(&connections, &target_connection_id, &subject.actor_id, &subject.device_id, path).await?;
+            let selection = transaction::owner_selection(&update, subject, resolved).map_err(|_| transport_error("Invalid directory selection"))?;
+            Ok(store.update_file_scope(&selection, chrono::Utc::now()).await?.changed)
+        }.await
+    } else {
+        apply_object_context_update(db, actor_user_id, target_device_id, &update).await
+    };
 
     let ack = DeviceAssistantObjectContextUpdated {
         conversation_id: update.conversation_id,
@@ -1146,6 +1181,20 @@ async fn run_turn_inner(
             .map(str::to_string),
     );
     selected_source_tools.insert("execute_confirmed_command".into());
+    // Candidates only. Directory consent and every read/write grant remain
+    // independently checked against the authoritative conversation.
+    selected_source_tools.extend(
+        [
+            "create_text_artifact_in_selected_directory",
+            "create_local_communication_draft",
+            "read_selected_text_file",
+            "inspect_selected_file_metadata",
+            "update_text_file",
+            "delete_text_file",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
     selected_source_tools
         .insert(desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL.into());
     selected_source_tools
@@ -1190,6 +1239,10 @@ async fn run_turn_inner(
     );
     selected_tool_capability_ids
         .push(desk_diagnose_core::device_assistant::SYSTEM_COMMAND_CAPABILITY_ID.into());
+    selected_tool_capability_ids.extend([
+        desk_diagnose_core::device_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID.into(),
+        desk_diagnose_core::device_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID.into(),
+    ]);
     if !selected_file_roots.is_empty() {
         selected_tool_capability_ids
             .push(desk_diagnose_core::device_assistant::FILE_METADATA_CAPABILITY_ID.into());
@@ -1350,6 +1403,7 @@ async fn run_turn_inner(
     // authority. It is always callable so the model can keep the user-visible
     // task assessment current even when no device context was selected.
     registry.extend(desk_diagnose_core::task_status_tools::task_status_tool_registry());
+    registry.extend(desk_diagnose_core::directory_tools::registry());
     // Permission planning is also internal run control. It can only create a
     // normalized pending request; it never widens this callable registry.
     registry.extend(desk_diagnose_core::permission_tools::permission_planning_tool_registry());
@@ -1415,6 +1469,14 @@ async fn run_turn_inner(
     // classifier's read-only vs mutating effect after it reproduces the sealed
     // safe-template plan; neither one exposes the legacy free-form exec tool.
     granted.push(desk_agent_protocol::Capability::ShellExecReadonly);
+    // Capability candidates, not directory consent or a tool execution grant.
+    // Issuance and dispatch independently resolve the current conversation root.
+    granted.push(desk_agent_protocol::Capability::FileArtifactCreateConfirmed);
+    granted.push(desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed);
+    granted.push(desk_agent_protocol::Capability::FileMetadataRead);
+    granted.push(desk_agent_protocol::Capability::FileContentRead);
+    granted.push(desk_agent_protocol::Capability::FilePatchConfirmed);
+    granted.push(desk_agent_protocol::Capability::FileDeleteConfirmed);
     granted.push(desk_agent_protocol::Capability::ShellExecConfirmed);
     if !selected_file_roots.is_empty() {
         granted.push(desk_agent_protocol::Capability::FileMetadataRead);

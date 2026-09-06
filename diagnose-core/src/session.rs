@@ -481,6 +481,9 @@ pub struct PersistedAgentSession {
     /// terminal, Office, UI and screen bytes never enter session JSON.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_attachments: Vec<ContextAttachment>,
+    /// Owner directory consent is durable security state, never model context.
+    #[serde(default)]
+    pub file_scope: crate::file_scope::SessionFileScope,
     /// Bounded metadata for screen pixels shown to the model/owner. Live preview
     /// bytes are stripped from every storage projection.
     #[serde(default)]
@@ -879,6 +882,7 @@ impl PersistedAgentSession {
             context_usage_basis: None,
             context_notices: Vec::new(),
             context_attachments: Vec::new(),
+            file_scope: crate::file_scope::SessionFileScope::default(),
             visual_evidence: Vec::new(),
             pending_visual_verification: None,
             actor_id: actor_id.into(),

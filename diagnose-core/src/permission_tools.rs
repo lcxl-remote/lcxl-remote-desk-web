@@ -524,7 +524,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 ]},
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
-                                "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, desktop semantic UI actions, and live/batch iWork semantic mutations. For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
+                                "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, desktop semantic UI actions, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
@@ -619,6 +619,10 @@ pub fn build_permission_request(
                 | CapabilityEffect::InputFallback
                 | CapabilityEffect::ExecuteCommand
         );
+        let inherently_r3 = inherently_r3
+            || crate::provider_preflight::text_file::TextMutationPreflight::supports(
+                &item.tool_name,
+            );
         if inherently_r3 && canonical_input_json.is_none() {
             return Err(invalid("inherently R3 tools require exact_input"));
         }

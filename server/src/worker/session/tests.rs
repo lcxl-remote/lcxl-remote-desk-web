@@ -791,7 +791,7 @@ mod inbound_reader {
     #[tokio::test]
     async fn application_policy_waits_for_readers_without_blocking_shutdown_and_rejects_stale_updates()
      {
-        use desk_ipc_protocol::message::ComputerUseApplicationPolicyPayload;
+        use desk_ipc_protocol::message::ComputerUseLocalPolicyPayload;
         let (daemon_tx, worker_rx) = inprocess::make_event::<ServiceToWorker>();
         let mirror = Arc::new(PolicyMirror::new(PolicySnapshot::new(
             SecuritySettings::default(),
@@ -801,7 +801,7 @@ mod inbound_reader {
         let (main_tx, mut main_rx) = mpsc::unbounded_channel();
         let reader = spawn_inbound_reader(worker_rx, mirror, settings.clone(), ack_tx, main_tx);
         let lease = settings.read().await;
-        let update = ComputerUseApplicationPolicyPayload {
+        let update = ComputerUseLocalPolicyPayload {
             operation_id: "applications-1".into(),
             revision: 2,
             allowed_application_paths: vec![
@@ -809,7 +809,7 @@ mod inbound_reader {
             ],
         };
         daemon_tx
-            .send(ServiceToWorker::UpdateComputerUseApplicationPolicy(
+            .send(ServiceToWorker::UpdateComputerUseLocalPolicy(
                 update.clone(),
             ))
             .await
@@ -824,11 +824,11 @@ mod inbound_reader {
         assert!(ack_rx.try_recv().is_err());
         drop(lease);
         assert!(
-            matches!(tokio::time::timeout(Duration::from_secs(1), ack_rx.recv()).await.unwrap(), Some(WorkerToService::ComputerUseApplicationPolicyApplied(applied)) if applied == update)
+            matches!(tokio::time::timeout(Duration::from_secs(1), ack_rx.recv()).await.unwrap(), Some(WorkerToService::ComputerUseLocalPolicyApplied(applied)) if applied == update)
         );
         daemon_tx
-            .send(ServiceToWorker::UpdateComputerUseApplicationPolicy(
-                ComputerUseApplicationPolicyPayload {
+            .send(ServiceToWorker::UpdateComputerUseLocalPolicy(
+                ComputerUseLocalPolicyPayload {
                     operation_id: "stale".into(),
                     revision: 1,
                     allowed_application_paths: vec![],
@@ -837,7 +837,7 @@ mod inbound_reader {
             .await
             .unwrap();
         assert!(
-            matches!(tokio::time::timeout(Duration::from_secs(1), ack_rx.recv()).await.unwrap(), Some(WorkerToService::ComputerUseApplicationPolicyApplied(applied)) if applied.revision == 2 && applied.allowed_application_paths == update.allowed_application_paths)
+            matches!(tokio::time::timeout(Duration::from_secs(1), ack_rx.recv()).await.unwrap(), Some(WorkerToService::ComputerUseLocalPolicyApplied(applied)) if applied.revision == 2 && applied.allowed_application_paths == update.allowed_application_paths)
         );
         drop(daemon_tx);
         reader.await.unwrap();

@@ -412,20 +412,6 @@ impl ModelSeam for SignalModelSeam {
         )
         .map_err(|e| transport_error(format!("model request failed: {e}")))?;
 
-        // A TLS-capable client: `awc::Client::default()` has no TLS connector and
-        // fails instantly on `https://` gateways. Pin the `ring` provider (the
-        // rustls default `aws_lc_rs` fast-fails the process on Windows).
-        let mut root_store = rustls::RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().certs {
-            let _ = root_store.add(cert);
-        }
-        let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("ring provider supports the default TLS protocol versions")
-        .with_root_certificates(std::sync::Arc::new(root_store))
-        .with_no_client_auth();
         // Guard the outbound dial with the transport resolver: every resolved IP is
         // validated just before connecting (authoritative anti-rebinding check),
         // and a plaintext dial to a public endpoint is refused when enforcement is
@@ -439,14 +425,26 @@ impl ModelSeam for SignalModelSeam {
             },
         ))
         .service();
-        let client = awc::Client::builder()
-            .connector(
-                awc::Connector::new()
-                    .connector(tcp)
-                    .timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-                    .rustls_0_23(std::sync::Arc::new(tls)),
-            )
-            .finish();
+        let mut connector = awc::Connector::new()
+            .connector(tcp)
+            .timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS));
+        // Native trust-store access can block for seconds on macOS. Plain HTTP
+        // gateways need no certificates; keep the guarded resolver for both.
+        if base_url_scheme_is_tls(&self.base_url) {
+            let mut root_store = rustls::RootCertStore::empty();
+            for cert in rustls_native_certs::load_native_certs().certs {
+                let _ = root_store.add(cert);
+            }
+            let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports the default TLS protocol versions")
+            .with_root_certificates(std::sync::Arc::new(root_store))
+            .with_no_client_auth();
+            connector = connector.rustls_0_23(std::sync::Arc::new(tls));
+        }
+        let client = awc::Client::builder().connector(connector).finish();
 
         log::info!(
             "[model-dial] starting {:?} model turn with {} advertised tool(s)",
@@ -641,7 +639,7 @@ fn openai_message_to_json(m: &ChatMessage) -> Value {
         return json!({
             "role": "tool",
             "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
-            "content": m.text,
+            "content": desk_diagnose_core::chat::frame_file_tool_result(m),
         });
     }
     // A mid-conversation system event renders as an in-place `system` message. The
@@ -962,7 +960,7 @@ fn anthropic_message_to_json(m: &ChatMessage) -> Value {
         let mut content = vec![json!({
             "type": "tool_result",
             "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-            "content": m.text,
+            "content": desk_diagnose_core::chat::frame_file_tool_result(m),
         })];
         if let Some((media_type, data)) = m.image_data_url.as_deref().and_then(split_data_url) {
             content.push(json!({

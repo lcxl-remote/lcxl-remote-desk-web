@@ -162,7 +162,13 @@ impl ContentRef {
             } => {
                 validate_id("artifact_id", artifact_id)?;
                 validate_sha256(sha256)?;
-                validate_size(*size_bytes)?;
+                // A verified empty file is still an immutable artifact. Its
+                // zero length must agree with the known SHA-256 of empty bytes.
+                if *size_bytes != 0
+                    || sha256 != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                {
+                    validate_size(*size_bytes)?;
+                }
                 validate_id("media_type", media_type)?;
             }
         }

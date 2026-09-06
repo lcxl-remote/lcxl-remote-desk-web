@@ -338,11 +338,11 @@ pub struct WorkerManager {
     >,
     /// Publications awaiting the worker's confirmation, keyed by operation id.
     policy_acks: Arc<StdMutex<HashMap<String, oneshot::Sender<SecurityPolicyAppliedPayload>>>>,
-    application_policy_acks: Arc<
+    local_policy_acks: Arc<
         StdMutex<
             HashMap<
                 String,
-                oneshot::Sender<desk_ipc_protocol::message::ComputerUseApplicationPolicyPayload>,
+                oneshot::Sender<desk_ipc_protocol::message::ComputerUseLocalPolicyPayload>,
             >,
         >,
     >,
@@ -655,7 +655,7 @@ impl WorkerManager {
             )),
             remote_access_acks: Arc::new(StdMutex::new(HashMap::new())),
             policy_acks: Arc::new(StdMutex::new(HashMap::new())),
-            application_policy_acks: Arc::new(StdMutex::new(HashMap::new())),
+            local_policy_acks: Arc::new(StdMutex::new(HashMap::new())),
         };
         (mgr, rx)
     }
@@ -3082,28 +3082,27 @@ impl WorkerManager {
     /// A successful return means every live worker acknowledged this exact
     /// policy. On failure retire workers so they cannot accept new work under
     /// an obsolete restriction; replacement workers read the durable Init.
-    pub async fn publish_application_policy(
+    pub async fn publish_local_policy(
         &self,
-        policy: crate::model::settings::ComputerUseApplicationPolicy,
+        policy: desk_ipc_protocol::message::ComputerUseLocalPolicyPayload,
         timeout: Duration,
     ) -> Result<(), String> {
-        use desk_ipc_protocol::message::ComputerUseApplicationPolicyPayload;
+        use desk_ipc_protocol::message::ComputerUseLocalPolicyPayload;
         let destinations = self.worker_destinations().await;
         let mut failed = false;
         for (_, _, ipc_tx) in destinations {
             let operation_id = uuid::Uuid::new_v4().to_string();
-            let payload = ComputerUseApplicationPolicyPayload {
+            let payload = ComputerUseLocalPolicyPayload {
                 operation_id: operation_id.clone(),
-                revision: policy.revision,
-                allowed_application_paths: policy.allowed_application_paths.clone(),
+                ..policy.clone()
             };
             let (tx, rx) = oneshot::channel();
-            self.application_policy_acks
+            self.local_policy_acks
                 .lock()
                 .unwrap()
                 .insert(operation_id.clone(), tx);
             let sent = ipc_tx
-                .send(ServiceToWorker::UpdateComputerUseApplicationPolicy(
+                .send(ServiceToWorker::UpdateComputerUseLocalPolicy(
                     payload.clone(),
                 ))
                 .is_ok();
@@ -3112,25 +3111,22 @@ impl WorkerManager {
             } else {
                 false
             };
-            self.application_policy_acks
-                .lock()
-                .unwrap()
-                .remove(&operation_id);
+            self.local_policy_acks.lock().unwrap().remove(&operation_id);
             failed |= !acknowledged;
         }
         if failed {
             self.shutdown_all().await;
-            return Err("Application policy was saved, but a worker did not acknowledge it. Workers were retired; restart the host before retrying.".into());
+            return Err("Local Computer Use policy was saved, but a worker did not acknowledge it. Workers were retired; restart the host before retrying.".into());
         }
         Ok(())
     }
 
-    pub fn note_application_policy_applied(
+    pub fn note_local_policy_applied(
         &self,
-        payload: desk_ipc_protocol::message::ComputerUseApplicationPolicyPayload,
+        payload: desk_ipc_protocol::message::ComputerUseLocalPolicyPayload,
     ) {
         if let Some(waiter) = self
-            .application_policy_acks
+            .local_policy_acks
             .lock()
             .unwrap()
             .remove(&payload.operation_id)

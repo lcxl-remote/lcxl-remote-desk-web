@@ -1,5 +1,8 @@
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 import { AssistantContextMeter } from './assistant-context-meter';
+import { AssistantComposerTools } from './assistant-composer-tools';
+import { AssistantFileScope } from './assistant-file-scope';
+import { AssistantConnectionIcon } from './assistant-connection-icon';
 import { AssistantCommandResult } from './assistant-command-result';
 import { AssistantContextNotices, noticeMessageId } from './assistant-context-notices';
 import { AssistantPermissionDisclosure } from './assistant-permission-disclosure';
@@ -7,10 +10,11 @@ import { AssistantPermissionRecords } from './assistant-permission-records';
 import { AssistantHistory } from './assistant-history';
 import { capabilityDescriptionKey } from './assistant-capability-copy';
 import { CommandConfirmationCard, validCommandReview } from './device-assistant-command';
+import { TextFileConfirmationCard, validTextFileReview, fileApprovalBlocked } from './device-assistant-file-confirmation';
 import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, ArrowLeft, Check, Copy, Eye, LoaderCircle, Monitor, Puzzle, RefreshCw, Send, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Check, Copy, Eye, LoaderCircle, Monitor, Puzzle, RefreshCw, Send, ShieldCheck, X } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -230,6 +234,15 @@ function DeviceAssistantWorkspace({
     const [pairingCopied, setPairingCopied] = useState(false);
     const [question, setQuestion] = useState('');
     const [panel, setPanel] = useState<AssistantPanelId | null>(null);
+    const [permissionHistorySession, setPermissionHistorySession] = useState<string | null>(null);
+    const [directorySession, setDirectorySession] = useState<string | null>(null);
+    const permissionHistoryKey = `${deskId}:${chat.conversationId}`;
+    const pendingDirectoryKey = chat.fileScope.directories.filter(directory => directory.state === 'pending')
+        .map(directory => directory.requestId).join(':');
+    useEffect(() => {
+        if (pendingDirectoryKey) setDirectorySession(permissionHistoryKey);
+    }, [pendingDirectoryKey, permissionHistoryKey]);
+    useEffect(() => { setPermissionHistorySession(null); }, [permissionHistoryKey]);
     const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
     const [permissionSelections, setPermissionSelections] = useState<Record<string, string[]>>({});
     const [permissionEdits, setPermissionEdits] = useState<
@@ -692,14 +705,6 @@ function DeviceAssistantWorkspace({
             </div>
 </>,
             }} />
-            <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="min-w-0 text-sm text-muted-foreground">
-                    <span>{chat.sessionTarget?.display_name ?? t('pages.deviceAssistant.title')}</span>
-                </div>
-                <Button type="button" variant="outline" size="sm" onClick={() => setPanel('details')}>
-                    {t('pages.deviceAssistant.workspace.details')}
-                </Button>
-            </div>
             <SessionTargetDialog
                 targets={chat.sessionTargets}
                 onSelect={(targetId) => chat.selectSessionTarget(targetId)}
@@ -755,8 +760,8 @@ function DeviceAssistantWorkspace({
                     <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
                             <CardTitle className="flex items-center gap-2 text-base">
-                                <Sparkles className="h-4 w-4" />
-                                {t('pages.deviceAssistant.chatTitle')}
+                                <AssistantConnectionIcon connected={isConnected} enabled={assistantEnabled} />
+                                <span title={chat.sessionTarget?.display_name}>{t('pages.deviceAssistant.chatTitle')}</span>
                             </CardTitle>
                             <CardDescription>
                                 {t('pages.deviceAssistant.providerBoundary', {
@@ -780,10 +785,6 @@ function DeviceAssistantWorkspace({
                                 {t('pages.deviceAssistant.newConversation')}
                             </Button>
                         </div>
-                    </div>
-                    <div role="status" data-testid="assistant-signal-status" className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <span className={`h-2 w-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-amber-500'}`} />
-                        {t(isConnected ? 'pages.deviceAssistant.signalConnected' : 'pages.deviceAssistant.signalConnecting')}
                     </div>
                 </CardHeader>
                 <CardContent className="space-y-4 px-0">
@@ -845,6 +846,7 @@ function DeviceAssistantWorkspace({
                             <p className="break-all text-xs text-muted-foreground">
                                 {chat.unresolvedOutcome.workKind} · work {chat.unresolvedOutcome.workId} · {chat.unresolvedOutcome.executionId}
                             </p>
+                            {chat.unresolvedOutcome.fileRecoveryReceipt && <AssistantCommandResult text={chat.unresolvedOutcome.fileRecoveryReceipt} />}
                             {featureProfile.unknown_outcome_disposition && (
                             <Button
                                 variant="outline"
@@ -915,7 +917,12 @@ function DeviceAssistantWorkspace({
                             ))}
                         </div>
                     )}
-                    <AssistantPermissionRecords key={`${deskId}:${chat.conversationId}`} requests={chat.permissionRequests}>
+                    <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope}
+                        open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
+                        disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory} />
+                    <AssistantPermissionRecords key={permissionHistoryKey} requests={chat.permissionRequests}
+                        open={permissionHistorySession === permissionHistoryKey}
+                        onOpenChange={(open) => setPermissionHistorySession(open ? permissionHistoryKey : null)}>
                             {(request) => (
                                 <AssistantPermissionDisclosure key={request.requestId} state={request.state} tools={request.items.map((item) => item.toolName)}>
                                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -931,7 +938,8 @@ function DeviceAssistantWorkspace({
                                             const defaultItemIds = request.items
                                                 .filter((entry) => (entry.expectedEffect !== 'send_external'
                                                     || Boolean(entry.externalSendConfirmation))
-                                                    && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation)))
+                                                    && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
+                                                    && !fileApprovalBlocked(entry))
                                                 .map((entry) => entry.itemId);
                                             const selected = permissionSelections[request.requestId]
                                                 ?? defaultItemIds;
@@ -940,7 +948,7 @@ function DeviceAssistantWorkspace({
                                             const sendConfirmation = item.externalSendConfirmation;
                                             const commandConfirmation = item.commandConfirmation;
                                             const commandBlocked = item.toolName === 'execute_confirmed_command' && !validCommandReview(commandConfirmation);
-                                            const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked;
+                                            const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || fileApprovalBlocked(item);
                                             const edit = permissionEdits[request.requestId]?.[item.itemId]
                                                 ?? {};
                                             const resourceScope = edit.resourceScope
@@ -971,6 +979,7 @@ function DeviceAssistantWorkspace({
                                                             {item.providerId} · {item.toolName} · {item.expectedEffect}
                                                         </p>
                                                         {validCommandReview(commandConfirmation) && <CommandConfirmationCard value={commandConfirmation} />}
+                                                        {validTextFileReview(item.textFileConfirmation) && <TextFileConfirmationCard value={item.textFileConfirmation} />}
                                                         {sendConfirmation && (
                                                             <div data-testid="external-send-confirmation" className="mt-3 space-y-2 rounded-md border border-red-500/50 bg-red-500/5 p-3 text-xs">
                                                                 <p className="flex items-center gap-2 font-semibold text-red-700 dark:text-red-300">
@@ -1011,7 +1020,8 @@ function DeviceAssistantWorkspace({
                                                         )}
                                                         {approvalBlocked && (
                                                             <p className="mt-2 text-xs font-medium text-red-700 dark:text-red-300">
-                                                                {t(commandBlocked ? 'pages.deviceAssistant.commandSummaryMissing' : 'pages.deviceAssistant.externalSendSummaryMissing')}
+                                                                {t(fileApprovalBlocked(item) ? 'pages.deviceAssistant.fileConfirmMissing'
+                                                                    : commandBlocked ? 'pages.deviceAssistant.commandSummaryMissing' : 'pages.deviceAssistant.externalSendSummaryMissing')}
                                                             </p>
                                                         )}
                                                         {(item.resourceScope.length > 0 || item.operationScope.length > 0) && (
@@ -1164,12 +1174,14 @@ function DeviceAssistantWorkspace({
                                                             ?? request.items
                                                                 .filter((entry) => (entry.expectedEffect !== 'send_external'
                                                                     || Boolean(entry.externalSendConfirmation))
-                                                                    && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation)))
+                                                                    && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
+                                                                    && !fileApprovalBlocked(entry))
                                                                 .map((entry) => entry.itemId);
                                                         if (!selected.includes(item.itemId)
                                                             || (item.expectedEffect === 'send_external'
                                                                 && !item.externalSendConfirmation)
-                                                            || (item.toolName === 'execute_confirmed_command' && !validCommandReview(item.commandConfirmation))) {
+                                                            || (item.toolName === 'execute_confirmed_command' && !validCommandReview(item.commandConfirmation))
+                                                            || fileApprovalBlocked(item)) {
                                                             return {
                                                                 itemId: item.itemId,
                                                                 decision: 'deny' as const,
@@ -1285,7 +1297,12 @@ function DeviceAssistantWorkspace({
                             className="min-h-16 w-full resize-y rounded-md border-0 bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                         />
                         <div className="flex items-center justify-between gap-3">
-                            <AssistantContextMeter usage={chat.contextUsage} draft={question} />
+                            <AssistantComposerTools
+                                meter={<AssistantContextMeter usage={chat.contextUsage} draft={question} />}
+                                onDetails={() => setPanel('details')}
+                                onPermissionHistory={() => setPermissionHistorySession(permissionHistoryKey)}
+                                onDirectories={() => setDirectorySession(permissionHistoryKey)}
+                            />
                             <Button type="submit" disabled={!assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
                                 <Send className="mr-2 h-4 w-4" />
                                 {t('pages.deviceAssistant.send')}

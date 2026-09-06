@@ -47,6 +47,7 @@ pub fn build_object_context_mutation(
     update.validate().map_err(|_| invalid())?;
     use DeviceAssistantObjectContextOperation::*;
     match &update.operation {
+        DecideDirectory { .. } | RevokeDirectory { .. } | SelectDirectory { .. } => Err(invalid()),
         Detach { attachment_id } => Ok(ObjectContextMutation::Detach {
             attachment_id: attachment_id.clone(),
         }),

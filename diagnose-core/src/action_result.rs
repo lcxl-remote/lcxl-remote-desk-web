@@ -153,6 +153,24 @@ impl ActionResultOrigin {
                 });
             }
         }
+        // A confirmed native text mutation produces a new device observation:
+        // its status, new file version and recovery location are not a replay
+        // of the source read's bytes. Keep the current model proposal's frozen
+        // boundary, rather than the older read's remaining observation TTL.
+        // Source identity/version/expiry and the live exact grant are still
+        // checked at dispatch; sensitivity and lineage remain conservative.
+        if crate::provider_preflight::text_file::TextMutationPreflight::supports(&call.name) {
+            retention = parent.retention;
+            if let ContentRef::EphemeralObservation {
+                expires_at_unix_ms, ..
+            } = parent.content
+            {
+                retention = retention.most_restrictive(RetentionBoundary {
+                    expires_at_unix_ms: Some(expires_at_unix_ms),
+                    delete_with_run: true,
+                });
+            }
+        }
         let origin = Self {
             command_completion: None,
             schema_version: 1,

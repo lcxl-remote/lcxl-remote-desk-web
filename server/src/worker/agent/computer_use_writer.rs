@@ -19,12 +19,20 @@ pub enum InputPreemptionSource {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriterLeaseRequest {
+    /// Set by the native dispatcher, never by the remote request.
+    pub scope: WriterLeaseScope,
     pub work_id: String,
     pub action_request_id: String,
     pub execution_generation: String,
     pub approved_actor_id: String,
     pub interactive_session_incarnation: String,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriterLeaseScope {
+    InteractiveSession,
+    FileWorker,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -256,6 +264,7 @@ mod tests {
 
     fn request(generation: &str) -> WriterLeaseRequest {
         WriterLeaseRequest {
+            scope: WriterLeaseScope::InteractiveSession,
             work_id: "work-1".into(),
             action_request_id: "action-1".into(),
             execution_generation: generation.into(),

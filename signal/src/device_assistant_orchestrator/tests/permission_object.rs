@@ -339,7 +339,7 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
         .unwrap()
         .context_attachments
         .remove(0);
-    tokio::time::timeout(
+    let initial = tokio::time::timeout(
         Duration::from_secs(10),
         run_turn_inner(
             connections.clone(),
@@ -368,8 +368,12 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
             None,
         ),
     )
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        initial.is_ok(),
+        "initial turn timed out: {:?}",
+        sessions.read_snapshot(&run_id).await.unwrap()
+    );
     let snapshot = sessions.read_snapshot(&run_id).await.unwrap().unwrap();
     assert_eq!(snapshot.permission_requests.len(), 1, "{snapshot:?}");
     let request = &snapshot.permission_requests[0];

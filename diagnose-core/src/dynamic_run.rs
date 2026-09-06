@@ -103,6 +103,7 @@ impl TaskStatusProjection {
 pub enum AgentRunEventKind {
     UserFollowup,
     ObjectContextUpdated,
+    FileScopeUpdated,
     LiveContextUpdated,
     ModelStep,
     ToolDiscovery,
@@ -124,6 +125,7 @@ impl AgentRunEventKind {
         match self {
             Self::UserFollowup => "user_followup",
             Self::ObjectContextUpdated => "object_context_updated",
+            Self::FileScopeUpdated => "file_scope_updated",
             Self::LiveContextUpdated => "live_context_updated",
             Self::ModelStep => "model_step",
             Self::ToolDiscovery => "tool_discovery",

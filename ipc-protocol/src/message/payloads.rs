@@ -748,7 +748,7 @@ pub struct UpdateSecurityPolicyPayload {
 
 /// Trusted daemon publication; never accepted from a signaling peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
-pub struct ComputerUseApplicationPolicyPayload {
+pub struct ComputerUseLocalPolicyPayload {
     pub operation_id: String,
     pub revision: u64,
     pub allowed_application_paths: Vec<String>,
