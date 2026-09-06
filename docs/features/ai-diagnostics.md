@@ -2,6 +2,8 @@
 
 ## AI Assistant conversations
 
+In the Web UI, “Command result (from device)” is collapsed by default; select its title to expand it. Standard receipts show the exit code, execution time, and stdout/stderr; terminal mode retains combined output. Empty output, truncation, and redactions are labeled. The original receipt can be expanded separately. Non-JSON or unrecognized formats are shown unchanged, without altering the saved result or AI interpretation.
+
 Before resuming an older conversation, the model view excludes expired or no-longer-authorized history. It may advance past complete message groups and show a trimming notice; the original transcript stays intact. This is not a fallback after failed compression and never extends data permissions. Invalid protected context required by the current task still fails and must be selected or read again. New terminal errors are saved with the conversation, so refreshing or reopening displays the same specific reason; a new turn clears the previous error. Errors not saved before upgrading cannot be reconstructed.
 
 System settings → Context management (`/system/context-management`) switches between checkpoint summaries and window trimming. Summaries are on by default. Changes apply on the next turn and survive restarts. Compaction makes an additional call to the current model and may incur charges; failures are explicit, without silent fallback to trimming.

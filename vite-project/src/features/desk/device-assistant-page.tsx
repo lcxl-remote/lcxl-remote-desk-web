@@ -1,5 +1,6 @@
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 import { AssistantContextMeter } from './assistant-context-meter';
+import { AssistantCommandResult } from './assistant-command-result';
 import { AssistantContextNotices, noticeMessageId } from './assistant-context-notices';
 import { AssistantPermissionDisclosure } from './assistant-permission-disclosure';
 import { AssistantPermissionRecords } from './assistant-permission-records';
@@ -812,11 +813,9 @@ function DeviceAssistantWorkspace({
                                         : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
                                 }`}
                             >
-                                {message.role === 'tool_result' && <p className="mb-1 font-medium">{t('pages.deviceAssistant.commandResultTitle')}</p>}
-                                {message.role === 'assistant'
+                                {message.role === 'tool_result' ? <AssistantCommandResult text={message.text} /> : message.role === 'assistant'
                                     ? <MarkdownContent disableLinks>{message.text}</MarkdownContent>
-                                    : <p className={message.role === 'tool_result' ? 'max-h-64 overflow-auto whitespace-pre-wrap break-words' : 'whitespace-pre-wrap'}>{message.text}</p>}
-                                {message.role === 'tool_result' && <p className="mt-2 text-xs text-muted-foreground">{t('pages.deviceAssistant.commandResultHint')}</p>}
+                                    : <p className="whitespace-pre-wrap">{message.text}</p>}
                             </div>
                             <AssistantContextNotices notices={chat.contextNotices.filter(notice => noticeMessageId(notice, chat.messages) === message.id)} />
                             </Fragment>
