@@ -275,6 +275,12 @@ pub fn configure_api_surface(
                     .service(update_device_assistant_settings)
                     .service(controller::computer_use_policy::query_computer_use_application_policy)
                     .service(
+                        controller::computer_use_policy::query_computer_use_communication_policy,
+                    )
+                    .service(
+                        controller::computer_use_policy::update_computer_use_communication_policy,
+                    )
+                    .service(
                         controller::computer_use_policy::update_computer_use_application_policy,
                     )
                     .service(query_turn_settings)
@@ -346,6 +352,8 @@ pub fn configure_api_surface(
                     .service(desk_signal::controller::web_search::get_web_search)
                     .service(desk_signal::controller::context_management::get_context_management)
                     .service(desk_signal::controller::context_management::update_context_management)
+                    .service(desk_signal::controller::schedule_budget_policy::get_schedule_budget_policy)
+                    .service(desk_signal::controller::schedule_budget_policy::update_schedule_budget_policy)
                     .service(desk_signal::controller::web_search::update_web_search)
                     .service(desk_signal::controller::web_search::test_web_search)
                     // Usage-retention windows govern both rollup tables; the row
@@ -651,6 +659,14 @@ pub async fn run_with_hub(
     if startup_mode_has_signal_db(&startup_mode) {
         actix_web::rt::spawn(
             desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
+                desk_signal::db::get_db().clone(),
+                connection_map.clone(),
+                desk_signal::device_assistant_gate::global_device_assistant_gate(),
+            )
+            .run(),
+        );
+        actix_web::rt::spawn(
+            desk_signal::schedule_executor::SignalScheduleExecutor::new(
                 desk_signal::db::get_db().clone(),
                 connection_map.clone(),
                 desk_signal::device_assistant_gate::global_device_assistant_gate(),

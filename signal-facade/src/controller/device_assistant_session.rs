@@ -22,12 +22,35 @@ pub const MAX_SNAPSHOT_MESSAGE_PAGE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct DeviceAssistantSessionQuery {
-    pub connection: String,
+    pub connection: Option<String>,
+    pub scheduled_task: Option<String>,
+    pub scheduled_run: Option<String>,
     pub conversation: Option<String>,
     pub session: Option<String>,
     /// Exclusive message cursor. Omit for the newest page.
     pub message_before: Option<String>,
     pub message_limit: Option<usize>,
+}
+
+impl DeviceAssistantSessionQuery {
+    /// Schedule selectors cannot be combined with connection/session selectors.
+    pub fn scheduled_selection(&self) -> Result<Option<(&str, &str)>, &'static str> {
+        match (&self.scheduled_task, &self.scheduled_run) {
+            (None, None) => Ok(None),
+            (Some(task), Some(run))
+                if self.connection.is_none()
+                    && self.conversation.is_none()
+                    && self.session.is_none()
+                    && !task.is_empty()
+                    && task.len() <= 256
+                    && !run.is_empty()
+                    && run.len() <= 256 =>
+            {
+                Ok(Some((task, run)))
+            }
+            _ => Err("invalid scheduled conversation selector"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -42,6 +65,10 @@ pub struct PermissionDecisionBody {
     pub connection: String,
     pub conversation: Option<String>,
     pub session: Option<String>,
+    /// Optional concurrency fence: snapshot.requestId, or the selected scheduled
+    /// run ID. Distinct from the permission request ID below. A mismatch rejects
+    /// the submission, including a replay, without issuing grants.
+    pub expected_run_request_id: Option<String>,
     pub request_id: String,
     pub items: Vec<PermissionDecisionItemBody>,
 }
@@ -523,6 +550,7 @@ impl From<desk_diagnose_core::file_scope::SessionFileScope> for FileScopeDto {
                     source: match record.proposal.source {
                         DirectoryConsentSource::ModelProposal => "model_proposal",
                         DirectoryConsentSource::OwnerSelection => "owner_selection",
+                        DirectoryConsentSource::TaskContract => "task_contract",
                     }
                     .into(),
                     reference_expires_at: record.proposal.directory.expires_at.clone(),
@@ -1199,6 +1227,7 @@ mod tests {
         };
 
         let page = BrowserPageRef {
+            account_id: None,
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
                 engine: BrowserEngineKind::ChromeExtension,
@@ -1405,5 +1434,32 @@ mod tests {
         assert_eq!(recovered.first().map(String::as_str), Some("message-0000"));
         assert_eq!(recovered.last().map(String::as_str), Some("message-0999"));
         assert!(project_snapshot_message_page(Vec::new(), None, Some(101)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod scheduled_query_tests {
+    use super::*;
+    #[test]
+    fn scheduled_selector_is_complete_and_excludes_other_selectors() {
+        let valid = serde_json::json!({"scheduled_task":"task", "scheduled_run":"run"});
+        let query: DeviceAssistantSessionQuery = serde_json::from_value(valid.clone()).unwrap();
+        assert_eq!(query.scheduled_selection().unwrap(), Some(("task", "run")));
+        for key in ["connection", "conversation", "session"] {
+            let mut mixed = valid.clone();
+            mixed[key] = serde_json::json!("");
+            let query: DeviceAssistantSessionQuery = serde_json::from_value(mixed).unwrap();
+            assert!(query.scheduled_selection().is_err());
+        }
+        for key in ["scheduled_task", "scheduled_run"] {
+            let mut partial = valid.clone();
+            partial.as_object_mut().unwrap().remove(key);
+            let query: DeviceAssistantSessionQuery = serde_json::from_value(partial).unwrap();
+            assert!(query.scheduled_selection().is_err());
+        }
+        let query: DeviceAssistantSessionQuery =
+            serde_json::from_value(serde_json::json!({"connection":"host", "conversation":"chat"}))
+                .unwrap();
+        assert_eq!(query.scheduled_selection().unwrap(), None);
     }
 }

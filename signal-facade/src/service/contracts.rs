@@ -54,7 +54,8 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::GetDeviceAssistantCapabilities
         | SignalingType::UpdateDeviceAssistantContext
         | SignalingType::UpdateDeviceAssistantObjectContext
-        | SignalingType::SelectDeviceAssistantSession => Request,
+        | SignalingType::SelectDeviceAssistantSession
+        | SignalingType::ManageScheduledTasks => Request,
 
         SignalingType::HeartbeatAcknowledged
         | SignalingType::ConnectionsFetched
@@ -90,7 +91,8 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::DeviceAssistantCapabilitiesUpdated
         | SignalingType::DeviceAssistantContextUpdated
         | SignalingType::DeviceAssistantObjectContextUpdated
-        | SignalingType::DeviceAssistantSessionSelected => Response,
+        | SignalingType::DeviceAssistantSessionSelected
+        | SignalingType::ScheduledTasksManaged => Response,
 
         SignalingType::RevokeSupportCode
         | SignalingType::RevokeAccessGrant
@@ -129,6 +131,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
 /// WebRTC standard frames return `None`.
 pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
     Some(match t {
+        SignalingType::ManageScheduledTasks => SignalingType::ScheduledTasksManaged,
         SignalingType::SendHeartbeat => SignalingType::HeartbeatAcknowledged,
         SignalingType::FetchConnections => SignalingType::ConnectionsFetched,
         SignalingType::RequestRemoteAccess => SignalingType::RemoteAccessInitialized,
@@ -180,6 +183,7 @@ pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
 pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] {
     use SignalingType::*;
     match t {
+        ManageScheduledTasks => &[ScheduledTasksManaged],
         SendHeartbeat => &[HeartbeatAcknowledged],
         FetchConnections => &[ConnectionsFetched],
         RequestRemoteAccess => &[RemoteAccessInitialized],

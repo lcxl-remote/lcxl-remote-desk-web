@@ -11,6 +11,8 @@ use desk_diagnose_core::{
 };
 use sea_orm::DatabaseTransaction;
 
+pub(crate) mod observation;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Observation {

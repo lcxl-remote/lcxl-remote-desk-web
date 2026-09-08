@@ -71,6 +71,21 @@ impl SignalAgentExecStore {
         )>,
         AgentError,
     > {
+        Self::command_result_on(&self.db, task).await
+    }
+
+    /// Use the caller's connection so receipt persistence can commit or roll back
+    /// with the original scheduled session and occurrence, without a nested transaction.
+    pub(crate) async fn command_result_on<C: sea_orm::ConnectionTrait>(
+        db: &C,
+        task: &agent_exec_task::Model,
+    ) -> Result<
+        Option<(
+            desk_diagnose_core::seam::ToolRunOutput,
+            desk_diagnose_core::action_result::ActionResultReceipt,
+        )>,
+        AgentError,
+    > {
         use crate::{
             capability_grant_store::CapabilityDispatchPayload,
             entity::agent_capability_dispatch_outbox as outbox,
@@ -78,10 +93,28 @@ impl SignalAgentExecStore {
         if task.status != STATUS_DONE {
             return Ok(None);
         }
+        let original = agent_exec_task::Entity::find_by_id(task.id)
+            .one(db)
+            .await
+            .map_err(|_| internal("original command task unavailable"))?
+            .ok_or_else(|| internal("original command task missing"))?;
+        if original.exec_request_id != task.exec_request_id
+            || original.execution_generation != task.execution_generation
+            || original.conversation_id != task.conversation_id
+            || original.tool_call_id != task.tool_call_id
+            || original.target_connection_id != task.target_connection_id
+            || original.status != task.status
+            || original.disposition_json != task.disposition_json
+            || original.result_text != task.result_text
+            || original.event_id != task.event_id
+        {
+            return Err(internal("command result differs from its durable task"));
+        }
+        let task = &original;
         for _ in 0..3 {
             let Some(row) = outbox::Entity::find()
                 .filter(outbox::Column::DispatchId.eq(&task.execution_generation))
-                .one(&self.db)
+                .one(db)
                 .await
                 .map_err(|_| internal("command origin unavailable"))?
             else {
@@ -137,7 +170,7 @@ impl SignalAgentExecStore {
                 )
                 .filter(outbox::Column::Id.eq(row.id))
                 .filter(outbox::Column::PayloadJson.eq(row.payload_json))
-                .exec(&self.db)
+                .exec(db)
                 .await
                 .map_err(|_| internal("command receipt could not be saved"))?;
             if saved.rows_affected == 1 {

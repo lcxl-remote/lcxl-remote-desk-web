@@ -1,0 +1,1 @@
+{"type":"string","enum":["email_mailbox","chat_user","chat_channel","chat_group"],"x-readme-ref-name":"RecipientKind"}

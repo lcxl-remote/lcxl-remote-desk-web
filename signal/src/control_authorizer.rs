@@ -298,6 +298,16 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
         model: &'a SignalingModel,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlFrameOutcome> + Send + 'a>> {
         Box::pin(async move {
+            if model.signaling_type == SignalingType::ManageScheduledTasks {
+                return crate::schedule_management::handle(
+                    &self.db,
+                    actor,
+                    model,
+                    self.connection_map.clone(),
+                    self.device_assistant_gate.clone(),
+                )
+                .await;
+            }
             // A copilot cancel is consumed centrally (the copilot runs on signal,
             // not the edge); best-effort no-op, never relayed.
             if model.signaling_type == SignalingType::CancelTerminalCopilot {

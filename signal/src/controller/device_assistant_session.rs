@@ -71,7 +71,9 @@ fn not_accessible() -> HttpResponse {
     tag = TAG,
     summary = "Read a Device Assistant conversation snapshot (browser view)",
     params(
-        ("connection" = String, Query, description = "Target connection id"),
+        ("connection" = Option<String>, Query, description = "Target connection id"),
+        ("scheduled_task" = Option<String>, Query, description = "Task id; requires scheduled_run and excludes other selectors"),
+        ("scheduled_run" = Option<String>, Query, description = "Public occurrence id"),
         ("conversation" = Option<String>, Query, description = "Client conversation intent"),
         ("session" = Option<String>, Query, description = "Opaque session id from history list"),
         ("message_before" = Option<String>, Query, description = "Exclusive older-message cursor"),
@@ -87,18 +89,39 @@ pub async fn get_device_assistant_session(
 ) -> Result<HttpResponse, DeskSignalError> {
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
     let store = SignalAgentSessionStore::new(crate::db::get_db().clone());
-    let Some((session_id, target_audience)) = recovery::resolve(
-        &store,
-        &connection_map,
-        &actor_id,
-        &query.connection,
-        query.session.as_deref(),
-        query.conversation.as_deref(),
-    )
-    .await?
-    else {
+    let selected = match query.scheduled_selection() {
+        Err(_) => return Ok(not_accessible()),
+        Ok(Some((task, run))) => {
+            match crate::schedule_store::ScheduleStore::new(crate::db::get_db().clone())
+                .resolve_run_session(SINGLE_ACCOUNT_USER_ID, task, run)
+                .await
+            {
+                Ok(subject) => Some(subject),
+                Err(crate::schedule_store::ScheduleStoreError::Backend(_)) => {
+                    return Err(DeskSignalError::new_custom_error(
+                        DeskErrorCode::SYSTEM_ERROR,
+                        "scheduled history unavailable",
+                    ));
+                }
+                Err(_) => return Ok(not_accessible()),
+            }
+        }
+        Ok(None) => {
+            recovery::resolve(
+                &store,
+                &connection_map,
+                &actor_id,
+                query.connection.as_deref().unwrap_or(""),
+                query.session.as_deref(),
+                query.conversation.as_deref(),
+            )
+            .await?
+        }
+    };
+    let Some((session_id, target_audience)) = selected else {
         return Ok(not_accessible());
     };
+    // The snapshot reader applies its current subject checks; selectors are not authority.
     let snapshot = store
         .read_assistant_snapshot_for_subject(&session_id, &actor_id, &target_audience)
         .await
@@ -433,12 +456,13 @@ pub(crate) async fn decide_permission_on(
     let decisions: Vec<desk_diagnose_core::dynamic_run::PermissionDecisionItem> =
         body.items.clone().into_iter().map(Into::into).collect();
     if let Some(state) = store
-        .replay_permission_decision(
+        .replay_permission_decision_with_expected_request(
             &session_id,
             &actor_id,
             &target_audience,
             &body.request_id,
             &decisions,
+            body.expected_run_request_id.as_deref(),
         )
         .await
         .map_err(|error| {
@@ -520,10 +544,12 @@ pub(crate) async fn decide_permission_on(
     })?;
     let now = now_dt.to_rfc3339();
     let decision = store
-        .decide_permission_request(
-            &session_id,
-            &actor_id,
-            &target_audience,
+        .decide_permission_request_with_expected_request(
+            crate::agent_session_store::PermissionDecisionSubject {
+                conversation_id: &session_id,
+                actor_id: &actor_id,
+                device_id: &target_audience,
+            },
             &body.request_id,
             decisions,
             PermissionGrantIssuanceContext {
@@ -535,6 +561,7 @@ pub(crate) async fn decide_permission_on(
                 implicit_fresh_object_refs: &implicit_fresh_object_refs,
             },
             &now,
+            body.expected_run_request_id.as_deref(),
         )
         .await
         .map_err(|error| {

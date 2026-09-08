@@ -201,6 +201,7 @@ fn transport_error(message: impl Into<String>) -> AgentError {
 
 /// Signal's model seam over a single resolved provider.
 pub struct SignalModelSeam {
+    cancel: tokio_util::sync::CancellationToken,
     context_db: Option<sea_orm::DatabaseConnection>,
     context_policy: tokio::sync::OnceCell<desk_diagnose_core::model_context::PinnedContextPolicy>,
     compression_call_key: std::cell::RefCell<Option<String>>,
@@ -239,6 +240,7 @@ impl SignalModelSeam {
             &model,
         );
         Ok(Self {
+            cancel: tokio_util::sync::CancellationToken::new(),
             context_db: None,
             context_policy: tokio::sync::OnceCell::new(),
             compression_call_key: std::cell::RefCell::new(None),
@@ -257,118 +259,38 @@ impl SignalModelSeam {
         })
     }
 
-    fn endpoint(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        match self.dialect {
-            Dialect::OpenAiCompatible => format!("{base}/chat/completions"),
-            Dialect::Anthropic => format!("{base}/v1/messages"),
+    /// Recheck pinned wire configuration using the caller's admission transaction.
+    /// Credentials are compared only in memory and never included in diagnostics.
+    pub(crate) async fn validate_current_on<C: sea_orm::ConnectionTrait>(
+        &self,
+        db: &C,
+    ) -> Result<(), AgentError> {
+        let config = crate::model_provider::load(db)
+            .await
+            .map_err(|_| config_error("current model configuration is unavailable"))?;
+        let current = Self::from_config(&config)?;
+        if self.connection_revision != current.connection_revision
+            || self.protocol != current.protocol
+            || self.profile != current.profile
+            || self.base_url != current.base_url
+            || self.api_key != current.api_key
+            || self.model != current.model
+            || self.capabilities != current.capabilities
+        {
+            return Err(config_error(
+                "model configuration changed; the pinned request cannot be sent",
+            ));
         }
+        Ok(())
     }
 
-    /// Inject the same central store that owns the conversation and provider.
-    pub fn with_context_db(mut self, db: sea_orm::DatabaseConnection) -> Self {
-        self.context_db = Some(db);
+    /// Use the same token as the scheduled run's paired lease heartbeat.
+    pub fn with_cancellation(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
+        self.cancel = cancel;
         self
     }
 
-    fn build_body(&self, request: &ModelRequest) -> Result<Value, AgentError> {
-        let effective = resolve_effective_output_limit(
-            request.use_case,
-            self.profile.probe_max_output_tokens,
-            self.profile.runtime_max_output_tokens,
-            request.caller_output_hard_cap,
-        )
-        .map_err(|error| config_error(error.to_string()))?;
-        match self.dialect {
-            Dialect::OpenAiCompatible => build_openai_body_profiled(
-                &self.model,
-                request,
-                self.protocol,
-                &self.profile,
-                effective,
-            ),
-            Dialect::Anthropic => build_anthropic_body_profiled(
-                &self.model,
-                request,
-                self.protocol,
-                &self.profile,
-                effective,
-            ),
-        }
-        .map_err(|error| config_error(error.to_string()))
-    }
-}
-
-fn non_empty(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-#[async_trait(?Send)]
-impl ModelSeam for SignalModelSeam {
-    async fn context_policy(
-        &self,
-        requirements: ModelRequirements,
-    ) -> Result<desk_diagnose_core::model_context::PinnedContextPolicy, AgentError> {
-        if !self.capabilities.satisfies(requirements) {
-            return Err(config_error(
-                "the selected AI model does not satisfy the request capabilities",
-            ));
-        }
-        self.context_policy
-            .get_or_try_init(|| async {
-                let db = self
-                    .context_db
-                    .as_ref()
-                    .ok_or_else(|| config_error("central context configuration is unavailable"))?;
-                let config = crate::context_management_config::read(db)
-                    .await
-                    .map_err(|_| config_error("context configuration could not be loaded"))?;
-                config
-                    .pin(
-                        self.source_context_key.clone(),
-                        self.profile.profile_revision,
-                        self.profile
-                            .max_context_bytes()
-                            .map_err(|e| config_error(e.to_string()))?,
-                    )
-                    .map_err(|e| config_error(e.to_string()))
-            })
-            .await
-            .cloned()
-    }
-
-    fn context_compression_provenance(
-        &self,
-        turn_id: &str,
-        created_at: &str,
-    ) -> Result<desk_diagnose_core::model_context::CompressorProvenanceV1, AgentError> {
-        use sha2::{Digest, Sha256};
-        let key = self
-            .compression_call_key
-            .borrow()
-            .clone()
-            .ok_or_else(|| config_error("compression call has not completed"))?;
-        let policy = self
-            .context_policy
-            .get()
-            .ok_or_else(|| config_error("context policy is not pinned"))?;
-        Ok(
-            desk_diagnose_core::model_context::CompressorProvenanceV1::for_call(
-                policy,
-                format!("{:x}", Sha256::digest(self.base_url.as_bytes())),
-                format!("{:x}", Sha256::digest(self.model.as_bytes())),
-                self.connection_revision,
-                format!("{:x}", Sha256::digest(key.as_bytes())),
-                created_at,
-                turn_id,
-            ),
-        )
-    }
-
-    async fn call(
+    async fn call_uncancelled(
         &self,
         request: ModelRequest,
         sink: &mut dyn TurnSink,
@@ -464,6 +386,9 @@ impl ModelSeam for SignalModelSeam {
                 .insert_header(("anthropic-version", ANTHROPIC_VERSION)),
         };
 
+        if let Some(db) = &self.context_db {
+            self.validate_current_on(db).await?;
+        }
         let mut response = http
             .insert_header(("Content-Type", "application/json"))
             .insert_header(("Accept", "text/event-stream"))
@@ -513,6 +438,178 @@ impl ModelSeam for SignalModelSeam {
             turn.tool_calls.len()
         );
         Ok(turn)
+    }
+
+    fn endpoint(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        match self.dialect {
+            Dialect::OpenAiCompatible => format!("{base}/chat/completions"),
+            Dialect::Anthropic => format!("{base}/v1/messages"),
+        }
+    }
+
+    /// Inject the same central store that owns the conversation and provider.
+    pub fn with_context_db(mut self, db: sea_orm::DatabaseConnection) -> Self {
+        self.context_db = Some(db);
+        self
+    }
+
+    fn build_body(&self, request: &ModelRequest) -> Result<Value, AgentError> {
+        let effective = resolve_effective_output_limit(
+            request.use_case,
+            self.profile.probe_max_output_tokens,
+            self.profile.runtime_max_output_tokens,
+            request.caller_output_hard_cap,
+        )
+        .map_err(|error| config_error(error.to_string()))?;
+        match self.dialect {
+            Dialect::OpenAiCompatible => build_openai_body_profiled(
+                &self.model,
+                request,
+                self.protocol,
+                &self.profile,
+                effective,
+            ),
+            Dialect::Anthropic => build_anthropic_body_profiled(
+                &self.model,
+                request,
+                self.protocol,
+                &self.profile,
+                effective,
+            ),
+        }
+        .map_err(|error| config_error(error.to_string()))
+    }
+
+    /// Account the exact immutable body that `call_uncancelled` will send.
+    pub(crate) fn task_request_budget(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<(String, u64), AgentError> {
+        use sha2::{Digest, Sha256};
+        if self.cancel.is_cancelled() {
+            return Err(config_error(
+                "scheduled model calls require an active request",
+            ));
+        }
+        // Compression shares MeteredModel's unique call ordinal, audited egress
+        // and occurrence budget. It must reserve the fully rendered request just
+        // like an ordinary model turn; failure leaves that reservation charged.
+        let body = self.build_body(request)?;
+        let output = self
+            .profile
+            .output_limit_field
+            .read_positive(&body)
+            .map_err(|_| config_error("invalid scheduled model output limit"))?
+            .get();
+        let units = desk_diagnose_core::schedule::model_usage::image_request_reservation(
+            &body,
+            u64::try_from(output).map_err(|_| config_error("invalid output limit"))?,
+            request
+                .messages
+                .iter()
+                .filter_map(|message| message.image_data_url.as_deref()),
+        )
+        .ok_or_else(|| config_error("scheduled model budget overflow"))?;
+        let encoded = serde_json::to_vec(&(
+            self.source_context_key.as_str(),
+            self.connection_revision,
+            self.profile.profile_revision,
+            body,
+        ))
+        .map_err(|_| config_error("invalid scheduled request"))?;
+        Ok((format!("{:x}", Sha256::digest(&encoded)), units))
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+#[async_trait(?Send)]
+impl ModelSeam for SignalModelSeam {
+    async fn context_policy(
+        &self,
+        requirements: ModelRequirements,
+    ) -> Result<desk_diagnose_core::model_context::PinnedContextPolicy, AgentError> {
+        if !self.capabilities.satisfies(requirements) {
+            return Err(config_error(
+                "the selected AI model does not satisfy the request capabilities",
+            ));
+        }
+        self.context_policy
+            .get_or_try_init(|| async {
+                let db = self
+                    .context_db
+                    .as_ref()
+                    .ok_or_else(|| config_error("central context configuration is unavailable"))?;
+                let config = crate::context_management_config::read(db)
+                    .await
+                    .map_err(|_| config_error("context configuration could not be loaded"))?;
+                config
+                    .pin(
+                        self.source_context_key.clone(),
+                        self.profile.profile_revision,
+                        self.profile
+                            .max_context_bytes()
+                            .map_err(|e| config_error(e.to_string()))?,
+                    )
+                    .map_err(|e| config_error(e.to_string()))
+            })
+            .await
+            .cloned()
+    }
+
+    fn context_compression_provenance(
+        &self,
+        turn_id: &str,
+        created_at: &str,
+    ) -> Result<desk_diagnose_core::model_context::CompressorProvenanceV1, AgentError> {
+        use sha2::{Digest, Sha256};
+        let key = self
+            .compression_call_key
+            .borrow()
+            .clone()
+            .ok_or_else(|| config_error("compression call has not completed"))?;
+        let policy = self
+            .context_policy
+            .get()
+            .ok_or_else(|| config_error("context policy is not pinned"))?;
+        Ok(
+            desk_diagnose_core::model_context::CompressorProvenanceV1::for_call(
+                policy,
+                format!("{:x}", Sha256::digest(self.base_url.as_bytes())),
+                format!("{:x}", Sha256::digest(self.model.as_bytes())),
+                self.connection_revision,
+                format!("{:x}", Sha256::digest(key.as_bytes())),
+                created_at,
+                turn_id,
+            ),
+        )
+    }
+
+    async fn call(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TurnSink,
+    ) -> Result<ModelTurn, AgentError> {
+        let cancelled = || AgentError {
+            kind: AgentErrorKind::Cancelled,
+            message: "The model request was cancelled.".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        };
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(cancelled()),
+            result = self.call_uncancelled(request, sink) => {
+                if self.cancel.is_cancelled() { Err(cancelled()) } else { result }
+            },
+        }
     }
 }
 
@@ -1664,6 +1761,131 @@ mod tests {
             Dialect::OpenAiCompatible
         );
         assert!(Dialect::from_protocol(WireProtocol::OpenAiResponses).is_err());
+    }
+
+    #[actix_web::test]
+    async fn cancellation_stops_waiting_headers_and_streaming_without_a_terminal_turn() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        struct CancellingSink(tokio_util::sync::CancellationToken);
+        impl TurnSink for CancellingSink {
+            fn on_text_delta(&mut self, _: &str) {
+                self.0.cancel();
+            }
+        }
+        for (streaming, complete_body) in [(false, false), (true, false), (true, true)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (sent, received) = tokio::sync::oneshot::channel();
+            let server = actix_web::rt::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0u8; 4096];
+                assert!(socket.read(&mut bytes).await.unwrap() > 0);
+                if streaming {
+                    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
+                    let length = if complete_body { body.len() } else { 100000 };
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}").as_bytes()).await.unwrap();
+                }
+                let _ = sent.send(());
+                std::future::pending::<()>().await;
+            });
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let config = ModelProviderConfig {
+                base_url: Some(format!("http://{address}")),
+                model: Some("test".into()),
+                api_key: Some("test-only".into()),
+                wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+                max_context_bytes: Some(131_072),
+                ..Default::default()
+            };
+            let seam = SignalModelSeam::from_config(&config)
+                .unwrap()
+                .with_cancellation(cancel.clone());
+            let mut sink = CancellingSink(cancel.clone());
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let (_, result) = tokio::join!(
+                    async {
+                        received.await.unwrap();
+                        if !streaming {
+                            cancel.cancel();
+                        }
+                    },
+                    seam.call(text_request(ResponseFormatSpec::None), &mut sink)
+                );
+                result
+            })
+            .await;
+            server.abort();
+            let error = result.unwrap().unwrap_err();
+            assert_eq!(error.kind, AgentErrorKind::Cancelled);
+            assert!(!error.retryable);
+            // A cancelled instance cannot send another request.
+            assert_eq!(
+                seam.call(text_request(ResponseFormatSpec::None), &mut sink)
+                    .await
+                    .unwrap_err()
+                    .kind,
+                AgentErrorKind::Cancelled
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn current_provider_validation_reads_uncommitted_changes_and_preserves_rollback() {
+        use crate::entity::model_provider as provider;
+        use sea_orm::{Database, EntityTrait, Set, TransactionTrait};
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let config = ModelProviderConfig {
+            base_url: Some("https://model.example/v1".into()),
+            model: Some("test".into()),
+            api_key: Some("test-only".into()),
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        };
+        crate::model_provider::save(&db, config).await.unwrap();
+        let config = crate::model_provider::load(&db).await.unwrap();
+        let seam = SignalModelSeam::from_config(&config).unwrap();
+        seam.validate_current_on(&db).await.unwrap();
+        for field in [
+            "model",
+            "secret",
+            "connection_revision",
+            "profile_revision",
+            "output_limit",
+            "capability",
+        ] {
+            let txn = db.begin().await.unwrap();
+            let mut update = provider::ActiveModel::default();
+            match field {
+                "model" => update.model = Set(Some("changed".into())),
+                "secret" => update.api_key = Set(Some("changed-secret".into())),
+                "connection_revision" => {
+                    update.connection_revision = Set(config.connection_revision + 1)
+                }
+                "profile_revision" => update.profile_revision = Set(config.profile_revision + 1),
+                "output_limit" => {
+                    update.runtime_max_output_tokens = Set(config.runtime_max_output_tokens + 1)
+                }
+                "capability" => update.supports_image_input = Set(!config.supports_image_input),
+                _ => unreachable!(),
+            }
+            provider::Entity::update_many()
+                .set(update)
+                .exec(&txn)
+                .await
+                .unwrap();
+            let error = seam.validate_current_on(&txn).await.unwrap_err();
+            assert!(!error.message.contains("changed-secret"));
+            assert!(!error.message.contains("test-only"));
+            txn.rollback().await.unwrap();
+            seam.validate_current_on(&db).await.unwrap();
+        }
+        let txn = db.begin().await.unwrap();
+        provider::Entity::delete_many().exec(&txn).await.unwrap();
+        assert!(seam.validate_current_on(&txn).await.is_err());
+        txn.rollback().await.unwrap();
+        seam.validate_current_on(&db).await.unwrap();
     }
 
     #[test]

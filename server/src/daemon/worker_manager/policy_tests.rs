@@ -9,11 +9,20 @@ use super::*;
 
 #[tokio::test]
 async fn application_policy_timeout_or_inexact_ack_retires_the_worker() {
-    for mismatch in ["timeout", "revision", "application_scope"] {
+    for mismatch in [
+        "timeout",
+        "revision",
+        "application_scope",
+        "communication_send",
+    ] {
         let (manager, _worker_rx) = test_manager();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         manager.install_active_for_test(tx).await;
         let policy = desk_ipc_protocol::message::ComputerUseLocalPolicyPayload {
+            enabled: false,
+            browser_semantic: false,
+            communication_handoff: false,
+            communication_send: false,
             operation_id: String::new(),
             revision: 1,
             allowed_application_paths: vec![],
@@ -26,6 +35,8 @@ async fn application_policy_timeout_or_inexact_ack_retires_the_worker() {
                 if mismatch != "timeout" {
                     if mismatch == "revision" {
                         payload.revision = 0;
+                    } else if mismatch == "communication_send" {
+                        payload.communication_send = !payload.communication_send;
                     } else {
                         payload
                             .allowed_application_paths

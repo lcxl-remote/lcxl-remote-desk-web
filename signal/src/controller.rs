@@ -5,6 +5,7 @@ pub mod device_assistant_session;
 pub mod device_code;
 pub mod exec_pty;
 pub mod model_provider;
+pub mod schedule_budget_policy;
 pub mod signaling;
 pub mod terminal;
 pub mod turn_usage;

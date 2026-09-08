@@ -1,3 +1,4 @@
+import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 import { AssistantContextMeter } from './assistant-context-meter';
 import { AssistantComposerTools } from './assistant-composer-tools';
@@ -5,14 +6,12 @@ import { AssistantFileScope } from './assistant-file-scope';
 import { AssistantConnectionIcon } from './assistant-connection-icon';
 import { AssistantCommandResult } from './assistant-command-result';
 import { AssistantContextNotices, noticeMessageId } from './assistant-context-notices';
-import { AssistantPermissionDisclosure } from './assistant-permission-disclosure';
+import { AssistantPermissionRequest } from './assistant-permission-request';
 import { AssistantPermissionRecords } from './assistant-permission-records';
 import { AssistantHistory } from './assistant-history';
 import { capabilityDescriptionKey } from './assistant-capability-copy';
-import { CommandConfirmationCard, validCommandReview } from './device-assistant-command';
-import { TextFileConfirmationCard, validTextFileReview, fileApprovalBlocked } from './device-assistant-file-confirmation';
 import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, ArrowLeft, Check, Copy, Eye, LoaderCircle, Monitor, Puzzle, RefreshCw, Send, ShieldCheck, X } from 'lucide-react';
 
@@ -20,7 +19,6 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { MarkdownContent } from '@/components/markdown-content';
@@ -36,7 +34,8 @@ import {
     ownerSelectableWindows,
     useDeviceAssistantObservation,
 } from './use-device-assistant-observation';
-import { useDeviceAssistantChat } from './use-device-assistant-chat';
+import { useDeviceAssistantChat, type RehearsalConversation } from './use-device-assistant-chat';
+import { DeviceAssistantRehearsalGate } from './device-assistant-rehearsal-gate';
 import { SessionTargetDialog } from './session-target-selection';
 import { useDeviceAssistantCapabilities } from './use-device-assistant-capabilities';
 import { AssistantCapabilityList } from './assistant-capability-list';
@@ -55,20 +54,6 @@ import {
 } from './device-assistant-external-send';
 
 const CURRENT_SCREEN_CAPABILITY_ID = 'screen.capture.current';
-
-function formatByteCount(value: number) {
-    if (value < 1024) return `${value} B`;
-    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-type PermissionItemEdit = {
-    resourceScope?: string[];
-    operationScope?: string[];
-    exportDestinationIndexes?: number[];
-    ttlSeconds?: number;
-    maxUses?: number;
-};
 
 function ObservationCard({
     title,
@@ -187,6 +172,7 @@ function ObservationCard({
 }
 
 function DeviceAssistantWorkspace({
+    rehearsal,
     deskId,
     stableDeviceId,
     localPairingAvailable,
@@ -194,6 +180,7 @@ function DeviceAssistantWorkspace({
     assistantEnabled,
     onBrowserTakeover,
 }: {
+    rehearsal?: RehearsalConversation;
     deskId: string;
     stableDeviceId: string;
     localPairingAvailable: boolean;
@@ -210,7 +197,9 @@ function DeviceAssistantWorkspace({
         subscribe,
         sendMessage,
     });
+    const scheduleNavigate = useNavigate();
     const chat = useDeviceAssistantChat({
+        rehearsal,
         deskId,
         connected: isConnected,
         conversationStorageScope: stableDeviceId,
@@ -232,7 +221,8 @@ function DeviceAssistantWorkspace({
     const providerConfig = provider.data?.data;
     const pairing = browserPairing.data?.data;
     const [pairingCopied, setPairingCopied] = useState(false);
-    const [question, setQuestion] = useState('');
+    const [question, setQuestion] = useState(rehearsal?.status === 'pending' ? rehearsal.prompt : '');
+    const rehearsalCanStart = !rehearsal || (rehearsal.status === 'pending' && !chat.running && !chat.messages.some(message => message.role === 'user'));
     const [panel, setPanel] = useState<AssistantPanelId | null>(null);
     const [permissionHistorySession, setPermissionHistorySession] = useState<string | null>(null);
     const [directorySession, setDirectorySession] = useState<string | null>(null);
@@ -244,10 +234,6 @@ function DeviceAssistantWorkspace({
     }, [pendingDirectoryKey, permissionHistoryKey]);
     useEffect(() => { setPermissionHistorySession(null); }, [permissionHistoryKey]);
     const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
-    const [permissionSelections, setPermissionSelections] = useState<Record<string, string[]>>({});
-    const [permissionEdits, setPermissionEdits] = useState<
-        Record<string, Record<string, PermissionItemEdit>>
-    >({});
     const started = useRef(false);
 
     useEffect(() => {
@@ -306,7 +292,7 @@ function DeviceAssistantWorkspace({
 
     const submit = (event: FormEvent) => {
         event.preventDefault();
-        if (!assistantEnabled) return;
+        if (!assistantEnabled || !rehearsalCanStart) return;
         const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
         if (chat.start(question, i18n.language, selectedContext)) {
             setQuestion('');
@@ -319,58 +305,7 @@ function DeviceAssistantWorkspace({
     const resetConversation = () => {
         chat.reset();
         setSelectedCapabilityIds([]);
-        setPermissionSelections({});
-        setPermissionEdits({});
     };
-
-    const updatePermissionItemEdit = (
-        requestId: string,
-        itemId: string,
-        update: (current: PermissionItemEdit) => PermissionItemEdit,
-    ) => {
-        setPermissionEdits((current) => ({
-            ...current,
-            [requestId]: {
-                ...current[requestId],
-                [itemId]: update(current[requestId]?.[itemId] ?? {}),
-            },
-        }));
-    };
-
-    const togglePermissionScope = (
-        requestId: string,
-        itemId: string,
-        field: 'resourceScope' | 'operationScope',
-        value: string,
-        defaults: string[],
-    ) => {
-        updatePermissionItemEdit(requestId, itemId, (current) => {
-            const values = current[field] ?? defaults;
-            return {
-                ...current,
-                [field]: values.includes(value)
-                    ? values.filter((entry) => entry !== value)
-                    : [...values, value],
-            };
-        });
-    };
-
-    const togglePermissionItem = (
-        requestId: string,
-        defaultItemIds: string[],
-        itemId: string,
-    ) => {
-        setPermissionSelections((current) => {
-            const selected = current[requestId] ?? defaultItemIds;
-            return {
-                ...current,
-                [requestId]: selected.includes(itemId)
-                    ? selected.filter((id) => id !== itemId)
-                    : [...selected, itemId],
-            };
-        });
-    };
-
 
     const detailsContent = (
         <div className="space-y-4">
@@ -772,16 +707,15 @@ function DeviceAssistantWorkspace({
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
                             <Badge variant="outline">{t(`pages.deviceAssistant.chatPhase.${chat.status}`)}</Badge>
-                            <AssistantHistory deskId={deskId} disabled={chat.running || chat.hydrating || !!chat.grantRevoking}
+                            <AssistantHistory deskId={deskId} disabled={!!rehearsal || chat.running || chat.hydrating || !!chat.grantRevoking}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
                                     setQuestion('');
                                     setSelectedCapabilityIds([]);
-                                    setPermissionSelections({});
-                                    setPermissionEdits({});
                                     return true;
                                 }} />
-                            <Button variant="ghost" size="sm" onClick={resetConversation} disabled={!assistantEnabled || chat.running || chat.hydrating}>
+                            {!rehearsal && <Button variant="ghost" size="sm" disabled={!assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision} onClick={() => { if (!chat.conversationId || !chat.inputRevision) return; scheduleNavigate(`/schedules?${new URLSearchParams({ resume_conversation: chat.conversationId, resume_device: stableDeviceId, resume_revision: String(chat.inputRevision) })}`); }}>{t('schedules.createResume')}</Button>}
+                            <Button variant="ghost" size="sm" onClick={resetConversation} disabled={!!rehearsal || !assistantEnabled || chat.running || chat.hydrating}>
                                 {t('pages.deviceAssistant.newConversation')}
                             </Button>
                         </div>
@@ -804,6 +738,7 @@ function DeviceAssistantWorkspace({
                                 </Button>
                             </div>
                         )}
+                        <ScheduleProposalCards tools={chat.tools} />
                         {chat.messages.map((message) => (
                             <Fragment key={message.id}>
                             <div
@@ -924,310 +859,10 @@ function DeviceAssistantWorkspace({
                         open={permissionHistorySession === permissionHistoryKey}
                         onOpenChange={(open) => setPermissionHistorySession(open ? permissionHistoryKey : null)}>
                             {(request) => (
-                                <AssistantPermissionDisclosure key={request.requestId} state={request.state} tools={request.items.map((item) => item.toolName)}>
-                                    <div className="flex flex-wrap items-center justify-between gap-2">
-                                        <span className="text-xs text-muted-foreground">
-                                            rev {request.inputRevision}
-                                        </span>
-                                        <Badge variant={request.state === 'pending' ? 'default' : 'outline'}>
-                                            {t(`pages.deviceAssistant.permissionState.${request.state}`)}
-                                        </Badge>
-                                    </div>
-                                    <div className="space-y-2">
-                                        {request.items.map((item) => {
-                                            const defaultItemIds = request.items
-                                                .filter((entry) => (entry.expectedEffect !== 'send_external'
-                                                    || Boolean(entry.externalSendConfirmation))
-                                                    && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
-                                                    && !fileApprovalBlocked(entry))
-                                                .map((entry) => entry.itemId);
-                                            const selected = permissionSelections[request.requestId]
-                                                ?? defaultItemIds;
-                                            const approved = selected.includes(item.itemId);
-                                            const isExternalSend = item.expectedEffect === 'send_external';
-                                            const sendConfirmation = item.externalSendConfirmation;
-                                            const commandConfirmation = item.commandConfirmation;
-                                            const commandBlocked = item.toolName === 'execute_confirmed_command' && !validCommandReview(commandConfirmation);
-                                            const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || fileApprovalBlocked(item);
-                                            const edit = permissionEdits[request.requestId]?.[item.itemId]
-                                                ?? {};
-                                            const resourceScope = edit.resourceScope
-                                                ?? item.resourceScope;
-                                            const operationScope = edit.operationScope
-                                                ?? item.operationScope;
-                                            const exportDestinationIndexes = edit.exportDestinationIndexes
-                                                ?? item.exportDestinations.map((_, index) => index);
-                                            return (
-                                                <div key={item.itemId} className="flex items-start gap-3 rounded border bg-background px-3 py-2">
-                                                    {featureProfile.permission_decision
-                                                        && request.state === 'pending' && (
-                                                        <Checkbox
-                                                            className="mt-0.5"
-                                                            checked={approved}
-                                                            disabled={approvalBlocked}
-                                                            aria-label={t('pages.deviceAssistant.permissionItemToggle', { reason: item.reason })}
-                                                            onCheckedChange={() => togglePermissionItem(
-                                                                request.requestId,
-                                                                defaultItemIds,
-                                                                item.itemId,
-                                                            )}
-                                                        />
-                                                    )}
-                                                    <div>
-                                                        <p className="text-sm font-medium">{item.reason}</p>
-                                                        <p className="mt-1 break-all text-xs text-muted-foreground">
-                                                            {item.providerId} · {item.toolName} · {item.expectedEffect}
-                                                        </p>
-                                                        {validCommandReview(commandConfirmation) && <CommandConfirmationCard value={commandConfirmation} />}
-                                                        {validTextFileReview(item.textFileConfirmation) && <TextFileConfirmationCard value={item.textFileConfirmation} />}
-                                                        {sendConfirmation && (
-                                                            <div data-testid="external-send-confirmation" className="mt-3 space-y-2 rounded-md border border-red-500/50 bg-red-500/5 p-3 text-xs">
-                                                                <p className="flex items-center gap-2 font-semibold text-red-700 dark:text-red-300">
-                                                                    <AlertTriangle className="h-4 w-4" />
-                                                                    {t('pages.deviceAssistant.externalSendConfirmationTitle')}
-                                                                </p>
-                                                                <p>{t('pages.deviceAssistant.externalSendOneShotWarning')}</p>
-                                                                <dl className="grid gap-x-3 gap-y-1 sm:grid-cols-[max-content_1fr]">
-                                                                    <dt className="font-medium">{t('pages.deviceAssistant.externalSendAccount')}</dt>
-                                                                    <dd className="break-all">{sendConfirmation.accountId}</dd>
-                                                                    <dt className="font-medium">{t('pages.deviceAssistant.externalSendDestination')}</dt>
-                                                                    <dd className="break-all">{sendConfirmation.destination}</dd>
-                                                                    {sendConfirmation.subject != null && (
-                                                                        <>
-                                                                            <dt className="font-medium">{t('pages.deviceAssistant.externalSendSubject')}</dt>
-                                                                            <dd className="break-words">{sendConfirmation.subject}</dd>
-                                                                        </>
-                                                                    )}
-                                                                    <dt className="font-medium">{t('pages.deviceAssistant.externalSendBody')}</dt>
-                                                                    <dd>{formatByteCount(sendConfirmation.bodySizeBytes)}</dd>
-                                                                </dl>
-                                                                <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2">
-                                                                    {sendConfirmation.bodyPlainText}
-                                                                </pre>
-                                                                {sendConfirmation.attachments.length > 0 && (
-                                                                    <div>
-                                                                        <p className="font-medium">{t('pages.deviceAssistant.externalSendAttachments')}</p>
-                                                                        <ul className="list-disc pl-5">
-                                                                            {sendConfirmation.attachments.map((attachment) => (
-                                                                                <li key={`${attachment.fileName}:${attachment.sizeBytes}`} className="break-all">
-                                                                                    {attachment.fileName} · {formatByteCount(attachment.sizeBytes)}
-                                                                                </li>
-                                                                            ))}
-                                                                        </ul>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        )}
-                                                        {approvalBlocked && (
-                                                            <p className="mt-2 text-xs font-medium text-red-700 dark:text-red-300">
-                                                                {t(fileApprovalBlocked(item) ? 'pages.deviceAssistant.fileConfirmMissing'
-                                                                    : commandBlocked ? 'pages.deviceAssistant.commandSummaryMissing' : 'pages.deviceAssistant.externalSendSummaryMissing')}
-                                                            </p>
-                                                        )}
-                                                        {(item.resourceScope.length > 0 || item.operationScope.length > 0) && (
-                                                            <p className="mt-1 break-all text-xs text-muted-foreground">
-                                                                {[...item.resourceScope, ...item.operationScope].join(' · ')}
-                                                            </p>
-                                                        )}
-                                                        {featureProfile.permission_decision
-                                                            && request.state === 'pending'
-                                                            && approved && (
-                                                            <div className="mt-3 space-y-3 border-t pt-3">
-                                                                {item.resourceScope.length > 0 && (
-                                                                    <div className="space-y-1">
-                                                                        <p className="text-xs font-medium">
-                                                                            {t('pages.deviceAssistant.permissionResourceScope')}
-                                                                        </p>
-                                                                        {item.resourceScope.map((scope) => (
-                                                                            <label key={scope} className="flex items-center gap-2 text-xs">
-                                                                                <Checkbox
-                                                                                    checked={resourceScope.includes(scope)}
-                                                                                    onCheckedChange={() => togglePermissionScope(
-                                                                                        request.requestId,
-                                                                                        item.itemId,
-                                                                                        'resourceScope',
-                                                                                        scope,
-                                                                                        item.resourceScope,
-                                                                                    )}
-                                                                                />
-                                                                                <span className="break-all">{scope}</span>
-                                                                            </label>
-                                                                        ))}
-                                                                    </div>
-                                                                )}
-                                                                {item.operationScope.length > 0 && (
-                                                                    <div className="space-y-1">
-                                                                        <p className="text-xs font-medium">
-                                                                            {t('pages.deviceAssistant.permissionOperationScope')}
-                                                                        </p>
-                                                                        {item.operationScope.map((scope) => (
-                                                                            <label key={scope} className="flex items-center gap-2 text-xs">
-                                                                                <Checkbox
-                                                                                    checked={operationScope.includes(scope)}
-                                                                                    onCheckedChange={() => togglePermissionScope(
-                                                                                        request.requestId,
-                                                                                        item.itemId,
-                                                                                        'operationScope',
-                                                                                        scope,
-                                                                                        item.operationScope,
-                                                                                    )}
-                                                                                />
-                                                                                <span className="break-all">{scope}</span>
-                                                                            </label>
-                                                                        ))}
-                                                                    </div>
-                                                                )}
-                                                                {item.exportDestinations.length > 0 && (
-                                                                    <div className="space-y-1">
-                                                                        <p className="text-xs font-medium">
-                                                                            {t('pages.deviceAssistant.permissionDestinations')}
-                                                                        </p>
-                                                                        {item.exportDestinations.map((destination, index) => (
-                                                                            <label key={JSON.stringify(destination)} className="flex items-center gap-2 text-xs">
-                                                                                <Checkbox
-                                                                                    checked={exportDestinationIndexes.includes(index)}
-                                                                                    onCheckedChange={() => updatePermissionItemEdit(
-                                                                                        request.requestId,
-                                                                                        item.itemId,
-                                                                                        (current) => {
-                                                                                            const indexes = current.exportDestinationIndexes
-                                                                                                ?? item.exportDestinations.map((_, currentIndex) => currentIndex);
-                                                                                            return {
-                                                                                                ...current,
-                                                                                                exportDestinationIndexes: indexes.includes(index)
-                                                                                                    ? indexes.filter((entry) => entry !== index)
-                                                                                                    : [...indexes, index],
-                                                                                            };
-                                                                                        },
-                                                                                    )}
-                                                                                />
-                                                                                <span className="break-all">{JSON.stringify(destination)}</span>
-                                                                            </label>
-                                                                        ))}
-                                                                    </div>
-                                                                )}
-                                                                <div className="grid gap-3 sm:grid-cols-2">
-                                                                    <label className="space-y-1 text-xs">
-                                                                        <span>{t('pages.deviceAssistant.permissionTtlSeconds')}</span>
-                                                                        <Input
-                                                                            type="number"
-                                                                            min={1}
-                                                                            max={item.suggestedTtlSeconds}
-                                                                            value={edit.ttlSeconds ?? item.suggestedTtlSeconds}
-                                                                            onChange={(event) => updatePermissionItemEdit(
-                                                                                request.requestId,
-                                                                                item.itemId,
-                                                                                (current) => ({
-                                                                                    ...current,
-                                                                                    ttlSeconds: Math.max(1, Math.min(
-                                                                                        item.suggestedTtlSeconds,
-                                                                                        Number(event.target.value) || 1,
-                                                                                    )),
-                                                                                }),
-                                                                            )}
-                                                                        />
-                                                                    </label>
-                                                                    <label className="space-y-1 text-xs">
-                                                                        <span>{t('pages.deviceAssistant.permissionMaxUses')}</span>
-                                                                        <Input
-                                                                            type="number"
-                                                                            min={1}
-                                                                            max={item.suggestedMaxUses}
-                                                                            value={isExternalSend ? 1 : (edit.maxUses ?? item.suggestedMaxUses)}
-                                                                            disabled={isExternalSend}
-                                                                            onChange={(event) => updatePermissionItemEdit(
-                                                                                request.requestId,
-                                                                                item.itemId,
-                                                                                (current) => ({
-                                                                                    ...current,
-                                                                                    maxUses: Math.max(1, Math.min(
-                                                                                        item.suggestedMaxUses,
-                                                                                        Number(event.target.value) || 1,
-                                                                                    )),
-                                                                                }),
-                                                                            )}
-                                                                        />
-                                                                    </label>
-                                                                </div>
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                    {featureProfile.permission_decision
-                                        && request.state === 'pending' && (
-                                        <div className="space-y-2">
-                                            <p className="text-xs text-muted-foreground">
-                                                {t('pages.deviceAssistant.permissionSelectionDescription')}
-                                            </p>
-                                            <div className="flex flex-wrap gap-2">
-                                            <Button
-                                                type="button"
-                                                size="sm"
-                                                disabled={!assistantEnabled || chat.permissionUpdating}
-                                                onClick={() => void chat.decidePermissionItems(
-                                                    request,
-                                                    request.items.map((item) => {
-                                                        const selected = permissionSelections[request.requestId]
-                                                            ?? request.items
-                                                                .filter((entry) => (entry.expectedEffect !== 'send_external'
-                                                                    || Boolean(entry.externalSendConfirmation))
-                                                                    && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
-                                                                    && !fileApprovalBlocked(entry))
-                                                                .map((entry) => entry.itemId);
-                                                        if (!selected.includes(item.itemId)
-                                                            || (item.expectedEffect === 'send_external'
-                                                                && !item.externalSendConfirmation)
-                                                            || (item.toolName === 'execute_confirmed_command' && !validCommandReview(item.commandConfirmation))
-                                                            || fileApprovalBlocked(item)) {
-                                                            return {
-                                                                itemId: item.itemId,
-                                                                decision: 'deny' as const,
-                                                            };
-                                                        }
-                                                        const edit = permissionEdits[request.requestId]?.[item.itemId]
-                                                            ?? {};
-                                                        const destinationIndexes = edit.exportDestinationIndexes
-                                                            ?? item.exportDestinations.map((_, index) => index);
-                                                        return {
-                                                            itemId: item.itemId,
-                                                            decision: 'approve' as const,
-                                                            resource_scope: edit.resourceScope ?? item.resourceScope,
-                                                            operation_scope: edit.operationScope ?? item.operationScope,
-                                                            export_destinations: item.exportDestinations.filter((_, index) =>
-                                                                destinationIndexes.includes(index)),
-                                                            ttl_seconds: edit.ttlSeconds ?? item.suggestedTtlSeconds,
-                                                            max_uses: item.expectedEffect === 'send_external'
-                                                                ? 1
-                                                                : (edit.maxUses ?? item.suggestedMaxUses),
-                                                        };
-                                                    }),
-                                                )}
-                                            >
-                                                <Check className="mr-2 h-4 w-4" />
-                                                {t('pages.deviceAssistant.permissionSubmitSelection')}
-                                            </Button>
-                                            <Button
-                                                type="button"
-                                                size="sm"
-                                                variant="outline"
-                                                disabled={chat.permissionUpdating}
-                                                onClick={() => void chat.decidePermission(request, false)}
-                                            >
-                                                <X className="mr-2 h-4 w-4" />
-                                                {t('pages.deviceAssistant.permissionDeny')}
-                                            </Button>
-                                            </div>
-                                        </div>
-                                    )}
-                                    {request.state === 'needs_revalidation' && (
-                                        <p className="text-xs text-amber-700 dark:text-amber-300">
-                                            {t('pages.deviceAssistant.permissionNeedsRevalidation')}
-                                        </p>
-                                    )}
-                                </AssistantPermissionDisclosure>
+                                <AssistantPermissionRequest key={`${permissionHistoryKey}:${request.requestId}:${request.inputRevision}`}
+                                    request={request} canDecide={featureProfile.permission_decision}
+                                    disabled={!assistantEnabled || !isConnected || chat.hydrating}
+                                    busy={chat.permissionUpdating} onDecide={chat.decidePermissionItems} />
                             )}
                     </AssistantPermissionRecords>
                     {featureProfile.exec_pty && Object.entries(exec.entries).map(([row, entry]) => {
@@ -1279,6 +914,7 @@ function DeviceAssistantWorkspace({
                             <AlertDescription>{chat.error === 'history_restore_failed' ? t('pages.deviceAssistant.history.restoreError') : chat.error}</AlertDescription>
                         </Alert>
                     )}
+                    {rehearsal && <Alert><AlertDescription>{t('schedules.rehearsal.executionNote')}</AlertDescription></Alert>}
                     <form onSubmit={submit} className="sticky bottom-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm">
                         <div className="flex flex-wrap items-center gap-2">
                             <Button type="button" size="sm" variant="ghost" onClick={() => setPanel('context')}>
@@ -1290,6 +926,7 @@ function DeviceAssistantWorkspace({
                         </div>
                         <textarea
                             value={question}
+                            readOnly={!!rehearsal}
                             onChange={(event) => setQuestion(event.target.value)}
                             placeholder={t('pages.deviceAssistant.questionPlaceholder')}
                             maxLength={16_384}
@@ -1303,9 +940,9 @@ function DeviceAssistantWorkspace({
                                 onPermissionHistory={() => setPermissionHistorySession(permissionHistoryKey)}
                                 onDirectories={() => setDirectorySession(permissionHistoryKey)}
                             />
-                            <Button type="submit" disabled={!assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
+                            <Button type="submit" disabled={!rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
                                 <Send className="mr-2 h-4 w-4" />
-                                {t('pages.deviceAssistant.send')}
+                                {t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.deviceAssistant.send')}
                             </Button>
                         </div>
                     </form>
@@ -1322,6 +959,7 @@ export default function DeviceAssistantPage({
 }) {
     const { id: deskId } = useParams<{ id: string }>();
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
     const { t } = useTranslation();
     const restricted = useRestrictedSession(deskId);
     const { data: connections, isLoading } = useListConnections();
@@ -1380,14 +1018,30 @@ export default function DeviceAssistantPage({
                     <p className="text-muted-foreground">{t('pages.deviceAssistant.subtitle')}</p>
                 </div>
             </div>
-            <DeviceAssistantWorkspace
-                deskId={deskId}
-                stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
-                localPairingAvailable={!connection.device_id}
-                featureProfile={featureProfile}
-                assistantEnabled={isDeviceAssistantEnabled(connection.version_info)}
-                onBrowserTakeover={() => navigate(`/desk/${deskId}/control`)}
-            />
+            {searchParams.has('rehearsal') ? <DeviceAssistantRehearsalGate
+                rehearsalId={searchParams.get('rehearsal') ?? ''}
+                deviceId={String(connection.device_id ?? connection.version_info.client_id ?? '')}
+            >
+                {row => <DeviceAssistantWorkspace
+                    key={row.rehearsal_id}
+                    rehearsal={row}
+                    deskId={deskId}
+                    stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
+                    localPairingAvailable={!connection.device_id}
+                    featureProfile={featureProfile}
+                    assistantEnabled={isDeviceAssistantEnabled(connection.version_info)}
+                    onBrowserTakeover={() => navigate(`/desk/${deskId}/control`)}
+                />}
+            </DeviceAssistantRehearsalGate> : (
+                <DeviceAssistantWorkspace
+                    deskId={deskId}
+                    stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
+                    localPairingAvailable={!connection.device_id}
+                    featureProfile={featureProfile}
+                    assistantEnabled={isDeviceAssistantEnabled(connection.version_info)}
+                    onBrowserTakeover={() => navigate(`/desk/${deskId}/control`)}
+                />
+            )}
         </div>
     );
 }

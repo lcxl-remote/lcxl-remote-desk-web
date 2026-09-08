@@ -8,7 +8,7 @@ pub use live_context::UpdateLiveContext;
 mod permission_receipt;
 pub mod permission_resume;
 pub use object_context::UpdateObjectContext;
-pub use permission_receipt::PermissionDecisionOutcome;
+pub use permission_receipt::{PermissionDecisionOutcome, PermissionDecisionSubject};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -174,7 +174,13 @@ impl SignalAgentSessionStore {
             task_status_projection: session.task_status_projection,
             permission_requests: session.permission_requests,
             visual_evidence: session.visual_evidence,
-            messages: session.conversation,
+            messages: session
+                .conversation
+                .into_iter()
+                .filter(|message| {
+                    !desk_diagnose_core::permission_resume::is_resume_control_message(message)
+                })
+                .collect(),
             context_notices: session.context_notices,
             context_attachments: session.context_attachments,
         }))
@@ -192,12 +198,47 @@ impl SignalAgentSessionStore {
         grant_context: PermissionGrantIssuanceContext<'_>,
         now: &str,
     ) -> Result<PermissionDecisionOutcome, AgentError> {
+        self.decide_permission_request_with_expected_request(
+            PermissionDecisionSubject {
+                conversation_id,
+                actor_id,
+                device_id,
+            },
+            request_id,
+            decisions,
+            grant_context,
+            now,
+            None,
+        )
+        .await
+    }
+
+    /// Fence both new decisions and replays to the caller's displayed input or
+    /// scheduled occurrence. The session CAS keeps this check atomic with grants.
+    pub async fn decide_permission_request_with_expected_request(
+        &self,
+        subject: PermissionDecisionSubject<'_>,
+        request_id: &str,
+        decisions: Vec<desk_diagnose_core::dynamic_run::PermissionDecisionItem>,
+        grant_context: PermissionGrantIssuanceContext<'_>,
+        now: &str,
+        expected_run_request_id: Option<&str>,
+    ) -> Result<PermissionDecisionOutcome, AgentError> {
+        let PermissionDecisionSubject {
+            conversation_id,
+            actor_id,
+            device_id,
+        } = subject;
         for _ in 0..CLAIM_ATTEMPTS {
             let txn = self
                 .db
                 .begin()
                 .await
                 .map_err(|error| internal(format!("begin permission decision: {error}")))?;
+            let task_expiry =
+                crate::schedule_store::lock_fresh_approval_on(&txn, conversation_id, request_id)
+                    .await
+                    .map_err(|_| internal("scheduled approval is no longer current"))?;
             let Some(row) = agent_session::Entity::find()
                 .filter(agent_session::Column::ConversationId.eq(conversation_id))
                 .one(&txn)
@@ -209,6 +250,7 @@ impl SignalAgentSessionStore {
             };
             let mut session =
                 permission_receipt::session(&row, conversation_id, actor_id, device_id)?;
+            permission_receipt::check_expected_request(&session, expected_run_request_id)?;
             if let Some(state) =
                 permission_receipt::replay_on(&txn, &session, request_id, &decisions).await?
             {
@@ -258,13 +300,18 @@ impl SignalAgentSessionStore {
                 } else {
                     None
                 };
-            let grants = build_permission_grants(
+            let mut grants = build_permission_grants(
                 &session,
                 &requested,
                 &decisions,
                 &grant_context,
                 original_reads.as_ref(),
             )?;
+            if let Some(review) = task_expiry {
+                review
+                    .constrain(&session, &requested, &mut grants)
+                    .map_err(|_| internal("approval exceeds the scheduled task ceiling"))?;
+            }
             session.last_event_seq = session
                 .last_event_seq
                 .checked_add(1)
@@ -353,6 +400,8 @@ impl SignalAgentSessionStore {
                     status: Set(crate::capability_grant_store::GRANT_STATUS_ACTIVE.into()),
                     remaining_uses: Set(i32::try_from(grant.remaining_uses)
                         .map_err(|_| internal("grant uses exceed SQLite range"))?),
+                    issued_payload_json: Set(serde_json::to_string(&grant)
+                        .map_err(|error| internal(format!("encode issued grant: {error}")))?),
                     payload_json: Set(serde_json::to_string(&grant)
                         .map_err(|error| internal(format!("encode issued grant: {error}")))?),
                     payload_schema_version: Set(i32::from(CAPABILITY_GRANT_SCHEMA_VERSION)),
@@ -427,7 +476,12 @@ impl SignalAgentSessionStore {
                 let first_question = session
                     .conversation
                     .iter()
-                    .find(|message| message.role == desk_diagnose_core::chat::ChatRole::User)
+                    .find(|message| {
+                        message.role == desk_diagnose_core::chat::ChatRole::User
+                            && !desk_diagnose_core::permission_resume::is_resume_control_message(
+                                message,
+                            )
+                    })
                     .map(|message| message.text.clone());
                 Some(SessionSummary {
                     session_id: row.conversation_id,
@@ -436,7 +490,15 @@ impl SignalAgentSessionStore {
                     created_at: row.created_at.to_rfc3339(),
                     updated_at: row.updated_at.to_rfc3339(),
                     active: session.turn_state.is_active(),
-                    message_count: session.conversation.len(),
+                    message_count: session
+                        .conversation
+                        .iter()
+                        .filter(|message| {
+                            !desk_diagnose_core::permission_resume::is_resume_control_message(
+                                message,
+                            )
+                        })
+                        .count(),
                 })
             })
             .take(limit as usize)
@@ -451,9 +513,24 @@ impl SignalAgentSessionStore {
         row: &agent_session::Model,
         now: DateTime<Utc>,
     ) -> Result<bool, AgentError> {
+        let Some(current) = agent_session::Entity::find_by_id(row.id)
+            .filter(agent_session::Column::Version.eq(row.version))
+            .filter(agent_session::Column::StateJson.eq(&row.state_json))
+            .one(&self.db)
+            .await
+            .map_err(|_| internal("reload lapsed agent session failed"))?
+        else {
+            return Ok(false);
+        };
+        let row = &current;
         let mut session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|e| internal(format!("decode lapsed agent session: {e}")))?;
         if !session.turn_state.is_active()
+            || matches!(
+                session.trigger_origin,
+                desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation
+                    | desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+            )
             || row.lease_deadline.is_some_and(|deadline| deadline >= now)
         {
             return Ok(false);
@@ -516,6 +593,7 @@ impl SignalAgentSessionStore {
             .col_expr(agent_session::Column::UpdatedAt, Expr::value(now))
             .filter(agent_session::Column::Id.eq(row.id))
             .filter(agent_session::Column::Version.eq(row.version))
+            .filter(agent_session::Column::StateJson.eq(&row.state_json))
             .exec(&self.db)
             .await
             .map_err(|e| internal(format!("settle lapsed agent session: {e}")))?;
@@ -603,12 +681,43 @@ impl SignalAgentSessionStore {
             let mut session = PersistedAgentSession::decode_json(&row.state_json)
                 .map_err(|e| internal(format!("decode completion session: {e}")))?;
             session.version = row.version;
+            // Task reconciliation owns both the session and occurrence, even
+            // after settlement; a late result cannot create an ordinary AI turn.
+            if session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::ScheduledTask {
+                return Ok(EventAppend::Busy);
+            }
+
             if session.turn_state.is_active()
-                && row
+                && (matches!(
+                    session.trigger_origin,
+                    desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation
+                        | desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+                ) || row
                     .lease_deadline
-                    .is_some_and(|deadline| deadline >= now_dt)
+                    .is_some_and(|deadline| deadline >= now_dt))
             {
                 return Ok(EventAppend::Busy);
+            }
+            if session.trigger_origin
+                == desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation
+                && work_kind == WorkKind::AgentExec
+            {
+                // A publisher can hold a pending snapshot across schedule
+                // settlement. Recheck consumption after reading the session.
+                let task = agent_exec_task::Entity::find_by_id(work_id)
+                    .filter(agent_exec_task::Column::ConversationId.eq(conversation_id))
+                    .filter(agent_exec_task::Column::ExecutionGeneration.eq(execution_id))
+                    .filter(agent_exec_task::Column::ToolCallId.eq(tool_call_id))
+                    .filter(agent_exec_task::Column::EventId.eq(event_id))
+                    .one(&self.db)
+                    .await
+                    .map_err(|_| internal("reload scheduled command delivery failed"))?;
+                let Some(task) = task else {
+                    return Ok(EventAppend::Busy);
+                };
+                if task.delivery_state == crate::agent_exec_store::DELIVERY_CONSUMED {
+                    return Ok(EventAppend::AlreadyPresent);
+                }
             }
             if !session.apply_completion_with_envelope(
                 event_id,
@@ -746,9 +855,13 @@ impl SignalAgentSessionStore {
                 .map_err(|e| internal(format!("decode unknown execution session: {e}")))?;
             session.version = row.version;
             if session.turn_state.is_active()
-                && row
+                && (matches!(
+                    session.trigger_origin,
+                    desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation
+                        | desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+                ) || row
                     .lease_deadline
-                    .is_some_and(|deadline| deadline >= now_dt)
+                    .is_some_and(|deadline| deadline >= now_dt))
             {
                 return Ok(EventAppend::Busy);
             }
@@ -907,7 +1020,13 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         task_status_projection: session.task_status_projection,
         permission_requests: session.permission_requests,
         visual_evidence: session.visual_evidence,
-        messages: session.conversation,
+        messages: session
+            .conversation
+            .into_iter()
+            .filter(|message| {
+                !desk_diagnose_core::permission_resume::is_resume_control_message(message)
+            })
+            .collect(),
         context_notices: session.context_notices,
         context_attachments: session.context_attachments,
     })
@@ -971,10 +1090,28 @@ async fn find_recovery_task(
 
 #[async_trait(?Send)]
 impl SessionSeam for SignalAgentSessionStore {
+    async fn propose_schedule(
+        &self,
+        session: &mut PersistedAgentSession,
+        call: &desk_diagnose_core::chat::ToolCall,
+    ) -> Result<String, AgentError> {
+        crate::schedule_store::ScheduleStore::new(self.db.clone())
+            .propose_from_session(session, call)
+            .await
+            .map_err(|_| desk_diagnose_core::schedule::proposal::unavailable())
+    }
+
     async fn claim_turn(
         &self,
         params: ClaimTurnParams,
     ) -> Result<PersistedAgentSession, ClaimError> {
+        if params.trigger_origin
+            == desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation
+        {
+            return Err(ClaimError::Backend(internal(
+                "scheduled continuation requires its atomic occurrence claim",
+            )));
+        }
         if params.trigger_origin == desk_diagnose_core::session::TriggerOrigin::PermissionDecision {
             return self.claim_permission_resume(params).await;
         }
@@ -1348,6 +1485,19 @@ impl SessionSeam for SignalAgentSessionStore {
         Ok(())
     }
 
+    async fn validate_task_permission_request(
+        &self,
+        session: &PersistedAgentSession,
+        request: &desk_diagnose_core::dynamic_run::PermissionRequest,
+    ) -> Result<(), AgentError> {
+        crate::schedule_store::ScheduleStore::new(self.db.clone()).validate_task_permission_request(session, request).await
+            .map_err(|_| AgentError {
+                kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
+                message: "Permission request exceeds the current task contract or its authority has expired".into(),
+                retryable: false, safe_for_model: true, error_code: None,
+            })
+    }
+
     async fn save_permission_request(
         &self,
         session: &mut PersistedAgentSession,
@@ -1372,6 +1522,9 @@ impl SessionSeam for SignalAgentSessionStore {
             .begin()
             .await
             .map_err(|error| internal(format!("begin permission transaction: {error}")))?;
+        crate::schedule_store::validate_task_permission_on(&txn, session, &update.request)
+            .await
+            .map_err(|_| internal("permission request exceeds current task authority"))?;
         let now = Utc::now();
         let old_version = session.version;
         let new_version = old_version + 1;
@@ -1506,6 +1659,7 @@ impl SessionSeam for SignalAgentSessionStore {
             let mut pending_user_messages = Vec::new();
             current.conversation.retain(|message| {
                 let pending = message.role == desk_diagnose_core::chat::ChatRole::User
+                    && !desk_diagnose_core::permission_resume::is_resume_control_message(message)
                     && !stale_ids.contains(message.message_id.as_str());
                 if pending {
                     pending_user_messages.push(message.clone());
@@ -1560,6 +1714,9 @@ impl SessionSeam for SignalAgentSessionStore {
                 .iter()
                 .filter(|message| {
                     message.role == desk_diagnose_core::chat::ChatRole::User
+                        && !desk_diagnose_core::permission_resume::is_resume_control_message(
+                            message,
+                        )
                         && !stale_ids.contains(message.message_id.as_str())
                 })
                 .filter_map(|message| {
@@ -1775,6 +1932,21 @@ mod tests {
             .await
             .unwrap();
         SignalAgentSessionStore::new(db)
+    }
+
+    #[tokio::test]
+    async fn scheduled_continuation_cannot_use_an_unfenced_session_claim() {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let store = SignalAgentSessionStore::new(db);
+        let mut params = claim("scheduled");
+        params.trigger_origin = desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation;
+        let Err(ClaimError::Backend(error)) = store.claim_turn(params).await else {
+            panic!("unfenced continuation was accepted");
+        };
+        assert_eq!(
+            error.message,
+            "scheduled continuation requires its atomic occurrence claim"
+        );
     }
 
     fn claim(turn_id: &str) -> ClaimTurnParams {
@@ -2568,6 +2740,38 @@ mod tests {
         ));
         store.save(&mut stale).await.unwrap();
 
+        // A separately saved runtime event is not a newly accepted user input.
+        let destination = desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        };
+        let original = desk_diagnose_core::model_message_labels::model_bound_user_message(
+            "original-source".into(),
+            "first".into(),
+            destination.clone(),
+        )
+        .unwrap();
+        let policy = desk_diagnose_core::model_egress::ModelEgressPolicy {
+            destination,
+            selected_source_tools: Default::default(),
+            export_authorization_id: "test-export".into(),
+            now_unix_ms: 1_000,
+            byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
+            omit_finite_retention_historical_turns: true,
+        };
+        let bridge = desk_diagnose_core::permission_resume::authorized_scheduled_resume_message(
+            "scheduled-control".into(),
+            &policy,
+            &original,
+        )
+        .unwrap()
+        .with_turn_id("turn-1");
+        let mut current = stale.clone();
+        current.conversation.push(bridge);
+        store.save(&mut current).await.unwrap();
+
         let second = events
             .append_user_followup(followup("followup-2", "user-2", "newer"))
             .await
@@ -2613,6 +2817,23 @@ mod tests {
                 (ChatRole::User, "user-2", None),
             ]
         );
+        let row = find(&store.db, "conversation-1").await.unwrap().unwrap();
+        let durable = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+        let control_index = durable
+            .conversation
+            .iter()
+            .position(|m| m.message_id == "scheduled-control")
+            .unwrap();
+        let result_index = durable
+            .conversation
+            .iter()
+            .position(|m| m.message_id == "read-result-1")
+            .unwrap();
+        assert!(
+            control_index < result_index,
+            "runtime control must not move with pending user input"
+        );
+
         let ledger = agent_run_event::Entity::find()
             .filter(agent_run_event::Column::RunId.eq("conversation-1"))
             .order_by_asc(agent_run_event::Column::EventSeq)
@@ -2885,6 +3106,105 @@ mod tests {
         assert_eq!(second.turn_state, TurnState::Running);
         assert_eq!(second.conversation_id, first.conversation_id);
         assert!(second.version > first.version);
+    }
+
+    #[tokio::test]
+    async fn snapshots_hide_runtime_bridges_but_keep_user_chosen_prefixes_and_durable_history() {
+        use desk_agent_protocol::data_lineage::DestinationIdentity;
+        use desk_diagnose_core::{
+            chat::{ChatMessage, ChatRole},
+            permission_resume::model_bound_permission_resume_message,
+        };
+
+        for scheduled in [false, true] {
+            let base = store().await;
+            let db = base.db.clone();
+            let device_id = "device-1".to_string();
+            let store = SignalAgentSessionStore::new(db.clone()).with_client_metadata(
+                Some("client-bridge".into()),
+                AgentSessionSurface::DeviceAssistant,
+            );
+            let mut claim = claim("bridge-turn");
+            claim.actor_id = "1".into();
+            claim.device_id = device_id.clone();
+            let mut session = store.claim_turn(claim).await.unwrap();
+            let input_revision = session.input_revision;
+            let bridge = model_bound_permission_resume_message(
+                "control-bridge".into(),
+                DestinationIdentity::Model {
+                    connection_id: "gateway".into(),
+                    connection_revision: 1,
+                    model_id: "model".into(),
+                    profile_revision: 1,
+                },
+                "original requirement",
+            )
+            .unwrap();
+            let bridge = if scheduled {
+                let destination =
+                    bridge.data_envelope.as_ref().unwrap().allowed_destinations[0].clone();
+                let original = desk_diagnose_core::model_message_labels::model_bound_user_message(
+                    "original".into(),
+                    "original requirement".into(),
+                    destination.clone(),
+                )
+                .unwrap();
+                let policy = desk_diagnose_core::model_egress::ModelEgressPolicy {
+                    destination,
+                    selected_source_tools: Default::default(),
+                    export_authorization_id: "test-export".into(),
+                    now_unix_ms: 1_000,
+                    byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
+                    omit_finite_retention_historical_turns: true,
+                };
+                desk_diagnose_core::permission_resume::authorized_scheduled_resume_message(
+                    "scheduled-bridge".into(),
+                    &policy,
+                    &original,
+                )
+                .unwrap()
+            } else {
+                bridge
+            };
+            let user = ChatMessage::text(
+                if scheduled {
+                    "scheduled-resume-user-id"
+                } else {
+                    "permission-resume-user-id"
+                },
+                ChatRole::User,
+                "actual user question",
+            );
+            // A trimmed history can begin with a runtime bridge. It is not a title.
+            session.conversation = vec![bridge.clone(), user.clone()];
+            session.finish_turn(TurnState::Idle, "2026-06-20T00:00:01Z");
+            store.save(&mut session).await.unwrap();
+            let snapshot = store
+                .read_snapshot("conversation-1")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.messages, vec![user.clone()]);
+            assert_eq!(snapshot.input_revision, input_revision);
+            let row = find(&db, "conversation-1").await.unwrap().unwrap();
+            assert_eq!(
+                snapshot_from_row(row.clone()).unwrap().messages,
+                vec![user.clone()]
+            );
+            let persisted = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+            assert_eq!(persisted.conversation, vec![bridge, user]);
+            assert_eq!(persisted.input_revision, input_revision);
+            let history = store
+                .list_device_assistant_sessions("1", &device_id, 30)
+                .await
+                .unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(
+                history[0].first_question.as_deref(),
+                Some("actual user question")
+            );
+            assert_eq!(history[0].message_count, 1);
+        }
     }
 
     #[tokio::test]

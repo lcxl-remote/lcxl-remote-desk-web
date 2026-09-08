@@ -316,6 +316,15 @@ pub enum ExecutionState {
     Interrupted { since: String },
 }
 
+/// Server-owned evidence of an owner's manual disposition, never a provider receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManualOutcomeDisposition {
+    pub action: ActionIdentity,
+    pub placeholder_message_id: String,
+    pub disposed_at: String,
+}
+
 const MANUALLY_DISPOSED_OUTCOME_UNKNOWN: &str = "The user manually disposed this unresolved action after checking the target. The actual provider outcome remains unknown. Do not infer success, restore the consumed grant, or automatically retry the action.";
 
 impl ExecutionState {
@@ -373,6 +382,12 @@ pub enum TriggerOrigin {
     /// An owner decision resumes the existing requirement. It may consume a
     /// matching grant, but does not reset the task's automation chain.
     PermissionDecision,
+    /// An explicitly confirmed one-shot continuation, claimed together with its
+    /// durable occurrence. Preserves the input epoch; origin alone grants nothing.
+    ScheduledContinuation,
+    /// A fresh occurrence of an explicitly published task. Current task authority
+    /// and per-call grants remain mandatory; this origin is not a user decision.
+    ScheduledTask,
     /// A manager-fired automation turn reacting to a completed background command.
     /// Retained only to deserialize sessions written before generic work origins.
     ExecCompletion,
@@ -394,13 +409,17 @@ pub enum AgentSessionSurface {
 }
 
 impl TriggerOrigin {
-    /// Whether a turn of this origin may start a **new** mutating command. Only a
-    /// `User` turn may; an `ExecCompletion` turn is barred so completions cannot
-    /// drive an unbounded self-triggering chain of executions.
+    /// Whether this origin may enter the ordinary mutation authorization path.
+    /// User input, explicit permission decisions and confirmed continuations
+    /// still require current policy and exact grants; completions cannot start
+    /// an unbounded self-triggering chain of executions.
     pub fn allows_new_mutation(self) -> bool {
         matches!(
             self,
-            TriggerOrigin::User | TriggerOrigin::PermissionDecision
+            TriggerOrigin::User
+                | TriggerOrigin::PermissionDecision
+                | TriggerOrigin::ScheduledContinuation
+                | TriggerOrigin::ScheduledTask
         )
     }
 }
@@ -537,7 +556,14 @@ pub struct PersistedAgentSession {
     /// Owner-visible terminal failure, never part of provider conversation input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_error: Option<desk_agent_protocol::AgentError>,
+    /// Exact permission pause returned by this turn, never an authorization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_permission_request_id: Option<String>,
     pub execution_state: ExecutionState,
+    /// The most recent manual disposition. It is not execution authority and is
+    /// retained separately from the provider outcome and model-visible transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_outcome_disposition: Option<ManualOutcomeDisposition>,
 
     /// Completed background results the model has not yet reacted to — the
     /// automation executor's durable work-list. Empty unless the automation gate
@@ -898,7 +924,9 @@ impl PersistedAgentSession {
             current_turn_id: None,
             turn_state: TurnState::Idle,
             terminal_error: None,
+            terminal_permission_request_id: None,
             execution_state: ExecutionState::None,
+            manual_outcome_disposition: None,
             pending_auto_triggers: Vec::new(),
             latest_input_seq: 0,
             input_revision: 0,
@@ -1223,6 +1251,7 @@ impl PersistedAgentSession {
         self.lease_token = self.lease_token.wrapping_add(1);
         self.turn_state = TurnState::Running;
         self.terminal_error = None;
+        self.terminal_permission_request_id = None;
         self.current_turn_id = Some(turn_id.into());
         self.current_request_id = request_id;
         self.active_control_connection_id = connection_id;
@@ -1324,6 +1353,7 @@ impl PersistedAgentSession {
     pub fn finish_turn(&mut self, terminal: TurnState, now: impl Into<String>) {
         self.turn_state = terminal;
         self.terminal_error = None;
+        self.terminal_permission_request_id = None;
         self.updated_at = now.into();
     }
 
@@ -1343,11 +1373,11 @@ impl PersistedAgentSession {
     pub fn adopt_trigger(&mut self, origin: TriggerOrigin, turn_id: &str) {
         self.trigger_origin = origin;
         match origin {
-            TriggerOrigin::User => {
+            TriggerOrigin::User | TriggerOrigin::ScheduledTask => {
                 self.chain_id = turn_id.to_string();
                 self.automation_turns_used = 0;
             }
-            TriggerOrigin::PermissionDecision => {}
+            TriggerOrigin::PermissionDecision | TriggerOrigin::ScheduledContinuation => {}
             TriggerOrigin::ExecCompletion | TriggerOrigin::WorkCompletion { .. } => {
                 self.automation_turns_used = self.automation_turns_used.saturating_add(1);
             }
@@ -1455,25 +1485,48 @@ impl PersistedAgentSession {
         execution_id: &str,
         now: impl Into<String>,
     ) -> bool {
-        let placeholder_id = match &self.execution_state {
+        let (action, placeholder_id) = match &self.execution_state {
             ExecutionState::OutcomeUnknown {
                 action,
                 placeholder_message_id,
                 ..
             } if action.work_id == work_id && action.execution_id == execution_id => {
-                placeholder_message_id.clone()
+                (action.clone(), placeholder_message_id.clone())
             }
             _ => return false,
         };
-        if let Some(message) = self
+        let anchors: Vec<_> = self
             .conversation
-            .iter_mut()
-            .find(|message| message.message_id == placeholder_id)
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.message_id == placeholder_id)
+            .map(|(index, _)| index)
+            .collect();
+        let [index] = anchors.as_slice() else {
+            return false;
+        };
+        let message = &mut self.conversation[*index];
+        if !matches!(
+            message.role,
+            crate::chat::ChatRole::Tool | crate::chat::ChatRole::UntrustedOutput
+        ) || message.tool_call_id.is_none()
+            || message
+                .background_task_id
+                .as_deref()
+                .is_some_and(|id| id != action.action_request_id)
         {
-            message.text = MANUALLY_DISPOSED_OUTCOME_UNKNOWN.to_string();
+            return false;
         }
+        message.text = MANUALLY_DISPOSED_OUTCOME_UNKNOWN.to_string();
+        message.image_data_url = None;
+        let now = now.into();
+        self.manual_outcome_disposition = Some(ManualOutcomeDisposition {
+            action,
+            placeholder_message_id: placeholder_id,
+            disposed_at: now.clone(),
+        });
         self.execution_state = ExecutionState::None;
-        self.updated_at = now.into();
+        self.updated_at = now;
         true
     }
 
@@ -1620,8 +1673,9 @@ impl PersistedAgentSession {
         let result_text = result_text.into();
         let now = now.into();
 
-        // A recovered unknown outcome for this execution: replace the placeholder in
-        // place and re-key it to the event id so a redelivery dedups on it above.
+        // A recovered unknown outcome must retain its exact anchor until the
+        // original receipt has a valid destination. Missing or ambiguous anchors
+        // cannot turn an unknown execution into an idle one.
         if let ExecutionState::OutcomeUnknown {
             action,
             placeholder_message_id,
@@ -1629,17 +1683,37 @@ impl PersistedAgentSession {
         } = &self.execution_state
             && action.execution_id == execution_id
         {
-            let placeholder_id = placeholder_message_id.clone();
-            if let Some(msg) = self
-                .conversation
-                .iter_mut()
-                .find(|m| m.message_id == placeholder_id)
-            {
-                msg.text = result_text;
-                msg.message_id = event_id.to_string();
-                msg.background_task_id = Some(background_task_id.to_string());
-                msg.data_envelope = result_envelope;
+            if action.action_request_id != background_task_id {
+                return false;
             }
+            let anchors: Vec<_> = self
+                .conversation
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| message.message_id == *placeholder_message_id)
+                .map(|(index, _)| index)
+                .collect();
+            let [index] = anchors.as_slice() else {
+                return false;
+            };
+            let msg = &mut self.conversation[*index];
+            if msg.tool_call_id.as_deref() != Some(tool_call_id)
+                || !matches!(
+                    msg.role,
+                    crate::chat::ChatRole::Tool | crate::chat::ChatRole::UntrustedOutput
+                )
+                || msg
+                    .background_task_id
+                    .as_deref()
+                    .is_some_and(|id| id != background_task_id)
+            {
+                return false;
+            }
+            msg.text = result_text;
+            msg.message_id = event_id.to_string();
+            msg.background_task_id = Some(background_task_id.to_string());
+            msg.data_envelope = result_envelope;
+            msg.image_data_url = None;
             self.execution_state = ExecutionState::None;
             self.updated_at = now;
             return true;
@@ -2315,6 +2389,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn permission_pause_evidence_is_cleared_at_each_turn_boundary() {
+        let mut s = session();
+        s.terminal_permission_request_id = Some("previous-request".into());
+        s.begin_turn("next", None, None, 7, s.scope_snapshot.clone(), "t")
+            .unwrap();
+        assert!(s.terminal_permission_request_id.is_none());
+        s.terminal_permission_request_id = Some("intermediate-request".into());
+        s.finish_turn(TurnState::Idle, "t");
+        assert!(s.terminal_permission_request_id.is_none());
+    }
+
     /// A `User` claim starts a fresh chain (its turn id) and zeroes the budget; a
     /// following `ExecCompletion` claim keeps the chain id and spends one budget per
     /// claim; the next `User` claim resets both again.
@@ -2344,6 +2430,14 @@ mod tests {
         assert!(s.trigger_origin.allows_new_mutation());
         assert_eq!(s.chain_id, "u1");
         assert_eq!(s.automation_turns_used, 2);
+
+        // A scheduled continuation is the same input, never a fresh chain.
+        let input_revision = s.input_revision;
+        s.adopt_trigger(TriggerOrigin::ScheduledContinuation, "scheduled-a");
+        assert_eq!(s.chain_id, "u1");
+        assert_eq!(s.automation_turns_used, 2);
+        assert_eq!(s.input_revision, input_revision);
+        assert!(s.trigger_origin.allows_new_mutation());
 
         // A new user turn supersedes the chain and resets the budget.
         s.adopt_trigger(TriggerOrigin::User, "u2");

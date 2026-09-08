@@ -76,6 +76,7 @@ pub mod read_tools;
 pub mod redaction;
 pub mod registry;
 pub mod replay;
+pub mod schedule;
 pub mod seam;
 pub mod selection;
 pub mod session;

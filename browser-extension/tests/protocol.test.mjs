@@ -655,3 +655,16 @@ test("a tab navigated by the user fails stale before its new origin permission i
     );
     assert.equal(permissionChecks, 0);
 });
+
+test("signed-in account change invalidates a page even when URL and document revision stay unchanged", async () => {
+    globalThis.chrome = extensionChrome();
+    try {
+        const { samePageObservation } = await import("../src/service-worker.js?account-binding-test");
+        const page = { page_id: "tab-7", page_incarnation: "same-document", document_revision: 2,
+            url_sha256: "a".repeat(64), origin: { kind: "https", host_ascii: "mail.google.com", port: 443 },
+            account_id: "gmail-web:owner@example.test" };
+        assert.equal(samePageObservation(page, { ...page }), true);
+        assert.equal(samePageObservation(page, { ...page, account_id: "gmail-web:other@example.test" }), false);
+        assert.equal(samePageObservation(page, { ...page, account_id: null }), false);
+    } finally { delete globalThis.chrome; }
+});

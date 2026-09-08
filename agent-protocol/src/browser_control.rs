@@ -295,6 +295,27 @@ pub struct BrowserPageRef {
     pub document_revision: u64,
     pub url_sha256: String,
     pub observed_at_unix_ms: u64,
+    /// Site-observed signed-in account; absent when it cannot be identified.
+    pub account_id: Option<String>,
+}
+
+/// Stable Slack account observation shared by page and communication validation.
+pub fn is_valid_slack_web_account_id(account: &str) -> bool {
+    let mut parts = account.split(':');
+    let valid_id = |value: Option<&str>, prefix: u8| {
+        value.is_some_and(|value| {
+            let bytes = value.as_bytes();
+            (2..=64).contains(&bytes.len())
+                && bytes[0] == prefix
+                && bytes[1..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        })
+    };
+    parts.next() == Some("slack-web")
+        && valid_id(parts.next(), b'T')
+        && valid_id(parts.next(), b'U')
+        && parts.next().is_none()
 }
 
 impl BrowserPageRef {
@@ -308,6 +329,20 @@ impl BrowserPageRef {
             MAX_BROWSER_ID_BYTES,
         )?;
         self.origin.validate()?;
+        if let Some(account) = &self.account_id {
+            validate_id("page.account_id", account, 320)?;
+            if self.adapter.engine != BrowserEngineKind::ChromeExtension
+                || self.origin.kind != BrowserOriginKind::Https
+                || self.origin.port != 443
+                || !match self.origin.host_ascii.as_str() {
+                    "mail.google.com" => account.starts_with("gmail-web:"),
+                    "app.slack.com" => is_valid_slack_web_account_id(account),
+                    _ => false,
+                }
+            {
+                return Err(BrowserControlContractError::InvalidText("page.account_id"));
+            }
+        }
         if self.document_revision == 0 {
             return Err(BrowserControlContractError::InvalidRevision);
         }
@@ -1175,6 +1210,7 @@ mod tests {
 
     fn page() -> BrowserPageRef {
         BrowserPageRef {
+            account_id: None,
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: adapter(),
             page_id: "page-1".into(),
@@ -1264,6 +1300,45 @@ mod tests {
             .validate(),
             Err(BrowserControlContractError::InvalidOrigin)
         );
+    }
+
+    #[test]
+    fn account_observations_are_bounded_and_specific_to_extension_gmail_pages() {
+        let mut page = page();
+        page.adapter.engine = BrowserEngineKind::ChromeExtension;
+        page.account_id = Some("gmail-web:owner@example.test".into());
+        page.validate().unwrap();
+        for mismatch in 0..4 {
+            let mut changed = page.clone();
+            match mismatch {
+                0 => changed.adapter.engine = BrowserEngineKind::ChromeDevtoolsMcp,
+                1 => changed.origin.host_ascii = "app.slack.com".into(),
+                2 => changed.account_id = Some("gmail-web:".to_owned() + &"a".repeat(321)),
+                _ => changed.account_id = Some("other-account".into()),
+            }
+            assert!(changed.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn slack_account_observations_require_the_matching_site_and_bounded_identity() {
+        let mut page = page();
+        page.adapter.engine = BrowserEngineKind::ChromeExtension;
+        page.origin.host_ascii = "app.slack.com".into();
+        page.account_id = Some("slack-web:T123:U456".into());
+        page.validate().unwrap();
+        for account in [
+            "slack-web:T:U",
+            "slack-web:t123:U456",
+            "slack-web:T123:U456:extra",
+            "gmail-web:a@example.test",
+        ] {
+            let mut invalid = page.clone();
+            invalid.account_id = Some(account.into());
+            assert!(invalid.validate().is_err());
+        }
+        page.origin.host_ascii = "mail.google.com".into();
+        assert!(page.validate().is_err());
     }
 
     #[test]

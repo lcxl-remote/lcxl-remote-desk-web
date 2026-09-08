@@ -1,0 +1,1 @@
+{"type":"string","enum":["manual","ai_proposal"],"x-readme-ref-name":"ScheduleCreationSource"}

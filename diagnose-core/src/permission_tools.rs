@@ -784,6 +784,8 @@ pub fn build_permission_request(
         } else {
             None
         };
+        let mut gmail_account_id = None;
+        let mut slack_account_id = None;
         if exact_gmail_handoff {
             let canonical = canonical_input_json
                 .as_deref()
@@ -794,6 +796,10 @@ pub fn build_permission_request(
             input
                 .validate()
                 .map_err(|error| invalid(format!("validate Gmail Web handoff input: {error}")))?;
+            gmail_account_id = Some(
+                crate::communication::gmail_web_account_id(&input.page)
+                    .map_err(|error| invalid(format!("Gmail account unavailable: {error}")))?,
+            );
         }
         if exact_slack_handoff {
             let canonical = canonical_input_json
@@ -805,6 +811,10 @@ pub fn build_permission_request(
             input
                 .validate()
                 .map_err(|error| invalid(format!("validate Slack Web handoff input: {error}")))?;
+            slack_account_id = Some(
+                crate::communication::slack_web_account_id(&input.page)
+                    .map_err(|error| invalid(format!("Slack account unavailable: {error}")))?,
+            );
         }
         if exact_gmail_send {
             let canonical = canonical_input_json
@@ -817,6 +827,10 @@ pub fn build_permission_request(
             crate::communication::verify_gmail_web_exact_send_input(&input).map_err(|error| {
                 invalid(format!("validate Gmail Web exact send input: {error}"))
             })?;
+            gmail_account_id = Some(
+                crate::communication::gmail_web_account_id(&input.page)
+                    .map_err(|error| invalid(format!("Gmail account unavailable: {error}")))?,
+            );
         }
         if exact_slack_send {
             let canonical = canonical_input_json
@@ -829,6 +843,10 @@ pub fn build_permission_request(
             crate::communication::verify_slack_web_exact_send_input(&input).map_err(|error| {
                 invalid(format!("validate Slack Web exact send input: {error}"))
             })?;
+            slack_account_id = Some(
+                crate::communication::slack_web_account_id(&input.page)
+                    .map_err(|error| invalid(format!("Slack account unavailable: {error}")))?,
+            );
         }
         if (exact_external_url || exact_external_query || exact_command)
             && canonical_input_digest_sha256.is_none()
@@ -909,29 +927,33 @@ pub fn build_permission_request(
             } else if exact_gmail_handoff {
                 vec![
                     desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
-                        account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                            .into(),
+                        account_id: gmail_account_id
+                            .clone()
+                            .ok_or_else(|| invalid("Gmail account is missing"))?,
                     },
                 ]
             } else if exact_slack_handoff {
                 vec![
                     desk_agent_protocol::data_lineage::DestinationIdentity::ChatAccount {
-                        account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                            .into(),
+                        account_id: slack_account_id
+                            .clone()
+                            .ok_or_else(|| invalid("Slack account is missing"))?,
                     },
                 ]
             } else if exact_gmail_send {
                 vec![
                     desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
-                        account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                            .into(),
+                        account_id: gmail_account_id
+                            .clone()
+                            .ok_or_else(|| invalid("Gmail account is missing"))?,
                     },
                 ]
             } else if exact_slack_send {
                 vec![
                     desk_agent_protocol::data_lineage::DestinationIdentity::ChatAccount {
-                        account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                            .into(),
+                        account_id: slack_account_id
+                            .clone()
+                            .ok_or_else(|| invalid("Slack account is missing"))?,
                     },
                 ]
             } else {
@@ -2098,7 +2120,8 @@ mod tests {
                 "origin": {"kind": "https", "host_ascii": "app.slack.com", "port": 443},
                 "document_revision": 2,
                 "url_sha256": "a".repeat(64),
-                "observed_at_unix_ms": 42
+                "observed_at_unix_ms": 42,
+                "account_id": "slack-web:T123:U456"
             },
             "composer": {
                 "page_id": "page-1",
@@ -2143,8 +2166,7 @@ mod tests {
             item.export_destinations,
             vec![
                 desk_agent_protocol::data_lineage::DestinationIdentity::ChatAccount {
-                    account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                        .into(),
+                    account_id: "slack-web:T123:U456".into(),
                 }
             ]
         );
@@ -2269,10 +2291,7 @@ mod tests {
     fn exact_external_send_permission_is_separate_exact_and_one_shot() {
         use crate::{
             communication::test_support::{gmail_exact_send_input, slack_exact_send_input},
-            device_assistant::{
-                GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID, GMAIL_WEB_SEND_PROVIDER_ID,
-                SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID, SLACK_WEB_SEND_PROVIDER_ID,
-            },
+            device_assistant::{GMAIL_WEB_SEND_PROVIDER_ID, SLACK_WEB_SEND_PROVIDER_ID},
         };
         use desk_agent_protocol::data_lineage::DestinationIdentity;
 
@@ -2283,7 +2302,7 @@ mod tests {
                 GMAIL_WEB_SEND_PROVIDER_ID,
                 serde_json::to_value(gmail_exact_send_input()).unwrap(),
                 DestinationIdentity::EmailAccount {
-                    account_id: GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                    account_id: "gmail-web:owner@example.test".into(),
                 },
             ),
             (
@@ -2291,7 +2310,7 @@ mod tests {
                 SLACK_WEB_SEND_PROVIDER_ID,
                 serde_json::to_value(slack_exact_send_input()).unwrap(),
                 DestinationIdentity::ChatAccount {
-                    account_id: SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                    account_id: "slack-web:T123:U456".into(),
                 },
             ),
         ] {
@@ -2323,6 +2342,24 @@ mod tests {
             assert_eq!(stored.export_destinations, [expected_destination]);
             assert!(stored.canonical_input_json.is_some());
             assert!(stored.canonical_input_digest_sha256.is_some());
+
+            for account in [
+                serde_json::Value::Null,
+                serde_json::json!("another-account"),
+            ] {
+                let mut changed = item.clone();
+                changed["exact_input"]["page"]["account_id"] = account;
+                assert!(
+                    build_permission_request(
+                        &call(&serde_json::json!({"items": [changed]}).to_string()),
+                        &registry,
+                        format!("permission-{tool_name}-wrong-account"),
+                        1,
+                        "2026-09-03T00:00:00Z".into(),
+                    )
+                    .is_err()
+                );
+            }
 
             let mut missing = item.clone();
             missing.as_object_mut().unwrap().remove("exact_input");
@@ -2362,4 +2399,11 @@ mod tests {
             assert!(error.message.contains("must be requested separately"));
         }
     }
+}
+
+/// Deterministic control text only; this is not a grant or current policy snapshot.
+pub(crate) fn existing_request_result(request_id: &str, decision_state: &str) -> serde_json::Value {
+    json!({"status":"existing_permission_request", "decision_state":decision_state,
+        "request_id":request_id, "authority":"unchanged",
+        "message":"An authority-equivalent permission batch already exists for this input revision. Do not request it again; use the current authorization snapshot or adapt to the recorded decision."})
 }

@@ -21,6 +21,13 @@ use crate::sink_authorizer::{
     SinkAuthorizer, SinkInput, SinkProjectionAudit, authorize_export,
 };
 
+mod lineage;
+pub use lineage::{
+    InvalidModelInputLineage, ModelInputLineage, is_audited_public_system_prompt,
+    model_output_message_envelope, project_model_input_lineage, validate_model_input_lineage,
+    validate_model_output_lineage,
+};
+
 const MODEL_OUTPUT_TTL_MS: u64 = 5 * 60 * 1000;
 pub(crate) const MODEL_CALL_RETENTION_HEADROOM_MS: u64 = 60 * 1000;
 
@@ -287,19 +294,21 @@ impl ModelEgressPolicy {
                     max_bytes: u64::try_from(self.byte_cap)
                         .map_err(|_| ModelEgressError::InvalidPolicy("byte cap overflow".into()))?,
                 };
-                let exported_id = format!(
-                    "model-export-{}",
-                    short_digest(
-                        format!(
-                            "{}:{}:{}",
-                            authorization.authorization_id, source.envelope_id, message.message_id
-                        )
-                        .as_bytes()
-                    )
+                let exported_id = model_export_envelope_id(
+                    &authorization.authorization_id,
+                    &source.envelope_id,
+                    &message.message_id,
                 );
-                authorize_export(&source, &exported_id, &authorization, self.now_unix_ms)
-                    .map_err(ModelEgressError::Sink)?
-                    .0
+                let (mut exported, transformation) =
+                    authorize_export(&source, &exported_id, &authorization, self.now_unix_ms)
+                        .map_err(ModelEgressError::Sink)?;
+                // Persist the identity-preserving export edge in the projected
+                // label; the original source retains its own ancestry.
+                exported.provenance.source_envelope_ids = transformation.input_envelope_ids;
+                exported
+                    .validate()
+                    .map_err(|error| ModelEgressError::InvalidDerivedEnvelope(error.to_string()))?;
+                exported
             };
             message.data_envelope = Some(projected.clone());
             projected_envelopes.push(projected);
@@ -383,18 +392,24 @@ impl ModelEgressPolicy {
             retention = retention.most_restrictive(input.retention);
         }
         let digest_sha256 = hex_digest(&bytes);
+        // Equal text can be produced from different sources in the same clock tick.
+        // Bind the immutable output identity to the full input identities as well.
+        let input_identities: Vec<_> = inputs
+            .iter()
+            .map(|input| (&input.envelope_id, &input.digest_sha256))
+            .collect();
+        let identity = serde_json::to_vec(&(
+            "model-output-v1",
+            &self.export_authorization_id,
+            &self.destination,
+            &digest_sha256,
+            &input_identities,
+            self.now_unix_ms,
+        ))
+        .map_err(|error| ModelEgressError::Encode(error.to_string()))?;
         let envelope = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-            envelope_id: format!(
-                "model-output-{}",
-                short_digest(
-                    format!(
-                        "{}:{}:{}",
-                        self.export_authorization_id, digest_sha256, self.now_unix_ms
-                    )
-                    .as_bytes()
-                )
-            ),
+            envelope_id: format!("model-output-{}", short_digest(&identity)),
             content: ContentRef::EphemeralObservation {
                 observation_id: format!(
                     "model-response-{}",
@@ -433,7 +448,12 @@ impl ModelEgressPolicy {
         let digest_sha256 = hex_digest(bytes);
         let envelope = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-            envelope_id: format!("system-prompt-{}", short_digest(message_id.as_bytes())),
+            // A system message can evolve as the runtime discloses capabilities.
+            // Its immutable label must distinguish those content revisions.
+            envelope_id: format!(
+                "system-prompt-{}-{digest_sha256}",
+                short_digest(message_id.as_bytes())
+            ),
             content: ContentRef::ImmutableBlob {
                 blob_id: format!("system-prompt-content-{}", short_digest(bytes)),
                 sha256: digest_sha256.clone(),
@@ -552,6 +572,18 @@ pub fn model_turn_content_bytes(turn: &ModelTurn) -> Result<Vec<u8>, ModelEgress
         })
         .map_err(|error| ModelEgressError::Encode(error.to_string()))
     }
+}
+
+/// Identity of an authorized projection, not an export permission by itself.
+pub fn model_export_envelope_id(
+    authorization_id: &str,
+    source_id: &str,
+    message_id: &str,
+) -> String {
+    format!(
+        "model-export-{}",
+        short_digest(format!("{authorization_id}:{source_id}:{message_id}").as_bytes())
+    )
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -888,6 +920,20 @@ mod tests {
         let policy = policy(&["inspect_office_selection"]);
         let authorized = policy.authorize_request(request).unwrap();
         assert_eq!(authorized.audit.envelope_ids.len(), 3);
+        let inputs =
+            project_model_input_lineage(&authorized.audit, &authorized.input_envelopes).unwrap();
+        assert_eq!(inputs[2].source_envelope_ids, ["read-envelope"]);
+        assert_ne!(inputs[2].envelope_id, "read-envelope");
+        assert_eq!(inputs[2].digest_sha256, hex_digest(observation));
+        assert_eq!(authorized.request.messages[2].text.as_bytes(), observation);
+        let reprojection = policy
+            .authorize_request(authorized.request.clone())
+            .unwrap();
+        assert_eq!(
+            reprojection.input_envelopes[2],
+            authorized.input_envelopes[2]
+        );
+
         assert!(matches!(
             authorized.input_envelopes[0].content,
             ContentRef::ImmutableBlob { .. }
@@ -914,6 +960,62 @@ mod tests {
         let derived = policy
             .derive_model_output_envelope(&turn, &authorized.input_envelopes)
             .unwrap();
+        use crate::schedule::source_graph::{
+            TaskSourceAuthority, TaskSourceBinding, resolve_task_sources,
+        };
+        let mut nodes = inputs.clone();
+        let read = ModelInputLineage {
+            public_system_prompt: false,
+            envelope_id: "read-envelope".into(),
+            digest_sha256: hex_digest(observation),
+            source_provider_id: inputs[2].source_provider_id.clone(),
+            source_tool_name: inputs[2].source_tool_name.clone(),
+            source_envelope_ids: vec![],
+        };
+        nodes.push(read.clone());
+        nodes.push(ModelInputLineage {
+            public_system_prompt: false,
+            envelope_id: derived.envelope_id.clone(),
+            digest_sha256: derived.digest_sha256.clone(),
+            source_provider_id: derived.provenance.source_provider_id.clone(),
+            source_tool_name: derived.provenance.source_tool_name.clone(),
+            source_envelope_ids: derived.provenance.source_envelope_ids.clone(),
+        });
+        let roots = [
+            TaskSourceBinding {
+                envelope_id: inputs[0].envelope_id.clone(),
+                digest_sha256: inputs[0].digest_sha256.clone(),
+                authority: TaskSourceAuthority::SystemPrompt,
+            },
+            TaskSourceBinding {
+                envelope_id: inputs[1].envelope_id.clone(),
+                digest_sha256: inputs[1].digest_sha256.clone(),
+                authority: TaskSourceAuthority::Scopes(vec!["fixed-input:question".into()]),
+            },
+            TaskSourceBinding {
+                envelope_id: read.envelope_id.clone(),
+                digest_sha256: read.digest_sha256.clone(),
+                authority: TaskSourceAuthority::Scopes(vec!["office:selection".into()]),
+            },
+        ];
+        let resolved =
+            resolve_task_sources(&derived.envelope_id, &derived.digest_sha256, &nodes, &roots)
+                .unwrap();
+        assert_eq!(
+            resolved.scopes,
+            ["fixed-input:question", "office:selection"]
+        );
+        nodes.retain(|node| node.envelope_id != read.envelope_id);
+        assert!(
+            resolve_task_sources(
+                &derived.envelope_id,
+                &derived.digest_sha256,
+                &nodes,
+                &roots[..2],
+            )
+            .is_err()
+        );
+
         assert_eq!(derived.sensitivity, Sensitivity::Sensitive);
         assert_eq!(derived.allowed_destinations, vec![destination]);
         assert!(
@@ -927,6 +1029,170 @@ mod tests {
                     .iter()
                     .any(|id| id.starts_with("model-export-"))
         );
+    }
+
+    #[test]
+    fn public_system_marker_requires_the_full_canonical_public_label() {
+        let policy = policy(&[]);
+        let authorized = policy
+            .authorize_request(ModelRequest::text_only(
+                vec![ChatMessage::text(
+                    "system",
+                    ChatRole::System,
+                    "public instructions",
+                )],
+                ResponseFormatSpec::None,
+            ))
+            .unwrap();
+        let lineage =
+            project_model_input_lineage(&authorized.audit, &authorized.input_envelopes).unwrap();
+        assert!(is_audited_public_system_prompt(&lineage[0]));
+        let mut private = authorized.input_envelopes.clone();
+        private[0].sensitivity = Sensitivity::Sensitive;
+        let private_lineage = project_model_input_lineage(&authorized.audit, &private).unwrap();
+        assert!(!private_lineage[0].public_system_prompt);
+        let binding = crate::schedule::source_graph::TaskSourceBinding {
+            envelope_id: private_lineage[0].envelope_id.clone(),
+            digest_sha256: private_lineage[0].digest_sha256.clone(),
+            authority: crate::schedule::source_graph::TaskSourceAuthority::SystemPrompt,
+        };
+        assert!(
+            crate::schedule::source_graph::resolve_task_sources(
+                &private_lineage[0].envelope_id,
+                &private_lineage[0].digest_sha256,
+                &private_lineage,
+                &[binding]
+            )
+            .is_err()
+        );
+        let mut changed = lineage.clone();
+        changed[0].source_tool_name = "read_system_info".into();
+        assert!(validate_model_input_lineage(&authorized.audit, &changed).is_err());
+        changed = lineage.clone();
+        changed[0].source_envelope_ids.push("other-input".into());
+        assert!(validate_model_input_lineage(&authorized.audit, &changed).is_err());
+        let mut serialized = serde_json::to_value(&lineage[0]).unwrap();
+        serialized
+            .as_object_mut()
+            .unwrap()
+            .remove("public_system_prompt");
+        assert!(serde_json::from_value::<ModelInputLineage>(serialized).is_err());
+    }
+
+    #[test]
+    fn evolving_system_catalog_keeps_distinct_sources_across_model_calls() {
+        use crate::schedule::source_graph::{
+            TaskSourceAuthority, TaskSourceBinding, resolve_task_sources,
+        };
+        let policy = policy(&[]);
+        let user = message(
+            "user",
+            ChatRole::User,
+            "report",
+            Some(envelope(
+                "original-input",
+                "send-message",
+                b"report",
+                Sensitivity::UserContent,
+                vec![destination()],
+            )),
+        );
+        let system = |catalog| {
+            crate::device_assistant::build_device_assistant_system_message_with_catalog(
+                None, catalog,
+            )
+        };
+        let first = policy
+            .authorize_request(ModelRequest::text_only(
+                vec![system("catalog A"), user.clone()],
+                ResponseFormatSpec::None,
+            ))
+            .unwrap();
+        let replay = policy
+            .authorize_request(ModelRequest::text_only(
+                vec![system("catalog A"), user.clone()],
+                ResponseFormatSpec::None,
+            ))
+            .unwrap();
+        assert_eq!(first.input_envelopes[0], replay.input_envelopes[0]);
+        let first_turn = ModelTurn {
+            text: "first report".into(),
+            stop_reason: StopReason::EndTurn,
+            ..Default::default()
+        };
+        let first_output = policy
+            .derive_model_output_envelope(&first_turn, &first.input_envelopes)
+            .unwrap();
+        let previous = message(
+            "previous",
+            ChatRole::Assistant,
+            &first_turn.text,
+            Some(first_output),
+        );
+        let second = policy
+            .authorize_request(ModelRequest::text_only(
+                vec![system("catalog B"), user, previous],
+                ResponseFormatSpec::None,
+            ))
+            .unwrap();
+        assert_ne!(
+            first.input_envelopes[0].envelope_id,
+            second.input_envelopes[0].envelope_id
+        );
+        assert_ne!(
+            first.input_envelopes[0].digest_sha256,
+            second.input_envelopes[0].digest_sha256
+        );
+        let second_turn = ModelTurn {
+            text: "first report".into(),
+            stop_reason: StopReason::EndTurn,
+            ..Default::default()
+        };
+        let output = policy
+            .derive_model_output_envelope(&second_turn, &second.input_envelopes)
+            .unwrap();
+        assert!(
+            !output
+                .provenance
+                .source_envelope_ids
+                .contains(&output.envelope_id)
+        );
+        let mut nodes = project_model_input_lineage(&first.audit, &first.input_envelopes).unwrap();
+        nodes.extend(project_model_input_lineage(&second.audit, &second.input_envelopes).unwrap());
+        nodes.push(ModelInputLineage {
+            public_system_prompt: false,
+            envelope_id: output.envelope_id.clone(),
+            digest_sha256: output.digest_sha256.clone(),
+            source_provider_id: output.provenance.source_provider_id.clone(),
+            source_tool_name: output.provenance.source_tool_name.clone(),
+            source_envelope_ids: output.provenance.source_envelope_ids.clone(),
+        });
+        let bindings = vec![
+            TaskSourceBinding {
+                envelope_id: first.input_envelopes[0].envelope_id.clone(),
+                digest_sha256: first.input_envelopes[0].digest_sha256.clone(),
+                authority: TaskSourceAuthority::SystemPrompt,
+            },
+            TaskSourceBinding {
+                envelope_id: second.input_envelopes[0].envelope_id.clone(),
+                digest_sha256: second.input_envelopes[0].digest_sha256.clone(),
+                authority: TaskSourceAuthority::SystemPrompt,
+            },
+            TaskSourceBinding {
+                envelope_id: first.input_envelopes[1].envelope_id.clone(),
+                digest_sha256: first.input_envelopes[1].digest_sha256.clone(),
+                authority: TaskSourceAuthority::Scopes(vec!["fixed-input:report".into()]),
+            },
+        ];
+        let proof = resolve_task_sources(
+            &output.envelope_id,
+            &output.digest_sha256,
+            &nodes,
+            &bindings,
+        )
+        .unwrap();
+        assert_eq!(proof.scopes, ["fixed-input:report"]);
+        assert_eq!(proof.root_envelope_ids.len(), 3);
     }
 
     #[test]

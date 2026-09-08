@@ -10,6 +10,7 @@ import type {
     ContextNoticeDto,
     PermissionDecisionBody,
     PermissionRequestDto,
+    RehearsalView,
 } from '@/services/types';
 import { deskErrorCodeEnum } from '@/services/types';
 import type { DeviceAssistantEvent, DeviceAssistantVisualEvidence } from './device-assistant-event';
@@ -82,7 +83,11 @@ export type ComputerActionDraftPreview = {
     }>;
 };
 
+export type RehearsalConversation = Pick<RehearsalView,
+    'client_conversation_id' | 'initial_message_id' | 'prompt' | 'locale' | 'status'>;
+
 type Props = {
+    rehearsal?: RehearsalConversation;
     deskId: string;
     connected?: boolean;
     /// Stable device identity for browser-side conversation intent. The OSS
@@ -268,6 +273,7 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
 }
 
 export function useDeviceAssistantChat({
+    rehearsal,
     deskId,
     connected,
     conversationStorageScope = deskId,
@@ -314,6 +320,7 @@ export function useDeviceAssistantChat({
     const contextRequest = useRef<string | null>(null);
     const contextTimer = useRef<number | null>(null);
     const conversationId = useRef<string | null>(null);
+    const rehearsalSent = useRef(false);
     const snapshotEpoch = useRef(0);
     const snapshotRequestOrder = useRef(0);
     const snapshotWatermark = useRef<{
@@ -321,6 +328,7 @@ export function useDeviceAssistantChat({
         sessionId: string;
         seq: number;
         requestOrder: number;
+        inputRevision?: number;
     } | null>(null);
     const lastSeq = useRef(-1);
     const previewArgs = useRef(new Map<string, string>());
@@ -399,6 +407,7 @@ export function useDeviceAssistantChat({
                 sessionId: snapshot.sessionId,
                 seq: snapshot.seq,
                 requestOrder: expectedRequestOrder,
+                inputRevision: snapshot.inputRevision,
             };
             setContextUsage(snapshot.contextUsage ?? null);
             setContextNotices([...new Map((snapshot.contextNotices ?? []).map(notice => [notice.id, notice])).values()]);
@@ -525,13 +534,14 @@ export function useDeviceAssistantChat({
     useEffect(() => {
         let stored: string | null = null;
         try {
-            stored = localStorage.getItem(storageKey(conversationStorageScope));
+            stored = rehearsal?.client_conversation_id ?? localStorage.getItem(storageKey(conversationStorageScope));
         } catch {
             stored = null;
         }
         snapshotEpoch.current += 1;
         snapshotWatermark.current = null;
         conversationId.current = stored;
+        rehearsalSent.current = false;
         setMessages([]);
         setTools([]);
         setDraft(null);
@@ -566,7 +576,7 @@ export function useDeviceAssistantChat({
         if (!stored) return;
 
         void loadSnapshot(stored, true);
-    }, [conversationStorageScope, loadSnapshot]);
+    }, [conversationStorageScope, loadSnapshot, rehearsal?.client_conversation_id]);
 
     useEffect(() => {
         const interval = window.setInterval(() => {
@@ -577,6 +587,7 @@ export function useDeviceAssistantChat({
 
     useEffect(() => {
         const onStorage = (event: StorageEvent) => {
+            if (rehearsal) return;
             if (
                 event.key !== storageKey(conversationStorageScope)
                 || event.newValue === conversationId.current
@@ -617,7 +628,7 @@ export function useDeviceAssistantChat({
         };
         window.addEventListener('storage', onStorage);
         return () => window.removeEventListener('storage', onStorage);
-    }, [conversationStorageScope, loadSnapshot]);
+    }, [conversationStorageScope, loadSnapshot, rehearsal]);
 
     useEffect(() => () => {
         if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
@@ -779,6 +790,7 @@ export function useDeviceAssistantChat({
     }, [conversationStorageScope]);
 
     const updateContext = useCallback((selectedCapabilityIds: string[]) => {
+        if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (activeRequest.current || remoteActive || contextRequest.current) return false;
         const currentConversationId = ensureConversation();
         const clientRequestId = v4();
@@ -801,9 +813,10 @@ export function useDeviceAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
-    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage]);
+    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
 
     const detachAttachment = useCallback((attachmentId: string) => {
+        if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (activeRequest.current || remoteActive || contextRequest.current) return false;
         const currentConversationId = ensureConversation();
         const clientRequestId = v4();
@@ -829,9 +842,10 @@ export function useDeviceAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
-    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage]);
+    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
 
     const updateDirectory = useCallback((operation: AssistantDirectoryOperation, timeoutMessage: string) => {
+        if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (contextRequest.current || !connected || hydrating) return false;
         const currentConversationId = ensureConversation();
         const clientRequestId = v4();
@@ -850,9 +864,10 @@ export function useDeviceAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 35_000);
         return true;
-    }, [connected, deskId, ensureConversation, hydrating, loadSnapshot, sendMessage]);
+    }, [connected, deskId, ensureConversation, hydrating, loadSnapshot, sendMessage, rehearsal]);
 
     const attachWindow = useCallback((objectRef: DeviceAssistantWindowRef, displaySummary: string) => {
+        if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (activeRequest.current || remoteActive || contextRequest.current) return false;
         const currentConversationId = ensureConversation();
         setContextUpdating(true);
@@ -878,20 +893,22 @@ export function useDeviceAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
-    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage]);
+    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
 
     const start = useCallback((
         question: string,
         locale?: string,
         selectedCapabilityIds: string[] = [],
     ) => {
-        const trimmed = question.trim();
+        if (rehearsal && (rehearsal.status !== 'pending' || rehearsalSent.current || question !== rehearsal.prompt || conversationId.current !== rehearsal.client_conversation_id)) return false;
+        const trimmed = rehearsal ? rehearsal.prompt : question.trim();
         // A follow-up is durable input, not a second foreground workflow. Replace
         // the locally observed request stream with the newest request; the server
         // supersedes the older model turn under its input-revision fence.
         if (!trimmed || hydrating || contextRequest.current || !sessionTargetReady) return false;
         ensureConversation();
-        const clientMessageId = `user-${v4()}`;
+        const clientMessageId = rehearsal?.initial_message_id ?? `user-${v4()}`;
+        if (rehearsal) rehearsalSent.current = true;
         setMessages((current) => [...current, {
             id: clientMessageId,
             role: 'user',
@@ -911,16 +928,16 @@ export function useDeviceAssistantChat({
                 question: trimmed,
                 client_message_id: clientMessageId,
                 conversation_id: conversationId.current,
-                locale,
+                locale: rehearsal ? rehearsal.locale ?? undefined : locale,
                 selected_capability_ids: selectedCapabilityIds,
-                selected_attachment_ids: attachments
+                selected_attachment_ids: rehearsal ? [] : attachments
                     .filter((attachment) => attachment.state === 'active')
                     .map((attachment) => attachment.id),
             },
             deskId,
         );
         return true;
-    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady, hydrating]);
+    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady, hydrating, rehearsal]);
 
     const submitPermissionDecision = useCallback(async (
         request: PermissionRequestDto,
@@ -1048,6 +1065,7 @@ export function useDeviceAssistantChat({
     }, [deskId, loadSnapshot, outcomeDisposing, unresolvedOutcome]);
 
     const reset = useCallback(() => {
+        if (rehearsal) return;
         if (activeRequest.current) {
             sendMessage(
                 SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT,
@@ -1095,9 +1113,10 @@ export function useDeviceAssistantChat({
         } catch {
             // Nothing else to clear.
         }
-    }, [conversationStorageScope, deskId, sendMessage]);
+    }, [conversationStorageScope, deskId, sendMessage, rehearsal]);
 
     const selectConversation = useCallback((id: string) => {
+        if (rehearsal) return false;
         // Navigation must never cancel a turn or race an in-flight decision.
         if (!id || activeRequest.current || remoteActive || contextUpdating || permissionUpdating
             || outcomeDisposing || grantRevoking || hydrating) return false;
@@ -1109,10 +1128,11 @@ export function useDeviceAssistantChat({
         void loadSnapshot(id, true, true);
         return true;
     }, [remoteActive, contextUpdating, permissionUpdating, outcomeDisposing, grantRevoking,
-        hydrating, reset, conversationStorageScope, loadSnapshot]);
+        hydrating, reset, conversationStorageScope, loadSnapshot, rehearsal]);
 
     return {
         conversationId: conversationId.current,
+        inputRevision: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.inputRevision : undefined,
         selectConversation,
         contextUsage,
         contextNotices,

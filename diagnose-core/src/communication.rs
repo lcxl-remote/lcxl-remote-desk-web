@@ -203,6 +203,33 @@ fn body_matches(snapshot: &SendPayloadSnapshot, body: &str) -> bool {
         && snapshot.payload.body.digest_sha256 == format!("{:x}", Sha256::digest(body.as_bytes()))
 }
 
+/// Resolve the signed-in Gmail identity from a provider-owned page observation.
+/// Development-only handoffs retain their explicitly manual profile destination.
+pub fn gmail_web_account_id(
+    page: &desk_agent_protocol::browser_control::BrowserPageRef,
+) -> Result<String, CommunicationSealError> {
+    use desk_agent_protocol::browser_control::BrowserEngineKind;
+    page.validate()
+        .map_err(|_| CommunicationSealError::InvalidEmailAddress)?;
+    if page.origin.host_ascii != "mail.google.com" {
+        return Err(CommunicationSealError::InvalidEmailAddress);
+    }
+    if page.adapter.engine == BrowserEngineKind::ChromeDevtoolsMcp {
+        return Ok(crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into());
+    }
+    let account = page
+        .account_id
+        .as_deref()
+        .ok_or(CommunicationSealError::InvalidEmailAddress)?;
+    let email = account
+        .strip_prefix("gmail-web:")
+        .ok_or(CommunicationSealError::InvalidEmailAddress)?;
+    if canonicalize_email_address(email)?.value != email {
+        return Err(CommunicationSealError::InvalidEmailAddress);
+    }
+    Ok(account.into())
+}
+
 pub fn verify_gmail_web_exact_send_input(
     input: &GmailWebExactSendInput,
 ) -> Result<(), CommunicationSealError> {
@@ -226,7 +253,8 @@ pub fn verify_gmail_web_exact_send_input(
         .iter()
         .map(|attachment| attachment.file_name.as_str())
         .collect::<Vec<_>>();
-    if snapshot.payload.recipients.len() != 1
+    if snapshot.payload.surface.account_id != gmail_web_account_id(&input.page)?
+        || snapshot.payload.recipients.len() != 1
         || snapshot.payload.recipients[0].role != RecipientRole::To
         || snapshot.payload.recipients[0].canonical_address != canonical.value
         || snapshot.payload.recipients[0].display_name != input.draft.recipients[0].display_name
@@ -240,6 +268,26 @@ pub fn verify_gmail_web_exact_send_input(
     Ok(())
 }
 
+/// Account identity observed by the reviewed site adapter. Workspace and member
+/// are both required; a browser profile alone cannot authorize a chat export.
+pub fn slack_web_account_id(
+    page: &desk_agent_protocol::browser_control::BrowserPageRef,
+) -> Result<String, CommunicationSealError> {
+    page.validate()
+        .map_err(|_| CommunicationContractError::InvalidSurfaceScope)?;
+    if page.origin.host_ascii != "app.slack.com" {
+        return Err(CommunicationContractError::InvalidSurfaceScope.into());
+    }
+    let account = page
+        .account_id
+        .as_deref()
+        .ok_or(CommunicationContractError::InvalidSurfaceScope)?;
+    if !desk_agent_protocol::browser_control::is_valid_slack_web_account_id(account) {
+        return Err(CommunicationContractError::InvalidSurfaceScope.into());
+    }
+    Ok(account.into())
+}
+
 pub fn verify_slack_web_exact_send_input(
     input: &SlackWebExactSendInput,
 ) -> Result<(), CommunicationSealError> {
@@ -250,7 +298,8 @@ pub fn verify_slack_web_exact_send_input(
         .as_ref()
         .ok_or(CommunicationContractError::InvalidSendAuthority)?;
     verify_send_payload_snapshot(snapshot)?;
-    if snapshot.payload.recipients.len() != 1
+    if snapshot.payload.surface.account_id != slack_web_account_id(&input.page)?
+        || snapshot.payload.recipients.len() != 1
         || snapshot.payload.recipients[0].role != RecipientRole::ChatDestination
         || snapshot.payload.recipients[0].canonical_address != input.composer.accessible_name.trim()
         || !snapshot.payload.subject.is_empty()
@@ -359,6 +408,57 @@ fn is_bidi_or_invisible_control(character: char) -> bool {
 }
 
 #[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    #[test]
+    fn slack_exact_send_requires_same_workspace_and_member() {
+        let input = super::test_support::slack_exact_send_input();
+        assert_eq!(
+            slack_web_account_id(&input.page).unwrap(),
+            "slack-web:T123:U456"
+        );
+        verify_slack_web_exact_send_input(&input).unwrap();
+        for account in [
+            None,
+            Some("slack-web:T999:U456"),
+            Some("slack-web:T123:U999"),
+            Some("slack-web:current-browser-profile"),
+            Some("slack-web:T:U"),
+            Some("slack-web:T123:U456:extra"),
+            Some("slack-web:t123:u456"),
+        ] {
+            let mut changed = input.clone();
+            changed.page.account_id = account.map(str::to_owned);
+            assert!(verify_slack_web_exact_send_input(&changed).is_err());
+        }
+        let mut other_site = input.page.clone();
+        other_site.origin.host_ascii = "example.com".into();
+        assert!(slack_web_account_id(&other_site).is_err());
+    }
+
+    #[test]
+    fn exact_send_binds_signed_in_account_and_rejects_replacement_or_missing_identity() {
+        let input = super::test_support::gmail_exact_send_input();
+        assert_eq!(
+            gmail_web_account_id(&input.page).unwrap(),
+            "gmail-web:owner@example.test"
+        );
+        verify_gmail_web_exact_send_input(&input).unwrap();
+        for replacement in [
+            None,
+            Some("gmail-web:other@example.test"),
+            Some("gmail-web:current-browser-profile"),
+            Some("gmail-web:invalid"),
+        ] {
+            let mut changed = input.clone();
+            changed.page.account_id = replacement.map(str::to_owned);
+            assert!(verify_gmail_web_exact_send_input(&changed).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod test_support {
     use desk_agent_protocol::{
         browser_control::{
@@ -381,6 +481,7 @@ pub(crate) mod test_support {
 
     fn page(host: &str) -> BrowserPageRef {
         BrowserPageRef {
+            account_id: (host == "mail.google.com").then(|| "gmail-web:owner@example.test".into()),
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
                 engine: BrowserEngineKind::ChromeExtension,
@@ -482,7 +583,7 @@ pub(crate) mod test_support {
             adapter_id: "gmail-web".into(),
             adapter_version: "1".into(),
             profile_id: page.adapter.profile_incarnation.clone(),
-            account_id: "gmail-current-profile".into(),
+            account_id: "gmail-web:owner@example.test".into(),
             revision: page.adapter.connection_revision,
         };
         let handoff = handoff(
@@ -517,7 +618,8 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn slack_exact_send_input() -> SlackWebExactSendInput {
-        let page = page("app.slack.com");
+        let mut page = page("app.slack.com");
+        page.account_id = Some("slack-web:T123:U456".into());
         let body_plain_text = "Reviewed Slack body".to_string();
         let composer = element(
             &page,
@@ -536,7 +638,7 @@ pub(crate) mod test_support {
             adapter_id: "slack-web".into(),
             adapter_version: "1".into(),
             profile_id: page.adapter.profile_incarnation.clone(),
-            account_id: "slack-current-profile".into(),
+            account_id: page.account_id.clone().unwrap(),
             revision: page.adapter.connection_revision,
         };
         let handoff = handoff(

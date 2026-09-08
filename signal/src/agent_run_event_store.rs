@@ -69,6 +69,17 @@ impl SignalAgentRunEventStore {
                     internal(format!("begin user follow-up transaction: {error}"))
                 })?;
 
+            crate::schedule_store::validate_rehearsal_input_on(
+                &txn,
+                &params.actor_id,
+                &params.device_id,
+                &params.run_id,
+                params.client_conversation_id.as_deref(),
+                &params.message,
+            )
+            .await
+            .map_err(|_| internal("rehearsal input changed or not admitted"))?;
+
             if let Some(existing) = agent_run_event::Entity::find()
                 .filter(agent_run_event::Column::EventId.eq(&params.event_id))
                 .one(&txn)

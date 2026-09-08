@@ -325,6 +325,7 @@ pub async fn resume_completion_turn(
         Box::new(CompletionModel {
             command_completion: pending.kind == WorkKind::AgentExec,
             inner: crate::assistant_model::MeteredModel {
+                fresh_task: None,
                 inner: seam,
                 db: db.clone(),
                 model_name: config.model.clone().unwrap_or_default(),
@@ -337,6 +338,7 @@ pub async fn resume_completion_turn(
                     )
                 ),
                 permission_resume: false,
+                completed_compression_receipt: std::cell::RefCell::new(None),
                 model_call_ordinal: std::sync::atomic::AtomicU64::new(0),
             },
             run_id: session.conversation_id.clone(),

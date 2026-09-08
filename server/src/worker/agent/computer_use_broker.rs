@@ -1026,6 +1026,17 @@ impl ComputerUseBroker {
             browser_reason.unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
         });
         let slack_browser_surface = slack_ready.then(|| browser_surface.clone()).flatten();
+        let send_ready = browser_ready
+            && ceiling.communication_send_enabled()
+            && browser_readiness.as_ref().is_some_and(|readiness| {
+                readiness.adapter.engine == BrowserEngineKind::ChromeExtension
+            });
+        let send_reason = (!send_ready).then_some(if !ceiling.communication_send_enabled() {
+            ComputerUseReadinessReason::DisabledByLocalCeiling
+        } else {
+            browser_reason.unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
+        });
+        let send_browser_surface = send_ready.then(|| browser_surface.clone()).flatten();
         let browser_adapter = browser_readiness
             .as_ref()
             .map(|readiness| ComputerUseAdapterRef {
@@ -1531,6 +1542,13 @@ impl ComputerUseBroker {
                     ready: slack_ready,
                     reason: slack_reason,
                 },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::BrowserExternalSendConfirmed,
+                    adapter: browser_adapter.clone(),
+                    supported: browser_provider_supported,
+                    ready: send_ready,
+                    reason: send_reason,
+                },
             ],
             context_references: office_document_ref
                 .into_iter()
@@ -1586,6 +1604,12 @@ impl ComputerUseBroker {
                 .chain(slack_browser_surface.into_iter().map(|object_ref| {
                     ComputerUseContextReference {
                         capability: Capability::BrowserExternalDraftWriteConfirmed,
+                        object_ref,
+                    }
+                }))
+                .chain(send_browser_surface.into_iter().map(|object_ref| {
+                    ComputerUseContextReference {
+                        capability: Capability::BrowserExternalSendConfirmed,
                         object_ref,
                     }
                 }))
@@ -4003,6 +4027,7 @@ mod tests {
                     | Capability::BrowserPageNavigateConfirmed
                     | Capability::BrowserInputFallbackConfirmed
                     | Capability::BrowserExternalDraftWriteConfirmed
+                    | Capability::BrowserExternalSendConfirmed
             )
         }));
     }
@@ -4016,6 +4041,39 @@ mod tests {
         assert_eq!(first.revision, second.revision);
         assert_ne!(first.observed_at, "");
         assert_ne!(second.expires_at, "");
+    }
+
+    #[test]
+    fn external_send_is_not_enabled_by_draft_permission_or_without_a_paired_browser() {
+        let broker = ComputerUseBroker::new();
+        let mut settings = ComputerUseSettings {
+            enabled: true,
+            browser_semantic: true,
+            communication_handoff: true,
+            ..Default::default()
+        };
+        for communication_send in [false, true] {
+            settings.communication_send = communication_send;
+            let readiness = broker.readiness(&settings, false, false);
+            let sending = readiness
+                .capabilities
+                .iter()
+                .find(|item| item.capability == Capability::BrowserExternalSendConfirmed)
+                .unwrap();
+            assert!(!sending.ready);
+            if !communication_send {
+                assert_eq!(
+                    sending.reason,
+                    Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
+                );
+            }
+            assert!(
+                !readiness
+                    .context_references
+                    .iter()
+                    .any(|item| { item.capability == Capability::BrowserExternalSendConfirmed })
+            );
+        }
     }
 
     #[test]

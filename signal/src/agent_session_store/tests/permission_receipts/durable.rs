@@ -319,7 +319,7 @@ async fn process_loss_after_claim_recovers_the_original_lease_without_repeating_
 }
 
 #[tokio::test]
-async fn schema_upgrade_keeps_old_decisions_readable_without_inventing_pending_work() {
+async fn obsolete_schema_is_rejected_without_rewriting_decisions_or_creating_resume_work() {
     let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
     decide(&store, &decisions, true).await.unwrap();
     let saved = state(&store).await;
@@ -328,35 +328,17 @@ async fn schema_upgrade_keeps_old_decisions_readable_without_inventing_pending_w
         .execute_unprepared("DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 9")
         .await
         .unwrap();
-    crate::db::initialize_schema(&store.db).await.unwrap();
-    crate::db::initialize_schema(&store.db).await.unwrap();
-    assert_eq!(state(&store).await, saved);
-    assert!(
-        store
-            .permission_resume_candidates(0, 32)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        !decide(&store, &decisions, false)
-            .await
-            .unwrap()
-            .newly_recorded
-    );
-    assert!(
-        store
-            .permission_resume_candidates(0, 32)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    store
-        .db
-        .execute_unprepared("ALTER TABLE agent_permission_resume DROP COLUMN decision_event_id")
-        .await
-        .unwrap();
-    assert!(crate::db::initialize_schema(&store.db).await.is_err());
+    for _ in 0..2 {
+        let error = crate::db::initialize_schema(&store.db).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("automatic migration is not supported")
+        );
+        assert_eq!(state(&store).await, saved);
+        // Rejection must neither reconstruct a missing table nor fabricate pending work.
+        assert!(store.permission_resume_candidates(0, 32).await.is_err());
+    }
 }
 
 #[tokio::test]
@@ -387,4 +369,35 @@ async fn corrupted_resume_metadata_is_not_a_claim_or_recovery_authority() {
         assert!(claimant.claim_turn(params).await.is_err(), "{change}");
         assert_eq!(state(&store).await, saved);
     }
+}
+
+#[tokio::test]
+async fn ordinary_permission_resume_cannot_replace_scheduled_occurrence_identity() {
+    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    decide(&store, &decisions, true).await.unwrap();
+    let pending = candidate(&store).await;
+    let (claimant, params) = prepare(&store).await;
+    let row = find(&store.db, "conversation-1").await.unwrap().unwrap();
+    let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+    session.trigger_origin = TriggerOrigin::ScheduledContinuation;
+    session.current_request_id = Some("scheduled-occurrence".into());
+    let mut row: agent_session::ActiveModel = row.into();
+    row.state_json = Set(session.encode_json_for_storage().unwrap());
+    let before = row.update(&store.db).await.unwrap();
+    assert!(
+        store
+            .pending_permission_resume(&pending, Utc::now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        claimant.claim_turn(params).await,
+        Err(ClaimError::Busy)
+    ));
+    assert_eq!(
+        find(&store.db, "conversation-1").await.unwrap().unwrap(),
+        before
+    );
+    assert_eq!(candidate(&store).await, pending);
 }

@@ -41,7 +41,9 @@ pub use artifact::{
 };
 mod communication;
 pub use communication::OutlookCallPreflight;
+mod observed;
 pub mod read;
+pub use observed::ObservedCapabilityAuthority;
 
 /// Identity and clock resolved by the runtime, never deserialized from tool input.
 pub struct ProviderCallSubject<'a> {
@@ -111,9 +113,10 @@ impl BrowserCallPreflight {
         {
             return Err(unavailable());
         }
-        let input = serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-        let canonical_input_json =
-            canonical_tool_permission_input_json(&call.name, input).map_err(|_| unavailable())?;
+        let input: serde_json::Value =
+            serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+        let canonical_input_json = canonical_tool_permission_input_json(&call.name, input.clone())
+            .map_err(|_| unavailable())?;
         if canonical_input_json.len() > capability.wire.limits.max_input_bytes as usize {
             return Err(unavailable());
         }
@@ -128,14 +131,20 @@ impl BrowserCallPreflight {
         let export_destinations = match call.name.as_str() {
             "prepare_gmail_web_draft_handoff" | "send_gmail_web_exact" => {
                 vec![DestinationIdentity::EmailAccount {
-                    account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                        .into(),
+                    account_id: crate::communication::gmail_web_account_id(
+                        &serde_json::from_value(input["page"].clone())
+                            .map_err(|_| unavailable())?,
+                    )
+                    .map_err(|_| unavailable())?,
                 }]
             }
             "prepare_slack_web_message_handoff" | "send_slack_web_exact" => {
                 vec![DestinationIdentity::ChatAccount {
-                    account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                        .into(),
+                    account_id: crate::communication::slack_web_account_id(
+                        &serde_json::from_value(input["page"].clone())
+                            .map_err(|_| unavailable())?,
+                    )
+                    .map_err(|_| unavailable())?,
                 }]
             }
             _ => vec![],

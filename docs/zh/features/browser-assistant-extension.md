@@ -17,4 +17,8 @@ LCXL Chrome 扩展是AI助手默认的浏览器适配器。它运行在被控端
 
 密码不会进入投影。附件在跨越 edge bridge 前会核对大小与 SHA-256，扩展内部还会再次核对。页面和元素引用绑定 Chrome profile、标签页、文档 incarnation、origin 与 revision；页面导航或扩展重连后，旧引用会 fail closed。
 
-Gmail 与 Slack 的草稿准备不会激活“发送”。未来的 exact-send 必须绑定单独封存的 `SendExternal` payload，在其独立发布门通过前保持不可用。
+Gmail 与 Slack 的草稿准备不会激活“发送”。exact-send 必须绑定单独封存的 `SendExternal` payload 并取得中心授权。被控端本地 `computer_use.communication_send` 上限默认关闭，与草稿开关独立；还必须开启总开关、浏览器语义控制并配对 Chrome 扩展，不能自动回退到 DevTools。worker 派发前会再次检查本地发送上限。
+
+exact-send 回执检查会排除激活前已存在的成功提示和同正文消息，包括隐藏提示，并要求出现新的可见确认信息。页面复用旧提示或无法确认结果时，保持结果未知，不能据此认定已送达或自动重试。
+
+精确发送还要求能够识别当前登录账号。Gmail 使用账号地址；Slack 要求可见账号控件提供 workspace 与 member 标识，并与当前工作区网址一致。身份缺失或有歧义时拒绝发送。扩展在激活发送前及等待回执期间复核同一身份；激活后账号发生变化时，结果保持未知。

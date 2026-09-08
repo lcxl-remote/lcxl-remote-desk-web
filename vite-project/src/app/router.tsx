@@ -54,6 +54,10 @@ export const router = createBrowserRouter([
                 }),
             },
             {
+                path: 'schedules',
+                lazy: async () => ({ Component: (await import('@/features/schedules/oss-page')).default }),
+            },
+            {
                 path: 'desk/list',
                 lazy: async () => ({
                     Component: (await import('@/features/desk/desk-list')).default,
@@ -176,6 +180,10 @@ export const router = createBrowserRouter([
                     {
                         path: 'web-search',
                         lazy: async () => ({ Component: (await import('@/features/settings/web-search-settings')).WebSearchSettings }),
+                    },
+                    {
+                        path: 'schedule-budget',
+                        lazy: async () => ({ Component: (await import('@/features/settings/schedule-budget-settings')).default }),
                     },
                     {
                         path: 'context-management',

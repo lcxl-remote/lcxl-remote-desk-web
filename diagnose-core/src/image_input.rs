@@ -126,6 +126,25 @@ pub fn validate_remote_tool_image(image: &RemoteToolImage) -> Result<(), ImageIn
     Ok(())
 }
 
+/// Deterministic history projection of an original image receipt. Recovery does
+/// not redistribute pixels or claim that a model observed them. Callers must
+/// validate the original native receipt before using this text.
+pub fn recovered_result_text(
+    content: &str,
+    image: Option<&str>,
+) -> Result<String, ImageInputError> {
+    let Some(url) = image else {
+        return Ok(content.to_owned());
+    };
+    let info = validate_image_data_url(url)?;
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(url.as_bytes()));
+    Ok(format!(
+        "{content}\n[Original image receipt recovered; pixels are not retained in this conversation. Media type: {}; decoded bytes: {}; data URL SHA-256: {digest}.]",
+        info.media_type, info.decoded_bytes
+    ))
+}
+
 fn remove_image(message: &mut ChatMessage) {
     if message.image_data_url.take().is_some()
         && !message.text.contains(IMAGE_NOT_RETAINED_PLACEHOLDER)

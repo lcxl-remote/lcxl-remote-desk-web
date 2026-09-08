@@ -633,7 +633,11 @@ pub fn apply_validated_checkpoint(
     let canonical_summary = canonical_json(&validated.summary)?;
     if let Some(lineage) = &validated.lineage {
         validate_summary_lineage(lineage, &canonical_summary, conversation)?;
-        if lineage.sources != compression_source_bindings(plan, conversation)? {
+        if lineage.sources != compression_source_bindings(plan, conversation)?
+            || lineage.derivations.last().is_none_or(|step| {
+                step.compressor != validated.compressor || step.generation != plan.generation
+            })
+        {
             return Err(ModelContextError::StaleCompressionPlan);
         }
     }
@@ -915,6 +919,11 @@ fn validate_checkpoint(
     let canonical = canonical_json(&checkpoint.summary)?;
     if let Some(lineage) = &checkpoint.lineage {
         validate_summary_lineage(lineage, &canonical, conversation)?;
+        if lineage.derivations.last().is_none_or(|step| {
+            step.compressor != checkpoint.compressor || step.generation != checkpoint.generation
+        }) {
+            return Err(ModelContextError::StaleCompressionPlan);
+        }
     }
     if canonical.len() > MAX_CONTEXT_SUMMARY_SERIALIZED_BYTES {
         return Err(ModelContextError::InvalidCheckpoint(

@@ -48,7 +48,9 @@ use crate::seam::{
     ClaimError, ClaimTurnParams, ExecContext, ExecOutcome, ModelRequest, ModelSeam, ReadOutcome,
     SessionSeam, ToolSeam, TurnSink, WaitOutcome,
 };
-use crate::session::{AgentSessionSurface, ExecutionState, SubjectMismatch, TurnState};
+use crate::session::{
+    AgentSessionSurface, ExecutionState, PersistedAgentSession, SubjectMismatch, TurnState,
+};
 
 /// The placeholder tool-result text written when a mutating execution's outcome is
 /// unknown (§6): it keeps the conversation well-formed and tells the model not to
@@ -366,6 +368,116 @@ pub async fn resume_agent_turn(
     run_or_resume(deps, claim, None, sink).await
 }
 
+mod fresh_task;
+pub use fresh_task::{resume_claimed_fresh_task_permission_turn, resume_claimed_fresh_task_turn};
+
+/// Drive a continuation already claimed atomically with its durable occurrence.
+/// The central runtime must supply the returned session directly, bind its
+/// heartbeat to BOTH leases, and gate model/tool calls against current authority.
+/// This function never claims again or interprets the event as new user input.
+/// The first save still fences the held session version/token before any model
+/// request, and the ordinary loop retains supersession and safety checks.
+pub async fn resume_claimed_scheduled_turn(
+    deps: &LoopDeps<'_>,
+    session: PersistedAgentSession,
+    scheduled_run_id: &str,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
+    resume_claimed_scheduled(deps, session, scheduled_run_id, None, sink).await
+}
+
+/// Continue the same claimed occurrence after its original durable owner decision.
+/// The central store must validate and consume that receipt with both leases.
+pub async fn resume_claimed_scheduled_permission_turn(
+    deps: &LoopDeps<'_>,
+    session: PersistedAgentSession,
+    scheduled_run_id: &str,
+    permission_request_id: &str,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
+    resume_claimed_scheduled(
+        deps,
+        session,
+        scheduled_run_id,
+        Some(permission_request_id),
+        sink,
+    )
+    .await
+}
+
+async fn resume_claimed_scheduled(
+    deps: &LoopDeps<'_>,
+    session: PersistedAgentSession,
+    scheduled_run_id: &str,
+    permission_request_id: Option<&str>,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
+    if scheduled_run_id.is_empty()
+        || scheduled_run_id.len() > 256
+        || session.trigger_origin != crate::session::TriggerOrigin::ScheduledContinuation
+        || session.surface != AgentSessionSurface::DeviceAssistant
+        || session.turn_state != TurnState::Running
+        || session.input_revision == 0
+        || session.lease_token == 0
+        || session.current_request_id.as_deref() != Some(scheduled_run_id)
+        || session.active_control_connection_id.is_some()
+        || session
+            .current_turn_id
+            .as_ref()
+            .is_none_or(|id| id.is_empty())
+        || deps.heartbeat.is_none()
+    {
+        return Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "scheduled continuation requires a bound active claim and heartbeat".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        });
+    }
+    let turn_id = session.current_turn_id.clone().expect("validated turn id");
+    let denied = || AgentError {
+        kind: AgentErrorKind::PermissionDenied,
+        message: "The original requirement is unavailable for this scheduled continuation.".into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    };
+    if let Some(id) = permission_request_id
+        && !session.permission_requests.iter().any(|request| {
+            request.request_id == id
+                && request.input_revision == session.input_revision
+                && request.validate().is_ok()
+                && matches!(
+                    request.state,
+                    crate::dynamic_run::PermissionRequestState::Approved
+                        | crate::dynamic_run::PermissionRequestState::PartiallyApproved
+                        | crate::dynamic_run::PermissionRequestState::Denied
+                        | crate::dynamic_run::PermissionRequestState::NeedsRevalidation
+                )
+        })
+    {
+        return Err(denied());
+    }
+    let policy = deps.model.model_egress_policy()?.ok_or_else(denied)?;
+    let original = crate::permission_resume::latest_user_requirement(&session.conversation)
+        .ok_or_else(denied)?;
+    let bridge = if permission_request_id.is_some() {
+        crate::permission_resume::authorized_permission_resume_message(
+            format!("{turn_id}-decision"),
+            &policy,
+            original,
+        )?
+    } else {
+        crate::permission_resume::authorized_scheduled_resume_message(
+            format!("scheduled-resume-{turn_id}"),
+            &policy,
+            original,
+        )?
+    };
+    drive_claimed(deps, session, turn_id, Some(bridge), sink).await
+}
+
 /// Resume after an owner permission decision and append one trusted protocol
 /// bridge at the conversation tail. Chat-completions providers commonly require
 /// a final user-role message to start a new completion, so the bridge uses that
@@ -401,21 +513,32 @@ async fn run_or_resume(
     sink: &mut dyn TurnSink,
 ) -> Result<LoopOutcome, AgentError> {
     let turn_id = claim.turn_id.clone();
-    let mut session = match deps.session_seam.claim_turn(claim).await {
+    let session = match deps.session_seam.claim_turn(claim).await {
         Ok(s) => s,
         Err(ClaimError::Busy) => return Ok(LoopOutcome::TurnBusy),
         Err(ClaimError::Subject(m)) => return Ok(LoopOutcome::SubjectRejected(m)),
         Err(ClaimError::Backend(e)) => return Err(e),
     };
 
+    drive_claimed(deps, session, turn_id, to_append, sink).await
+}
+
+/// Shared execution/settlement path for ordinary and preclaimed turns.
+async fn drive_claimed(
+    deps: &LoopDeps<'_>,
+    mut session: PersistedAgentSession,
+    turn_id: String,
+    to_append: Option<ChatMessage>,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
     // Keep the lease alive for the (possibly long) turn with the just-claimed
     // token; the guard stops renewal when dropped on every exit path below.
     let _lease_guard = deps
         .heartbeat
         .map(|h| h.start(session.conversation_id.clone(), session.lease_token));
 
-    // Append the control-end message (if any) and persist before the first model
-    // call. An automation resume appends nothing — it reacts to the existing tail.
+    // Append the user input or server control bridge, when supplied, and persist
+    // before the first model call. Completion-only turns use the existing tail.
     let mut newer_user_inputs_after_request = 0_u64;
     if let Some(message) = to_append {
         let message = message.with_turn_id(turn_id.clone());
@@ -429,6 +552,7 @@ async fn run_or_resume(
                 .filter(|message| {
                     message.role == ChatRole::User
                         && !crate::permission_resume::is_permission_resume_message(message)
+                        && !crate::permission_resume::is_scheduled_resume_message(message)
                 })
                 .count() as u64;
         }
@@ -509,6 +633,10 @@ async fn run_or_resume(
         _ => TurnState::Idle,
     };
     session.finish_turn(terminal, (deps.clock)());
+    session.terminal_permission_request_id = match &result {
+        Ok(LoopOutcome::PermissionRequested { request_id }) => Some(request_id.clone()),
+        _ => None,
+    };
     session.terminal_error = match &result {
         Err(error) | Ok(LoopOutcome::ContentSafetyUnavailable(error)) => Some(error.clone()),
         Ok(LoopOutcome::ProtocolError(error)) => Some(AgentError {
@@ -801,9 +929,7 @@ async fn prepare_model_context(
     loop {
         if pinned_context.strategy
             == crate::model_context::ContextManagementStrategy::CheckpointSummary
-            && deps
-                .heartbeat
-                .is_some_and(|heartbeat| !heartbeat.is_healthy())
+            && !lease_is_current(deps).await
         {
             return Err(report_context_compression_failure(
                 deps.model,
@@ -894,9 +1020,7 @@ async fn prepare_model_context(
                 if changed || floor_advanced {
                     if pinned_context.strategy
                         == crate::model_context::ContextManagementStrategy::CheckpointSummary
-                        && deps
-                            .heartbeat
-                            .is_some_and(|heartbeat| !heartbeat.is_healthy())
+                        && !lease_is_current(deps).await
                     {
                         session.model_context_state = previous_state;
                         session.context_notices = previous_notices;
@@ -940,10 +1064,7 @@ async fn prepare_model_context(
                     crate::model_context::ContextNotice::trimmed(turn_id),
                     (deps.clock)(),
                 );
-                if deps
-                    .heartbeat
-                    .is_some_and(|heartbeat| !heartbeat.is_healthy())
-                {
+                if !lease_is_current(deps).await {
                     session.model_context_state = previous_state;
                     session.context_notices = previous_notices;
                     return Err(report_context_compression_failure(
@@ -1147,10 +1268,7 @@ async fn prepare_model_context(
                         .await);
                     }
                 }
-                if deps
-                    .heartbeat
-                    .is_some_and(|heartbeat| !heartbeat.is_healthy())
-                {
+                if !lease_is_current(deps).await {
                     return Err(report_context_compression_failure(
                         deps.model,
                         FailureKind::StaleContext,
@@ -1231,10 +1349,7 @@ async fn prepare_model_context(
                     ),
                     (deps.clock)(),
                 );
-                if deps
-                    .heartbeat
-                    .is_some_and(|heartbeat| !heartbeat.is_healthy())
-                {
+                if !lease_is_current(deps).await {
                     session.model_context_state = previous_state;
                     session.context_notices = previous_notices;
                     return Err(report_context_compression_failure(
@@ -1280,6 +1395,26 @@ async fn prepare_model_context(
 }
 
 /// The loop body: model → validate → answer / discard / run read tools → repeat.
+async fn lease_is_current(deps: &LoopDeps<'_>) -> bool {
+    match deps.heartbeat {
+        Some(heartbeat) => heartbeat.check_current().await,
+        None => true,
+    }
+}
+
+async fn ensure_lease_healthy(deps: &LoopDeps<'_>) -> Result<(), AgentError> {
+    if !lease_is_current(deps).await {
+        return Err(AgentError {
+            kind: AgentErrorKind::TransportError,
+            message: "turn lease is no longer healthy".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        });
+    }
+    Ok(())
+}
+
 async fn run_inner(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
@@ -1452,6 +1587,18 @@ async fn run_inner(
                     current_unix_ms(deps.clock)?,
                 ));
         }
+        if deps
+            .registry
+            .iter()
+            .any(|tool| tool.name() == crate::schedule::proposal::REQUEST_SCHEDULE)
+        {
+            system_prompt
+                .text
+                .push_str(&crate::schedule::proposal::clock_prompt(
+                    session,
+                    current_unix_ms(deps.clock)?,
+                ));
+        }
         if deps.model.command_completion_event_id().is_some() {
             system_prompt
                 .text
@@ -1574,12 +1721,8 @@ async fn run_inner(
                 "RUNTIME INPUT WATERMARK (server authoritative): input_revision={} latest_input_seq={}. The newest user message in the transcript is the active requirement and overrides conflicting earlier requests. Do not continue a superseded plan. If update_task_status already succeeded for this requirement, do not call it again unless actual task progress materially changed; continue the work or answer.",
                 session.input_revision, session.latest_input_seq
             );
-            let latest_user = session
-                .conversation
-                .iter()
-                .rev()
-                .find(|message| message.role == ChatRole::User)
-                .cloned();
+            let latest_user =
+                crate::permission_resume::latest_user_requirement(&session.conversation).cloned();
             let parent = latest_user
                 .as_ref()
                 .and_then(|message| message.data_envelope.as_ref());
@@ -1619,6 +1762,10 @@ async fn run_inner(
                     session.conversation[..=position]
                         .iter()
                         .rev()
+                        .filter(|message| {
+                            !crate::permission_resume::is_permission_resume_message(message)
+                                && !crate::permission_resume::is_scheduled_resume_message(message)
+                        })
                         .take_while(|message| message.role == ChatRole::User)
                         .count()
                 })
@@ -1879,6 +2026,7 @@ async fn run_inner(
                 current_input_revision,
             });
         }
+        ensure_lease_healthy(deps).await?;
         // Interpretation is published only after protocol and safety validation.
         let completion_only = deps.model.command_completion_event_id().is_some();
         let turn = if completion_only {
@@ -1894,6 +2042,7 @@ async fn run_inner(
                 current_input_revision,
             });
         }
+        ensure_lease_healthy(deps).await?;
         session.record_step(turn.usage);
         if completion_only
             && (!turn.tool_calls.is_empty()
@@ -2024,6 +2173,7 @@ async fn run_inner(
                 return Ok(LoopOutcome::ContentSafetyUnavailable(error));
             }
         };
+        ensure_lease_healthy(deps).await?;
         if safety_decision != ContentSafetyDecision::Allow {
             append_refusal_placeholder(session, &mut mint, safety_decision);
             session.clear_reacted_auto_triggers(&request_message_ids);
@@ -2123,6 +2273,22 @@ async fn run_inner(
                             previous_input_revision: session.input_revision,
                             current_input_revision,
                         });
+                    }
+
+                    if let Err(error) = ensure_lease_healthy(deps).await {
+                        for skipped in &turn.tool_calls[call_index..] {
+                            append_internal_tool_result(
+                                session,
+                                turn.provider_meta.data_envelope.as_ref(),
+                                mint(),
+                                &skipped.id,
+                                "tool was not run because the turn lease is no longer healthy"
+                                    .into(),
+                                "lease_lost_tool_call",
+                            )?;
+                        }
+                        deps.session_seam.save(session).await?;
+                        return Err(error);
                     }
 
                     if crate::visual_evidence::blocks_targeting(session, &call.name) {
@@ -2262,7 +2428,19 @@ async fn run_inner(
                             }
                             let (out, ok, event_id, provided_envelope, background_task) =
                                 match completion.outcome {
-                                    Ok(ReadOutcome {
+                                    Ok(ReadOutcome::PermissionRequired { request }) => {
+                                        return task_permission::pause(
+                                            deps,
+                                            session,
+                                            call,
+                                            &turn.tool_calls[call_index + 1..],
+                                            request,
+                                            &mut mint,
+                                            sink,
+                                        )
+                                        .await;
+                                    }
+                                    Ok(ReadOutcome::Completed {
                                         output,
                                         ok,
                                         event_id,
@@ -2512,6 +2690,30 @@ async fn run_inner(
                                 }
                             }
                         }
+                        ToolEffect::SchedulePlanning => {
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            // Persist the model call before a separate transaction
+                            // compares the exact version and lease and records its result.
+                            deps.session_seam.save(session).await?;
+                            if let Err(error) =
+                                deps.session_seam.propose_schedule(session, call).await
+                            {
+                                append_internal_tool_result(
+                                    session,
+                                    turn.provider_meta.data_envelope.as_ref(),
+                                    mint(),
+                                    &call.id,
+                                    format!("tool error: {}", error.message),
+                                    "schedule_proposal_failed",
+                                )?;
+                                deps.session_seam.save(session).await?;
+                                finish_tool(session, &call.id, false, sink);
+                            } else {
+                                // The proposal transaction already stored a labelled
+                                // result. Do not append a second success message.
+                                finish_tool(session, &call.id, true, sink);
+                            }
+                        }
                         ToolEffect::DirectoryPlanning => {
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
                             let resolved = match crate::directory_tools::parse(call) {
@@ -2559,10 +2761,35 @@ async fn run_inner(
                                     current_unix_ms(deps.clock)?,
                                 )
                                 .await?;
-                            append_internal_tool_result(session, turn.provider_meta.data_envelope.as_ref(),
-                                mint(), &call.id, serde_json::json!({"directory_request_id":request_id,
-                                    "state":"pending", "message":"Awaiting owner confirmation in Conversation directories. No file operation has been authorized."}).to_string(),
-                                "directory_proposal_pending")?;
+                            let task_approved = session.file_scope.records().iter().any(|record| {
+                                record.proposal.request_id == request_id
+                                    && record.proposal.source
+                                        == crate::file_scope::DirectoryConsentSource::TaskContract
+                                    && record.state
+                                        == crate::file_scope::DirectoryConsentState::Approved
+                            });
+                            if task_approved {
+                                append_internal_tool_result(
+                                    session,
+                                    turn.provider_meta.data_envelope.as_ref(),
+                                    mint(),
+                                    &call.id,
+                                    crate::directory_tools::task_approved_result(&request_id)
+                                        .to_string(),
+                                    "task_directory_resolved",
+                                )?;
+                                deps.session_seam.save(session).await?;
+                                finish_tool(session, &call.id, true, sink);
+                                continue;
+                            }
+                            append_internal_tool_result(
+                                session,
+                                turn.provider_meta.data_envelope.as_ref(),
+                                mint(),
+                                &call.id,
+                                crate::directory_tools::pending_result(&request_id).to_string(),
+                                "directory_proposal_pending",
+                            )?;
                             append_unstarted_tool_results(
                                 session,
                                 &turn.tool_calls[call_index + 1..],
@@ -2654,6 +2881,14 @@ async fn run_inner(
                                 }
                                 Ok(request)
                             });
+                            let request = match request {
+                                Ok(request) => deps
+                                    .session_seam
+                                    .validate_task_permission_request(session, &request)
+                                    .await
+                                    .map(|()| request),
+                                Err(error) => Err(error),
+                            };
                             match request {
                                 Ok(request) => {
                                     if let Some(existing) = session
@@ -2690,14 +2925,12 @@ async fn run_inner(
                                                 "withdrawn"
                                             }
                                         };
-                                        let content = serde_json::json!({
-                                            "status": "existing_permission_request",
-                                            "decision_state": decision_state,
-                                            "request_id": existing.request_id,
-                                            "authority": "unchanged",
-                                            "message": "An authority-equivalent permission batch already exists for this input revision. Do not request it again; use the current authorization snapshot or adapt to the recorded decision."
-                                        })
-                                        .to_string();
+                                        let content =
+                                            crate::permission_tools::existing_request_result(
+                                                &existing.request_id,
+                                                decision_state,
+                                            )
+                                            .to_string();
                                         let envelope = derive_internal_tool_result_envelope(
                                             turn.provider_meta.data_envelope.as_ref(),
                                             &call.id,
@@ -2839,6 +3072,20 @@ async fn run_inner(
                                         ChatMessage::tool_result(mint(), &call.id, content);
                                     message.data_envelope = envelope;
                                     session.conversation.push(message);
+                                    if session.trigger_origin
+                                        == crate::session::TriggerOrigin::ScheduledTask
+                                    {
+                                        append_unstarted_tool_results(
+                                            session,
+                                            &turn.tool_calls[call_index + 1..],
+                                            turn.provider_meta.data_envelope.as_ref(),
+                                            &mut mint,
+                                            "not executed: task permission request was rejected",
+                                            "task_permission_denied",
+                                        )?;
+                                        finish_tool(session, &call.id, false, sink);
+                                        return Err(error);
+                                    }
                                     deps.session_seam.save(session).await?;
                                     finish_tool(session, &call.id, false, sink);
                                 }
@@ -4211,6 +4458,12 @@ async fn run_mutating<F: FnMut() -> String>(
                 }
             }
         }
+        Ok(ExecOutcome::PermissionRequired { request }) => {
+            terminal_outcome = Some(
+                task_permission::pause(deps, session, call, remaining_calls, request, mint, sink)
+                    .await?,
+            );
+        }
         Ok(ExecOutcome::Rejected { reason }) => {
             let text = match reason {
                 Some(r) => format!("the operator rejected this command: {r}"),
@@ -4633,3 +4886,5 @@ async fn run_wait<F: FnMut() -> String>(
 
 #[cfg(test)]
 mod tests;
+
+mod task_permission;

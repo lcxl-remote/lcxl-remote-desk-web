@@ -1,3 +1,4 @@
+mod scheduled_continuation;
 use super::*;
 use crate::chat::{ChatRole, ModelTurn, StopReason, ToolCall, ToolCallRef, ToolSpec};
 use crate::model_profile::WireProtocol;
@@ -456,16 +457,15 @@ impl ToolSeam for BackgroundReadTools {
     ) -> crate::seam::ReadCompletion {
         if call.name != "long_read" {
             return crate::seam::ReadCompletion {
-                outcome: self
-                    .run_read(call)
-                    .await
-                    .map(|output| crate::seam::ReadOutcome {
+                outcome: self.run_read(call).await.map(|output| {
+                    crate::seam::ReadOutcome::Completed {
                         output,
                         ok: true,
                         event_id: None,
                         data_envelope: None,
                         background_task: None,
-                    }),
+                    }
+                }),
                 version_advance: None,
             };
         }
@@ -474,7 +474,7 @@ impl ToolSeam for BackgroundReadTools {
         assert_eq!(ctx.assistant_turn_fence.as_ref(), Some(&version.turn_fence));
         self.version_seen.set(true);
         crate::seam::ReadCompletion {
-            outcome: Ok(crate::seam::ReadOutcome {
+            outcome: Ok(crate::seam::ReadOutcome::Completed {
                 output: ToolRunOutput {
                     content: crate::chat::background_task_running_result("read-task"),
                     image_data_url: None,
@@ -1127,6 +1127,7 @@ async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
     );
     seeded.surface = AgentSessionSurface::DeviceAssistant;
     let page = BrowserPageRef {
+        account_id: None,
         schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
         adapter: BrowserAdapterRef {
             engine: BrowserEngineKind::ChromeExtension,
@@ -1717,6 +1718,18 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
     assert!(tools.calls.borrow().is_empty());
     let stored = sess.inner.borrow();
     let stored = stored.as_ref().unwrap();
+    assert_eq!(
+        stored.terminal_permission_request_id.as_deref(),
+        Some(request_id.as_str())
+    );
+    let round_trip = crate::session::PersistedAgentSession::decode_json(
+        &stored.encode_json_for_storage().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        round_trip.terminal_permission_request_id,
+        stored.terminal_permission_request_id
+    );
     assert_eq!(stored.permission_requests.len(), 1);
     assert_eq!(
         stored.permission_requests[0].state,
@@ -7101,6 +7114,7 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
         Sensitivity::Sensitive,
     ));
     let page = BrowserPageRef {
+        account_id: None,
         schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
         adapter: BrowserAdapterRef {
             engine: BrowserEngineKind::ChromeExtension,
@@ -7159,6 +7173,7 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
     browser_result_envelope.retention.expires_at_unix_ms = Some(9_999);
     browser.data_envelope = Some(browser_result_envelope);
     let gmail_page = BrowserPageRef {
+        account_id: None,
         page_id: "page-gmail-1".into(),
         page_incarnation: "gmail-incarnation-1".into(),
         origin: BrowserOrigin {
@@ -7307,6 +7322,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
     };
 
     let page = BrowserPageRef {
+        account_id: None,
         schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
         adapter: BrowserAdapterRef {
             engine: BrowserEngineKind::ChromeExtension,
@@ -7699,4 +7715,130 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
         vec!["docx-envelope-1"]
     );
     assert_eq!(stored.conversation_id, "conv");
+}
+
+#[tokio::test]
+async fn scheduled_permission_pause_saves_exact_request_without_executing_remaining_calls() {
+    use crate::dynamic_run::{
+        GrantRequestItem, PERMISSION_REQUEST_SCHEMA_VERSION, PermissionRequest,
+        PermissionRequestState,
+    };
+    let store = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new(Default::default()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "must not execute".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let registry = vec![];
+    let loop_deps = deps(&store, &model, &tools, &registry, &clock);
+    let mut session = PersistedAgentSession::new("run", "actor", "device", 1, scope(), &clock());
+    session.input_revision = 1;
+    session.turn_state = TurnState::Running;
+    session.trigger_origin = crate::session::TriggerOrigin::ScheduledTask;
+    let original = ToolCall {
+        id: "first".into(),
+        name: "read_system_info".into(),
+        arguments_json: "{}".into(),
+    };
+    let remaining = ToolCall {
+        id: "second".into(),
+        ..original.clone()
+    };
+    let mut proposal = ChatMessage::text("proposal", ChatRole::Assistant, "");
+    proposal.tool_calls = vec![original.to_ref(), remaining.to_ref()];
+    session.conversation.push(proposal);
+    let request = PermissionRequest {
+        schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
+        request_id: "request-1".into(),
+        input_revision: 1,
+        state: PermissionRequestState::Pending,
+        created_at: clock(),
+        items: vec![GrantRequestItem {
+            item_id: original.id.clone(),
+            provider_id: "device".into(),
+            tool_name: original.name.clone(),
+            expected_effect: desk_agent_protocol::capability_provider::CapabilityEffect::ReadDevice,
+            resource_scope: vec!["device:1".into()],
+            operation_scope: vec!["observe".into()],
+            export_destinations: vec![],
+            canonical_input_json: Some("{}".into()),
+            canonical_input_digest_sha256: Some(format!("{:x}", Sha256::digest(b"{}"))),
+            command_confirmation: None,
+            suggested_ttl_seconds: 60,
+            suggested_max_uses: 1,
+            reason: "Approve this exact read".into(),
+        }],
+    };
+    let mut serial = 0;
+    let mut mint = || {
+        serial += 1;
+        format!("result-{serial}")
+    };
+    for mode in 0..4 {
+        let mut invalid_session = session.clone();
+        let mut invalid_request = request.clone();
+        match mode {
+            0 => invalid_session
+                .conversation
+                .push(invalid_session.conversation[0].clone()),
+            1 => invalid_request.input_revision += 1,
+            2 => invalid_request.items[0].suggested_max_uses = 2,
+            _ => invalid_session.permission_requests.push(request.clone()),
+        }
+        let before = invalid_session.clone();
+        assert!(
+            task_permission::pause(
+                &loop_deps,
+                &mut invalid_session,
+                &original,
+                &[],
+                invalid_request,
+                &mut mint,
+                &mut NullTurnSink
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(invalid_session, before);
+        assert!(store.inner.borrow().is_none());
+    }
+    let outcome = task_permission::pause(
+        &loop_deps,
+        &mut session,
+        &original,
+        &[remaining],
+        request.clone(),
+        &mut mint,
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, LoopOutcome::PermissionRequested { request_id } if request_id == "request-1")
+    );
+    assert_eq!(
+        crate::schedule::permission_wait::unfinished_pause(&session).as_deref(),
+        Some("request-1")
+    );
+    let mut changed = session.clone();
+    changed.permission_requests[0].items[0].suggested_max_uses = 2;
+    assert!(crate::schedule::permission_wait::unfinished_pause(&changed).is_none());
+    assert!(tools.calls.borrow().is_empty());
+    assert!(session.unclosed_tool_call_ids().is_empty());
+    assert_eq!(session.permission_requests, vec![request]);
+    assert_eq!(
+        store.inner.borrow().as_ref().unwrap().permission_requests,
+        session.permission_requests
+    );
+    assert!(
+        session
+            .conversation
+            .iter()
+            .any(|message| message.tool_call_id.as_deref() == Some("first")
+                && message.text.contains("pending_user_decision"))
+    );
 }

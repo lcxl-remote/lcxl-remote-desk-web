@@ -10,6 +10,12 @@ use serde_json::json;
 
 pub const REQUEST_DIRECTORY: &str = "request_conversation_directory";
 
+/// Durable pause payload shared by the loop and interrupted-turn recovery.
+pub fn pending_result(request_id: &str) -> serde_json::Value {
+    json!({"directory_request_id": request_id, "state": "pending",
+        "message": "Awaiting owner confirmation in Conversation directories. No file operation has been authorized."})
+}
+
 /// Bounded current scope metadata, rebuilt each step rather than appended to
 /// durable messages. Paths are labels/data, never instructions or tool grants.
 pub fn scope_prompt(session: &crate::session::PersistedAgentSession, now_unix_ms: u64) -> String {
@@ -138,4 +144,10 @@ mod tests {
         }
         assert_eq!(registry()[0].effect, ToolEffect::DirectoryPlanning);
     }
+}
+
+/// Only the runtime may emit this after durable task-contract consent.
+pub fn task_approved_result(request_id: &str) -> serde_json::Value {
+    json!({"directory_request_id":request_id, "state":"approved", "authority":"task_contract",
+        "file_operation_authorized":false})
 }

@@ -1,0 +1,1 @@
+{"type":"string","enum":["queued","waiting_device","running","awaiting_permission","succeeded","failed","missed","skipped_overlap","cancelled","superseded","outcome_unknown"],"x-readme-ref-name":"ScheduledRunStatus"}

@@ -1,10 +1,13 @@
-//! Pure Stage-3 CapabilityGrant matcher.
+//! Pure CapabilityGrant matcher.
 //!
 //! Matching has no reserve or dispatch capability. The SQLite/Manager stores use
 //! this decision inside their own transaction before consuming a grant use.
 
 use desk_agent_protocol::{
-    capability_grant::{CapabilityGrant, CapabilityGrantUsePolicy, CapabilityRiskTier},
+    capability_grant::{
+        CapabilityGrant, CapabilityGrantIssuer, CapabilityGrantUsePolicy, CapabilityRiskTier,
+        TaskGrantProvenance,
+    },
     capability_provider::{AuthorizationResourceKind, CapabilityEffect, ProductSurface},
     data_lineage::DestinationIdentity,
 };
@@ -173,6 +176,7 @@ pub struct CapabilityGrantCall<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantMismatch {
     InvalidGrant,
+    TaskAuthorization,
     Revoked,
     NotYetValid,
     Expired,
@@ -198,7 +202,22 @@ pub fn match_capability_grant(
     grant: &CapabilityGrant,
     call: &CapabilityGrantCall<'_>,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, true)
+    match_capability_grant_inner(grant, call, true, None)
+}
+
+/// Filter a stored candidate before the runtime opens its admission transaction.
+/// This checks scope only: a task's provenance is not current authority here.
+/// Every selected candidate still requires current parent/session validation at
+/// reservation, intent and send claim; this result must never permit device I/O.
+pub fn is_capability_grant_candidate(
+    grant: &CapabilityGrant,
+    call: &CapabilityGrantCall<'_>,
+) -> bool {
+    let parent = match &grant.issued_by {
+        CapabilityGrantIssuer::TaskAuthorization(parent) => Some(parent),
+        _ => None,
+    };
+    match_capability_grant_inner(grant, call, true, parent).is_ok()
 }
 
 /// Revalidate a call that already owns a durable reservation. The reservation
@@ -208,15 +227,42 @@ pub fn match_reserved_capability_grant(
     grant: &CapabilityGrant,
     call: &CapabilityGrantCall<'_>,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, false)
+    match_capability_grant_inner(grant, call, false, None)
+}
+
+/// The expected binding must come from current authoritative task/authorization rows
+/// under the caller's transaction fence, never from the grant or a wire request.
+/// This is equality/scope matching only, not policy approval or budget reservation.
+pub fn match_task_capability_grant(
+    grant: &CapabilityGrant,
+    call: &CapabilityGrantCall<'_>,
+    current: &TaskGrantProvenance,
+) -> Result<(), GrantMismatch> {
+    match_capability_grant_inner(grant, call, true, Some(current))
+}
+
+pub fn match_reserved_task_capability_grant(
+    grant: &CapabilityGrant,
+    call: &CapabilityGrantCall<'_>,
+    current: &TaskGrantProvenance,
+) -> Result<(), GrantMismatch> {
+    match_capability_grant_inner(grant, call, false, Some(current))
 }
 
 fn match_capability_grant_inner(
     grant: &CapabilityGrant,
     call: &CapabilityGrantCall<'_>,
     require_available_use: bool,
+    current_task: Option<&TaskGrantProvenance>,
 ) -> Result<(), GrantMismatch> {
     grant.validate().map_err(|_| GrantMismatch::InvalidGrant)?;
+    match (&grant.issued_by, current_task) {
+        (CapabilityGrantIssuer::TaskAuthorization(parent), Some(current)) if parent == current => {}
+        (CapabilityGrantIssuer::TaskAuthorization(_), _) | (_, Some(_)) => {
+            return Err(GrantMismatch::TaskAuthorization);
+        }
+        (_, None) => {}
+    }
     if grant.revoked_at_unix_ms.is_some() {
         return Err(GrantMismatch::Revoked);
     }
@@ -539,5 +585,110 @@ mod tests {
             match_capability_grant(&revoked, &current),
             Err(GrantMismatch::Revoked)
         );
+    }
+    fn task_parent() -> TaskGrantProvenance {
+        TaskGrantProvenance {
+            schedule_id: "schedule-1".into(),
+            scheduled_run_id: "scheduled-run-1".into(),
+            task_revision: 1,
+            contract_revision: 2,
+            contract_sha256: digest('c'),
+            authorization_id: "authorization-1".into(),
+            authorization_revision: 3,
+            recovery_epoch: 4,
+        }
+    }
+
+    #[test]
+    fn task_grants_require_current_parent_and_keep_all_exact_call_checks() {
+        use desk_agent_protocol::capability_grant::CAPABILITY_GRANT_SCHEMA_VERSION;
+        let resources = vec!["root:selected".into()];
+        let operations = vec!["create_new".into()];
+        let envelopes = vec!["envelope-1".into()];
+        let digests = vec![digest('b')];
+        let canonical = digest('a');
+        let current_call = call(&resources, &operations, &envelopes, &digests, &canonical);
+        let parent = task_parent();
+        let mut granted = grant();
+        granted.schema_version = CAPABILITY_GRANT_SCHEMA_VERSION;
+        granted.issued_by = CapabilityGrantIssuer::TaskAuthorization(parent.clone());
+        assert_eq!(
+            match_capability_grant(&granted, &current_call),
+            Err(GrantMismatch::TaskAuthorization)
+        );
+        assert_eq!(
+            match_reserved_capability_grant(&granted, &current_call),
+            Err(GrantMismatch::TaskAuthorization)
+        );
+        assert_eq!(
+            match_task_capability_grant(&granted, &current_call, &parent),
+            Ok(())
+        );
+        let mut stale = parent.clone();
+        stale.authorization_revision += 1;
+        assert_eq!(
+            match_task_capability_grant(&granted, &current_call, &stale),
+            Err(GrantMismatch::TaskAuthorization)
+        );
+        stale = parent.clone();
+        stale.recovery_epoch += 1;
+        assert_eq!(
+            match_task_capability_grant(&granted, &current_call, &stale),
+            Err(GrantMismatch::TaskAuthorization)
+        );
+        stale = parent.clone();
+        stale.task_revision += 1;
+        assert_eq!(
+            match_task_capability_grant(&granted, &current_call, &stale),
+            Err(GrantMismatch::TaskAuthorization)
+        );
+        stale = parent.clone();
+        stale.scheduled_run_id = "other-run".into();
+        assert_eq!(
+            match_task_capability_grant(&granted, &current_call, &stale),
+            Err(GrantMismatch::TaskAuthorization)
+        );
+        let mut changed_call = current_call.clone();
+        changed_call.canonical_input_digest_sha256 = &canonical[1..];
+        assert_eq!(
+            match_task_capability_grant(&granted, &changed_call, &parent),
+            Err(GrantMismatch::CanonicalInput)
+        );
+        granted.remaining_uses = 0;
+        assert_eq!(
+            match_task_capability_grant(&granted, &current_call, &parent),
+            Err(GrantMismatch::Exhausted)
+        );
+        assert_eq!(
+            match_reserved_task_capability_grant(&granted, &current_call, &parent),
+            Ok(())
+        );
+        granted.revoked_at_unix_ms = Some(120);
+        granted.revoked_reason = Some("revoked".into());
+        assert_eq!(
+            match_reserved_task_capability_grant(&granted, &current_call, &parent),
+            Err(GrantMismatch::Revoked)
+        );
+        assert_eq!(
+            match_task_capability_grant(&grant(), &current_call, &parent),
+            Err(GrantMismatch::TaskAuthorization)
+        );
+    }
+
+    #[test]
+    fn all_grant_sources_require_the_current_schema() {
+        for issuer in [
+            CapabilityGrantIssuer::PolicyAuto,
+            CapabilityGrantIssuer::UserDecision,
+            CapabilityGrantIssuer::TaskAuthorization(task_parent()),
+        ] {
+            let mut candidate = grant();
+            candidate.issued_by = issuer;
+            assert!(candidate.validate().is_ok());
+            for obsolete in [0, 1, 2, 99] {
+                candidate.schema_version = obsolete;
+                assert!(candidate.validate().is_err());
+            }
+        }
     }
 }

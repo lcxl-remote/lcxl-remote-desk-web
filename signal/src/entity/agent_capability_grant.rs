@@ -14,6 +14,7 @@ pub struct Model {
     pub tool_name: String,
     pub status: String,
     pub remaining_uses: i32,
+    pub issued_payload_json: String,
     pub payload_json: String,
     pub payload_schema_version: i32,
     pub version: i64,

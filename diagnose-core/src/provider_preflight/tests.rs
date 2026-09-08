@@ -43,6 +43,7 @@ fn open() -> ToolCall {
 
 fn page() -> BrowserPageRef {
     BrowserPageRef {
+        account_id: None,
         schema_version: 1,
         adapter: BrowserAdapterRef {
             engine: BrowserEngineKind::ChromeExtension,
@@ -285,9 +286,7 @@ fn equivalent_json_keeps_the_digest_but_changed_input_or_surface_does_not() {
 
 #[test]
 fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
-    use crate::device_assistant::{
-        GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID, SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID,
-    };
+    use crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID;
     use desk_agent_protocol::capability_provider::CapabilityEffect;
     use desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION;
 
@@ -299,6 +298,7 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
             "app.slack.com"
         }
         .into();
+        page.account_id = gmail.then(|| "gmail-web:owner@example.test".into());
         let field = |id: &str| {
             let mut field = element(&page);
             field.element_id = id.into();
@@ -314,7 +314,7 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
                     "draft":{"schema_version":COMMUNICATION_SCHEMA_VERSION,"recipients":[{"role":"to","address":"alice@example.com","display_name":null}],
                         "subject":"Review","body_plain_text":"Draft only","attachment_labels":[]}}),
                 DestinationIdentity::EmailAccount {
-                    account_id: GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                    account_id: "gmail-web:owner@example.test".into(),
                 },
             )
         } else {
@@ -371,9 +371,7 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
 fn exact_external_send_preflight_is_sealed_r3_authority() {
     use crate::{
         communication::test_support::{gmail_exact_send_input, slack_exact_send_input},
-        device_assistant::{
-            GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID, SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID,
-        },
+        device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID,
     };
     use desk_agent_protocol::capability_provider::CapabilityEffect;
 
@@ -382,7 +380,7 @@ fn exact_external_send_preflight_is_sealed_r3_authority() {
             "send_gmail_web_exact",
             serde_json::to_value(gmail_exact_send_input()).unwrap(),
             DestinationIdentity::EmailAccount {
-                account_id: GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                account_id: "gmail-web:owner@example.test".into(),
             },
         ),
         (

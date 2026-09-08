@@ -79,6 +79,14 @@ pub async fn run_local_api(
         )
         .run(),
     );
+    actix_web::rt::spawn(
+        desk_signal::schedule_executor::SignalScheduleExecutor::new(
+            desk_signal::db::get_db().clone(),
+            connection_map.clone(),
+            desk_signal::device_assistant_gate::global_device_assistant_gate(),
+        )
+        .run(),
+    );
     let tauri_is_admin_data = web::Data::new(Arc::clone(&tauri_bridge.tauri_is_admin));
 
     let validator: Arc<dyn NodeTokenValidator> = Arc::new(LocalNodeTokenValidator {

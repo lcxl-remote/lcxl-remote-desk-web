@@ -1,4 +1,5 @@
 //! Durable stop intent on the original accepted execution, never a new action.
+mod foreground;
 
 use super::computer_background::{Promotion, bound, task_on};
 use super::computer_binding::original_on;
@@ -192,6 +193,9 @@ impl SignalCapabilityGrantStore {
             .ok_or_else(invalid)?;
         let (outbox, work, payload) = original_on(&txn, &outbox.dispatch_id).await?;
         let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
+        if outbox.computer_background_json.is_none() {
+            return foreground::candidate(&outbox, &work, &payload);
+        }
         if task_on(&txn, &work, now).await?.is_none() {
             return Ok(None);
         }
@@ -268,6 +272,14 @@ impl SignalCapabilityGrantStore {
         lock_task(&txn, &state.action_request_id).await?;
         let (outbox, work, payload) = original_on(&txn, &state.execution_generation).await?;
         let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
+        if outbox.computer_background_json.is_none() {
+            let accepted = foreground::accept(
+                &txn, &outbox, &work, &payload, connection, audience, state, now,
+            )
+            .await?;
+            txn.commit().await?;
+            return Ok(accepted);
+        }
         task_on(&txn, &work, now).await?.ok_or_else(invalid)?;
         let binding = bound(&outbox, &work, &payload)?;
         if work.id != id

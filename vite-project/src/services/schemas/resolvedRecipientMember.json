@@ -1,0 +1,1 @@
+{"type":"object","required":["stable_id","canonical_address"],"properties":{"canonical_address":{"type":"string"},"stable_id":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"ResolvedRecipientMember"}

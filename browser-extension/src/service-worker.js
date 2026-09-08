@@ -157,6 +157,7 @@ export function samePageObservation(expected, current) {
         && expected.page_incarnation === current.page_incarnation
         && expected.document_revision === current.document_revision
         && expected.url_sha256 === current.url_sha256
+        && expected.account_id === current.account_id
         && expected.origin?.kind === current.origin?.kind
         && expected.origin?.host_ascii === current.origin?.host_ascii
         && expected.origin?.port === current.origin?.port;
@@ -265,6 +266,7 @@ async function rememberTargetTab(targetUrl, tabId) {
 function rawPageFromAction(action) {
     return {
         page_id: action.page.page_id,
+        account_id: action.page.account_id,
         page_incarnation: action.page.page_incarnation,
         origin: action.page.origin,
         document_revision: action.page.document_revision,

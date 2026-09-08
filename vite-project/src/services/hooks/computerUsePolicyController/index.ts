@@ -1,8 +1,16 @@
 export type { QueryComputerUseApplicationPolicyMutationKey } from "./useQueryComputerUseApplicationPolicy.ts";
+export type { QueryComputerUseCommunicationPolicyMutationKey } from "./useQueryComputerUseCommunicationPolicy.ts";
 export type { UpdateComputerUseApplicationPolicyMutationKey } from "./useUpdateComputerUseApplicationPolicy.ts";
+export type { UpdateComputerUseCommunicationPolicyMutationKey } from "./useUpdateComputerUseCommunicationPolicy.ts";
 export { queryComputerUseApplicationPolicyMutationKey } from "./useQueryComputerUseApplicationPolicy.ts";
 export { queryComputerUseApplicationPolicyMutationOptions } from "./useQueryComputerUseApplicationPolicy.ts";
 export { useQueryComputerUseApplicationPolicy } from "./useQueryComputerUseApplicationPolicy.ts";
+export { queryComputerUseCommunicationPolicyMutationKey } from "./useQueryComputerUseCommunicationPolicy.ts";
+export { queryComputerUseCommunicationPolicyMutationOptions } from "./useQueryComputerUseCommunicationPolicy.ts";
+export { useQueryComputerUseCommunicationPolicy } from "./useQueryComputerUseCommunicationPolicy.ts";
 export { updateComputerUseApplicationPolicyMutationKey } from "./useUpdateComputerUseApplicationPolicy.ts";
 export { updateComputerUseApplicationPolicyMutationOptions } from "./useUpdateComputerUseApplicationPolicy.ts";
 export { useUpdateComputerUseApplicationPolicy } from "./useUpdateComputerUseApplicationPolicy.ts";
+export { updateComputerUseCommunicationPolicyMutationKey } from "./useUpdateComputerUseCommunicationPolicy.ts";
+export { updateComputerUseCommunicationPolicyMutationOptions } from "./useUpdateComputerUseCommunicationPolicy.ts";
+export { useUpdateComputerUseCommunicationPolicy } from "./useUpdateComputerUseCommunicationPolicy.ts";

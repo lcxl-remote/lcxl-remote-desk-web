@@ -376,7 +376,11 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             }
             true
         };
-        let (output, sent) = tokio::join!(tools.run_read(&call), peer);
+        let (output, sent) = tokio::time::timeout(Duration::from_secs(40), async {
+            tokio::join!(tools.run_read(&call), peer)
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{case}: read/peer exchange did not settle"));
         assert!(sent, "read failed before dispatch: {output:?}");
         if case != "success" {
             let error = output.unwrap_err();
@@ -419,10 +423,28 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             },
             "{case}: durable outcome must describe the Provider response, not local release"
         );
-        socket.send(awc::ws::Message::Close(None)).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            socket.send(awc::ws::Message::Close(None)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{case}: websocket close did not settle"))
+        .unwrap();
         drop(socket);
-        map.write().await.clear();
-        handle.stop(true).await;
-        task.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            map.write().await.clear();
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{case}: connection map cleanup did not settle"));
+        // Protocol and durable-outcome assertions have completed. Teardown
+        // should not wait for unrelated HTTP graceful-shutdown bookkeeping.
+        tokio::time::timeout(Duration::from_secs(5), handle.stop(false))
+            .await
+            .unwrap_or_else(|_| panic!("{case}: server stop did not settle"));
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap_or_else(|_| panic!("{case}: server task did not settle"))
+            .unwrap()
+            .unwrap();
     }
 }

@@ -170,24 +170,18 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
             }
             crate::agent_exec_store::start_completion_publisher(db.clone());
             crate::agent_background_task_store::start_completion_publisher(db.clone());
+            actix_web::rt::spawn(
+                crate::schedule_store::ScheduleStore::new(db.clone())
+                    .run_calendar_materializer(),
+            );
 
             Ok(db)
         })
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 12;
-const MIGRATION_LOCK_TABLE: &str = "signal_schema_migration_lock";
-const LEGACY_TABLES: [&str; 8] = [
-    "agent_exec_task",
-    "agent_session",
-    "ai_usage_hourly",
-    "device_code",
-    "host_remote_access_state",
-    "model_provider",
-    "turn_usage_hourly",
-    "usage_retention",
-];
+const SIGNAL_SCHEMA_VERSION: i32 = 14;
+const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
 struct NameRow {
@@ -199,24 +193,19 @@ struct UserVersionRow {
     user_version: i32,
 }
 
-#[derive(Debug, FromQueryResult)]
-struct CountRow {
-    count: i64,
-}
-
-/// Initialize or migrate the signal database under a SQLite write lock.
+/// Initialize or validate the signal database under a SQLite write lock.
 pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbErr> {
     // Creating and touching this one-row table is the SeaORM equivalent of
     // BEGIN IMMEDIATE: the transaction obtains SQLite's write reservation before
     // reading schema state, so two startup processes cannot both classify v0.
     db.execute_unprepared(&format!(
-        "CREATE TABLE IF NOT EXISTS {MIGRATION_LOCK_TABLE} (id INTEGER PRIMARY KEY CHECK (id = 1)); \
-         INSERT OR IGNORE INTO {MIGRATION_LOCK_TABLE}(id) VALUES (1);"
+        "CREATE TABLE IF NOT EXISTS {SCHEMA_LOCK_TABLE} (id INTEGER PRIMARY KEY CHECK (id = 1)); \
+         INSERT OR IGNORE INTO {SCHEMA_LOCK_TABLE}(id) VALUES (1);"
     ))
     .await?;
     let txn = db.begin().await?;
     txn.execute_unprepared(&format!(
-        "UPDATE {MIGRATION_LOCK_TABLE} SET id = id WHERE id = 1"
+        "UPDATE {SCHEMA_LOCK_TABLE} SET id = id WHERE id = 1"
     ))
     .await?;
 
@@ -225,50 +214,10 @@ pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbE
     if version == 0 && tables.is_empty() {
         create_latest_schema(&txn).await?;
     } else {
-        if !(0..=SIGNAL_SCHEMA_VERSION).contains(&version) {
+        if version != SIGNAL_SCHEMA_VERSION {
             return Err(DbErr::Custom(format!(
-                "unsupported signal database schema version {version}"
+                "unsupported signal database schema version {version}; expected {SIGNAL_SCHEMA_VERSION}; automatic migration is not supported"
             )));
-        }
-        let mut migration_version = version;
-        while migration_version < SIGNAL_SCHEMA_VERSION {
-            let tables = application_tables(&txn).await?;
-            match migration_version {
-                0 => migrate_legacy_v0_to_v1(&txn, &tables).await?,
-                1 => migrate_v1_to_v2(&txn, &tables).await?,
-                2 => migrate_v2_to_v3(&txn, &tables).await?,
-                3 => migrate_v3_to_v4(&txn, &tables).await?,
-                4 => migrate_v4_to_v5(&txn, &tables).await?,
-                5 => migrate_v5_to_v6(&txn, &tables).await?,
-                6 => migrate_v6_to_v7(&txn, &tables).await?,
-                7 => migrate_v7_to_v8(&txn, &tables).await?,
-                8 => migrate_v8_to_v9(&txn, &tables).await?,
-                9 => migrate_v9_to_v10(&txn, &tables).await?,
-                10 => {
-                    validate_v10_schema(&txn, &tables).await?;
-                    create_entity(
-                        &txn,
-                        &Schema::new(txn.get_database_backend()),
-                        crate::entity::web_search_config::Entity,
-                    )
-                    .await?;
-                }
-                11 => {
-                    validate_v11_schema(&txn, &tables).await?;
-                    create_entity(
-                        &txn,
-                        &Schema::new(txn.get_database_backend()),
-                        crate::entity::context_management_config::Entity,
-                    )
-                    .await?;
-                }
-                other => {
-                    return Err(DbErr::Custom(format!(
-                        "no signal database migration registered from version {other}"
-                    )));
-                }
-            }
-            migration_version += 1;
         }
         validate_latest_schema(&txn, &application_tables(&txn).await?).await?;
     }
@@ -280,6 +229,7 @@ pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbE
 
 async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     let schema = Schema::new(db.get_database_backend());
+    create_schedule_schema(db).await?;
     create_entity(db, &schema, device_code::Entity).await?;
     create_entity(db, &schema, turn_usage::Entity).await?;
     create_entity(db, &schema, ai_usage::Entity).await?;
@@ -297,6 +247,7 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, agent_run_event::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_permission_resume::Entity).await?;
     create_entity(db, &schema, crate::entity::web_search_config::Entity).await?;
+    create_entity(db, &schema, crate::entity::schedule_budget_policy::Entity).await?;
     create_entity(
         db,
         &schema,
@@ -381,33 +332,6 @@ async fn create_latest_model_provider<C: ConnectionTrait>(db: &C) -> Result<(), 
     Ok(())
 }
 
-/// Historical v1 model-provider shape used only by the legacy v0 migration.
-/// Later migrations add their columns in version order inside the same startup
-/// transaction.
-async fn create_v1_model_provider<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
-    db.execute_unprepared(
-        "CREATE TABLE model_provider (\
-           id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),\
-           wire_protocol TEXT NULL, model TEXT NULL,\
-           supports_image_input INTEGER NOT NULL DEFAULT 0,\
-           base_url TEXT NULL, api_key TEXT NULL,\
-           profile_schema_version INTEGER NOT NULL CHECK (profile_schema_version >= 1),\
-           request_options TEXT NOT NULL CHECK (json_valid(request_options) AND json_type(request_options) = 'object'),\
-           output_limit_field TEXT NOT NULL,\
-           probe_max_output_tokens INTEGER NOT NULL CHECK (probe_max_output_tokens > 0),\
-           runtime_max_output_tokens INTEGER NOT NULL CHECK (runtime_max_output_tokens > 0),\
-           max_context_bytes INTEGER NOT NULL CHECK (max_context_bytes BETWEEN 4096 AND 16777216),\
-           connection_revision INTEGER NOT NULL CHECK (connection_revision >= 1),\
-           profile_revision INTEGER NOT NULL CHECK (profile_revision >= 1),\
-           response_format TEXT NOT NULL, execution_mode TEXT NOT NULL,\
-           max_same_tool_calls_per_turn INTEGER NOT NULL,\
-           max_steps_per_turn INTEGER NOT NULL, updated_at TEXT NOT NULL\
-         )",
-    )
-    .await?;
-    Ok(())
-}
-
 async fn create_latest_probe_observation<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     db.execute_unprepared(
         "CREATE TABLE model_probe_observation (\
@@ -423,116 +347,6 @@ async fn create_latest_probe_observation<C: ConnectionTrait>(db: &C) -> Result<(
     )
     .await?;
     Ok(())
-}
-
-async fn migrate_legacy_v0_to_v1<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    let expected: HashSet<String> = LEGACY_TABLES
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
-    if tables != &expected {
-        return Err(DbErr::Custom(format!(
-            "legacy signal database has an unknown or partial table set: {tables:?}"
-        )));
-    }
-    let columns = table_columns(db, "model_provider").await?;
-    let expected_columns: HashSet<String> = [
-        "id",
-        "provider",
-        "model",
-        "supports_image_input",
-        "base_url",
-        "api_key",
-        "max_context_bytes",
-        "response_format",
-        "execution_mode",
-        "max_same_tool_calls_per_turn",
-        "max_steps_per_turn",
-        "updated_at",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
-    if columns != expected_columns {
-        return Err(DbErr::Custom(format!(
-            "legacy model_provider schema fingerprint mismatch: {columns:?}"
-        )));
-    }
-
-    let oversized = CountRow::find_by_statement(Statement::from_string(
-        db.get_database_backend(),
-        "SELECT COUNT(*) AS count FROM model_provider WHERE max_context_bytes > 16777216"
-            .to_string(),
-    ))
-    .one(db)
-    .await?
-    .map_or(0, |row| row.count);
-    if oversized > 0 {
-        log::warn!(
-            "legacy model-provider max_context_bytes exceeded the application safety limit; clamped {oversized} row(s) to 16777216"
-        );
-    }
-
-    db.execute_unprepared("ALTER TABLE model_provider RENAME TO model_provider_v0")
-        .await?;
-    create_v1_model_provider(db).await?;
-    db.execute_unprepared(
-        "INSERT INTO model_provider (\
-           id, wire_protocol, model, supports_image_input, base_url, api_key,\
-           profile_schema_version, request_options, output_limit_field,\
-           probe_max_output_tokens, runtime_max_output_tokens, max_context_bytes,\
-           connection_revision, profile_revision, response_format, execution_mode,\
-           max_same_tool_calls_per_turn, max_steps_per_turn, updated_at\
-         ) SELECT id,\
-           CASE provider WHEN 'anthropic' THEN 'anthropic_messages' \
-             WHEN 'openai-compatible' THEN 'open_ai_chat_completions' \
-             ELSE provider END,\
-           model, supports_image_input, base_url, api_key, 1, '{}', 'max_tokens',\
-           512, 4096,\
-           CASE WHEN max_context_bytes IS NULL OR max_context_bytes = 0 THEN 131072 \
-             WHEN max_context_bytes < 4096 THEN 4096 \
-             WHEN max_context_bytes > 16777216 THEN 16777216 \
-             ELSE max_context_bytes END,\
-           1, 1, response_format, execution_mode, max_same_tool_calls_per_turn,\
-           max_steps_per_turn, updated_at FROM model_provider_v0",
-    )
-    .await?;
-    db.execute_unprepared("DROP TABLE model_provider_v0")
-        .await?;
-    Ok(())
-}
-
-async fn migrate_v1_to_v2<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v1_schema(db, tables).await?;
-    create_latest_probe_observation(db).await
-}
-
-async fn migrate_v2_to_v3<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v2_schema(db, tables).await?;
-    db.execute_unprepared(
-        "ALTER TABLE model_provider ADD COLUMN exec_approval_timeout_secs INTEGER \
-         NOT NULL DEFAULT 120 CHECK (exec_approval_timeout_secs BETWEEN 30 AND 1800)",
-    )
-    .await?;
-    Ok(())
-}
-
-async fn migrate_v3_to_v4<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v3_schema(db, tables).await?;
-    let schema = Schema::new(db.get_database_backend());
-    create_entity(db, &schema, agent_action_item::Entity).await
 }
 
 async fn verify_sqlite_durability(db: &DatabaseConnection) -> Result<(), DbErr> {
@@ -582,504 +396,95 @@ async fn verify_sqlite_durability(db: &DatabaseConnection) -> Result<(), DbErr> 
     Ok(())
 }
 
-async fn migrate_v4_to_v5<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v4_schema(db, tables).await?;
-    let schema = Schema::new(db.get_database_backend());
-    create_entity(db, &schema, model_egress_receipt::Entity).await?;
-    db.execute(
-        &Index::create()
-            .if_not_exists()
-            .unique()
-            .name("idx-model-egress-export-call")
-            .table(model_egress_receipt::Entity)
-            .col(model_egress_receipt::Column::ExportAuthorizationId)
-            .col(model_egress_receipt::Column::ModelCallOrdinal)
-            .to_owned(),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn migrate_v5_to_v6<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v5_schema(db, tables).await?;
-    let schema = Schema::new(db.get_database_backend());
-    create_entity(db, &schema, agent_run_event::Entity).await?;
-    db.execute(
-        &Index::create()
-            .if_not_exists()
-            .unique()
-            .name("idx-agent-run-event-sequence")
-            .table(agent_run_event::Entity)
-            .col(agent_run_event::Column::RunId)
-            .col(agent_run_event::Column::EventSeq)
-            .to_owned(),
-    )
-    .await?;
-    db.execute(
-        &Index::create()
-            .if_not_exists()
-            .name("idx-agent-run-event-input")
-            .table(agent_run_event::Entity)
-            .col(agent_run_event::Column::RunId)
-            .col(agent_run_event::Column::Kind)
-            .col(agent_run_event::Column::InputSeq)
-            .to_owned(),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn migrate_v6_to_v7<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v6_schema(db, tables).await?;
-    let schema = Schema::new(db.get_database_backend());
-    create_entity(db, &schema, agent_capability_grant::Entity).await?;
-    create_entity(db, &schema, agent_grant_reservation::Entity).await?;
-    create_entity(db, &schema, agent_capability_dispatch_outbox::Entity).await?;
-    Ok(())
-}
-
-async fn validate_v1_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    let expected: HashSet<String> = LEGACY_TABLES
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
-    if tables != &expected {
-        return Err(DbErr::Custom(format!(
-            "signal database schema v{SIGNAL_SCHEMA_VERSION} has an unknown or partial table set: {tables:?}"
-        )));
-    }
-    validate_profile_columns(db, 1).await
-}
-
 async fn validate_latest_schema<C: ConnectionTrait>(
     db: &C,
     tables: &HashSet<String>,
 ) -> Result<(), DbErr> {
-    let mut previous = tables.clone();
-    if !previous.remove("context_management_config") {
-        return Err(DbErr::Custom(
-            "signal schema v12 is missing context_management_config".into(),
-        ));
+    use sea_orm::{EntityName, Iterable, sea_query::Iden};
+    let mut remaining = tables.clone();
+    macro_rules! check_entity {
+        ($module:ident) => {{
+            let table = crate::entity::$module::Entity.table_name();
+            if !remaining.remove(table) {
+                return Err(DbErr::Custom(format!("signal schema is missing {table}")));
+            }
+            let columns = table_columns(db, table).await?;
+            for column in crate::entity::$module::Column::iter() {
+                let name = column.to_string();
+                if !columns.contains(&name) {
+                    return Err(DbErr::Custom(format!(
+                        "signal schema is missing {table}.{name}"
+                    )));
+                }
+            }
+        }};
     }
-    validate_v11_schema(db, &previous).await?;
-    let columns = table_columns(db, "context_management_config").await?;
-    for column in ["id", "config_json"] {
-        if !columns.contains(column) {
-            return Err(DbErr::Custom(format!(
-                "context_management_config missing {column}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_v11_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    let mut previous = tables.clone();
-    if !previous.remove("web_search_config") {
-        return Err(DbErr::Custom(
-            "signal schema v11 is missing web_search_config".into(),
-        ));
-    }
-    validate_v10_schema(db, &previous).await?;
-    let columns = table_columns(db, "web_search_config").await?;
-    for column in ["id", "config_json"] {
-        if !columns.contains(column) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v11 is missing web_search_config.{column}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_v10_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    let mut previous = tables.clone();
-    if !previous.remove("agent_permission_resume") {
-        return Err(DbErr::Custom(
-            "signal schema v10 is missing agent_permission_resume".into(),
-        ));
-    }
-    validate_v9_schema(db, &previous).await?;
-    let columns = table_columns(db, "agent_permission_resume").await?;
-    for required in [
-        "id",
-        "permission_id",
-        "decision_event_id",
-        "run_id",
-        "request_id",
-        "actor_id",
-        "device_id",
-        "input_revision",
-        "state",
-        "turn_id",
-        "version",
-        "created_at",
-        "updated_at",
-    ] {
-        if !columns.contains(required) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v10 is missing agent_permission_resume.{required}"
-            )));
-        }
+    check_entity!(device_code);
+    check_entity!(turn_usage);
+    check_entity!(ai_usage);
+    check_entity!(model_provider);
+    check_entity!(model_probe_observation);
+    check_entity!(usage_retention);
+    check_entity!(host_remote_access_state);
+    check_entity!(agent_session);
+    check_entity!(agent_exec_task);
+    check_entity!(agent_action_item);
+    check_entity!(agent_capability_grant);
+    check_entity!(agent_grant_reservation);
+    check_entity!(agent_capability_dispatch_outbox);
+    check_entity!(model_egress_receipt);
+    check_entity!(agent_run_event);
+    check_entity!(agent_permission_resume);
+    check_entity!(web_search_config);
+    check_entity!(context_management_config);
+    check_entity!(schedule_budget_policy);
+    check_entity!(agent_schedule);
+    check_entity!(agent_schedule_run);
+    check_entity!(agent_task_contract);
+    check_entity!(agent_task_rehearsal);
+    check_entity!(agent_task_authorization);
+    check_entity!(agent_task_budget_reservation);
+    if !remaining.is_empty() {
+        return Err(DbErr::Custom(format!(
+            "signal schema has unexpected tables: {remaining:?}"
+        )));
     }
     Ok(())
 }
 
-async fn migrate_v9_to_v10<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v9_schema(db, tables).await?;
-    // Historical decisions do not prove whether their volatile resume started.
-    // Add an empty fence table, never enqueue old decisions during migration.
+async fn create_schedule_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+    use crate::entity::{
+        agent_schedule, agent_schedule_run, agent_task_authorization, agent_task_contract,
+    };
+    let schema = Schema::new(db.get_database_backend());
+    create_entity(db, &schema, agent_schedule::Entity).await?;
+    create_entity(db, &schema, agent_schedule_run::Entity).await?;
+    create_entity(db, &schema, agent_task_contract::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_task_rehearsal::Entity).await?;
+    create_entity(db, &schema, agent_task_authorization::Entity).await?;
     create_entity(
         db,
-        &Schema::new(db.get_database_backend()),
-        crate::entity::agent_permission_resume::Entity,
+        &schema,
+        crate::entity::agent_task_budget_reservation::Entity,
     )
-    .await
-}
-
-async fn validate_v9_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v8_schema(db, tables).await?;
-    let session_columns = table_columns(db, "agent_session").await?;
-    if !session_columns.contains("snapshot_seq")
-        || !session_columns.contains("snapshot_fingerprint")
-    {
-        return Err(DbErr::Custom(
-            "signal schema v9 is missing session snapshot metadata".into(),
-        ));
-    }
-    if !table_columns(db, "agent_capability_dispatch_outbox")
-        .await?
-        .contains("computer_background_json")
-    {
-        return Err(DbErr::Custom(
-            "signal schema v9 is missing computer_background_json".into(),
-        ));
-    }
-    Ok(())
-}
-
-async fn migrate_v8_to_v9<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v8_schema(db, tables).await?;
-    let session_columns = table_columns(db, "agent_session").await?;
-    for (name, kind) in [
-        ("snapshot_seq", "INTEGER"),
-        ("snapshot_fingerprint", "TEXT"),
-    ] {
-        if !session_columns.contains(name) {
-            db.execute_unprepared(&format!(
-                "ALTER TABLE agent_session ADD COLUMN {name} {kind} NULL"
-            ))
-            .await?;
-        }
-    }
-    if !table_columns(db, "agent_capability_dispatch_outbox")
-        .await?
-        .contains("computer_background_json")
-    {
-        db.execute_unprepared("ALTER TABLE agent_capability_dispatch_outbox ADD COLUMN computer_background_json TEXT NULL").await?;
-    }
-    Ok(())
-}
-
-async fn validate_v8_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v7_schema(db, tables).await?;
-    let columns = table_columns(db, "agent_capability_dispatch_outbox").await?;
-    for column in ["computer_binding_json", "computer_acceptance_json"] {
-        if !columns.contains(column) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v8 is missing {column}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn migrate_v7_to_v8<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v7_schema(db, tables).await?;
-    // Earlier migration steps create current entities, so the columns may
-    // already exist when a database starts below v7. Never backfill old rows.
-    let columns = table_columns(db, "agent_capability_dispatch_outbox").await?;
-    for column in ["computer_binding_json", "computer_acceptance_json"] {
-        if !columns.contains(column) {
-            db.execute_unprepared(&format!(
-                "ALTER TABLE agent_capability_dispatch_outbox ADD COLUMN {column} TEXT NULL"
-            ))
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-async fn validate_v7_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    let mut v6_tables = tables.clone();
-    for table in [
-        "agent_capability_grant",
-        "agent_grant_reservation",
-        "agent_capability_dispatch_outbox",
-    ] {
-        if !v6_tables.remove(table) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing {table}"
-            )));
-        }
-    }
-    validate_v6_schema(db, &v6_tables).await?;
-    let grant_columns = table_columns(db, "agent_capability_grant").await?;
-    for required in [
-        "grant_id",
-        "actor_id",
-        "run_id",
-        "remaining_uses",
-        "payload_json",
-        "version",
-    ] {
-        if !grant_columns.contains(required) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_capability_grant.{required}"
-            )));
-        }
-    }
-    let reservation_columns = table_columns(db, "agent_grant_reservation").await?;
-    for required in [
-        "reservation_id",
-        "grant_id",
-        "run_id",
-        "call_id",
-        "work_id",
-        "canonical_input_digest_sha256",
-        "state",
-        "generation",
-    ] {
-        if !reservation_columns.contains(required) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_grant_reservation.{required}"
-            )));
-        }
-    }
-    let outbox_columns = table_columns(db, "agent_capability_dispatch_outbox").await?;
-    for required in [
-        "dispatch_id",
-        "call_id",
-        "work_id",
-        "reservation_id",
-        "generation",
-        "state",
-        "payload_json",
-    ] {
-        if !outbox_columns.contains(required) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_capability_dispatch_outbox.{required}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_v6_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    let mut v5_tables = tables.clone();
-    if !v5_tables.remove("agent_run_event") {
-        return Err(DbErr::Custom(format!(
-            "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_run_event"
-        )));
-    }
-    validate_v5_schema(db, &v5_tables).await?;
-    let columns = table_columns(db, "agent_run_event").await?;
-    for required in [
-        "event_id",
-        "run_id",
-        "event_seq",
-        "input_revision",
-        "kind",
-        "input_seq",
-        "source_envelope_ids_json",
-        "result_envelope_ids_json",
-        "payload_json",
-        "payload_schema_version",
-    ] {
-        if !columns.contains(required) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_run_event.{required}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_v5_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    let mut v4_tables = tables.clone();
-    if !v4_tables.remove("model_egress_receipt") {
-        return Err(DbErr::Custom(format!(
-            "signal schema v{SIGNAL_SCHEMA_VERSION} is missing model_egress_receipt"
-        )));
-    }
-    validate_v4_schema(db, &v4_tables).await?;
-    let columns = table_columns(db, "model_egress_receipt").await?;
-    for required in [
-        "receipt_id",
-        "export_authorization_id",
-        "model_call_ordinal",
-        "destination_json",
-        "envelope_ids_json",
-        "digests_sha256_json",
-        "projection_digest_sha256",
-        "total_bytes",
-        "state",
-        "model_output_envelope_id",
-        "authorized_at",
-        "completed_at",
-    ] {
-        if !columns.contains(required) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing model_egress_receipt.{required}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_v4_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    let mut v3_tables = tables.clone();
-    if !v3_tables.remove("agent_action_item") {
-        return Err(DbErr::Custom(format!(
-            "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_action_item"
-        )));
-    }
-    validate_v3_schema(db, &v3_tables).await?;
-    let columns = table_columns(db, "agent_action_item").await?;
-    for required in [
-        "kind",
-        "action_request_id",
-        "execution_id",
-        "payload_schema_version",
-        "result_schema_version",
-        "cancel_generation",
-    ] {
-        if !columns.contains(required) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v{SIGNAL_SCHEMA_VERSION} is missing agent_action_item.{required}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_v3_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    validate_v2_schema(db, tables).await?;
-    let columns = table_columns(db, "model_provider").await?;
-    if !columns.contains("exec_approval_timeout_secs") {
-        return Err(DbErr::Custom(format!(
-            "signal schema v{SIGNAL_SCHEMA_VERSION} is missing \
-             model_provider.exec_approval_timeout_secs"
-        )));
-    }
-    Ok(())
-}
-
-async fn validate_v2_schema<C: ConnectionTrait>(
-    db: &C,
-    tables: &HashSet<String>,
-) -> Result<(), DbErr> {
-    let mut expected: HashSet<String> = LEGACY_TABLES
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
-    expected.insert("model_probe_observation".to_string());
-    if tables != &expected {
-        return Err(DbErr::Custom(format!(
-            "signal database schema v2 has an unknown or partial table set: {tables:?}"
-        )));
-    }
-    validate_profile_columns(db, 2).await?;
-    let observation_columns = table_columns(db, "model_probe_observation").await?;
-    for required in [
-        "model_provider_id",
-        "connection_revision",
-        "profile_revision",
-        "tested_at",
-        "reasoning_observed",
-        "reasoning_tokens",
-        "stop_reason",
-        "validated_capabilities",
-    ] {
-        if !observation_columns.contains(required) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v2 is missing model_probe_observation.{required}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_profile_columns<C: ConnectionTrait>(
-    db: &C,
-    schema_version: i32,
-) -> Result<(), DbErr> {
-    let columns = table_columns(db, "model_provider").await?;
-    for required in [
-        "wire_protocol",
-        "profile_schema_version",
-        "request_options",
-        "output_limit_field",
-        "probe_max_output_tokens",
-        "runtime_max_output_tokens",
-        "max_context_bytes",
-        "connection_revision",
-        "profile_revision",
-    ] {
-        if !columns.contains(required) {
-            return Err(DbErr::Custom(format!(
-                "signal schema v{schema_version} is missing model_provider.{required}"
-            )));
-        }
-    }
+    .await?;
+    let index = Index::create()
+        .name("idx_agent_schedule_due")
+        .table(agent_schedule::Entity)
+        .col(agent_schedule::Column::Status)
+        .col(agent_schedule::Column::NextRunAt)
+        .col(agent_schedule::Column::Id)
+        .to_owned();
+    db.execute(&index).await?;
+    use crate::entity::agent_task_budget_reservation as budget;
+    let budget_index = Index::create()
+        .name("idx_task_budget_schedule_day")
+        .table(budget::Entity)
+        .col(budget::Column::ScheduleId)
+        .col(budget::Column::Kind)
+        .col(budget::Column::UtcDay)
+        .to_owned();
+    db.execute(&budget_index).await?;
     Ok(())
 }
 
@@ -1099,7 +504,7 @@ async fn application_tables<C: ConnectionTrait>(db: &C) -> Result<HashSet<String
         db.get_database_backend(),
         format!(
             "SELECT name FROM sqlite_master WHERE type = 'table' \
-             AND name NOT LIKE 'sqlite_%' AND name <> '{MIGRATION_LOCK_TABLE}'"
+             AND name NOT LIKE 'sqlite_%' AND name <> '{SCHEMA_LOCK_TABLE}'"
         ),
     ))
     .all(db)
@@ -1190,42 +595,6 @@ mod tests {
         name: String,
     }
 
-    async fn install_legacy_v0(
-        db: &DatabaseConnection,
-        id: i64,
-        provider: &str,
-        max_context_bytes: Option<i64>,
-    ) {
-        let schema = Schema::new(db.get_database_backend());
-        for entity in [
-            schema.create_table_from_entity(device_code::Entity),
-            schema.create_table_from_entity(turn_usage::Entity),
-            schema.create_table_from_entity(ai_usage::Entity),
-            schema.create_table_from_entity(usage_retention::Entity),
-            schema.create_table_from_entity(host_remote_access_state::Entity),
-            schema.create_table_from_entity(agent_session::Entity),
-            schema.create_table_from_entity(agent_exec_task::Entity),
-        ] {
-            db.execute(&entity).await.unwrap();
-        }
-        let max_context_bytes =
-            max_context_bytes.map_or_else(|| "NULL".to_string(), |value| value.to_string());
-        db.execute_unprepared(&format!(
-            "CREATE TABLE model_provider (\
-               id INTEGER PRIMARY KEY NOT NULL, provider TEXT NULL, model TEXT NULL,\
-               supports_image_input INTEGER NOT NULL DEFAULT 0, base_url TEXT NULL,\
-               api_key TEXT NULL, max_context_bytes INTEGER NULL, response_format TEXT NOT NULL,\
-               execution_mode TEXT NOT NULL, max_same_tool_calls_per_turn INTEGER NOT NULL,\
-               max_steps_per_turn INTEGER NOT NULL, updated_at TEXT NOT NULL\
-             );\
-             INSERT INTO model_provider VALUES ({id}, '{provider}', 'claude-test', 0,\
-               'https://example.test', 'preserved-secret', {max_context_bytes}, 'json_object',\
-               'confirm_each_action', 20, 40, '2026-08-20T00:00:00Z')"
-        ))
-        .await
-        .unwrap();
-    }
-
     #[tokio::test]
     async fn current_schema_is_idempotent_and_has_no_migration_history() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
@@ -1251,7 +620,7 @@ mod tests {
             "ai_usage_hourly",
             "model_provider",
             "model_probe_observation",
-            MIGRATION_LOCK_TABLE,
+            SCHEMA_LOCK_TABLE,
             "usage_retention",
             "host_remote_access_state",
             "agent_session",
@@ -1268,6 +637,9 @@ mod tests {
             "idx-model-egress-export-call",
             "idx-agent-run-event-sequence",
             "idx-agent-run-event-input",
+            "idx_task_budget_schedule_day",
+            "agent_task_budget_reservation",
+            "agent_task_rehearsal",
         ] {
             assert!(
                 objects.contains(required),
@@ -1279,209 +651,6 @@ mod tests {
             query_user_version(&db).await.unwrap(),
             SIGNAL_SCHEMA_VERSION
         );
-    }
-
-    #[tokio::test]
-    async fn v1_to_latest_runner_adds_probe_and_timeout_then_reopens_cleanly() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        create_latest_schema(&db).await.unwrap();
-        db.execute_unprepared(
-            "DROP TABLE agent_capability_dispatch_outbox; \
-             DROP TABLE agent_grant_reservation; \
-             DROP TABLE agent_capability_grant; \
-             DROP TABLE agent_run_event; \
-             DROP TABLE model_egress_receipt; \
-             DROP TABLE agent_action_item; \
-             DROP TABLE model_probe_observation; \
-             ALTER TABLE model_provider DROP COLUMN exec_approval_timeout_secs; \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 1",
-        )
-        .await
-        .unwrap();
-
-        initialize_schema(&db).await.unwrap();
-        assert_eq!(
-            query_user_version(&db).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
-        assert!(
-            application_tables(&db)
-                .await
-                .unwrap()
-                .contains("model_probe_observation")
-        );
-        assert!(
-            table_columns(&db, "model_provider")
-                .await
-                .unwrap()
-                .contains("exec_approval_timeout_secs")
-        );
-        initialize_schema(&db).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn v2_to_latest_defaults_existing_provider_timeout() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        create_latest_schema(&db).await.unwrap();
-        db.execute_unprepared(
-            "DROP TABLE agent_capability_dispatch_outbox; \
-             DROP TABLE agent_grant_reservation; \
-             DROP TABLE agent_capability_grant; \
-             DROP TABLE agent_run_event; \
-             DROP TABLE model_egress_receipt; \
-             DROP TABLE agent_action_item; \
-             ALTER TABLE model_provider DROP COLUMN exec_approval_timeout_secs; \
-             INSERT INTO model_provider (id, wire_protocol, model, supports_image_input, \
-               base_url, api_key, profile_schema_version, request_options, output_limit_field, \
-               probe_max_output_tokens, runtime_max_output_tokens, max_context_bytes, \
-               connection_revision, profile_revision, response_format, execution_mode, \
-               max_same_tool_calls_per_turn, max_steps_per_turn, updated_at) \
-             VALUES (1, 'open_ai_chat_completions', 'test', 0, 'https://example.test', \
-               'secret', 1, '{}', 'max_tokens', 512, 4096, 131072, 1, 1, 'json_object', \
-               'confirm_each_action', 20, 40, '2026-08-21T00:00:00Z'); \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 2",
-        )
-        .await
-        .unwrap();
-
-        initialize_schema(&db).await.unwrap();
-        let row = crate::entity::model_provider::Entity::find_by_id(1)
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.exec_approval_timeout_secs, 120);
-        assert_eq!(
-            query_user_version(&db).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
-    }
-
-    #[tokio::test]
-    async fn v4_to_latest_adds_model_egress_receipts_then_reopens_cleanly() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        create_latest_schema(&db).await.unwrap();
-        db.execute_unprepared(
-            "DROP TABLE agent_capability_dispatch_outbox; \
-             DROP TABLE agent_grant_reservation; \
-             DROP TABLE agent_capability_grant; \
-             DROP TABLE agent_run_event; \
-             DROP TABLE model_egress_receipt; \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 4",
-        )
-        .await
-        .unwrap();
-
-        initialize_schema(&db).await.unwrap();
-        assert!(
-            application_tables(&db)
-                .await
-                .unwrap()
-                .contains("model_egress_receipt")
-        );
-        assert_eq!(
-            query_user_version(&db).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
-        initialize_schema(&db).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn v5_to_latest_adds_ordered_agent_run_events_then_reopens_cleanly() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        create_latest_schema(&db).await.unwrap();
-        db.execute_unprepared(
-            "DROP TABLE agent_capability_dispatch_outbox; \
-             DROP TABLE agent_grant_reservation; \
-             DROP TABLE agent_capability_grant; \
-             DROP TABLE agent_run_event; \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 5",
-        )
-        .await
-        .unwrap();
-
-        initialize_schema(&db).await.unwrap();
-        assert!(
-            application_tables(&db)
-                .await
-                .unwrap()
-                .contains("agent_run_event")
-        );
-        assert_eq!(
-            query_user_version(&db).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
-        initialize_schema(&db).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn v6_to_latest_adds_capability_grants_reservations_and_outbox_then_reopens_cleanly() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        create_latest_schema(&db).await.unwrap();
-        db.execute_unprepared(
-            "DROP TABLE agent_capability_dispatch_outbox; \
-             DROP TABLE agent_grant_reservation; \
-             DROP TABLE agent_capability_grant; \
-             DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 6",
-        )
-        .await
-        .unwrap();
-
-        initialize_schema(&db).await.unwrap();
-        let tables = application_tables(&db).await.unwrap();
-        assert!(tables.contains("agent_capability_grant"));
-        assert!(tables.contains("agent_grant_reservation"));
-        assert!(tables.contains("agent_capability_dispatch_outbox"));
-        assert_eq!(
-            query_user_version(&db).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
-        initialize_schema(&db).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn v7_to_latest_keeps_original_outbox_and_does_not_invent_acceptance() {
-        use sea_orm::{ActiveModelTrait, Set};
-
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        create_latest_schema(&db).await.unwrap();
-        let original = agent_capability_dispatch_outbox::ActiveModel {
-            dispatch_id: Set("legacy-dispatch".into()),
-            call_id: Set("legacy-call".into()),
-            work_id: Set(7),
-            reservation_id: Set("legacy-reservation".into()),
-            generation: Set(1),
-            state: Set("outcome_unknown".into()),
-            payload_json: Set("{\"legacy\":true}".into()),
-            payload_schema_version: Set(1),
-            created_at: Set(chrono::Utc::now()),
-            updated_at: Set(chrono::Utc::now()),
-            ..Default::default()
-        }
-        .insert(&db)
-        .await
-        .unwrap();
-        db.execute_unprepared(
-            "ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_binding_json; \
-            ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_acceptance_json; \
-            DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 7",
-        )
-        .await
-        .unwrap();
-        initialize_schema(&db).await.unwrap();
-        initialize_schema(&db).await.unwrap();
-        assert_eq!(
-            query_user_version(&db).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
-        let migrated = agent_capability_dispatch_outbox::Entity::find_by_id(original.id)
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(migrated, original);
-        assert!(migrated.computer_binding_json.is_none());
-        assert!(migrated.computer_acceptance_json.is_none());
     }
 
     #[tokio::test]
@@ -1502,73 +671,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v8_to_v9_adds_only_nullable_background_and_presentation_metadata() {
-        use sea_orm::{ActiveModelTrait, Set};
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        create_latest_schema(&db).await.unwrap();
-        let session = agent_session::ActiveModel {
-            conversation_id: Set("original-run".into()),
-            actor_id: Set("owner".into()),
-            device_id: Set("device".into()),
-            state_json: Set("{\"original\":true}".into()),
-            version: Set(42),
-            lease_token: Set(7),
-            lease_deadline: Set(Some(chrono::Utc::now())),
-            created_at: Set(chrono::Utc::now()),
-            updated_at: Set(chrono::Utc::now()),
-            ..Default::default()
-        }
-        .insert(&db)
-        .await
-        .unwrap();
-        let outbox = agent_capability_dispatch_outbox::ActiveModel {
-            dispatch_id: Set("original-dispatch".into()),
-            call_id: Set("original-call".into()),
-            work_id: Set(1),
-            reservation_id: Set("original-reservation".into()),
-            generation: Set(1),
-            state: Set("sending".into()),
-            payload_json: Set("{\"original\":true}".into()),
-            payload_schema_version: Set(1),
-            computer_binding_json: Set(Some("original binding".into())),
-            computer_acceptance_json: Set(Some("original acceptance".into())),
-            created_at: Set(chrono::Utc::now()),
-            updated_at: Set(chrono::Utc::now()),
-            ..Default::default()
-        }
-        .insert(&db)
-        .await
-        .unwrap();
-        db.execute_unprepared("ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_background_json; ALTER TABLE agent_session DROP COLUMN snapshot_seq; ALTER TABLE agent_session DROP COLUMN snapshot_fingerprint; DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 8").await.unwrap();
-        initialize_schema(&db).await.unwrap();
-        initialize_schema(&db).await.unwrap();
-        assert_eq!(
-            query_user_version(&db).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
-        assert_eq!(
-            agent_session::Entity::find_by_id(session.id)
-                .one(&db)
-                .await
-                .unwrap()
-                .unwrap(),
-            session
-        );
-        assert_eq!(
-            agent_capability_dispatch_outbox::Entity::find_by_id(outbox.id)
-                .one(&db)
-                .await
-                .unwrap()
-                .unwrap(),
-            outbox
-        );
-        db.execute_unprepared("ALTER TABLE agent_session DROP COLUMN snapshot_seq")
-            .await
-            .unwrap();
-        assert!(initialize_schema(&db).await.is_err());
-    }
-
-    #[tokio::test]
     async fn unknown_future_schema_version_fails_closed() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         create_latest_schema(&db).await.unwrap();
@@ -1580,179 +682,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v10_adds_search_configuration_without_importing_credentials() {
+    async fn schedules_initialize_and_survive_reinitialization() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        create_latest_schema(&db).await.unwrap();
-        db.execute_unprepared("DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 10")
-            .await
-            .unwrap();
         initialize_schema(&db).await.unwrap();
-        let search = crate::web_search_config::read(&db).await.unwrap();
-        assert!(search.configured());
-        assert_eq!(
-            search.provider,
-            desk_signal_facade::web_search::SearchProvider::DuckDuckGo
-        );
         initialize_schema(&db).await.unwrap();
-        assert_eq!(crate::web_search_config::read(&db).await.unwrap(), search);
-        db.execute_unprepared("ALTER TABLE web_search_config DROP COLUMN config_json")
-            .await
-            .unwrap();
-        assert!(initialize_schema(&db).await.is_err());
+        let tables = application_tables(&db).await.unwrap();
+        for table in [
+            "agent_schedule",
+            "agent_schedule_run",
+            "agent_task_contract",
+            "agent_task_authorization",
+        ] {
+            assert!(tables.contains(table));
+        }
+        validate_latest_schema(&db, &tables).await.unwrap();
     }
 
     #[tokio::test]
-    async fn v11_adds_compaction_configuration_and_preserves_explicit_choice() {
+    async fn concurrent_empty_database_startup_creates_one_complete_schema() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        create_latest_schema(&db).await.unwrap();
-        db.execute_unprepared("DROP TABLE context_management_config; PRAGMA user_version = 11")
-            .await
-            .unwrap();
-        initialize_schema(&db).await.unwrap();
-        let config = crate::context_management_config::read(&db).await.unwrap();
-        assert_eq!(config.strategy.as_str(), "checkpoint_summary");
-        crate::context_management_config::update(
-            &db,
-            &desk_signal_facade::context_management::UpdateContextManagementRequest {
-                expected_revision: 0,
-                strategy:
-                    desk_signal_facade::context_management::ContextManagementStrategyDto::Window,
-            },
-        )
-        .await
-        .unwrap();
-        initialize_schema(&db).await.unwrap();
-        assert_eq!(
-            crate::context_management_config::read(&db)
-                .await
-                .unwrap()
-                .strategy
-                .as_str(),
-            "window"
-        );
-    }
-
-    #[tokio::test]
-    async fn legacy_v0_migrates_profile_and_preserves_secret() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        install_legacy_v0(&db, 1, "anthropic", Some(0)).await;
-
-        initialize_schema(&db).await.unwrap();
-        let row = crate::entity::model_provider::Entity::find_by_id(1)
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.wire_protocol.as_deref(), Some("anthropic_messages"));
-        assert_eq!(row.api_key.as_deref(), Some("preserved-secret"));
-        assert_eq!(row.max_context_bytes, 131_072);
-        assert_eq!(row.request_options, "{}");
+        let (first, second) = tokio::join!(initialize_schema(&db), initialize_schema(&db));
+        first.unwrap();
+        second.unwrap();
         assert_eq!(
             query_user_version(&db).await.unwrap(),
             SIGNAL_SCHEMA_VERSION
         );
+        validate_latest_schema(&db, &application_tables(&db).await.unwrap())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn legacy_context_budget_materialization_covers_every_boundary_class() {
-        for (input, expected) in [
-            (None, 131_072),
-            (Some(0), 131_072),
-            (Some(1), 4096),
-            (Some(4095), 4096),
-            (Some(4096), 4096),
-            (Some(16_777_216), 16_777_216),
-            (Some(16_777_217), 16_777_216),
-        ] {
+    async fn obsolete_schema_is_rejected_without_migration_or_data_deletion() {
+        for version in 0..SIGNAL_SCHEMA_VERSION {
             let db = Database::connect("sqlite::memory:").await.unwrap();
-            install_legacy_v0(&db, 1, "openai-compatible", input).await;
             initialize_schema(&db).await.unwrap();
-            let row = crate::entity::model_provider::Entity::find_by_id(1)
-                .one(&db)
+            db.execute_unprepared("CREATE TABLE development_marker(value TEXT); INSERT INTO development_marker VALUES ('preserve')").await.unwrap();
+            db.execute_unprepared(&format!("PRAGMA user_version = {version}"))
+                .await
+                .unwrap();
+            let tables = application_tables(&db).await.unwrap();
+            let error = initialize_schema(&db).await.unwrap_err().to_string();
+            assert!(
+                error.contains("automatic migration is not supported"),
+                "{error}"
+            );
+            assert_eq!(query_user_version(&db).await.unwrap(), version);
+            assert_eq!(application_tables(&db).await.unwrap(), tables);
+            let value = db
+                .query_one_raw(Statement::from_string(
+                    db.get_database_backend(),
+                    "SELECT value FROM development_marker",
+                ))
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(row.max_context_bytes, expected, "legacy input {input:?}");
+            assert_eq!(value.try_get::<String>("", "value").unwrap(), "preserve");
         }
-    }
-
-    #[tokio::test]
-    async fn failed_legacy_migration_rolls_back_and_can_be_retried() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        // The v0 fingerprint permits arbitrary ids, but latest enforces the
-        // published singleton id=1 invariant. This fails after rename/create,
-        // proving that the whole migration—not only classification—rolls back.
-        install_legacy_v0(&db, 2, "openai-compatible", Some(131_072)).await;
-        initialize_schema(&db)
-            .await
-            .expect_err("id=2 must fail latest singleton check");
-
-        assert_eq!(query_user_version(&db).await.unwrap(), 0);
-        let columns = table_columns(&db, "model_provider").await.unwrap();
-        assert!(columns.contains("provider"));
-        assert!(!columns.contains("wire_protocol"));
-        let secret = db
-            .query_one_raw(Statement::from_string(
-                db.get_database_backend(),
-                "SELECT api_key FROM model_provider WHERE id = 2".to_string(),
-            ))
-            .await
-            .unwrap()
-            .unwrap()
-            .try_get::<String>("", "api_key")
-            .unwrap();
-        assert_eq!(secret, "preserved-secret");
-
-        db.execute_unprepared("UPDATE model_provider SET id = 1 WHERE id = 2")
-            .await
-            .unwrap();
-        initialize_schema(&db).await.unwrap();
-        assert_eq!(
-            query_user_version(&db).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
-    }
-
-    #[tokio::test]
-    async fn concurrent_startup_serializes_the_legacy_migration() {
-        let path =
-            std::env::temp_dir().join(format!("lrdm-signal-migration-{}.db", uuid::Uuid::new_v4()));
-        let url = format!("sqlite://{}?mode=rwc", path.display());
-        let seed = Database::connect(&url).await.unwrap();
-        install_legacy_v0(&seed, 1, "openai-compatible", Some(131_072)).await;
-        seed.close().await.unwrap();
-
-        let first = Database::connect(&url).await.unwrap();
-        let second = Database::connect(&url).await.unwrap();
-        let (first_result, second_result) =
-            tokio::join!(initialize_schema(&first), initialize_schema(&second));
-        first_result.unwrap();
-        second_result.unwrap();
-        assert_eq!(
-            query_user_version(&first).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
-        assert_eq!(
-            crate::entity::model_provider::Entity::find()
-                .all(&first)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-
-        first.close().await.unwrap();
-        second.close().await.unwrap();
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[tokio::test]
-    async fn partial_legacy_schema_fails_closed() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        db.execute_unprepared("CREATE TABLE model_provider (id INTEGER PRIMARY KEY)")
-            .await
-            .unwrap();
-        let error = initialize_schema(&db).await.unwrap_err().to_string();
-        assert!(error.contains("unknown or partial table set"), "{error}");
     }
 }

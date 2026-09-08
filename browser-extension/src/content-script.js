@@ -11,6 +11,7 @@
     let documentRevision = 1;
     let elements = new Map();
     let elementIds = new WeakMap();
+    let snapshotAccount = null;
 
     function boundedText(value, maximum = 1024) {
         const normalized = String(value || "").replace(/\s+/gu, " ").trim();
@@ -88,8 +89,10 @@
 
     async function pageDescriptor() {
         const url = new URL(location.href);
+        const account = currentCommunicationAccount();
         return {
             page_id: null,
+            account_id: account,
             page_incarnation: documentIncarnation,
             origin: {
                 kind: url.protocol === "https:" ? "https" : "http_loopback",
@@ -101,8 +104,54 @@
         };
     }
 
+    // Read only the visible Google account control, never message text, cookies,
+    // account menus or model-provided labels. Ambiguity disables reviewed send.
+    function currentGmailAccount() {
+        if (!isGmail()) return null;
+        const controls = [...document.querySelectorAll("a[href]")].filter((element) => {
+            const href = element.getAttribute("href");
+            if (!href || !visibleAcknowledgement(element)) return false;
+            try {
+                const url = new URL(href, location.href);
+                return url.origin === "https://accounts.google.com" &&
+                    url.pathname === "/SignOutOptions";
+            } catch { return false; }
+        });
+        if (controls.length !== 1) return null;
+        const label = controls[0].getAttribute("aria-label");
+        if (!label || textEncoder.encode(label).length > MAX_ACCESSIBLE_NAME_BYTES) return null;
+        const addresses = label.match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/giu);
+        if (!addresses || addresses.length !== 1) return null;
+        return addresses[0].toLowerCase();
+    }
+
+    // Restrict identity to the signed-in user's visible account control. Message
+    // authors, arbitrary profile links and display names never establish identity.
+    function currentSlackAccount() {
+        if (location.protocol !== "https:" || location.hostname !== "app.slack.com") return null;
+        const workspace = new URL(location.href).pathname.match(/^\/client\/(T[A-Z0-9]{1,63})(?:\/|$)/u)?.[1];
+        if (!workspace) return null;
+        const controls = [...document.querySelectorAll('[data-qa="user-button"],[data-qa="user_menu"]')]
+            .filter(visibleAcknowledgement);
+        if (controls.length !== 1) return null;
+        const control = controls[0];
+        const member = control.getAttribute("data-member-id");
+        const team = control.getAttribute("data-team-id");
+        if (!member || !/^U[A-Z0-9]{1,63}$/u.test(member) || team !== workspace) return null;
+        return `slack-web:${workspace}:${member}`;
+    }
+
+    function currentCommunicationAccount() {
+        if (isGmail()) {
+            const account = currentGmailAccount();
+            return account ? `gmail-web:${account}` : null;
+        }
+        return currentSlackAccount();
+    }
+
     async function snapshot(maxElements) {
         documentRevision += 1;
+        snapshotAccount = currentCommunicationAccount();
         elements = new Map();
         elementIds = new WeakMap();
         const selectors = "button,a[href],input,textarea,select,[role],[contenteditable='true']";
@@ -297,18 +346,21 @@
             });
     }
 
-    function visibleTextMatches(selectors, expected) {
-        return [...document.querySelectorAll(selectors)].some((element) => {
-            const style = getComputedStyle(element);
-            const rect = element.getBoundingClientRect();
-            return style.visibility !== "hidden" && style.display !== "none" &&
-                rect.width > 0 && rect.height > 0 && boundedText(element.textContent, 64 * 1024) === expected;
+    function sendAcknowledgements(site, approvedBody) {
+        const gmail = site === "gmail_web";
+        const selectors = gmail ? "[role='status'],[role='alert']"
+            : "[data-qa*='message'],[data-testid*='message'],[role='listitem']";
+        return [...document.querySelectorAll(selectors)].filter((element) => {
+            const text = boundedText(element.textContent, gmail ? 1024 : 64 * 1024);
+            return gmail ? /^(message sent|邮件已发送|消息已发送)/iu.test(text) : text === approvedBody;
         });
     }
 
-    function gmailAcknowledged() {
-        return [...document.querySelectorAll("[role='status'],[role='alert']")]
-            .some((element) => /^(message sent|邮件已发送|消息已发送)/iu.test(boundedText(element.textContent, 1024)));
+    function visibleAcknowledgement(element) {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return element.isConnected && style.visibility !== "hidden" && style.display !== "none" &&
+            rect.width > 0 && rect.height > 0;
     }
 
     async function reviewedSendReceipt(activation, outcome, evidence) {
@@ -331,7 +383,9 @@
     async function executeReviewedSend(element, activation) {
         const siteMatches = (activation.site === "gmail_web" && isGmail()) ||
             (activation.site === "slack_web" && isSlack());
-        const preconditionsMatch = siteMatches && isReviewedSendControl(element) &&
+        const approvedAccount = snapshotAccount;
+        const accountMatches = approvedAccount !== null && currentCommunicationAccount() === approvedAccount;
+        const preconditionsMatch = siteMatches && accountMatches && isReviewedSendControl(element) &&
             activation.fields.every(exactFieldStillMatches) &&
             activation.attachment_file_names.every((name) => attachmentStillPresent(element, name));
         if (!preconditionsMatch) {
@@ -346,15 +400,16 @@
         }
 
         const approvedBody = activation.fields[activation.fields.length - 1].value;
+        // Existing matches, including hidden notices, cannot confirm this activation.
+        // Reused or ambiguous acknowledgements remain unknown instead of inventing success.
+        const previous = new Set(sendAcknowledgements(activation.site, approvedBody));
         element.click();
         const deadline = Date.now() + 5000;
         while (Date.now() < deadline) {
-            const acknowledged = activation.site === "gmail_web"
-                ? gmailAcknowledged()
-                : visibleTextMatches(
-                    "[data-qa*='message'],[data-testid*='message'],[role='listitem']",
-                    approvedBody
-                );
+            // A receipt from another account cannot settle this activation.
+            if (currentCommunicationAccount() !== approvedAccount) break;
+            const acknowledged = sendAcknowledgements(activation.site, approvedBody)
+                .some((candidate) => !previous.has(candidate) && visibleAcknowledgement(candidate));
             if (acknowledged) {
                 return {
                     send_receipt: await reviewedSendReceipt(

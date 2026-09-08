@@ -61,7 +61,7 @@ use desk_agent_protocol::{
 };
 use desk_diagnose_core::capability_grant::{
     CapabilityGrantCall, canonical_compiled_scope, exact_external_url_resource_scope,
-    fresh_object_resource_scope, match_capability_grant,
+    fresh_object_resource_scope, is_capability_grant_candidate,
 };
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::chunk::ByteReassembler;
@@ -1140,7 +1140,100 @@ impl SignalDeviceAssistantTools {
         Ok(())
     }
 
-    async fn authorize_and_invoke(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+    async fn read_outcome(&self, call: &ToolCall) -> Result<ReadOutcome, AgentError> {
+        self.verified_read_labels
+            .lock()
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "Provider result label state is unavailable",
+                    false,
+                    false,
+                )
+            })?
+            .remove(&call.id);
+        let browser_read = matches!(
+            call.name.as_str(),
+            "browser_take_snapshot" | "browser_wait_for"
+        );
+        let result = if browser_read {
+            match self.authorize_and_execute_browser(call).await? {
+                ExecOutcome::Executed {
+                    output,
+                    event_id,
+                    data_envelope,
+                } => Ok(ReadOutcome::Completed {
+                    output,
+                    ok: true,
+                    event_id,
+                    data_envelope,
+                    background_task: None,
+                }),
+                ExecOutcome::Unknown(_) => Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "browser observation outcome is unknown and cannot be retried automatically",
+                    false,
+                    true,
+                )),
+                ExecOutcome::PermissionRequired { request } => {
+                    Ok(ReadOutcome::PermissionRequired { request })
+                }
+                ExecOutcome::Rejected { reason } => Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    reason.unwrap_or_else(|| "browser observation was rejected".into()),
+                    false,
+                    true,
+                )),
+                ExecOutcome::Dispatched(_) => Err(error(
+                    AgentErrorKind::SessionUnavailable,
+                    "browser observation continues as a background task",
+                    false,
+                    true,
+                )),
+                _ => Err(error(
+                    AgentErrorKind::Internal,
+                    "browser observation returned an invalid execution state",
+                    false,
+                    false,
+                )),
+            }
+        } else {
+            self.authorize_and_invoke(call).await
+        };
+        if let Err(provider_error) = &result {
+            let output = ToolRunOutput {
+                content: if provider_error.safe_for_model {
+                    format!("tool error: {}", provider_error.message)
+                } else {
+                    "tool error: the tool could not complete".into()
+                },
+                image_data_url: None,
+            };
+            let (_, digest_sha256) = tool_output_fingerprint(&output)?;
+            self.verified_read_labels
+                .lock()
+                .map_err(|_| {
+                    error(
+                        AgentErrorKind::Internal,
+                        "Provider result label state is unavailable",
+                        false,
+                        false,
+                    )
+                })?
+                .insert(
+                    call.id.clone(),
+                    VerifiedReadLabel {
+                        digest_sha256,
+                        expires_at_unix_ms: chrono::Utc::now().timestamp_millis().max(0) as u64
+                            + 120_000,
+                        failed: true,
+                    },
+                );
+        }
+        result
+    }
+
+    async fn authorize_and_invoke(&self, call: &ToolCall) -> Result<ReadOutcome, AgentError> {
         let capability = self
             .provider_registry
             .capability_for_tool(&call.name)
@@ -1292,6 +1385,10 @@ impl SignalDeviceAssistantTools {
                 )
             })? {
             existing
+        } else if session.trigger_origin
+            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+        {
+            crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else if let Some(grant) = store
             .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
             .await
@@ -1304,7 +1401,7 @@ impl SignalDeviceAssistantTools {
                 )
             })?
             .into_iter()
-            .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+            .find(|grant| is_capability_grant_candidate(grant, &call_authority))
         {
             grant.grant_id
         } else if risk_tier == CapabilityRiskTier::R0 {
@@ -1384,8 +1481,8 @@ impl SignalDeviceAssistantTools {
                 call: current,
             }
         };
-        store
-            .prepare(prepare(now_unix_ms))
+        let preparation = store
+            .prepare_outcome(prepare(now_unix_ms), &self.provider_registry)
             .await
             .map_err(|db_error| {
                 error(
@@ -1395,6 +1492,11 @@ impl SignalDeviceAssistantTools {
                     true,
                 )
             })?;
+        if let crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) =
+            preparation
+        {
+            return Ok(ReadOutcome::PermissionRequired { request });
+        }
         let dispatch_id = match store
             .record_dispatch_intent(prepare(now_unix_ms))
             .await
@@ -1578,7 +1680,13 @@ impl SignalDeviceAssistantTools {
                             failed: false,
                         },
                     );
-                Ok(output)
+                Ok(ReadOutcome::Completed {
+                    output,
+                    ok: true,
+                    event_id: None,
+                    data_envelope: None,
+                    background_task: None,
+                })
             }
             Err(provider_error) => {
                 if let Some((outcome, result_digest_sha256)) = provider_error.known_completion {
@@ -1735,6 +1843,10 @@ impl SignalDeviceAssistantTools {
                 )
             })? {
             existing
+        } else if session.trigger_origin
+            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+        {
+            crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
             store
                 .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
@@ -1748,7 +1860,7 @@ impl SignalDeviceAssistantTools {
                     )
                 })?
                 .into_iter()
-                .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
                 .map(|grant| grant.grant_id)
                 .ok_or_else(|| {
                     error(
@@ -1769,14 +1881,23 @@ impl SignalDeviceAssistantTools {
             canonical_input_json: &canonical_input_json,
             call: call_authority.clone(),
         };
-        let _prepared = store.prepare(prepare()).await.map_err(|db_error| {
-            error(
-                AgentErrorKind::PermissionDenied,
-                format!("command call authorization failed: {db_error}"),
-                false,
-                true,
-            )
-        })?;
+        let _prepared = store
+            .prepare_outcome(prepare(), &self.provider_registry)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("command call authorization failed: {db_error}"),
+                    false,
+                    true,
+                )
+            })?;
+        let _prepared = match _prepared {
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                return Ok(ExecOutcome::PermissionRequired { request });
+            }
+        };
         let dispatch_id =
             match store
                 .record_dispatch_intent(prepare())
@@ -2413,6 +2534,10 @@ impl SignalDeviceAssistantTools {
                 )
             })? {
             existing
+        } else if session.trigger_origin
+            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+        {
+            crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
             store
                 .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
@@ -2426,7 +2551,7 @@ impl SignalDeviceAssistantTools {
                     )
                 })?
                 .into_iter()
-                .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
                 .map(|grant| grant.grant_id)
                 .ok_or_else(|| {
                     error(
@@ -2447,14 +2572,23 @@ impl SignalDeviceAssistantTools {
             canonical_input_json: &canonical_input_json,
             call: call_authority.clone(),
         };
-        let prepared = store.prepare(prepare()).await.map_err(|db_error| {
-            error(
-                AgentErrorKind::PermissionDenied,
-                format!("semantic UI call authorization failed: {db_error}"),
-                false,
-                true,
-            )
-        })?;
+        let prepared = store
+            .prepare_outcome(prepare(), &self.provider_registry)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("semantic UI call authorization failed: {db_error}"),
+                    false,
+                    true,
+                )
+            })?;
+        let prepared = match prepared {
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                return Ok(ExecOutcome::PermissionRequired { request });
+            }
+        };
         let dispatch_id =
             match store
                 .record_dispatch_intent(prepare())
@@ -3028,6 +3162,10 @@ impl SignalDeviceAssistantTools {
                 )
             })? {
             existing
+        } else if session.trigger_origin
+            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+        {
+            crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
             store
                 .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
@@ -3041,7 +3179,7 @@ impl SignalDeviceAssistantTools {
                     )
                 })?
                 .into_iter()
-                .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
                 .map(|grant| grant.grant_id)
                 .ok_or_else(|| {
                     error(
@@ -3062,14 +3200,23 @@ impl SignalDeviceAssistantTools {
             canonical_input_json: &canonical_input_json,
             call: call_authority.clone(),
         };
-        let prepared = store.prepare(prepare()).await.map_err(|db_error| {
-            error(
-                AgentErrorKind::PermissionDenied,
-                format!("artifact call authorization failed: {db_error}"),
-                false,
-                true,
-            )
-        })?;
+        let prepared = store
+            .prepare_outcome(prepare(), &self.provider_registry)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("artifact call authorization failed: {db_error}"),
+                    false,
+                    true,
+                )
+            })?;
+        let prepared = match prepared {
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                return Ok(ExecOutcome::PermissionRequired { request });
+            }
+        };
         let dispatch_id =
             match store
                 .record_dispatch_intent(prepare())
@@ -3536,6 +3683,10 @@ impl SignalDeviceAssistantTools {
                 )
             })? {
             existing
+        } else if session.trigger_origin
+            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+        {
+            crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else if browser_policy_auto_authorized(risk_tier) {
             let grant_id = format!(
                 "policy-auto-browser-{:x}",
@@ -3599,7 +3750,7 @@ impl SignalDeviceAssistantTools {
                     )
                 })?
                 .into_iter()
-                .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
                 .map(|grant| grant.grant_id)
                 .ok_or_else(|| {
                     error(
@@ -3696,14 +3847,23 @@ impl SignalDeviceAssistantTools {
             canonical_input_json: &canonical_input_json,
             call: call_authority.clone(),
         };
-        let prepared = store.prepare(prepare()).await.map_err(|db_error| {
-            error(
-                AgentErrorKind::PermissionDenied,
-                format!("browser call authorization failed: {db_error}"),
-                false,
-                true,
-            )
-        })?;
+        let prepared = store
+            .prepare_outcome(prepare(), &self.provider_registry)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("browser call authorization failed: {db_error}"),
+                    false,
+                    true,
+                )
+            })?;
+        let prepared = match prepared {
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                return Ok(ExecOutcome::PermissionRequired { request });
+            }
+        };
         let dispatch_id =
             match store
                 .record_dispatch_intent(prepare())
@@ -4118,6 +4278,10 @@ impl SignalDeviceAssistantTools {
                 )
             })? {
             existing
+        } else if session.trigger_origin
+            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+        {
+            crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
             store
                 .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
@@ -4131,7 +4295,7 @@ impl SignalDeviceAssistantTools {
                     )
                 })?
                 .into_iter()
-                .find(|grant| match_capability_grant(grant, &call_authority).is_ok())
+                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
                 .map(|grant| grant.grant_id)
                 .ok_or_else(|| {
                     error(
@@ -4274,14 +4438,23 @@ impl SignalDeviceAssistantTools {
             canonical_input_json: &canonical_input_json,
             call: call_authority.clone(),
         };
-        let prepared = store.prepare(prepare()).await.map_err(|db_error| {
-            error(
-                AgentErrorKind::PermissionDenied,
-                format!("Outlook handoff authorization failed: {db_error}"),
-                false,
-                true,
-            )
-        })?;
+        let prepared = store
+            .prepare_outcome(prepare(), &self.provider_registry)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("Outlook handoff authorization failed: {db_error}"),
+                    false,
+                    true,
+                )
+            })?;
+        let prepared = match prepared {
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                return Ok(ExecOutcome::PermissionRequired { request });
+            }
+        };
         let dispatch_id =
             match store
                 .record_dispatch_intent(prepare())
@@ -5032,83 +5205,15 @@ impl ToolSeam for SignalDeviceAssistantTools {
         .await
     }
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
-        self.verified_read_labels
-            .lock()
-            .map_err(|_| {
-                error(
-                    AgentErrorKind::Internal,
-                    "Provider result label state is unavailable",
-                    false,
-                    false,
-                )
-            })?
-            .remove(&call.id);
-        let browser_read = matches!(
-            call.name.as_str(),
-            "browser_take_snapshot" | "browser_wait_for"
-        );
-        let result = if browser_read {
-            match self.authorize_and_execute_browser(call).await? {
-                ExecOutcome::Executed { output, .. } => Ok(output),
-                ExecOutcome::Unknown(_) => Err(error(
-                    AgentErrorKind::PermissionDenied,
-                    "browser observation outcome is unknown and cannot be retried automatically",
-                    false,
-                    true,
-                )),
-                ExecOutcome::Rejected { reason } => Err(error(
-                    AgentErrorKind::PermissionDenied,
-                    reason.unwrap_or_else(|| "browser observation was rejected".into()),
-                    false,
-                    true,
-                )),
-                ExecOutcome::Dispatched(_) => Err(error(
-                    AgentErrorKind::SessionUnavailable,
-                    "browser observation continues as a background task",
-                    false,
-                    true,
-                )),
-                _ => Err(error(
-                    AgentErrorKind::Internal,
-                    "browser observation returned an invalid execution state",
-                    false,
-                    false,
-                )),
-            }
-        } else {
-            self.authorize_and_invoke(call).await
-        };
-        if let Err(provider_error) = &result {
-            let output = ToolRunOutput {
-                content: if provider_error.safe_for_model {
-                    format!("tool error: {}", provider_error.message)
-                } else {
-                    "tool error: the tool could not complete".into()
-                },
-                image_data_url: None,
-            };
-            let (_, digest_sha256) = tool_output_fingerprint(&output)?;
-            self.verified_read_labels
-                .lock()
-                .map_err(|_| {
-                    error(
-                        AgentErrorKind::Internal,
-                        "Provider result label state is unavailable",
-                        false,
-                        false,
-                    )
-                })?
-                .insert(
-                    call.id.clone(),
-                    VerifiedReadLabel {
-                        digest_sha256,
-                        expires_at_unix_ms: chrono::Utc::now().timestamp_millis().max(0) as u64
-                            + 120_000,
-                        failed: true,
-                    },
-                );
+        match self.read_outcome(call).await? {
+            ReadOutcome::Completed { output, .. } => Ok(output),
+            ReadOutcome::PermissionRequired { .. } => Err(error(
+                AgentErrorKind::PermissionDenied,
+                "permission decision requires the versioned read loop",
+                false,
+                false,
+            )),
         }
-        result
     }
 
     fn read_requires_version(&self, call: &ToolCall) -> bool {
@@ -5123,13 +5228,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
     ) -> ReadCompletion {
         if call.name != "browser_wait_for" {
             return ReadCompletion {
-                outcome: self.run_read(call).await.map(|output| ReadOutcome {
-                    output,
-                    ok: true,
-                    event_id: None,
-                    data_envelope: None,
-                    background_task: None,
-                }),
+                outcome: self.read_outcome(call).await,
                 version_advance: None,
             };
         }
@@ -5155,7 +5254,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 output,
                 event_id,
                 data_envelope,
-            } => Ok(ReadOutcome {
+            } => Ok(ReadOutcome::Completed {
                 output,
                 ok: true,
                 event_id,
@@ -5166,14 +5265,14 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 output,
                 event_id,
                 data_envelope,
-            } => Ok(ReadOutcome {
+            } => Ok(ReadOutcome::Completed {
                 output,
                 ok: false,
                 event_id,
                 data_envelope,
                 background_task: None,
             }),
-            ExecOutcome::Dispatched(action) => Ok(ReadOutcome {
+            ExecOutcome::Dispatched(action) => Ok(ReadOutcome::Completed {
                 output: ToolRunOutput {
                     content: desk_diagnose_core::chat::background_task_running_result(
                         &action.action_request_id,
@@ -5185,6 +5284,9 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 data_envelope: None,
                 background_task: Some(action),
             }),
+            ExecOutcome::PermissionRequired { request } => {
+                Ok(ReadOutcome::PermissionRequired { request })
+            }
             ExecOutcome::Rejected { reason } => Err(error(
                 AgentErrorKind::PermissionDenied,
                 reason.unwrap_or_else(|| "browser observation was rejected".into()),
@@ -5863,6 +5965,7 @@ mod tests {
             BrowserOriginKind,
         };
         let page = BrowserPageRef {
+            account_id: None,
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
                 engine: BrowserEngineKind::ChromeDevtoolsMcp,
@@ -5924,6 +6027,7 @@ mod tests {
             BrowserOriginKind,
         };
         let page = BrowserPageRef {
+            account_id: None,
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
                 engine: BrowserEngineKind::ChromeDevtoolsMcp,
@@ -5987,6 +6091,7 @@ mod tests {
             BrowserOriginKind,
         };
         let page = BrowserPageRef {
+            account_id: None,
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
                 engine: BrowserEngineKind::ChromeDevtoolsMcp,

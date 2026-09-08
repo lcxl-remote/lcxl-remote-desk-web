@@ -1,3 +1,6 @@
+use desk_agent_protocol::schedule::management::{
+    ScheduleManagementRequest, ScheduleManagementResponse,
+};
 use desk_signal::controller::device_code::{
     DeviceCodeBatchDeleteParams, DeviceCodeItem, DeviceCodeListResult,
 };
@@ -32,6 +35,8 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
 /// API version
 #[derive(OpenApi)]
 #[openapi(components(schemas(
+    ScheduleManagementRequest,
+    ScheduleManagementResponse,
     SignalingModel,
     RequestRemoteModel,
     SessionTargetDescriptor,

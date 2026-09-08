@@ -128,6 +128,79 @@ fn expired_history_reconciles_before_compression_without_mutating_transcript() {
 }
 
 #[test]
+fn current_turn_uses_actual_retention_deadline_while_history_keeps_headroom() {
+    let mut conversation = history();
+    conversation[1]
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(1001);
+    let original = conversation.clone();
+    let state = ModelContextState::default();
+    let mut protection = ContextProtectionSet::default();
+    protection.protect_message("recent");
+    assert!(
+        reconcile_context_eligibility(
+            &policy(),
+            &conversation,
+            &state,
+            &context_policy(),
+            &protection,
+            7,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(conversation, original);
+    for now in [1001, 1002] {
+        let mut expired = policy();
+        expired.now_unix_ms = now;
+        assert!(
+            reconcile_context_eligibility(
+                &expired,
+                &conversation,
+                &state,
+                &context_policy(),
+                &protection,
+                7,
+            )
+            .is_err()
+        );
+    }
+    conversation[0]
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(1001);
+    let repair = reconcile_context_eligibility(
+        &policy(),
+        &conversation,
+        &state,
+        &context_policy(),
+        &protection,
+        7,
+    )
+    .unwrap()
+    .unwrap();
+    let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
+    assert!(
+        reconcile_context_eligibility(
+            &policy(),
+            &conversation,
+            &next,
+            &context_policy(),
+            &protection,
+            8,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(conversation[1], original[1]);
+}
+
+#[test]
 fn expired_checkpoint_is_removed_without_reopening_its_covered_prefix() {
     let conversation = history();
     let (state, _) = checkpoint(&conversation);
@@ -310,6 +383,35 @@ fn compression_and_reloaded_checkpoint_keep_exact_lineage_and_lens_dependencies(
             ResponseFormatSpec::None,
         ))
         .unwrap();
+    assert_eq!(lineage.derivations.len(), 1);
+    let trace = &lineage.derivations[0];
+    assert_eq!(
+        trace.export_authorization_id,
+        policy().export_authorization_id
+    );
+    assert_eq!(trace.compressor, provenance());
+    assert_eq!(trace.summary, lineage.envelope);
+    for case in 0..5 {
+        let mut changed = lineage.clone();
+        match case {
+            0 => changed.derivations.clear(),
+            1 => changed.derivations[0].compression_sources.clear(),
+            2 => changed.derivations[0].model_output.digest_sha256 = "a".repeat(64),
+            3 => changed.derivations[0].summary.retention.delete_with_run = false,
+            _ => changed.derivations[0]
+                .compression_input
+                .provenance
+                .source_envelope_ids
+                .clear(),
+        }
+        assert!(
+            validate_summary_derivations(&changed, &conversation).is_err(),
+            "case {case}"
+        );
+    }
+    let mut missing = serde_json::to_value(lineage).unwrap();
+    missing.as_object_mut().unwrap().remove("derivations");
+    assert!(serde_json::from_value::<ContextSummaryLineageV1>(missing).is_err());
     let mut changed_lens = conversation;
     changed_lens[1] = user("recent", 7999);
     assert!(
@@ -541,6 +643,24 @@ fn another_compression_generation_keeps_prior_retention_and_all_dependencies() {
         .lineage
         .as_ref()
         .unwrap();
+    assert_eq!(lineage.derivations.len(), 2);
+    assert_eq!(lineage.derivations[0].generation, 1);
+    assert_eq!(lineage.derivations[1].generation, 2);
+    assert!(
+        lineage.derivations[1]
+            .compression_sources
+            .contains(&lineage.derivations[0].summary)
+    );
+    let encoded = serde_json::to_string(lineage).unwrap();
+    let restored: ContextSummaryLineageV1 = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(&restored, lineage);
+    validate_summary_derivations(&restored, &conversation).unwrap();
+    let mut missing_prior = restored.clone();
+    missing_prior.derivations.remove(0);
+    assert!(validate_summary_derivations(&missing_prior, &conversation).is_err());
+    let mut broken = restored;
+    broken.derivations.swap(0, 1);
+    assert!(validate_summary_derivations(&broken, &conversation).is_err());
     assert_eq!(
         lineage.envelope.retention.expires_at_unix_ms,
         previous_expiry

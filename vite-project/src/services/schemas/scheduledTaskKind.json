@@ -1,0 +1,1 @@
+{"type":"string","enum":["conversation_resume","fresh_task"],"x-readme-ref-name":"ScheduledTaskKind"}

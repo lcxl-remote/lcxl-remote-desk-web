@@ -49,13 +49,25 @@ pub fn reconcile_context_eligibility(
         .enumerate()
         .skip(floor)
         .filter_map(|(index, group)| {
+            // Headroom excludes historical observations before another round
+            // trip. Fresh current-turn results retain their actual deadline;
+            // request and response authorization still enforce that deadline.
+            let current_group = current_turn.is_some()
+                && conversation[group.start..group.end]
+                    .iter()
+                    .any(|message| message.turn_id.as_ref() == current_turn);
+            let group_cutoff = if current_group {
+                egress.now_unix_ms
+            } else {
+                cutoff
+            };
             let ineligible = conversation[group.start..group.end].iter().any(|message| {
                 !retained.contains(&message.message_id)
                     || message
                         .data_envelope
                         .as_ref()
                         .and_then(|envelope| envelope.retention.expires_at_unix_ms)
-                        .is_some_and(|expiry| expiry <= cutoff)
+                        .is_some_and(|expiry| expiry <= group_cutoff)
             });
             ineligible.then_some(index)
         })
@@ -112,15 +124,34 @@ pub struct ContextSummarySourceV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ContextSummaryDerivationV1 {
+    pub export_authorization_id: String,
+    pub compressor: CompressorProvenanceV1,
+    pub generation: u32,
+    pub model_output: DataEnvelope,
+    pub compression_input: DataEnvelope,
+    pub compression_sources: Vec<DataEnvelope>,
+    pub summary: DataEnvelope,
+    pub sources: Vec<ContextSummarySourceV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextSummaryLineageV1 {
     pub envelope: DataEnvelope,
     /// Includes continuation-lens dependencies, not just cited/covered history.
     pub sources: Vec<ContextSummarySourceV1>,
+    /// Metadata only: no raw provider response or packed conversation content.
+    /// Retain every generation because later summaries can depend on earlier ones.
+    pub derivations: Vec<ContextSummaryDerivationV1>,
 }
 
 pub struct AuthorizedCompressionInput {
     pub messages: Vec<ChatMessage>,
     sources: Vec<ContextSummarySourceV1>,
+    parents: Vec<DataEnvelope>,
+    prior_derivations: Vec<ContextSummaryDerivationV1>,
+    generation: u32,
 }
 
 /// Recheck a persisted checkpoint without reminting its export authority or TTL.
@@ -143,6 +174,11 @@ pub fn authorize_context_checkpoint(
     let lineage = checkpoint.lineage.as_ref().ok_or_else(lineage_error)?;
     let canonical = canonical_json(&checkpoint.summary)?;
     validate_summary_lineage(lineage, &canonical, conversation)?;
+    if lineage.derivations.last().is_none_or(|step| {
+        step.compressor != checkpoint.compressor || step.generation != checkpoint.generation
+    }) {
+        return Err(lineage_error());
+    }
     authorize_sources(policy, &lineage.sources, conversation)?;
     authorize_bytes(policy, &lineage.envelope, canonical.as_bytes())
 }
@@ -189,7 +225,15 @@ pub fn authorize_compression_input(
         packed.data_envelope.as_ref().ok_or_else(lineage_error)?,
         packed.text.as_bytes(),
     )?;
-    Ok(AuthorizedCompressionInput { messages, sources })
+    Ok(AuthorizedCompressionInput {
+        messages,
+        sources,
+        parents,
+        generation: plan.generation,
+        prior_derivations: prior_checkpoint(plan)
+            .and_then(|checkpoint| checkpoint.lineage.as_ref())
+            .map_or_else(Vec::new, |lineage| lineage.derivations.clone()),
+    })
 }
 
 /// Canonicalization and deterministic omitted-evidence annotations derive from
@@ -221,9 +265,21 @@ pub fn bind_context_summary_lineage(
     )?;
     envelope.provenance.source_object_id = Some(source_binding_digest(&envelope, &input.sources)?);
     authorize_bytes(policy, &envelope, canonical.as_bytes())?;
+    let mut derivations = input.prior_derivations.clone();
+    derivations.push(ContextSummaryDerivationV1 {
+        export_authorization_id: policy.export_authorization_id.clone(),
+        compressor: validated.compressor.clone(),
+        generation: input.generation,
+        model_output: output.clone(),
+        compression_input: packed.clone(),
+        compression_sources: input.parents.clone(),
+        summary: envelope.clone(),
+        sources: input.sources.clone(),
+    });
     validated.lineage = Some(ContextSummaryLineageV1 {
         envelope,
         sources: input.sources.clone(),
+        derivations,
     });
     Ok(())
 }
@@ -316,6 +372,7 @@ pub(super) fn validate_summary_lineage(
     conversation: &[ChatMessage],
 ) -> Result<(), ModelContextError> {
     validate_source_bindings(&lineage.sources, conversation)?;
+    validate_summary_derivations(lineage, conversation)?;
     lineage.envelope.validate().map_err(|_| lineage_error())?;
     if lineage.envelope.digest_sha256 != sha256_hex(canonical.as_bytes())
         || lineage.envelope.provenance.source_object_id.as_deref()
@@ -324,6 +381,88 @@ pub(super) fn validate_summary_lineage(
             if *size_bytes == canonical.len() as u64)
     {
         return Err(lineage_error());
+    }
+    Ok(())
+}
+
+/// Check transformation shape against retained original source bindings.
+/// This is not a successful model receipt: publication must independently join
+/// each compressor call and its original model input audit in the server store.
+pub fn validate_summary_derivations(
+    lineage: &ContextSummaryLineageV1,
+    conversation: &[ChatMessage],
+) -> Result<(), ModelContextError> {
+    let Some(last) = lineage.derivations.last() else {
+        return Err(lineage_error());
+    };
+    if last.summary != lineage.envelope || last.sources != lineage.sources {
+        return Err(lineage_error());
+    }
+    let mut previous: Option<&ContextSummaryDerivationV1> = None;
+    for step in &lineage.derivations {
+        validate_source_bindings(&step.sources, conversation)?;
+        step.model_output.validate().map_err(|_| lineage_error())?;
+        if step.export_authorization_id.trim().is_empty()
+            || step.export_authorization_id.len() > 256
+            || step.model_output.provenance.source_provider_id != "external-model"
+            || step.model_output.provenance.source_tool_name != "model-response"
+            || !step
+                .model_output
+                .provenance
+                .source_envelope_ids
+                .contains(&step.compression_input.envelope_id)
+        {
+            return Err(lineage_error());
+        }
+        // Every retained checkpoint parent must have its own earlier derivation.
+        // Removing the oldest record must not silently turn a summary into a root.
+        for source in &step.compression_sources {
+            if source.provenance.source_provider_id == "device-assistant-context"
+                && source.provenance.source_tool_name == "checkpoint-summary"
+                && !lineage
+                    .derivations
+                    .iter()
+                    .take_while(|candidate| candidate.generation < step.generation)
+                    .any(|candidate| &candidate.summary == source)
+            {
+                return Err(lineage_error());
+            }
+        }
+        if let Some(prior) = previous
+            && (step.generation <= prior.generation
+                || !step.compression_sources.contains(&prior.summary))
+        {
+            return Err(lineage_error());
+        }
+        let ContentRef::ImmutableBlob { size_bytes, .. } = &step.compression_input.content else {
+            return Err(lineage_error());
+        };
+        let expected_input = derive_projection_metadata(
+            &step.compression_input.digest_sha256,
+            *size_bytes,
+            &step.compression_sources,
+            "compression-input",
+            step.generation,
+        )?;
+        if expected_input != step.compression_input {
+            return Err(lineage_error());
+        }
+        let ContentRef::ImmutableBlob { size_bytes, .. } = &step.summary.content else {
+            return Err(lineage_error());
+        };
+        let mut expected_summary = derive_projection_metadata(
+            &step.summary.digest_sha256,
+            *size_bytes,
+            &[step.model_output.clone(), step.compression_input.clone()],
+            "checkpoint-summary",
+            0,
+        )?;
+        expected_summary.provenance.source_object_id =
+            Some(source_binding_digest(&expected_summary, &step.sources)?);
+        if expected_summary != step.summary {
+            return Err(lineage_error());
+        }
+        previous = Some(step);
     }
     Ok(())
 }
@@ -402,13 +541,28 @@ fn derive_projection(
     tool: &str,
     generation: u32,
 ) -> Result<DataEnvelope, ModelContextError> {
-    let digest = sha256_hex(text.as_bytes());
+    derive_projection_metadata(
+        &sha256_hex(text.as_bytes()),
+        text.len() as u64,
+        inputs,
+        tool,
+        generation,
+    )
+}
+
+fn derive_projection_metadata(
+    digest: &str,
+    size_bytes: u64,
+    inputs: &[DataEnvelope],
+    tool: &str,
+    generation: u32,
+) -> Result<DataEnvelope, ModelContextError> {
     // Bind the label identity to all input labels as well as transformed bytes.
     let binding = sha256_hex(&canonical_bytes(&(tool, generation, &digest, inputs))?);
     let content = ContentRef::ImmutableBlob {
         blob_id: format!("context-projection:{binding}"),
-        sha256: digest.clone(),
-        size_bytes: text.len() as u64,
+        sha256: digest.to_owned(),
+        size_bytes,
         media_type: "application/json".into(),
     };
     let (mut envelope, _) = derive_conservatively(
@@ -416,7 +570,7 @@ fn derive_projection(
         ConservativeDerivation {
             output_envelope_id: &format!("context-lineage:{binding}"),
             content,
-            digest_sha256: &digest,
+            digest_sha256: digest,
             source_provider_id: "device-assistant-context",
             source_tool_name: tool,
             source_object_id: Some(&binding),

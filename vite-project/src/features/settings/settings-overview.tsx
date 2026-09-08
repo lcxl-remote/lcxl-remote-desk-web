@@ -122,6 +122,14 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
+                        <Link to="/system/schedule-budget" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <CardTitle className="text-lg">{t('schedules.policy.title')}</CardTitle>
+                                    <CardDescription>{t('schedules.policy.description')}</CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
                         <Link to="/system/context-management" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>

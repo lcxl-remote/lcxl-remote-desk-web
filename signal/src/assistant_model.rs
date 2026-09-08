@@ -9,6 +9,9 @@ use desk_diagnose_core::{
 use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 
+mod scheduled;
+pub(crate) use scheduled::FreshTaskModelContext;
+
 fn transport_error(message: impl Into<String>) -> AgentError {
     AgentError {
         kind: AgentErrorKind::TransportError,
@@ -20,6 +23,7 @@ fn transport_error(message: impl Into<String>) -> AgentError {
 }
 
 pub(crate) struct MeteredModel {
+    pub(crate) fresh_task: Option<FreshTaskModelContext>,
     pub(crate) inner: SignalModelSeam,
     pub(crate) db: DatabaseConnection,
     pub(crate) model_name: String,
@@ -27,6 +31,7 @@ pub(crate) struct MeteredModel {
     pub(crate) selected_source_tools: std::collections::BTreeSet<String>,
     pub(crate) export_authorization_id: String,
     pub(crate) permission_resume: bool,
+    pub(crate) completed_compression_receipt: std::cell::RefCell<Option<String>>,
     pub(crate) model_call_ordinal: std::sync::atomic::AtomicU64,
 }
 
@@ -37,8 +42,15 @@ impl ModelSeam for MeteredModel {
         turn_id: &str,
         created_at: &str,
     ) -> Result<desk_diagnose_core::model_context::CompressorProvenanceV1, AgentError> {
-        self.inner
-            .context_compression_provenance(turn_id, created_at)
+        let receipt = self.completed_compression_receipt.borrow();
+        let receipt = receipt
+            .as_ref()
+            .ok_or_else(|| transport_error("compression receipt has not completed"))?;
+        let mut provenance = self
+            .inner
+            .context_compression_provenance(turn_id, created_at)?;
+        provenance.provider_call_key = format!("{:x}", Sha256::digest(receipt.as_bytes()));
+        Ok(provenance)
     }
     fn model_egress_policy(&self) -> Result<Option<ModelEgressPolicy>, AgentError> {
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
@@ -89,6 +101,11 @@ impl ModelSeam for MeteredModel {
         request: ModelRequest,
         sink: &mut dyn TurnSink,
     ) -> Result<desk_diagnose_core::chat::ModelTurn, AgentError> {
+        let is_compression =
+            request.use_case == desk_diagnose_core::model_profile::ModelUseCase::ContextCompression;
+        if is_compression {
+            *self.completed_compression_receipt.borrow_mut() = None;
+        }
         let policy = self.model_egress_policy()?.ok_or_else(|| {
             transport_error("device assistant model egress policy is unavailable")
         })?;
@@ -106,25 +123,18 @@ impl ModelSeam for MeteredModel {
             .model_call_ordinal
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .saturating_add(1);
-        let receipt_id = format!(
+        let ordinary_receipt_id = format!(
             "model-egress-{:x}",
             Sha256::digest(
                 format!("{}:{model_call_ordinal}", self.export_authorization_id).as_bytes()
             )
         );
         let egress_store = crate::model_egress_store::SignalModelEgressStore::new(self.db.clone());
-        egress_store
-            .record_dispatch_intent(
-                receipt_id.clone(),
-                self.export_authorization_id.clone(),
-                model_call_ordinal,
-                &authorized.audit,
-            )
+        let receipt_id = self
+            .record_dispatch(&authorized, model_call_ordinal, ordinary_receipt_id)
             .await
             .map_err(|error| {
-                log::warn!(
-                    "[device-assistant] failed to persist model egress receipt_id={receipt_id}: {error}"
-                );
+                log::warn!("[device-assistant] failed to persist model egress: {error}");
                 AgentError {
                     kind: AgentErrorKind::Internal,
                     message: "The AI model request could not be audited safely.".into(),
@@ -152,6 +162,12 @@ impl ModelSeam for MeteredModel {
                 return Err(error);
             }
         };
+        egress_store
+            .record_terminal_usage(&receipt_id, &turn.usage)
+            .await
+            .map_err(|_| transport_error("The AI model usage could not be recorded safely."))?;
+        self.settle_task_dispatch(model_call_ordinal, &turn.usage)
+            .await?;
         if turn.text.trim().is_empty() && turn.tool_calls.is_empty() {
             // There is no model output content to label or export. Close this
             // audited provider call as unusable, then let the pure agent loop
@@ -208,16 +224,8 @@ impl ModelSeam for MeteredModel {
                 });
             }
         };
-        turn.provider_meta.data_envelope = Some(output_envelope);
-        let output_envelope_id = turn
-            .provider_meta
-            .data_envelope
-            .as_ref()
-            .expect("model output envelope was just assigned")
-            .envelope_id
-            .clone();
         egress_store
-            .mark_succeeded(&receipt_id, &output_envelope_id)
+            .mark_succeeded(&receipt_id, &output_envelope)
             .await
             .map_err(|error| {
                 log::warn!(
@@ -231,7 +239,14 @@ impl ModelSeam for MeteredModel {
                     error_code: None,
                 }
             })?;
+        if is_compression {
+            *self.completed_compression_receipt.borrow_mut() = Some(receipt_id);
+        }
+        turn.provider_meta.data_envelope = Some(output_envelope);
         crate::agent_runtime::record_usage(&self.db, &self.model_name, &turn.usage).await;
         Ok(turn)
     }
 }
+
+mod identity;
+pub(crate) use identity::{ModelExportSource, model_export_id};

@@ -802,6 +802,10 @@ mod inbound_reader {
         let reader = spawn_inbound_reader(worker_rx, mirror, settings.clone(), ack_tx, main_tx);
         let lease = settings.read().await;
         let update = ComputerUseLocalPolicyPayload {
+            enabled: true,
+            browser_semantic: true,
+            communication_handoff: true,
+            communication_send: true,
             operation_id: "applications-1".into(),
             revision: 2,
             allowed_application_paths: vec![
@@ -826,9 +830,20 @@ mod inbound_reader {
         assert!(
             matches!(tokio::time::timeout(Duration::from_secs(1), ack_rx.recv()).await.unwrap(), Some(WorkerToService::ComputerUseLocalPolicyApplied(applied)) if applied == update)
         );
+        assert!(
+            settings
+                .read()
+                .await
+                .computer_use
+                .communication_send_enabled()
+        );
         daemon_tx
             .send(ServiceToWorker::UpdateComputerUseLocalPolicy(
                 ComputerUseLocalPolicyPayload {
+                    enabled: false,
+                    browser_semantic: false,
+                    communication_handoff: false,
+                    communication_send: false,
                     operation_id: "stale".into(),
                     revision: 1,
                     allowed_application_paths: vec![],
@@ -838,6 +853,13 @@ mod inbound_reader {
             .unwrap();
         assert!(
             matches!(tokio::time::timeout(Duration::from_secs(1), ack_rx.recv()).await.unwrap(), Some(WorkerToService::ComputerUseLocalPolicyApplied(applied)) if applied.revision == 2 && applied.allowed_application_paths == update.allowed_application_paths)
+        );
+        assert!(
+            settings
+                .read()
+                .await
+                .computer_use
+                .communication_send_enabled()
         );
         drop(daemon_tx);
         reader.await.unwrap();

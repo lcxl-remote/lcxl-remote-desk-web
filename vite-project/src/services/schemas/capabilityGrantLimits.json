@@ -1,0 +1,1 @@
+{"type":"object","required":["max_bytes_per_call","max_items_per_call","max_calls"],"properties":{"max_bytes_per_call":{"type":"integer","format":"int64","minimum":0},"max_calls":{"type":"integer","format":"int32","minimum":0},"max_items_per_call":{"type":"integer","format":"int32","minimum":0}},"x-readme-ref-name":"CapabilityGrantLimits"}

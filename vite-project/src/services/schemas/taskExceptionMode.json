@@ -1,0 +1,1 @@
+{"type":"string","enum":["deny","request_approval"],"x-readme-ref-name":"TaskExceptionMode"}

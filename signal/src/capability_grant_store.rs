@@ -1,13 +1,13 @@
 //! OSS SQLite CapabilityGrant issuance and atomic Prepare/DispatchIntent transactions.
 
+mod task_authority;
+pub(crate) mod task_grant;
+
 use chrono::{TimeZone, Utc};
-use desk_agent_protocol::capability_grant::{CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant};
-use desk_diagnose_core::{
-    capability_grant::{
-        CapabilityGrantCall, match_capability_grant, match_reserved_capability_grant,
-    },
-    session::PersistedAgentSession,
-};
+#[cfg(test)]
+use desk_agent_protocol::capability_grant::CAPABILITY_GRANT_SCHEMA_VERSION;
+use desk_agent_protocol::capability_grant::CapabilityGrant;
+use desk_diagnose_core::{capability_grant::CapabilityGrantCall, session::PersistedAgentSession};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, RuntimeErr,
@@ -27,6 +27,8 @@ pub(crate) mod computer_cancel;
 pub(crate) mod computer_completion;
 pub(crate) mod computer_delivery;
 pub(crate) mod computer_export;
+pub(crate) mod fresh_recovery;
+pub(crate) mod scheduled_recovery;
 
 pub const GRANT_STATUS_ACTIVE: &str = "active";
 pub const GRANT_STATUS_REVOKED: &str = "revoked";
@@ -84,6 +86,7 @@ fn pause_crash_fixture_before_commit(phase: &str) {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedCapabilityPayload {
+    pub observed_authority: desk_diagnose_core::provider_preflight::ObservedCapabilityAuthority,
     pub grant_id: String,
     pub reservation_id: String,
     pub call_id: String,
@@ -108,6 +111,7 @@ pub struct PreparedCapabilityCall {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDispatchPayload {
+    pub observed_authority: desk_diagnose_core::provider_preflight::ObservedCapabilityAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_origin: Option<desk_diagnose_core::action_result::ActionResultOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,6 +204,11 @@ pub struct PrepareCapabilityCall<'a> {
     pub call: CapabilityGrantCall<'a>,
 }
 
+pub enum CapabilityPreparation {
+    Ready(PreparedCapabilityCall),
+    PermissionRequired(desk_diagnose_core::dynamic_run::PermissionRequest),
+}
+
 #[derive(Clone)]
 pub struct SignalCapabilityGrantStore {
     db: DatabaseConnection,
@@ -214,16 +223,27 @@ impl SignalCapabilityGrantStore {
         &self,
         grant: &CapabilityGrant,
     ) -> Result<agent_capability_grant::Model, DbErr> {
+        Self::issue_on(&self.db, grant).await
+    }
+
+    /// Participate in the caller's authority/budget/work transaction. This primitive
+    /// persists a validated grant; current actor policy and dispatch remain caller checks.
+    pub async fn issue_on<C: sea_orm::ConnectionTrait>(
+        db: &C,
+        grant: &CapabilityGrant,
+    ) -> Result<agent_capability_grant::Model, DbErr> {
         grant
             .validate()
             .map_err(|error| DbErr::Custom(format!("invalid capability grant: {error}")))?;
         if let Some(existing) = agent_capability_grant::Entity::find()
             .filter(agent_capability_grant::Column::GrantId.eq(&grant.grant_id))
-            .one(&self.db)
+            .one(db)
             .await?
         {
-            let stored = decode_grant(&existing)?;
-            if &stored == grant {
+            decode_grant(&existing)?;
+            let issued: CapabilityGrant =
+                serde_json::from_str(&existing.issued_payload_json).map_err(json_error)?;
+            if &issued == grant {
                 return Ok(existing);
             }
             return Err(DbErr::Custom(
@@ -239,14 +259,15 @@ impl SignalCapabilityGrantStore {
             status: Set(GRANT_STATUS_ACTIVE.into()),
             remaining_uses: Set(i32::try_from(grant.remaining_uses)
                 .map_err(|_| DbErr::Custom("grant uses exceed SQLite range".into()))?),
+            issued_payload_json: Set(serde_json::to_string(grant).map_err(json_error)?),
             payload_json: Set(serde_json::to_string(grant).map_err(json_error)?),
-            payload_schema_version: Set(i32::from(CAPABILITY_GRANT_SCHEMA_VERSION)),
+            payload_schema_version: Set(i32::from(grant.schema_version)),
             version: Set(1),
             created_at: Set(timestamp(grant.issued_at_unix_ms)?),
             updated_at: Set(timestamp(grant.issued_at_unix_ms)?),
             ..Default::default()
         }
-        .insert(&self.db)
+        .insert(db)
         .await
     }
 
@@ -369,12 +390,39 @@ impl SignalCapabilityGrantStore {
         &self,
         request: PrepareCapabilityCall<'_>,
     ) -> Result<PreparedCapabilityCall, DbErr> {
+        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        match self.prepare_outcome(request, &registry).await? {
+            CapabilityPreparation::Ready(work) => Ok(work),
+            CapabilityPreparation::PermissionRequired(_) => {
+                Err(DbErr::Custom("task permission decision required".into()))
+            }
+        }
+    }
+
+    pub async fn prepare_outcome(
+        &self,
+        request: PrepareCapabilityCall<'_>,
+        registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
+    ) -> Result<CapabilityPreparation, DbErr> {
         validate_prepare(&request)?;
         let txn = self.db.begin().await?;
         if let Some(existing) = load_prepared(&txn, request.call_id).await? {
             let prepared = validate_replay(&existing, &request)?;
             txn.rollback().await.ok();
-            return Ok(prepared);
+            return Ok(CapabilityPreparation::Ready(prepared));
+        }
+        if let Some(row) =
+            crate::schedule_store::lock_action_session(&txn, request.call.run_id).await?
+        {
+            let session = PersistedAgentSession::decode_json(&row.state_json)
+                .map_err(|error| DbErr::Custom(format!("invalid Provider session: {error:?}")))?;
+            if session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+                && let Some(candidate) =
+                    task_grant::issue_on(&txn, &session, &request, registry).await?
+            {
+                txn.rollback().await?;
+                return Ok(CapabilityPreparation::PermissionRequired(candidate));
+            }
         }
         let grant_row = agent_capability_grant::Entity::find()
             .filter(agent_capability_grant::Column::GrantId.eq(request.grant_id))
@@ -386,9 +434,11 @@ impl SignalCapabilityGrantStore {
             return Err(DbErr::Custom("capability grant is not active".into()));
         }
         let mut grant = decode_grant(&grant_row)?;
-        match_capability_grant(&grant, &request.call).map_err(|reason| {
-            DbErr::Custom(format!("capability grant does not match call: {reason:?}"))
-        })?;
+        task_authority::match_current_on(&txn, &grant, &request.call, false)
+            .await
+            .map_err(|reason| {
+                DbErr::Custom(format!("capability grant does not match call: {reason:?}"))
+            })?;
         if grant.remaining_uses == 0 || grant_row.remaining_uses <= 0 {
             txn.rollback().await.ok();
             return Err(DbErr::Custom("capability grant is exhausted".into()));
@@ -398,6 +448,10 @@ impl SignalCapabilityGrantStore {
             &format!("{}:{}", request.grant_id, request.call_id),
         );
         let payload = PreparedCapabilityPayload {
+            observed_authority:
+                desk_diagnose_core::provider_preflight::ObservedCapabilityAuthority::from_call(
+                    &request.call,
+                ),
             grant_id: request.grant_id.to_string(),
             reservation_id: reservation_id.clone(),
             call_id: request.call_id.to_string(),
@@ -489,13 +543,13 @@ impl SignalCapabilityGrantStore {
         #[cfg(test)]
         pause_crash_fixture_before_commit("prepare_before_commit");
         txn.commit().await?;
-        Ok(PreparedCapabilityCall {
+        Ok(CapabilityPreparation::Ready(PreparedCapabilityCall {
             work_id: work.id,
             reservation_id,
             call_id: request.call_id.to_string(),
             generation: request.generation,
             idempotent_replay: false,
-        })
+        }))
     }
 
     /// Atomically freeze a provider dispatch intent with its exact input bytes.
@@ -556,9 +610,7 @@ impl SignalCapabilityGrantStore {
             ));
         }
 
-        let session_row = agent_session::Entity::find()
-            .filter(agent_session::Column::ConversationId.eq(request.call.run_id))
-            .one(&txn)
+        let session_row = crate::schedule_store::lock_action_session(&txn, request.call.run_id)
             .await?
             .ok_or_else(|| DbErr::Custom("authoritative agent session was not found".into()))?;
         let session =
@@ -617,11 +669,13 @@ impl SignalCapabilityGrantStore {
             });
         }
         let grant = decode_grant(&grant_row)?;
-        match_reserved_capability_grant(&grant, &request.call).map_err(|reason| {
-            DbErr::Custom(format!(
-                "reserved capability grant no longer matches call: {reason:?}"
-            ))
-        })?;
+        task_authority::match_current_on(&txn, &grant, &request.call, true)
+            .await
+            .map_err(|reason| {
+                DbErr::Custom(format!(
+                    "reserved capability grant no longer matches call: {reason:?}"
+                ))
+            })?;
         desk_diagnose_core::file_scope::validate_artifact_scope(
             &session,
             &grant.tool_name,
@@ -635,6 +689,7 @@ impl SignalCapabilityGrantStore {
             &format!("{}:{}", request.call_id, request.generation),
         );
         let dispatch_payload = CapabilityDispatchPayload {
+            observed_authority: prepared_payload.observed_authority,
             command_origin: None,
             command_receipt: None,
             command_export: None,
@@ -789,6 +844,13 @@ impl SignalCapabilityGrantStore {
                 "capability dispatch outbox payload disagrees with its authority row".into(),
             ));
         }
+        let work = agent_action_item::Entity::find_by_id(outbox.work_id)
+            .one(&txn)
+            .await?
+            .ok_or_else(|| DbErr::Custom("capability dispatch work missing".into()))?;
+        crate::schedule_store::lock_action_session(&txn, &work.conversation_id)
+            .await?
+            .ok_or_else(|| DbErr::Custom("capability dispatch session missing".into()))?;
         if desk_diagnose_core::file_scope::requires_directory_scope(&payload.tool_name) {
             let grant_row = agent_capability_grant::Entity::find()
                 .filter(agent_capability_grant::Column::GrantId.eq(&payload.grant_id))
@@ -956,9 +1018,7 @@ impl SignalCapabilityGrantStore {
             {
                 return Err(DbErr::Custom("claimed dispatch authority changed".into()));
             }
-            let session_row = agent_session::Entity::find()
-                .filter(agent_session::Column::ConversationId.eq(request.call.run_id))
-                .one(&txn)
+            let session_row = crate::schedule_store::lock_action_session(&txn, request.call.run_id)
                 .await?
                 .ok_or_else(|| DbErr::Custom("claimed dispatch session is missing".into()))?;
             let session = PersistedAgentSession::decode_json(&session_row.state_json)
@@ -981,9 +1041,11 @@ impl SignalCapabilityGrantStore {
                 return Err(DbErr::Custom("claimed dispatch grant is revoked".into()));
             }
             let grant = decode_grant(&row)?;
-            match_reserved_capability_grant(&grant, &request.call).map_err(|reason| {
-                DbErr::Custom(format!("claimed dispatch grant changed: {reason:?}"))
-            })?;
+            task_authority::match_current_on(&txn, &grant, &request.call, true)
+                .await
+                .map_err(|reason| {
+                    DbErr::Custom(format!("claimed dispatch grant changed: {reason:?}"))
+                })?;
             Ok(grant)
         }
         .await;
@@ -1247,117 +1309,7 @@ impl SignalCapabilityGrantStore {
         now_unix_ms: u64,
     ) -> Result<DispatchCompletionResult, DbErr> {
         let txn = self.db.begin().await?;
-        let result = async {
-            let outbox = agent_capability_dispatch_outbox::Entity::find()
-                .filter(
-                    agent_capability_dispatch_outbox::Column::DispatchId
-                        .eq(&completion.dispatch_id),
-                )
-                .one(&txn)
-                .await?
-                .ok_or_else(|| DbErr::Custom("capability dispatch was not found".into()))?;
-            let payload: CapabilityDispatchPayload =
-                serde_json::from_str(&outbox.payload_json).map_err(json_error)?;
-            if payload.dispatch_id != completion.dispatch_id
-                || payload.call_id != completion.call_id
-                || payload.generation != completion.generation
-                || outbox.call_id != completion.call_id
-                || u64::try_from(outbox.generation).ok() != Some(completion.generation)
-            {
-                return Err(DbErr::Custom(
-                    "capability completion disagrees with dispatch authority".into(),
-                ));
-            }
-            let work = agent_action_item::Entity::find_by_id(outbox.work_id)
-                .one(&txn)
-                .await?
-                .ok_or_else(|| DbErr::Custom("capability dispatch work was not found".into()))?;
-            let expected_work_status = match completion.outcome {
-                CapabilityDispatchOutcome::Succeeded => CAPABILITY_WORK_SUCCEEDED,
-                CapabilityDispatchOutcome::Failed => CAPABILITY_WORK_FAILED,
-            };
-            let result_json = serde_json::to_string(completion).map_err(json_error)?;
-            if outbox.state == DISPATCH_OUTBOX_COMPLETED {
-                if work.status == expected_work_status
-                    && work.result_json.as_deref() == Some(result_json.as_str())
-                    && work.result_schema_version == Some(1)
-                {
-                    return Ok(DispatchCompletionResult {
-                        work_id: work.id,
-                        idempotent_replay: true,
-                    });
-                }
-                return Err(DbErr::Custom(
-                    "capability dispatch completion conflicts with the terminal fact".into(),
-                ));
-            }
-            if !matches!(
-                outbox.state.as_str(),
-                DISPATCH_OUTBOX_SENDING | DISPATCH_OUTBOX_OUTCOME_UNKNOWN
-            ) || !matches!(
-                work.status.as_str(),
-                CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
-            ) {
-                return Err(DbErr::Custom(
-                    "capability dispatch was not handed off; completion is not admissible".into(),
-                ));
-            }
-            let now = timestamp(now_unix_ms)?;
-            let completed_outbox = agent_capability_dispatch_outbox::Entity::update_many()
-                .col_expr(
-                    agent_capability_dispatch_outbox::Column::State,
-                    Expr::value(DISPATCH_OUTBOX_COMPLETED),
-                )
-                .col_expr(
-                    agent_capability_dispatch_outbox::Column::UpdatedAt,
-                    Expr::value(now),
-                )
-                .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))
-                .filter(
-                    agent_capability_dispatch_outbox::Column::State
-                        .is_in([DISPATCH_OUTBOX_SENDING, DISPATCH_OUTBOX_OUTCOME_UNKNOWN]),
-                )
-                .exec(&txn)
-                .await?;
-            let completed_work = agent_action_item::Entity::update_many()
-                .col_expr(
-                    agent_action_item::Column::Status,
-                    Expr::value(expected_work_status),
-                )
-                .col_expr(
-                    agent_action_item::Column::ResultJson,
-                    Expr::value(result_json),
-                )
-                .col_expr(
-                    agent_action_item::Column::ResultSchemaVersion,
-                    Expr::value(1),
-                )
-                .col_expr(
-                    agent_action_item::Column::Resolution,
-                    Expr::value(match completion.outcome {
-                        CapabilityDispatchOutcome::Succeeded => "provider_succeeded",
-                        CapabilityDispatchOutcome::Failed => "provider_failed",
-                    }),
-                )
-                .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
-                .filter(agent_action_item::Column::Id.eq(work.id))
-                .filter(
-                    agent_action_item::Column::Status
-                        .is_in([CAPABILITY_WORK_DISPATCHING, CAPABILITY_WORK_OUTCOME_UNKNOWN]),
-                )
-                .exec(&txn)
-                .await?;
-            if completed_outbox.rows_affected != 1 || completed_work.rows_affected != 1 {
-                return Err(DbErr::Custom(
-                    "capability dispatch completion conflicted".into(),
-                ));
-            }
-            Ok(DispatchCompletionResult {
-                work_id: work.id,
-                idempotent_replay: false,
-            })
-        }
-        .await;
+        let result = Self::record_dispatch_completion_on(&txn, completion, now_unix_ms).await;
         match result {
             Ok(result) => {
                 txn.commit().await?;
@@ -1371,6 +1323,122 @@ impl SignalCapabilityGrantStore {
                 Err(error)
             }
         }
+    }
+
+    /// Join the caller's transaction; retrying or committing it belongs to the caller.
+    pub(crate) async fn record_dispatch_completion_on(
+        txn: &sea_orm::DatabaseTransaction,
+        completion: &CapabilityDispatchCompletion,
+        now_unix_ms: u64,
+    ) -> Result<DispatchCompletionResult, DbErr> {
+        validate_completion(completion)?;
+        let outbox = agent_capability_dispatch_outbox::Entity::find()
+            .filter(
+                agent_capability_dispatch_outbox::Column::DispatchId.eq(&completion.dispatch_id),
+            )
+            .one(txn)
+            .await?
+            .ok_or_else(|| DbErr::Custom("capability dispatch was not found".into()))?;
+        let payload: CapabilityDispatchPayload =
+            serde_json::from_str(&outbox.payload_json).map_err(json_error)?;
+        if payload.dispatch_id != completion.dispatch_id
+            || payload.call_id != completion.call_id
+            || payload.generation != completion.generation
+            || outbox.call_id != completion.call_id
+            || u64::try_from(outbox.generation).ok() != Some(completion.generation)
+        {
+            return Err(DbErr::Custom(
+                "capability completion disagrees with dispatch authority".into(),
+            ));
+        }
+        let work = agent_action_item::Entity::find_by_id(outbox.work_id)
+            .one(txn)
+            .await?
+            .ok_or_else(|| DbErr::Custom("capability dispatch work was not found".into()))?;
+        let expected_work_status = match completion.outcome {
+            CapabilityDispatchOutcome::Succeeded => CAPABILITY_WORK_SUCCEEDED,
+            CapabilityDispatchOutcome::Failed => CAPABILITY_WORK_FAILED,
+        };
+        let result_json = serde_json::to_string(completion).map_err(json_error)?;
+        if outbox.state == DISPATCH_OUTBOX_COMPLETED {
+            if work.status == expected_work_status
+                && work.result_json.as_deref() == Some(result_json.as_str())
+                && work.result_schema_version == Some(1)
+            {
+                return Ok(DispatchCompletionResult {
+                    work_id: work.id,
+                    idempotent_replay: true,
+                });
+            }
+            return Err(DbErr::Custom(
+                "capability dispatch completion conflicts with the terminal fact".into(),
+            ));
+        }
+        if !matches!(
+            outbox.state.as_str(),
+            DISPATCH_OUTBOX_SENDING | DISPATCH_OUTBOX_OUTCOME_UNKNOWN
+        ) || !matches!(
+            work.status.as_str(),
+            CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
+        ) {
+            return Err(DbErr::Custom(
+                "capability dispatch was not handed off; completion is not admissible".into(),
+            ));
+        }
+        let now = timestamp(now_unix_ms)?;
+        let completed_outbox = agent_capability_dispatch_outbox::Entity::update_many()
+            .col_expr(
+                agent_capability_dispatch_outbox::Column::State,
+                Expr::value(DISPATCH_OUTBOX_COMPLETED),
+            )
+            .col_expr(
+                agent_capability_dispatch_outbox::Column::UpdatedAt,
+                Expr::value(now),
+            )
+            .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))
+            .filter(
+                agent_capability_dispatch_outbox::Column::State
+                    .is_in([DISPATCH_OUTBOX_SENDING, DISPATCH_OUTBOX_OUTCOME_UNKNOWN]),
+            )
+            .exec(txn)
+            .await?;
+        let completed_work = agent_action_item::Entity::update_many()
+            .col_expr(
+                agent_action_item::Column::Status,
+                Expr::value(expected_work_status),
+            )
+            .col_expr(
+                agent_action_item::Column::ResultJson,
+                Expr::value(result_json),
+            )
+            .col_expr(
+                agent_action_item::Column::ResultSchemaVersion,
+                Expr::value(1),
+            )
+            .col_expr(
+                agent_action_item::Column::Resolution,
+                Expr::value(match completion.outcome {
+                    CapabilityDispatchOutcome::Succeeded => "provider_succeeded",
+                    CapabilityDispatchOutcome::Failed => "provider_failed",
+                }),
+            )
+            .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
+            .filter(agent_action_item::Column::Id.eq(work.id))
+            .filter(
+                agent_action_item::Column::Status
+                    .is_in([CAPABILITY_WORK_DISPATCHING, CAPABILITY_WORK_OUTCOME_UNKNOWN]),
+            )
+            .exec(txn)
+            .await?;
+        if completed_outbox.rows_affected != 1 || completed_work.rows_affected != 1 {
+            return Err(DbErr::Custom(
+                "capability dispatch completion conflicted".into(),
+            ));
+        }
+        Ok(DispatchCompletionResult {
+            work_id: work.id,
+            idempotent_replay: false,
+        })
     }
 
     /// Startup fence. It must run before a dispatcher starts claiming new work.
@@ -1526,7 +1594,11 @@ fn validate_outbox_replay(
         "capability-dispatch",
         &format!("{}:{}", request.call_id, request.generation),
     );
-    if outbox.dispatch_id != expected_dispatch_id
+    if payload.observed_authority
+        != desk_diagnose_core::provider_preflight::ObservedCapabilityAuthority::from_call(
+            &request.call,
+        )
+        || outbox.dispatch_id != expected_dispatch_id
         || outbox.work_id != work.id
         || outbox.reservation_id != reservation.reservation_id
         || payload.dispatch_id != expected_dispatch_id
@@ -1565,7 +1637,11 @@ fn validate_replay(
     let (reservation, work) = existing;
     let payload: PreparedCapabilityPayload =
         serde_json::from_str(&work.payload_json).map_err(json_error)?;
-    if reservation.grant_id != request.grant_id
+    if payload.observed_authority
+        != desk_diagnose_core::provider_preflight::ObservedCapabilityAuthority::from_call(
+            &request.call,
+        )
+        || reservation.grant_id != request.grant_id
         || reservation.run_id != request.call.run_id
         || reservation.canonical_input_digest_sha256 != request.call.canonical_input_digest_sha256
         || reservation.generation
@@ -1622,12 +1698,30 @@ fn validate_prepare(request: &PrepareCapabilityCall<'_>) -> Result<(), DbErr> {
     Ok(())
 }
 
-fn decode_grant(row: &agent_capability_grant::Model) -> Result<CapabilityGrant, DbErr> {
+pub(crate) fn decode_grant(row: &agent_capability_grant::Model) -> Result<CapabilityGrant, DbErr> {
+    let issued: CapabilityGrant =
+        serde_json::from_str(&row.issued_payload_json).map_err(json_error)?;
+    issued
+        .validate()
+        .map_err(|error| DbErr::Custom(format!("invalid original capability grant: {error}")))?;
     let grant: CapabilityGrant = serde_json::from_str(&row.payload_json).map_err(json_error)?;
     grant
         .validate()
         .map_err(|error| DbErr::Custom(format!("invalid stored capability grant: {error}")))?;
-    if i32::try_from(grant.remaining_uses).ok() != Some(row.remaining_uses) {
+    let mut immutable = grant.clone();
+    immutable.remaining_uses = issued.remaining_uses;
+    immutable.revoked_at_unix_ms = issued.revoked_at_unix_ms;
+    immutable.revoked_reason = issued.revoked_reason.clone();
+    if immutable != issued
+        || grant.remaining_uses > issued.remaining_uses
+        || row.payload_schema_version != i32::from(grant.schema_version)
+        || row.grant_id != grant.grant_id
+        || row.run_id != grant.run_id
+        || row.actor_id != grant.actor_id
+        || row.provider_id != grant.provider_id
+        || row.tool_name != grant.tool_name
+        || i32::try_from(grant.remaining_uses).ok() != Some(row.remaining_uses)
+    {
         return Err(DbErr::Custom(
             "capability grant use projection disagrees with payload".into(),
         ));
@@ -1671,6 +1765,8 @@ fn validate_completion(completion: &CapabilityDispatchCompletion) -> Result<(), 
 #[cfg(test)]
 mod tests {
     mod computer_binding;
+    mod observed;
+    mod scheduled_admission;
 
     use std::path::Path;
 
@@ -2074,7 +2170,75 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let before_receipt = agent_capability_dispatch_outbox::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let before_work = agent_action_item::Entity::find_by_id(before_receipt.work_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let txn = db.begin().await.unwrap();
+        let staged =
+            crate::agent_exec_store::SignalAgentExecStore::command_result_on(&txn, &finished)
+                .await
+                .unwrap()
+                .unwrap();
+        let staged_completion = CapabilityDispatchCompletion {
+            dispatch_id: dispatch_id.clone(),
+            call_id: finished.exec_request_id.clone(),
+            generation: 1,
+            outcome: CapabilityDispatchOutcome::Succeeded,
+            result_digest_sha256: staged.1.envelope.digest_sha256.clone(),
+        };
+        SignalCapabilityGrantStore::record_dispatch_completion_on(
+            &txn,
+            &staged_completion,
+            policy.now_unix_ms,
+        )
+        .await
+        .unwrap();
+        let staged_row = agent_capability_dispatch_outbox::Entity::find()
+            .one(&txn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(staged_row.payload_json, before_receipt.payload_json);
+        assert_eq!(staged_row.state, DISPATCH_OUTBOX_COMPLETED);
+        txn.rollback().await.unwrap();
+        assert_eq!(
+            agent_action_item::Entity::find_by_id(before_work.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            before_work
+        );
+        assert_eq!(
+            agent_capability_dispatch_outbox::Entity::find()
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            before_receipt
+        );
+        let mut forged = finished.clone();
+        forged.result_text = Some("not the original device result".into());
+        assert!(exec_store.command_result(&forged).await.is_err());
+        assert_eq!(
+            agent_capability_dispatch_outbox::Entity::find()
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            before_receipt
+        );
         let first = exec_store.command_result(&finished).await.unwrap().unwrap();
+        assert_eq!(first.0.content, staged.0.content);
+        assert_eq!(first.0.image_data_url, staged.0.image_data_url);
+        assert_eq!(first.1, staged.1);
         assert_eq!(
             first.1.envelope.retention.expires_at_unix_ms,
             Some(completion.expires_at_unix_ms)
@@ -2548,6 +2712,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(exhausted.remaining_uses, 0);
+        let replay = store.issue(&grant(2)).await.unwrap();
+        assert_eq!(
+            replay, exhausted,
+            "issuance retry must not refill consumed uses"
+        );
+        assert!(store.issue(&grant(3)).await.is_err());
+        let revoked = store
+            .revoke("grant-1", "actor-1", "device-1", 600, "owner revoked")
+            .await
+            .unwrap();
+        let replay = store.issue(&grant(2)).await.unwrap();
+        assert_eq!(decode_grant(&replay).unwrap(), revoked);
+        assert_eq!(replay.remaining_uses, 0);
         assert_eq!(
             agent_grant_reservation::Entity::find()
                 .count(&db)
@@ -3449,5 +3626,55 @@ mod tests {
             0
         );
         db.close().await.unwrap();
+    }
+    #[tokio::test]
+    async fn task_grant_persists_parent_schema_and_rejects_metadata_drift() {
+        use desk_agent_protocol::capability_grant::{
+            CAPABILITY_GRANT_SCHEMA_VERSION, TaskGrantProvenance,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let db = file_db(&directory.path().join("task-grant.db")).await;
+        let store = SignalCapabilityGrantStore::new(db.clone());
+        let mut task = grant(1);
+        task.schema_version = CAPABILITY_GRANT_SCHEMA_VERSION;
+        task.issued_by = CapabilityGrantIssuer::TaskAuthorization(TaskGrantProvenance {
+            schedule_id: "schedule-1".into(),
+            scheduled_run_id: "scheduled-run-1".into(),
+            task_revision: 1,
+            contract_revision: 2,
+            contract_sha256: "a".repeat(64),
+            authorization_id: "authorization-1".into(),
+            authorization_revision: 3,
+            recovery_epoch: 4,
+        });
+        let row = store.issue(&task).await.unwrap();
+        assert_eq!(row.payload_schema_version, 3);
+        assert_eq!(
+            store
+                .list_for_subject("run-1", "actor-1", "device-1")
+                .await
+                .unwrap(),
+            vec![task.clone()]
+        );
+        let mut substituted = task.clone();
+        if let CapabilityGrantIssuer::TaskAuthorization(parent) = &mut substituted.issued_by {
+            parent.authorization_revision += 1;
+        }
+        assert!(store.issue(&substituted).await.is_err());
+        agent_capability_grant::Entity::update_many()
+            .set(agent_capability_grant::ActiveModel {
+                payload_schema_version: Set(2),
+                ..Default::default()
+            })
+            .filter(agent_capability_grant::Column::GrantId.eq(&task.grant_id))
+            .exec(&db)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .list_for_subject("run-1", "actor-1", "device-1")
+                .await
+                .is_err()
+        );
     }
 }

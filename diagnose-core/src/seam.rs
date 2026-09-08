@@ -430,6 +430,12 @@ pub enum ExecOutcome {
         event_id: Option<String>,
         data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
     },
+    /// A scheduled call exceeded automatic authority but remains within its
+    /// approval ceiling. No work was dispatched and no grant was issued. The
+    /// loop must durably publish this exact request and pause before returning.
+    PermissionRequired {
+        request: crate::dynamic_run::PermissionRequest,
+    },
     /// The operator rejected the command; nothing ran.
     Rejected { reason: Option<String> },
     /// The runtime durably refused dispatch before any execution generation was
@@ -476,15 +482,26 @@ pub struct ExecCompletion {
 /// advance; a remote Provider may use the same crash-safe work/receipt path as
 /// mutations without misclassifying the operation's effect.
 #[derive(Debug)]
-pub struct ReadOutcome {
-    pub output: ToolRunOutput,
-    pub ok: bool,
-    pub event_id: Option<String>,
-    pub data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
-    /// Present only when this exact read crossed its Adaptive foreground
-    /// budget after executor acceptance. The loop records the same durable
-    /// task identity used by mutation dispatches; this is not a second call.
-    pub background_task: Option<ExecIdentity>,
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the pre-existing completed read payload inline without a heap allocation on every read; the uncommon approval branch only adds a discriminant"
+)]
+pub enum ReadOutcome {
+    /// A native read result or an accepted background read.
+    Completed {
+        output: ToolRunOutput,
+        ok: bool,
+        event_id: Option<String>,
+        data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+        /// Present only when this exact read crossed its Adaptive foreground
+        /// budget after executor acceptance. The loop records the same durable
+        /// task identity used by mutation dispatches; this is not a second call.
+        background_task: Option<ExecIdentity>,
+    },
+    /// No read was dispatched; persist the exact request and pause the run.
+    PermissionRequired {
+        request: crate::dynamic_run::PermissionRequest,
+    },
 }
 
 #[derive(Debug)]
@@ -604,13 +621,16 @@ pub trait ToolSeam {
     ) -> ReadCompletion {
         let _ = (ctx, version);
         ReadCompletion {
-            outcome: self.run_read(call).await.map(|output| ReadOutcome {
-                output,
-                ok: true,
-                event_id: None,
-                data_envelope: None,
-                background_task: None,
-            }),
+            outcome: self
+                .run_read(call)
+                .await
+                .map(|output| ReadOutcome::Completed {
+                    output,
+                    ok: true,
+                    event_id: None,
+                    data_envelope: None,
+                    background_task: None,
+                }),
             version_advance: None,
         }
     }
@@ -751,6 +771,15 @@ pub enum ClaimError {
 /// in DB with optimistic-concurrency CAS and is the authority across instances.
 #[async_trait(?Send)]
 pub trait SessionSeam {
+    /// Commit an owner-review-only schedule draft and this call's result together.
+    async fn propose_schedule(
+        &self,
+        _session: &mut PersistedAgentSession,
+        _call: &crate::chat::ToolCall,
+    ) -> Result<String, AgentError> {
+        Err(crate::schedule::proposal::unavailable())
+    }
+
     /// Persist a model proposal under the exact held session version/lease and
     /// advance only this transaction's state, never adopt another writer's state.
     async fn propose_directory(
@@ -798,6 +827,25 @@ pub trait SessionSeam {
     /// Persist a normalized permission request and its append-only event in one
     /// transaction. The default is suitable only for in-memory test seams;
     /// durable runtimes override it so UI visibility cannot diverge from audit.
+    /// Validate a scheduled-task exception against current frozen authority.
+    /// Runtimes without task admission must not expose an expanding approval card.
+    async fn validate_task_permission_request(
+        &self,
+        session: &PersistedAgentSession,
+        _request: &crate::dynamic_run::PermissionRequest,
+    ) -> Result<(), AgentError> {
+        if session.trigger_origin == crate::session::TriggerOrigin::ScheduledTask {
+            return Err(AgentError {
+                kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
+                message: "Task exception authority is unavailable".into(),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            });
+        }
+        Ok(())
+    }
+
     async fn save_permission_request(
         &self,
         session: &mut PersistedAgentSession,
@@ -862,6 +910,13 @@ pub trait LeaseHeartbeat {
     /// commits then fail closed even when no competing owner has taken over yet.
     fn is_healthy(&self) -> bool {
         true
+    }
+
+    /// Recheck durable cancellation/lease ownership at an execution boundary.
+    /// Ordinary sessions use the local health flag; scheduled runtimes validate
+    /// their occurrence and session together. This is not tool dispatch authority.
+    fn check_current(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + '_>> {
+        Box::pin(async move { self.is_healthy() })
     }
 }
 

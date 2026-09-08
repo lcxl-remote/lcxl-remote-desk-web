@@ -634,7 +634,7 @@ impl fmt::Debug for ModelProviderUpdate {
 
 /// Load the singleton provider config, returning the default (all-unset) config
 /// when no row has been written yet.
-pub async fn load(db: &DatabaseConnection) -> Result<ModelProviderConfig, DbErr> {
+pub async fn load<C: sea_orm::ConnectionTrait>(db: &C) -> Result<ModelProviderConfig, DbErr> {
     let row = model_provider::Entity::find_by_id(SINGLETON_ID)
         .one(db)
         .await?;

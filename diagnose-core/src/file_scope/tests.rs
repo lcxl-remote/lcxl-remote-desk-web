@@ -497,3 +497,52 @@ fn owner_selection_transaction_is_atomic_and_does_not_grant_tool_execution() {
     assert!(replay(&stored, &update, &receipt).is_ok());
     assert!(prepare(&stored, &update, 1).is_err());
 }
+
+#[test]
+fn task_directory_consent_keeps_distinct_source_and_requires_active_scheduled_run() {
+    use super::transaction::*;
+    let mut session = PersistedAgentSession::new(
+        "conversation",
+        "owner",
+        "device",
+        0,
+        AgentScope {
+            granted: vec![],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        "2026-09-05T00:00:00Z",
+    );
+    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::DeviceAssistant);
+    let mut directory = proposal();
+    directory.source = DirectoryConsentSource::TaskContract;
+    let mut update = FileScopeUpdate {
+        subject: subject(),
+        client_conversation_id: "browser-intent".into(),
+        client_request_id: directory.request_id.clone(),
+        expected_revision: 0,
+        mutation: FileScopeMutation::Select {
+            proposal: directory.clone(),
+        },
+    };
+    assert!(prepare(&session, &update, 1).is_err());
+    session.trigger_origin = crate::session::TriggerOrigin::ScheduledTask;
+    session.turn_state = crate::session::TurnState::Running;
+    let (stored, receipt) = prepare(&session, &update, 1).unwrap();
+    assert_eq!(
+        stored.file_scope.records()[0].proposal.source,
+        DirectoryConsentSource::TaskContract
+    );
+    assert_eq!(
+        stored.file_scope.records()[0].state,
+        DirectoryConsentState::Approved
+    );
+    assert!(stored.scope_snapshot.granted.is_empty());
+    assert_eq!(receipt.update, update);
+    assert_eq!(session.file_scope.revision(), 0);
+    update.mutation = FileScopeMutation::Propose {
+        proposal: directory,
+    };
+    assert!(update.validate().is_err());
+}

@@ -1,0 +1,1 @@
+{"type":"string","enum":["failed","pending","running","completed","cancelled"],"x-readme-ref-name":"RehearsalStatus"}

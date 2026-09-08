@@ -44,6 +44,8 @@ pub enum ToolEffect {
     ConversationHistory,
     /// Resolves one candidate directory and stores pending owner consent only.
     DirectoryPlanning,
+    /// Creates only an owner-reviewable schedule draft from a user turn.
+    SchedulePlanning,
 }
 
 /// A tool registered with the agent loop: its model-facing spec, the capability
@@ -74,7 +76,8 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
         | ToolEffect::PermissionPlanning
         | ToolEffect::CapabilityDiscovery
         | ToolEffect::ConversationHistory
-        | ToolEffect::DirectoryPlanning => true,
+        | ToolEffect::DirectoryPlanning
+        | ToolEffect::SchedulePlanning => true,
         ToolEffect::Mutating => matches!(
             mode,
             ExecutionMode::ConfirmEachAction
@@ -111,6 +114,9 @@ pub fn is_exposed(
     }
     if tool.effect == ToolEffect::ConversationHistory {
         return true;
+    }
+    if tool.effect == ToolEffect::SchedulePlanning {
+        return origin == TriggerOrigin::User;
     }
     if tool.effect == ToolEffect::DirectoryPlanning {
         return origin.allows_new_mutation();

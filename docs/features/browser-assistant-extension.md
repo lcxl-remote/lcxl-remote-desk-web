@@ -17,4 +17,8 @@ The extension accepts only the versioned typed actions advertised by AI Assistan
 
 Passwords are never projected. Upload bytes are checked against their size and SHA-256 both before crossing the edge bridge and again inside the extension. Page and element references are bound to the Chrome profile, tab, document incarnation, origin, and revision; navigation or reconnection makes stale references fail closed.
 
-Gmail and Slack draft preparation never activates Send. A future exact-send path must use a separately sealed `SendExternal` payload and remains unavailable until that path passes its own release gate.
+Gmail and Slack draft preparation never activates Send. Exact-send requires a separately sealed `SendExternal` payload and central authorization. The host-local `computer_use.communication_send` ceiling defaults off and is independent of draft handoff. Sending also requires the master switch, browser semantic control and a paired Chrome extension; DevTools is not an automatic fallback. The worker rechecks the local sending ceiling before dispatch.
+
+The exact-send receipt check excludes success notices and matching messages that already existed before activation, including hidden notices. It requires a new visible acknowledgement. If the page reuses an old acknowledgement or the result cannot be confirmed, the outcome remains unknown; it must not be treated as successful delivery or retried automatically.
+
+Exact-send also requires an identifiable signed-in account. Gmail uses the account address; Slack requires both workspace and member IDs from the visible account control, consistent with the current workspace URL. Missing or ambiguous identity prevents sending. The extension checks the same identity immediately before activation and while waiting for acknowledgement; an account switch after activation leaves the result unknown.

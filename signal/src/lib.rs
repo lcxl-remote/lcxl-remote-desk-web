@@ -29,6 +29,9 @@ pub mod permission_resume_executor;
 pub mod remote_access;
 pub mod remote_tool_edge;
 pub mod request_remote_authorizer;
+pub mod schedule_budget_policy;
+pub mod schedule_executor;
+pub mod schedule_store;
 pub mod service;
 pub mod terminal_orchestrator;
 pub mod terminal_start_authorizer;
@@ -38,3 +41,5 @@ pub mod usage_retention;
 pub mod version;
 pub mod web_research;
 pub mod web_search_config;
+
+pub mod schedule_management;

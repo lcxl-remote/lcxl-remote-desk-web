@@ -174,11 +174,13 @@ pub fn load_history_page(
 fn is_visible_user_message(message: &ChatMessage) -> bool {
     message.role == ChatRole::User
         && !crate::permission_resume::is_permission_resume_message(message)
+        && !crate::permission_resume::is_scheduled_resume_message(message)
 }
 
 fn is_visible_history_message(message: &ChatMessage) -> bool {
     matches!(message.role, ChatRole::User | ChatRole::Assistant)
         && !crate::permission_resume::is_permission_resume_message(message)
+        && !crate::permission_resume::is_scheduled_resume_message(message)
 }
 
 fn invalid(message: &str) -> AgentError {
@@ -195,6 +197,43 @@ fn invalid(message: &str) -> AgentError {
 mod tests {
     use super::*;
     use desk_agent_protocol::data_lineage::DestinationIdentity;
+
+    #[test]
+    fn scheduled_control_is_not_history_or_a_new_user_boundary() {
+        let original = labeled("original", ChatRole::User, "owner requirement");
+        let policy = crate::model_egress::ModelEgressPolicy {
+            destination: original
+                .data_envelope
+                .as_ref()
+                .unwrap()
+                .allowed_destinations[0]
+                .clone(),
+            selected_source_tools: BTreeSet::new(),
+            export_authorization_id: "scheduled-test".into(),
+            now_unix_ms: 1_000,
+            byte_cap: 100_000,
+            omit_finite_retention_historical_turns: false,
+        };
+        let bridge = crate::permission_resume::authorized_scheduled_resume_message(
+            "scheduled-resume-1".into(),
+            &policy,
+            &original,
+        )
+        .unwrap();
+        assert!(!is_visible_user_message(&bridge));
+        assert!(!is_visible_history_message(&bridge));
+        assert!(is_visible_user_message(&original));
+        let call = ToolCall {
+            id: "history".into(),
+            name: LOAD_CONVERSATION_HISTORY_TOOL_NAME.into(),
+            arguments_json: r#"{"limit":5}"#.into(),
+        };
+        let result = load_history_page(&call, &[original, bridge], Some(&policy), 1_000).unwrap();
+        let page: HistoryPage = serde_json::from_str(&result.content).unwrap();
+        // The actual current user requirement remains the paging boundary.
+        assert!(page.messages.is_empty());
+        assert!(result.source_messages.is_empty());
+    }
 
     #[test]
     fn filters_unavailable_history_without_renewing_it_and_advances_empty_pages() {

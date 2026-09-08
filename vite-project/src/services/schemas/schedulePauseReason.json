@@ -1,0 +1,1 @@
+{"type":"string","enum":["user","consecutive_failures","unknown_side_effect","authorization_invalid","schedule_upgrade_required"],"x-readme-ref-name":"SchedulePauseReason"}

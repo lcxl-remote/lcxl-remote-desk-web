@@ -223,6 +223,7 @@ mod tests {
 
     fn page(page_id: &str) -> BrowserPageRef {
         BrowserPageRef {
+            account_id: None,
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
                 engine: BrowserEngineKind::ChromeDevtoolsMcp,

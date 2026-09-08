@@ -1,0 +1,1 @@
+{"type":"string","enum":["draft","rehearsing","awaiting_authorization","active","triggered","paused","completed","deleted"],"x-readme-ref-name":"ScheduledTaskStatus"}

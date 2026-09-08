@@ -7,6 +7,13 @@ use desk_diagnose_core::dynamic_run::{
 };
 use sea_orm::ConnectionTrait;
 
+/// Explicit session subject, independently checked against stored owner/device.
+pub struct PermissionDecisionSubject<'a> {
+    pub conversation_id: &'a str,
+    pub actor_id: &'a str,
+    pub device_id: &'a str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PermissionDecisionOutcome {
     pub state: PermissionRequestState,
@@ -192,14 +199,47 @@ impl SignalAgentSessionStore {
         request_id: &str,
         decisions: &[PermissionDecisionItem],
     ) -> Result<Option<PermissionRequestState>, AgentError> {
+        self.replay_permission_decision_with_expected_request(
+            run_id, actor_id, device_id, request_id, decisions, None,
+        )
+        .await
+    }
+
+    pub async fn replay_permission_decision_with_expected_request(
+        &self,
+        run_id: &str,
+        actor_id: &str,
+        device_id: &str,
+        request_id: &str,
+        decisions: &[PermissionDecisionItem],
+        expected_run_request_id: Option<&str>,
+    ) -> Result<Option<PermissionRequestState>, AgentError> {
         let txn = self.db.begin().await.map_err(|_| invalid())?;
         let row = find(&txn, run_id)
             .await
             .map_err(|_| invalid())?
             .ok_or_else(invalid)?;
         let session = session(&row, run_id, actor_id, device_id)?;
+        check_expected_request(&session, expected_run_request_id)?;
         let state = replay_on(&txn, &session, request_id, decisions).await?;
         txn.commit().await.map_err(|_| invalid())?;
         Ok(state)
     }
+}
+
+/// This fence is caller intent, never authority derived from a historical run.
+pub(super) fn check_expected_request(
+    session: &PersistedAgentSession,
+    expected: Option<&str>,
+) -> Result<(), AgentError> {
+    if expected.is_some_and(|expected| {
+        expected.is_empty()
+            || expected.len() > 256
+            || session.current_request_id.as_deref() != Some(expected)
+    }) {
+        return Err(internal(
+            "permission decision no longer matches the displayed run",
+        ));
+    }
+    Ok(())
 }

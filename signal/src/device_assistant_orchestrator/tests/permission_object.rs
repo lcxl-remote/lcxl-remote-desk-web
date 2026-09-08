@@ -20,7 +20,9 @@ use desk_signal_facade::{
     service::RemoteToolObserver,
 };
 use futures_util::{SinkExt, StreamExt};
+use sea_orm::{ColumnTrait, QueryFilter};
 use std::{sync::Arc, time::Duration};
+mod scheduled;
 
 fn tool_reply(name: &str, arguments: serde_json::Value) -> String {
     let delta = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("call-{name}"),"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]}}]});
@@ -94,6 +96,9 @@ enum ResumeMode {
     Direct,
     Scan,
     Loop,
+    Scheduled,
+    ScheduledScan,
+    ScheduledLoop,
 }
 
 async fn run_case(change: Option<&str>, mode: ResumeMode) {
@@ -101,7 +106,7 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
 }
 
 async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) {
-    let scanner = mode != ResumeMode::Direct;
+    let scanner = matches!(mode, ResumeMode::Scan | ResumeMode::Loop);
     let directory = tempfile::tempdir().unwrap();
     let url = if scanner {
         format!(
@@ -145,7 +150,7 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
     ];
     if matches!(
         change,
-        Some("readiness" | "legacy" | "live_after" | "live_target")
+        Some("readiness" | "legacy" | "live_after" | "live_target" | "scheduled_revoke")
     ) {
         replies[2] = replies[2].replace("object-read-complete", "object-read-unavailable");
     }
@@ -377,6 +382,14 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
     let snapshot = sessions.read_snapshot(&run_id).await.unwrap().unwrap();
     assert_eq!(snapshot.permission_requests.len(), 1, "{snapshot:?}");
     let request = &snapshot.permission_requests[0];
+    let scheduled_run = if matches!(
+        mode,
+        ResumeMode::Scheduled | ResumeMode::ScheduledScan | ResumeMode::ScheduledLoop
+    ) {
+        Some(scheduled::wait_for_permission(&db, &run_id, &request.request_id).await)
+    } else {
+        None
+    };
     // A later attachment is not part of the input awaiting this decision.
     let later_reference = ObjectRef {
         token: "later-unselected-file".into(),
@@ -485,6 +498,155 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
         assert_eq!(row.state, "pending");
     }
     let resume = || async {
+        if let Some(scheduled_run) = &scheduled_run {
+            if matches!(mode, ResumeMode::ScheduledScan | ResumeMode::ScheduledLoop) {
+                let executor = crate::schedule_executor::SignalScheduleExecutor::new(
+                    db.clone(),
+                    connections.clone(),
+                    std::sync::Arc::new(crate::device_assistant_gate::DeviceAssistantGate::new(
+                        desk_agent_protocol::device_assistant::DeviceAssistantSettings {
+                            enabled: true,
+                            revision: 1,
+                        },
+                    )),
+                );
+                if mode == ResumeMode::ScheduledLoop {
+                    let runner = actix_web::rt::spawn(executor.clone().run());
+                    let completed = tokio::time::timeout(Duration::from_secs(12), async {
+                        loop {
+                            let work = crate::entity::agent_schedule_run::Entity::find()
+                                .filter(
+                                    crate::entity::agent_schedule_run::Column::RunId
+                                        .eq(scheduled_run),
+                                )
+                                .one(&db)
+                                .await
+                                .unwrap()
+                                .unwrap();
+                            if work.failure_accounted {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                    })
+                    .await;
+                    runner.abort();
+                    let _ = runner.await;
+                    completed.unwrap();
+                } else {
+                    let (first, second) =
+                        tokio::join!(executor.scan_once(0), executor.scan_once(0));
+                    let (first, second) = (first.unwrap(), second.unwrap());
+                    assert_eq!(first.settled + second.settled, 1);
+                    assert_eq!(first.needs_reconciliation + second.needs_reconciliation, 0);
+                }
+                assert_eq!(executor.scan_once(0).await.unwrap().scanned, 0);
+                let work = crate::entity::agent_schedule_run::Entity::find()
+                    .filter(crate::entity::agent_schedule_run::Column::RunId.eq(scheduled_run))
+                    .one(&db)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(work.status, "succeeded");
+                assert_eq!(work.attempt, 1);
+                return;
+            }
+            let gate = crate::device_assistant_gate::DeviceAssistantGate::new(
+                desk_agent_protocol::device_assistant::DeviceAssistantSettings {
+                    enabled: true,
+                    revision: 1,
+                },
+            );
+            assert!(
+                claim_scheduled_permission(
+                    connections.as_ref(),
+                    &db,
+                    &crate::device_assistant_gate::DeviceAssistantGate::default(),
+                    scheduled_run,
+                    90
+                )
+                .await
+                .is_err()
+            );
+            let original_host = map.write().await.remove(&host).unwrap();
+            assert!(
+                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                    .await
+                    .is_err()
+            );
+            map.write()
+                .await
+                .insert(host.clone(), original_host.clone());
+            let duplicate = format!("{host}-duplicate");
+            map.write().await.insert(duplicate.clone(), original_host);
+            assert!(
+                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                    .await
+                    .is_err()
+            );
+            map.write().await.remove(&duplicate);
+            let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
+            let cached = cache.get_fresh(&host, Utc::now()).unwrap();
+            cache.remove_connection(&host);
+            assert!(
+                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                    .await
+                    .is_err()
+            );
+            cache.update(&host, cached.readiness, Utc::now()).unwrap();
+            let prepared =
+                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                    .await
+                    .unwrap();
+            assert!(
+                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                    .await
+                    .is_err()
+            );
+            let epoch = prepared.claimed.run.lease_epoch;
+            let token = prepared.claimed.session.lease_token;
+            if change == Some("scheduled_revoke") {
+                crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+                    .revoke(
+                        &grants[0].grant_id,
+                        "1",
+                        "device",
+                        Utc::now().timestamp_millis() as u64,
+                        "owner revoked",
+                    )
+                    .await
+                    .unwrap();
+            }
+            let outcome = resume_scheduled_turn(
+                connections.clone(),
+                db.clone(),
+                &gate,
+                prepared.target_connection_id,
+                prepared.claimed,
+                90,
+            )
+            .await
+            .unwrap();
+            let LoopOutcome::Answered(answer) = outcome else {
+                panic!("scheduled read must finish with an answer")
+            };
+            let settled = crate::schedule_store::ScheduleStore::new(db.clone())
+                .finish_answered_continuation(
+                    crate::schedule_store::ContinuationLease {
+                        owner: 1,
+                        run_id: scheduled_run,
+                        node_id: "oss-scheduler",
+                        run_epoch: epoch,
+                        session_token: token,
+                    },
+                    &answer,
+                )
+                .await
+                .unwrap();
+            assert_eq!(settled.status, "succeeded");
+            assert_eq!(settled.attempt, 1);
+            return;
+        }
         if mode == ResumeMode::Loop {
             let runner = actix_web::rt::spawn(executor.clone().run());
             let settled = tokio::time::timeout(Duration::from_secs(12), async {
@@ -581,6 +743,39 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                 .as_deref(),
             Some("object-read-unavailable")
         );
+        socket.send(awc::ws::Message::Close(None)).await.unwrap();
+        drop(socket);
+        map.write().await.clear();
+        handle.stop(true).await;
+        task.await.unwrap().unwrap();
+        db.close().await.unwrap();
+        return;
+    }
+    if change == Some("scheduled_revoke") {
+        tokio::time::timeout(Duration::from_secs(10), resume())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), socket.next())
+                .await
+                .is_err()
+        );
+        let bodies = tokio::time::timeout(Duration::from_secs(5), capture)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bodies.len(), 3);
+        assert!(
+            bodies
+                .iter()
+                .all(|body| !String::from_utf8_lossy(body).contains("synthetic-original-marker"))
+        );
+        let grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+            .list_for_subject(&run_id, "1", "device")
+            .await
+            .unwrap();
+        assert_eq!(grants[0].remaining_uses, 1);
+        assert!(grants[0].revoked_at_unix_ms.is_some());
         socket.send(awc::ws::Message::Close(None)).await.unwrap();
         drop(socket);
         map.write().await.clear();
@@ -868,8 +1063,23 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
             "object-read-complete"
         })
     );
-    let bridge = final_snapshot
-        .messages
+    assert!(
+        !final_snapshot
+            .messages
+            .iter()
+            .any(desk_diagnose_core::permission_resume::is_resume_control_message,)
+    );
+    let durable = crate::entity::agent_session::Entity::find()
+        .filter(crate::entity::agent_session::Column::ConversationId.eq(&run_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let durable =
+        desk_diagnose_core::session::PersistedAgentSession::decode_json(&durable.state_json)
+            .unwrap();
+    let bridge = durable
+        .conversation
         .iter()
         .find(|message| {
             desk_diagnose_core::permission_resume::is_permission_resume_message(message)

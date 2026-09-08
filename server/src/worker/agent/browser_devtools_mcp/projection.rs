@@ -100,6 +100,7 @@ pub(super) fn project_opened_page(
         )
     );
     let page = BrowserPageRef {
+        account_id: None,
         schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
         adapter: adapter.clone(),
         page_id,
@@ -181,6 +182,7 @@ pub(super) fn project_opened_page_from_inventory_delta(
         )
     );
     let page = BrowserPageRef {
+        account_id: None,
         schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
         adapter: adapter.clone(),
         page_id,

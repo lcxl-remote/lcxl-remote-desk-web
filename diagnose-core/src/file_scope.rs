@@ -167,6 +167,8 @@ pub struct FileScopeSubject {
 pub enum DirectoryConsentSource {
     ModelProposal,
     OwnerSelection,
+    /// Fresh directory reference admitted under this run's current task contract.
+    TaskContract,
 }
 
 /// Metadata returned by an authenticated device resolution, not model input.
@@ -409,6 +411,14 @@ impl PersistedAgentSession {
 
 fn valid_id(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+/// Shared bounds for Provider-resolved metadata; this does not approve a directory.
+pub(crate) fn validate_resolved_proposal(
+    proposal: &DirectoryProposal,
+    now: u64,
+) -> Result<(), FileScopeError> {
+    validate_proposal(proposal, now)
 }
 
 fn validate_proposal(proposal: &DirectoryProposal, now: u64) -> Result<(), FileScopeError> {

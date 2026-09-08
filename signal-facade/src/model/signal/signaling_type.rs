@@ -491,6 +491,13 @@ pub enum SignalingType {
     #[wincode(tag = 644)]
     DeviceAssistantSessionSelected = 644,
 
+    /// Cookie owner -> central scheduler; no live target connection is required.
+    #[wincode(tag = 645)]
+    ManageScheduledTasks = 645,
+    /// Central scheduler -> requesting owner, correlated by request_id.
+    #[wincode(tag = 646)]
+    ScheduledTasksManaged = 646,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,

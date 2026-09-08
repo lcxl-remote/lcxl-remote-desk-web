@@ -7,7 +7,101 @@ use desk_agent_protocol::computer_use::{
 use desk_diagnose_core::seam::{ExecOutcome, WaitOutcome};
 
 mod projections;
+mod rehearsal;
 mod retention;
+
+#[tokio::test]
+async fn rehearsal_observation_reads_original_success_and_rejects_tampering() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new(file_db(&dir.path().join("observation.db")).await).await;
+    f.bind().await;
+    let txn = f.store.db.begin().await.unwrap();
+    assert!(
+        SignalCapabilityGrantStore::observe_completed_provider_on(
+            &txn,
+            &f.plan.execution_generation,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    txn.rollback().await.unwrap();
+    observe(&f, &verified(&f.plan)).await.unwrap();
+    let before = work(&f).await;
+    let txn = f.store.db.begin().await.unwrap();
+    let observed = SignalCapabilityGrantStore::observe_completed_provider_on(
+        &txn,
+        &f.plan.execution_generation,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(observed.origin.tool_call_id, f.call.id);
+    assert_eq!(observed.authority.tool_name, f.call.name);
+    assert_eq!(observed.work_id, before.id);
+    assert!(observed.sent_message.is_none());
+    assert_eq!(
+        agent_action_item::Entity::find_by_id(before.id)
+            .one(&txn)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+
+    let mut altered: agent_action_item::ActiveModel = before.clone().into();
+    altered.manual_resolved_at = Set(Some(Utc::now()));
+    altered.update(&txn).await.unwrap();
+    assert!(
+        SignalCapabilityGrantStore::observe_completed_provider_on(
+            &txn,
+            &f.plan.execution_generation,
+        )
+        .await
+        .is_err()
+    );
+    let restored: agent_action_item::ActiveModel = before.clone().into();
+    restored.reset_all().update(&txn).await.unwrap();
+    let mut prepared: PreparedCapabilityPayload =
+        serde_json::from_str(&before.payload_json).unwrap();
+    prepared
+        .observed_authority
+        .resources
+        .push("unobserved-resource".into());
+    let mut altered: agent_action_item::ActiveModel = before.into();
+    altered.payload_json = Set(serde_json::to_string(&prepared).unwrap());
+    altered.update(&txn).await.unwrap();
+    assert!(
+        SignalCapabilityGrantStore::observe_completed_provider_on(
+            &txn,
+            &f.plan.execution_generation,
+        )
+        .await
+        .is_err()
+    );
+    txn.rollback().await.unwrap();
+    f.store
+        .revoke(
+            &observed.grant_id,
+            &f.session.actor_id,
+            &f.session.device_id,
+            Utc::now().timestamp_millis() as u64,
+            "No future calls",
+        )
+        .await
+        .unwrap();
+    let txn = f.store.db.begin().await.unwrap();
+    let retained = SignalCapabilityGrantStore::observe_completed_provider_on(
+        &txn,
+        &f.plan.execution_generation,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(retained.authority, observed.authority);
+    assert_eq!(retained.completed_at, observed.completed_at);
+    txn.rollback().await.unwrap();
+}
 
 pub(super) fn failed(plan: &SealedComputerActionPlan) -> ComputerActionCompleted {
     ComputerActionCompleted {

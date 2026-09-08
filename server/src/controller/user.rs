@@ -251,3 +251,6 @@ mod tests {
         assert_eq!(owner.status(), StatusCode::OK);
     }
 }
+
+#[cfg(test)]
+mod scheduled_history;

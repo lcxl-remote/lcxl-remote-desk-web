@@ -1,0 +1,1 @@
+{"type":"string","enum":["calendar","manual"],"x-readme-ref-name":"ScheduledRunSource"}

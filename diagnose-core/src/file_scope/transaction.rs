@@ -187,14 +187,15 @@ impl FileScopeUpdate {
                 if proposal.request_id != self.client_request_id {
                     return Err(FileScopeError::RequestConflict);
                 }
-                let source = if matches!(self.mutation, FileScopeMutation::Select { .. }) {
-                    DirectoryConsentSource::OwnerSelection
-                } else {
-                    DirectoryConsentSource::ModelProposal
+                let valid_source = match &self.mutation {
+                    FileScopeMutation::Select { .. } => matches!(
+                        proposal.source,
+                        DirectoryConsentSource::OwnerSelection
+                            | DirectoryConsentSource::TaskContract
+                    ),
+                    _ => proposal.source != DirectoryConsentSource::TaskContract,
                 };
-                if matches!(self.mutation, FileScopeMutation::Select { .. })
-                    && proposal.source != source
-                {
+                if !valid_source {
                     return Err(FileScopeError::InvalidProposal);
                 }
             }
@@ -243,6 +244,13 @@ pub fn prepare(
     now_unix_ms: u64,
 ) -> Result<(PersistedAgentSession, FileScopeReceipt), FileScopeError> {
     update.validate_session(session)?;
+    if matches!(&update.mutation, FileScopeMutation::Select { proposal }
+        if proposal.source == DirectoryConsentSource::TaskContract)
+        && (session.trigger_origin != crate::session::TriggerOrigin::ScheduledTask
+            || !session.turn_state.is_active())
+    {
+        return Err(FileScopeError::InvalidProposal);
+    }
     let mut next = session.clone();
     // The immutable ledger must have been checked by the caller first. A
     // surviving proposal with no receipt is corruption, not a fresh operation.

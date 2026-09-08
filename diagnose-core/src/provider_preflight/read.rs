@@ -345,3 +345,19 @@ impl ReadCallPreflight {
 
 #[cfg(test)]
 mod tests;
+
+/// Bind an observed result to the original tool and exact input without retaining content.
+pub fn output_digest(call: &crate::chat::ToolCall, output: &crate::seam::ToolRunOutput) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for value in [
+        &call.name,
+        &call.arguments_json,
+        &output.content,
+        output.image_data_url.as_deref().unwrap_or(""),
+    ] {
+        hash.update((value.len() as u64).to_le_bytes());
+        hash.update(value.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}

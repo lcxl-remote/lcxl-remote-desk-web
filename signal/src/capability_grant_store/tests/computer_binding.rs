@@ -3,6 +3,7 @@ mod background;
 mod cancellation;
 mod completion;
 mod recovery;
+mod scheduled_recovery;
 mod wire;
 use crate::capability_grant_store::computer_binding::{
     AcceptanceOutcome, ComputerAcceptance, ComputerBinding,
@@ -35,6 +36,40 @@ impl Fixture {
     }
 
     async fn new_for_actor(db: DatabaseConnection, actor: &str) -> Self {
+        Self::new_with_schedule(db, actor, false).await
+    }
+
+    async fn new_with_schedule(db: DatabaseConnection, actor: &str, scheduled: bool) -> Self {
+        Self::new_at_stage(db, actor, scheduled, false).await
+    }
+
+    async fn new_at_stage(
+        db: DatabaseConnection,
+        actor: &str,
+        scheduled: bool,
+        prepared_only: bool,
+    ) -> Self {
+        Self::new_before_binding(db, actor, scheduled, prepared_only, false).await
+    }
+
+    async fn new_before_binding(
+        db: DatabaseConnection,
+        actor: &str,
+        scheduled: bool,
+        prepared_only: bool,
+        intent_only: bool,
+    ) -> Self {
+        Self::new_with_call(db, actor, scheduled, prepared_only, intent_only, None).await
+    }
+
+    async fn new_with_call(
+        db: DatabaseConnection,
+        actor: &str,
+        scheduled: bool,
+        prepared_only: bool,
+        intent_only: bool,
+        custom_call: Option<ToolCall>,
+    ) -> Self {
         insert_session(&db, 1, 1).await;
         let mut row = agent_session::Entity::find()
             .one(&db)
@@ -61,11 +96,11 @@ impl Fixture {
                 "now",
             )
             .unwrap();
-        let call = ToolCall {
+        let call = custom_call.unwrap_or_else(|| ToolCall {
             id: "model-call-original".into(),
             name: "browser_open_page".into(),
             arguments_json: r#"{ "target": { "url": "https://example.test/approved", "origin": { "kind": "https", "host_ascii": "example.test", "port": 443 } } }"#.into(),
-        };
+        });
         let mut user = desk_diagnose_core::model_message_labels::model_bound_user_message(
             "input-1".into(),
             "private test input".into(),
@@ -102,6 +137,11 @@ impl Fixture {
         let active: agent_session::ActiveModel = row.into();
         active.reset_all().update(&db).await.unwrap();
 
+        if scheduled {
+            scheduled_recovery::integration::claim_original(&db, &mut session).await;
+        }
+        let turn_id = session.current_turn_id.clone().unwrap();
+
         let now = u64::try_from(Utc::now().timestamp_millis()).unwrap();
         let expires_at = (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
         let surface = ObjectRef {
@@ -110,7 +150,7 @@ impl Fixture {
             object_kind: ObjectKind::BrowserSurface,
             expires_at: expires_at.clone(),
         };
-        let call_id = stable_id("capability-call", &format!("run-1:turn-1:{}", call.id));
+        let call_id = stable_id("capability-call", &format!("run-1:{turn_id}:{}", call.id));
         let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
         let evaluated = BrowserCallPreflight::build(
             &registry,
@@ -151,7 +191,7 @@ impl Fixture {
         let request = || PrepareCapabilityCall {
             grant_id: "grant-1",
             call_id: &call_id,
-            turn_id: "turn-1",
+            turn_id: &turn_id,
             input_revision: 1,
             input_watermark: 1,
             generation: 1,
@@ -159,14 +199,20 @@ impl Fixture {
             call: authority.clone(),
         };
         let prepared = store.prepare(request()).await.unwrap();
-        let dispatch_id = match store.record_dispatch_intent(request()).await.unwrap() {
-            DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
-            other => panic!("unexpected intent: {other:?}"),
+        let dispatch_id = if prepared_only {
+            stable_id("capability-dispatch", &format!("{call_id}:1"))
+        } else {
+            match store.record_dispatch_intent(request()).await.unwrap() {
+                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+                other => panic!("unexpected intent: {other:?}"),
+            }
         };
-        assert!(matches!(
-            store.claim_dispatch(&dispatch_id, now).await.unwrap(),
-            DispatchClaimResult::Claimed(_)
-        ));
+        if !prepared_only && !intent_only {
+            assert!(matches!(
+                store.claim_dispatch(&dispatch_id, now).await.unwrap(),
+                DispatchClaimResult::Claimed(_)
+            ));
+        }
         let plan = SealedComputerActionPlan {
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: prepared.work_id.to_string(),

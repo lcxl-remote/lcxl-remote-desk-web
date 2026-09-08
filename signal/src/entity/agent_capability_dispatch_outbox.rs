@@ -24,6 +24,8 @@ pub struct Model {
     pub computer_acceptance_json: Option<String>,
     /// Promotion of this original execution; never a second executable task.
     pub computer_background_json: Option<String>,
+    /// Stop intent for the original execution before background promotion.
+    pub computer_cancel_json: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

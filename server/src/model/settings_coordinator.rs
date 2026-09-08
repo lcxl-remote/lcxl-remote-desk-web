@@ -788,6 +788,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn communication_policy_commit_waits_for_exact_worker_ack_and_persists() {
+        use crate::model::settings::ComputerUseCommunicationPolicyUpdate;
+        let dir = tempfile::tempdir().unwrap();
+        let (coordinator, mut receiver) = coordinator_with_worker(&dir.path().join("config")).await;
+        let manager = coordinator.worker_manager().unwrap();
+        let commit = coordinator.commit(|settings| {
+            settings.computer_use.update_communication_policy(
+                ComputerUseCommunicationPolicyUpdate {
+                    expected_revision: 0,
+                    enabled: true,
+                    browser_semantic: true,
+                    communication_handoff: true,
+                    communication_send: true,
+                },
+            )
+        });
+        let worker = async {
+            match receiver.recv().await.unwrap() {
+                ServiceToWorker::UpdateComputerUseLocalPolicy(payload) => {
+                    assert_eq!(payload.revision, 1);
+                    assert!(
+                        payload.enabled
+                            && payload.browser_semantic
+                            && payload.communication_handoff
+                            && payload.communication_send
+                    );
+                    manager.note_local_policy_applied(payload);
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+        };
+        let (result, ()) = tokio::join!(commit, worker);
+        result.unwrap();
+        let live = coordinator.settings.read().await;
+        assert_eq!(live.computer_use.revision, 1);
+        assert_eq!(
+            Settings::load_readonly(&live.args)
+                .unwrap()
+                .computer_use
+                .communication_policy(),
+            live.computer_use.communication_policy()
+        );
+    }
+
+    #[tokio::test]
     async fn application_policy_worker_failure_is_not_reported_as_success() {
         use crate::model::settings::ComputerUseApplicationPolicyUpdate;
         let dir = tempfile::tempdir().unwrap();

@@ -72,9 +72,20 @@ pub(super) fn validate_destination(
         .iter()
         .filter(|message| message.message_id == original.work.completion_event_id);
     if let Some(existing) = results.next() {
+        let recovered_image = session.trigger_origin
+            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+            && original.output.image_data_url.is_some()
+            && existing.image_data_url.is_none()
+            && existing.text
+                == desk_diagnose_core::image_input::recovered_result_text(
+                    &original.output.content,
+                    original.output.image_data_url.as_deref(),
+                )
+                .map_err(|_| invalid())?;
         if results.next().is_some()
-            || existing.text != original.output.content
-            || existing.image_data_url != original.output.image_data_url
+            || (!recovered_image
+                && (existing.text != original.output.content
+                    || existing.image_data_url != original.output.image_data_url))
             || existing.data_envelope.as_ref() != Some(&original.receipt.envelope)
             || existing.tool_call_id.as_deref() != Some(call)
             || !matches!(existing.role, ChatRole::Tool | ChatRole::UntrustedOutput)
@@ -162,6 +173,15 @@ impl SignalCapabilityGrantStore {
             }
             session.version = row.version;
             let already = validate_destination(&session, &original)?;
+            // The scheduler alone restores task receipts. A publisher can only
+            // acknowledge exact bytes already present, without a model follow-up.
+            if session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::ScheduledTask {
+                return Ok(if already && session.pending_auto_triggers.is_empty() {
+                    EventAppend::AlreadyPresent
+                } else {
+                    EventAppend::Busy
+                });
+            }
             if !session.unclosed_tool_call_ids().is_empty() {
                 return Ok(EventAppend::Busy);
             }

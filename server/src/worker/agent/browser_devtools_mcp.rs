@@ -1412,6 +1412,7 @@ mod tests {
 
     fn upload_action(file: ObjectRef, size_bytes: u64, digest_sha256: String) -> BrowserAction {
         let page = BrowserPageRef {
+            account_id: None,
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: live_adapter(),
             page_id: "7".into(),

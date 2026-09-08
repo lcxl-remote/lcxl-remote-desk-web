@@ -9,6 +9,7 @@ describe('buildNavItems', () => {
     it('offers desk, support, usage and settings on a portable server', () => {
         expect(urls({ access: 'admin', startupMode: startupModeEnum.default })).toEqual([
             '/desk/list',
+            '/schedules',
             '/support',
             '/usage',
             '/system',
@@ -18,6 +19,7 @@ describe('buildNavItems', () => {
     it('hides the host-only support entry on a pure signaling server', () => {
         expect(urls({ access: 'admin', startupMode: startupModeEnum.signaling })).toEqual([
             '/desk/list',
+            '/schedules',
             '/usage',
             '/system',
         ]);

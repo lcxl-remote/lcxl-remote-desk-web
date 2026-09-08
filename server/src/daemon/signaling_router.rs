@@ -338,6 +338,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // daemon-owned so a legacy/plain relay cannot forward them to a worker.
         SignalingType::AskDeviceAssistant
         | SignalingType::DeviceAssistantUpdated
+        | SignalingType::ManageScheduledTasks
+        | SignalingType::ScheduledTasksManaged
         | SignalingType::CancelDeviceAssistant
         | SignalingType::GetDeviceAssistantCapabilities
         | SignalingType::DeviceAssistantCapabilitiesUpdated
@@ -1316,6 +1318,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // Central-orchestrator-only Device Assistant frames are never executed
         // by the edge. Swallow a stray/legacy-relayed copy fail closed.
         SignalingType::AskDeviceAssistant
+        | SignalingType::ManageScheduledTasks
+        | SignalingType::ScheduledTasksManaged
         | SignalingType::DeviceAssistantUpdated
         | SignalingType::CancelDeviceAssistant
         | SignalingType::GetDeviceAssistantCapabilities

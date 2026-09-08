@@ -81,7 +81,11 @@ async fn record(
         || row.version < 1
         || !match (row.state.as_str(), row.turn_id.as_deref()) {
             ("pending" | "superseded", None) => true,
-            ("started" | "settled", Some(id)) => id == row.permission_id,
+            ("started" | "settled", Some(id)) => {
+                id == row.permission_id
+                    || (session.trigger_origin == TriggerOrigin::ScheduledTask
+                        && id == format!("{}-turn", session.conversation_id))
+            }
             _ => false,
         }
     {
@@ -135,6 +139,55 @@ fn current_decision(
 }
 
 impl SignalAgentSessionStore {
+    /// Read a scheduled decision and its grants coherently without recovering
+    /// or claiming either lease. The occurrence claim rechecks this snapshot.
+    pub(crate) async fn pending_scheduled_permission(
+        &self,
+        run_id: &str,
+        request_id: &str,
+        device_id: &str,
+    ) -> Result<
+        Option<(
+            PersistedAgentSession,
+            Vec<desk_agent_protocol::capability_grant::CapabilityGrant>,
+        )>,
+        AgentError,
+    > {
+        let txn = self.db.begin().await.map_err(storage)?;
+        let row = find(&txn, run_id)
+            .await
+            .map_err(storage)?
+            .ok_or_else(invalid)?;
+        let session = permission_receipt::session(
+            &row,
+            run_id,
+            &crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string(),
+            device_id,
+        )?;
+        if session.trigger_origin != TriggerOrigin::ScheduledContinuation
+            || session.turn_state.is_active()
+        {
+            return Ok(None);
+        }
+        let (receipt, decision) = record(&txn, &session, request_id).await?;
+        if receipt.state != "pending" || session.input_revision != decision.request_input_revision {
+            return Ok(None);
+        }
+        current_decision(&session, &decision)?;
+        desk_diagnose_core::assistant_policy::require_current_policy(session.policy_revision)?;
+        let grants =
+            crate::capability_grant_store::SignalCapabilityGrantStore::list_for_subject_on(
+                &txn,
+                run_id,
+                &session.actor_id,
+                device_id,
+            )
+            .await
+            .map_err(storage)?;
+        txn.commit().await.map_err(storage)?;
+        Ok(Some((session, grants)))
+    }
+
     pub fn with_permission_resume(
         mut self,
         request_id: String,
@@ -184,6 +237,13 @@ impl SignalAgentSessionStore {
             &candidate.actor_id,
             &candidate.device_id,
         )?;
+        // Only the scheduled executor may pair this session with its occurrence.
+        if matches!(
+            session.trigger_origin,
+            TriggerOrigin::ScheduledContinuation | TriggerOrigin::ScheduledTask
+        ) {
+            return Ok(None);
+        }
         let (original, _) = record(&self.db, &session, &candidate.request_id).await?;
         if original.id != candidate.id || original.permission_id != candidate.permission_id {
             return Err(invalid());
@@ -205,6 +265,13 @@ impl SignalAgentSessionStore {
             &candidate.actor_id,
             &candidate.device_id,
         )?;
+        // Only the scheduled executor may pair this session with its occurrence.
+        if matches!(
+            session.trigger_origin,
+            TriggerOrigin::ScheduledContinuation | TriggerOrigin::ScheduledTask
+        ) {
+            return Ok(None);
+        }
         let (resume, decision) = record(&txn, &session, &candidate.request_id).await?;
         if resume.state == "started" {
             if session.current_turn_id.as_deref() != resume.turn_id.as_deref()
@@ -269,6 +336,12 @@ impl SignalAgentSessionStore {
             &params.device_id,
         )
         .map_err(ClaimError::Backend)?;
+        if matches!(
+            session.trigger_origin,
+            TriggerOrigin::ScheduledContinuation | TriggerOrigin::ScheduledTask
+        ) {
+            return Err(ClaimError::Busy);
+        }
         let (resume, decision) = record(&txn, &session, request_id)
             .await
             .map_err(ClaimError::Backend)?;
@@ -362,4 +435,223 @@ impl SignalAgentSessionStore {
             .map_err(|e| ClaimError::Backend(storage(e)))?;
         Ok(session)
     }
+}
+
+/// Consume the original decision inside the scheduler's task/session/run transaction.
+/// This neither creates grants nor writes a session or occurrence lease.
+pub(crate) async fn consume_scheduled_decision_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request_id: &str,
+    expected_grants: &[desk_agent_protocol::capability_grant::CapabilityGrant],
+    now: DateTime<Utc>,
+) -> Result<(), AgentError> {
+    if !matches!(
+        session.trigger_origin,
+        TriggerOrigin::ScheduledContinuation | TriggerOrigin::ScheduledTask
+    ) || session.turn_state != TurnState::Idle
+    {
+        return Err(invalid());
+    }
+    let (resume, decision) = record(txn, session, request_id).await?;
+    if resume.state != "pending" || session.input_revision != decision.request_input_revision {
+        return Err(invalid());
+    }
+    current_decision(session, &decision)?;
+    let grants = crate::capability_grant_store::SignalCapabilityGrantStore::list_for_subject_on(
+        txn,
+        &session.conversation_id,
+        &session.actor_id,
+        &session.device_id,
+    )
+    .await
+    .map_err(storage)?;
+    if grants != expected_grants {
+        return Err(invalid());
+    }
+    desk_diagnose_core::assistant_policy::require_current_policy(session.policy_revision)?;
+    transition(txn, &resume, "started", true, now).await?;
+    if session.trigger_origin == TriggerOrigin::ScheduledTask {
+        let changed = resume::Entity::update_many()
+            .col_expr(
+                resume::Column::TurnId,
+                Expr::value(session.current_turn_id.clone()),
+            )
+            .filter(resume::Column::Id.eq(resume.id))
+            .filter(resume::Column::Version.eq(resume.version.checked_add(1).ok_or_else(invalid)?))
+            .filter(resume::Column::State.eq("started"))
+            .exec(txn)
+            .await
+            .map_err(storage)?;
+        if changed.rows_affected != 1 {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+/// Resolve an already consumed decision without changing authority.
+/// The caller holds the schedule/session/run fence and supplies the persisted session.
+pub(crate) async fn scheduled_decision_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+) -> Result<Option<String>, AgentError> {
+    if session.turn_state != TurnState::Running {
+        return Err(invalid());
+    }
+    Ok(scheduled_record_on(txn, session)
+        .await?
+        .map(|row| row.request_id))
+}
+
+/// Finish only the current consumed approval in the occurrence transaction.
+pub(crate) async fn settle_scheduled_decision_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    now: DateTime<Utc>,
+) -> Result<(), AgentError> {
+    if !matches!(session.turn_state, TurnState::Idle | TurnState::Failed) {
+        return Err(invalid());
+    }
+    if let Some(row) = scheduled_record_on(txn, session).await? {
+        transition(txn, &row, "settled", true, now).await?;
+    }
+    Ok(())
+}
+
+async fn scheduled_record_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+) -> Result<Option<resume::Model>, AgentError> {
+    if session.trigger_origin != TriggerOrigin::ScheduledContinuation {
+        return Err(invalid());
+    }
+    let run_id = session.current_request_id.as_deref().ok_or_else(invalid)?;
+    let current_turn = session.current_turn_id.as_deref().ok_or_else(invalid)?;
+    if current_turn == format!("{run_id}-turn") {
+        return Ok(None);
+    }
+    let rows = resume::Entity::find()
+        .filter(resume::Column::RunId.eq(&session.conversation_id))
+        .filter(resume::Column::ActorId.eq(&session.actor_id))
+        .filter(resume::Column::DeviceId.eq(&session.device_id))
+        .filter(resume::Column::TurnId.eq(current_turn))
+        .limit(2)
+        .all(txn)
+        .await
+        .map_err(storage)?;
+    if rows.len() != 1 {
+        return Err(invalid());
+    }
+    let (row, decision) = record(txn, session, &rows[0].request_id).await?;
+    if row.state != "started" || session.input_revision != decision.request_input_revision {
+        return Err(invalid());
+    }
+    current_decision(session, &decision)?;
+    Ok(Some(row))
+}
+
+/// Settle only the original decision consumed by the task's current segment.
+pub(crate) async fn settle_fresh_decision_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), AgentError> {
+    if session.trigger_origin != TriggerOrigin::ScheduledTask {
+        return Err(invalid());
+    }
+    let (row, decision) = record(txn, session, request_id).await?;
+    current_decision(session, &decision)?;
+    if row.state != "started" || row.turn_id != session.current_turn_id {
+        return Err(invalid());
+    }
+    let changed = resume::Entity::update_many()
+        .col_expr(resume::Column::State, Expr::value("settled"))
+        .col_expr(
+            resume::Column::Version,
+            Expr::value(row.version.checked_add(1).ok_or_else(invalid)?),
+        )
+        .col_expr(resume::Column::UpdatedAt, Expr::value(now))
+        .filter(resume::Column::Id.eq(row.id))
+        .filter(resume::Column::Version.eq(row.version))
+        .filter(resume::Column::State.eq("started"))
+        .exec(txn)
+        .await
+        .map_err(storage)?;
+    if changed.rows_affected != 1 {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Close an unconsumed owner decision without rewriting its immutable receipt.
+pub(crate) async fn close_fresh_wait_decision_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), AgentError> {
+    if session.trigger_origin != TriggerOrigin::ScheduledTask {
+        return Err(invalid());
+    }
+    if permission_receipt::decided_on(txn, session, request_id)
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let (row, decision) = record(txn, session, request_id).await?;
+    current_decision(session, &decision)?;
+    if row.state != "pending" {
+        return Err(invalid());
+    }
+    transition(txn, &row, "superseded", false, now).await
+}
+
+/// Recover a pause only from its original durable request/decision events.
+pub(crate) async fn verify_fresh_wait_request_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request_id: &str,
+) -> Result<(), AgentError> {
+    if session.trigger_origin != TriggerOrigin::ScheduledTask {
+        return Err(invalid());
+    }
+    let mut expected = permission_receipt::requested_on(txn, session, request_id)
+        .await?
+        .request;
+    if let Some(decision) = permission_receipt::decided_on(txn, session, request_id).await? {
+        let (row, original) = record(txn, session, request_id).await?;
+        if row.state != "pending" || original != decision {
+            return Err(invalid());
+        }
+        expected
+            .apply_user_decision(&decision.items)
+            .map_err(|_| invalid())?;
+    }
+    if !session.permission_requests.contains(&expected) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Authenticate the immutable proposal only; this never attests to a decision or grant.
+pub(crate) async fn verify_control_request_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request_id: &str,
+) -> Result<(), AgentError> {
+    let requested = permission_receipt::requested_on(txn, session, request_id).await?;
+    let mut current = session
+        .permission_requests
+        .iter()
+        .find(|request| request.request_id == request_id)
+        .cloned()
+        .ok_or_else(invalid)?;
+    current.state = desk_diagnose_core::dynamic_run::PermissionRequestState::Pending;
+    if current != requested.request {
+        return Err(invalid());
+    }
+    Ok(())
 }

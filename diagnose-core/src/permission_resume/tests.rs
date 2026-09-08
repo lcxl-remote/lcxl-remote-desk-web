@@ -191,7 +191,7 @@ fn authorized_bridge_keeps_original_lineage_sensitivity_and_deadline() {
 
 #[test]
 fn original_content_cannot_be_omitted_then_reminted_for_permission_resume() {
-    for mutation in 0..8 {
+    for mutation in 0..9 {
         let mut original = original();
         let mut policy = policy();
         match mutation {
@@ -222,7 +222,7 @@ fn original_content_cannot_be_omitted_then_reminted_for_permission_resume() {
                 .allowed_destinations
                 .clear(),
             6 => original.role = ChatRole::Assistant,
-            _ => {
+            7 => {
                 original = model_bound_permission_resume_message(
                     "old-bridge".into(),
                     destination(),
@@ -230,10 +230,84 @@ fn original_content_cannot_be_omitted_then_reminted_for_permission_resume() {
                 )
                 .unwrap()
             }
+            _ => {
+                original = authorized_scheduled_resume_message(
+                    "old-scheduled-bridge".into(),
+                    &policy,
+                    &original,
+                )
+                .unwrap();
+            }
         }
+        assert!(
+            authorized_scheduled_resume_message("scheduled-bridge".into(), &policy, &original)
+                .is_err(),
+            "scheduled mutation={mutation}"
+        );
         assert!(
             authorized_permission_resume_message("bridge".into(), &policy, &original).is_err(),
             "mutation={mutation}"
         );
+    }
+}
+
+#[test]
+fn scheduled_bridge_preserves_original_authority_without_claiming_approval() {
+    let original = original();
+    let bridge =
+        authorized_scheduled_resume_message("scheduled-1".into(), &policy(), &original).unwrap();
+    assert!(is_scheduled_resume_message(&bridge));
+    assert!(!is_permission_resume_message(&bridge));
+    assert!(bridge.text.contains("continuation time has arrived"));
+    assert!(bridge.text.contains("grants no new permission"));
+    assert!(bridge.text.contains(&original.text));
+    let source = original.data_envelope.as_ref().unwrap();
+    let envelope = bridge.data_envelope.as_ref().unwrap();
+    assert_eq!(envelope.sensitivity, source.sensitivity);
+    assert_eq!(
+        envelope.retention.expires_at_unix_ms,
+        source.retention.expires_at_unix_ms
+    );
+    assert!(envelope.retention.delete_with_run);
+    assert_eq!(envelope.allowed_destinations, source.allowed_destinations);
+    assert_eq!(
+        envelope.provenance.source_envelope_ids,
+        vec![source.envelope_id.clone()]
+    );
+    policy()
+        .authorize_request(crate::seam::ModelRequest::text_only(
+            vec![bridge.clone()],
+            crate::prompt::ResponseFormatSpec::None,
+        ))
+        .unwrap();
+    let messages = vec![original.clone(), bridge];
+    assert_eq!(latest_user_requirement(&messages), Some(&original));
+}
+
+#[test]
+fn scheduled_control_identity_requires_provenance_not_a_user_chosen_prefix() {
+    let user = ChatMessage::text("scheduled-resume-user", ChatRole::User, "real input");
+    assert!(!is_scheduled_resume_message(&user));
+    assert_eq!(
+        latest_user_requirement(std::slice::from_ref(&user)),
+        Some(&user)
+    );
+    for mutation in 0..3 {
+        let mut bridge =
+            authorized_scheduled_resume_message("scheduled-1".into(), &policy(), &original())
+                .unwrap();
+        match mutation {
+            0 => bridge.message_id = "different".into(),
+            1 => {
+                bridge
+                    .data_envelope
+                    .as_mut()
+                    .unwrap()
+                    .provenance
+                    .source_provider_id = "user".into()
+            }
+            _ => bridge.role = ChatRole::Assistant,
+        }
+        assert!(!is_scheduled_resume_message(&bridge));
     }
 }

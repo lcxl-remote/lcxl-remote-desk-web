@@ -4,6 +4,7 @@ use actix_web::web;
 
 mod durable;
 mod http;
+mod scheduled;
 
 async fn seed(db: DatabaseConnection) -> (SignalAgentSessionStore, Vec<PermissionDecisionItem>) {
     crate::db::initialize_schema(&db).await.unwrap();
@@ -88,6 +89,15 @@ async fn decide(
     decisions: &[PermissionDecisionItem],
     ready: bool,
 ) -> Result<PermissionDecisionOutcome, AgentError> {
+    decide_expected(store, decisions, ready, None).await
+}
+
+async fn decide_expected(
+    store: &SignalAgentSessionStore,
+    decisions: &[PermissionDecisionItem],
+    ready: bool,
+    expected: Option<&str>,
+) -> Result<PermissionDecisionOutcome, AgentError> {
     let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
     let inventory = [CapabilityAvailability {
         provider_id: "desktop.session".into(),
@@ -100,10 +110,12 @@ async fn decide(
         reason: None,
     }];
     store
-        .decide_permission_request(
-            "conversation-1",
-            "1",
-            "device-1",
+        .decide_permission_request_with_expected_request(
+            PermissionDecisionSubject {
+                conversation_id: "conversation-1",
+                actor_id: "1",
+                device_id: "device-1",
+            },
             "permission-1",
             decisions.to_vec(),
             PermissionGrantIssuanceContext {
@@ -115,6 +127,7 @@ async fn decide(
                 implicit_fresh_object_refs: &[],
             },
             &Utc::now().to_rfc3339(),
+            expected,
         )
         .await
 }
@@ -152,6 +165,45 @@ async fn state(
             .await
             .unwrap(),
     )
+}
+
+#[tokio::test]
+async fn decision_expected_request_rejects_stale_runs_without_writes() {
+    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let before = state(&store).await;
+    for expected in ["", "other-occurrence", &"x".repeat(257)] {
+        assert!(
+            decide_expected(&store, &decisions, true, Some(expected))
+                .await
+                .is_err()
+        );
+        assert_eq!(state(&store).await, before);
+    }
+    let expected = "request-permission-turn";
+    assert!(
+        decide_expected(&store, &decisions, true, Some(expected))
+            .await
+            .unwrap()
+            .newly_recorded
+    );
+    assert!(
+        !decide_expected(&store, &decisions, true, Some(expected))
+            .await
+            .unwrap()
+            .newly_recorded
+    );
+    SignalAgentRunEventStore::new(store.db.clone())
+        .append_user_followup(followup("input-2", "user-2", "do something else"))
+        .await
+        .unwrap();
+    store.claim_turn(claim("new-turn")).await.unwrap();
+    let before = state(&store).await;
+    assert!(
+        decide_expected(&store, &decisions, true, Some(expected))
+            .await
+            .is_err()
+    );
+    assert_eq!(state(&store).await, before);
 }
 
 #[tokio::test]

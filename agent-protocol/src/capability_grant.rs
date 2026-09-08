@@ -14,7 +14,7 @@ use crate::{
     data_lineage::DestinationIdentity,
 };
 
-pub const CAPABILITY_GRANT_SCHEMA_VERSION: u16 = 2;
+pub const CAPABILITY_GRANT_SCHEMA_VERSION: u16 = 3;
 pub const MAX_GRANT_SCOPE_VALUES: usize = 128;
 pub const MAX_GRANT_USES: u32 = 10_000;
 
@@ -41,12 +41,56 @@ pub enum CapabilityRiskTier {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityGrantIssuer {
     PolicyAuto,
     UserDecision,
+    TaskAuthorization(TaskGrantProvenance),
+}
+
+/// Immutable parent binding. Current authority must still be loaded and checked at dispatch.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct TaskGrantProvenance {
+    pub schedule_id: String,
+    pub scheduled_run_id: String,
+    pub task_revision: u64,
+    pub contract_revision: u64,
+    pub contract_sha256: String,
+    pub authorization_id: String,
+    pub authorization_revision: u64,
+    pub recovery_epoch: u64,
+}
+
+impl TaskGrantProvenance {
+    pub fn validate(&self) -> Result<(), CapabilityGrantError> {
+        for (field, value) in [
+            ("schedule_id", self.schedule_id.as_str()),
+            ("scheduled_run_id", self.scheduled_run_id.as_str()),
+            ("authorization_id", self.authorization_id.as_str()),
+        ] {
+            validate_id(field, value)?;
+            if value.trim() != value {
+                return Err(CapabilityGrantError::InvalidId(field));
+            }
+        }
+        if [
+            self.task_revision,
+            self.contract_revision,
+            self.authorization_revision,
+            self.recovery_epoch,
+        ]
+        .iter()
+        .any(|v| *v == 0 || *v > i64::MAX as u64)
+        {
+            return Err(CapabilityGrantError::InvalidLimitOrRevision);
+        }
+        validate_digest(&self.contract_sha256)
+    }
 }
 
 #[derive(
@@ -111,6 +155,9 @@ impl CapabilityGrant {
             return Err(CapabilityGrantError::UnsupportedSchemaVersion(
                 self.schema_version,
             ));
+        }
+        if let CapabilityGrantIssuer::TaskAuthorization(parent) = &self.issued_by {
+            parent.validate()?;
         }
         for (field, value) in [
             ("grant_id", self.grant_id.as_str()),
@@ -276,5 +323,66 @@ fn validate_digest(value: &str) -> Result<(), CapabilityGrantError> {
         Ok(())
     } else {
         Err(CapabilityGrantError::InvalidDigest)
+    }
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+
+    fn parent() -> TaskGrantProvenance {
+        TaskGrantProvenance {
+            schedule_id: "schedule-1".into(),
+            scheduled_run_id: "scheduled-run-1".into(),
+            task_revision: 1,
+            contract_revision: 2,
+            contract_sha256: "a".repeat(64),
+            authorization_id: "authorization-1".into(),
+            authorization_revision: 3,
+            recovery_epoch: 4,
+        }
+    }
+
+    #[test]
+    fn task_parent_requires_bounded_versions_and_canonical_ids() {
+        let valid = parent();
+        assert!(valid.validate().is_ok());
+        let mut bad = valid.clone();
+        bad.task_revision = 0;
+        assert!(bad.validate().is_err());
+        bad = valid.clone();
+        bad.recovery_epoch = u64::MAX;
+        assert!(bad.validate().is_err());
+        bad = valid.clone();
+        bad.authorization_id = " authorization-1".into();
+        assert!(bad.validate().is_err());
+        bad = valid.clone();
+        bad.contract_sha256 = "A".repeat(64);
+        assert!(bad.validate().is_err());
+        let mut value = serde_json::to_value(&valid).unwrap();
+        value["allow_all"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<TaskGrantProvenance>(value).is_err());
+    }
+
+    #[test]
+    fn grant_issuers_round_trip_with_distinct_authority_sources() {
+        let cfg = wincode::config::Configuration::default();
+        for issuer in [
+            CapabilityGrantIssuer::PolicyAuto,
+            CapabilityGrantIssuer::UserDecision,
+            CapabilityGrantIssuer::TaskAuthorization(parent()),
+        ] {
+            let bytes = wincode::config::serialize(&issuer, cfg).unwrap();
+            let decoded: CapabilityGrantIssuer = wincode::config::deserialize(&bytes, cfg).unwrap();
+            assert_eq!(decoded, issuer);
+        }
+        assert_eq!(
+            serde_json::to_string(&CapabilityGrantIssuer::PolicyAuto).unwrap(),
+            "\"policy_auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CapabilityGrantIssuer::UserDecision).unwrap(),
+            "\"user_decision\""
+        );
     }
 }

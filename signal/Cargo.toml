@@ -21,6 +21,7 @@ actix-ws = { workspace = true }
 utoipa = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 futures-util = { workspace = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
@@ -51,7 +52,6 @@ windows = { workspace = true }
 # Exercise the WebSocket frame codec directly so the signaling endpoint's
 # raised `max_frame_size` is regression-tested against the diagnose chunk size.
 actix-http = { workspace = true }
-tokio-util = { workspace = true }
 # Build a realistic VersionInfo query string for the signaling probe test.
 serde_urlencoded = { workspace = true }
 tempfile = { workspace = true }

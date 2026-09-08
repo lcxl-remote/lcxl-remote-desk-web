@@ -296,6 +296,7 @@ struct RawExtensionResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawExtensionPage {
+    account_id: Option<String>,
     page_id: String,
     page_incarnation: String,
     origin: BrowserOrigin,
@@ -346,6 +347,7 @@ pub(super) fn project_extension_result(
         .or(raw.page.clone())
         .ok_or(BrowserExtensionBridgeError::InvalidExtensionResult)?;
     let page = BrowserPageRef {
+        account_id: raw_page.account_id,
         schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
         adapter: adapter.clone(),
         page_id: raw_page.page_id,
@@ -829,6 +831,7 @@ fn same_page_identity(candidate: &BrowserPageRef, authoritative: &BrowserPageRef
         && candidate.origin == authoritative.origin
         && candidate.document_revision == authoritative.document_revision
         && candidate.url_sha256 == authoritative.url_sha256
+        && candidate.account_id == authoritative.account_id
         && candidate.observed_at_unix_ms == authoritative.observed_at_unix_ms
 }
 
@@ -1162,6 +1165,7 @@ mod tests {
 
     fn page() -> BrowserPageRef {
         BrowserPageRef {
+            account_id: None,
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
                 engine: BrowserEngineKind::ChromeExtension,
@@ -1322,6 +1326,7 @@ mod tests {
             result: Some(serde_json::json!({
                 "page": {
                     "page_id": "tab-7",
+                    "account_id": "gmail-web:owner@example.test",
                     "page_incarnation": "document-7",
                     "origin": {
                         "kind": "https",
@@ -1337,6 +1342,30 @@ mod tests {
         let result = task.await.unwrap().unwrap();
         assert_eq!(result.outcome, BrowserActionOutcome::PageOpened);
         assert_eq!(result.page.page_id, "tab-7");
+        assert_eq!(
+            result.page.account_id.as_deref(),
+            Some("gmail-web:owner@example.test")
+        );
+        for account in [
+            Some("gmail-web:owner@example.test"),
+            Some("gmail-web:other@example.test"),
+            None,
+        ] {
+            let mut page = result.page.clone();
+            page.account_id = account.map(str::to_owned);
+            let followup = BrowserActionRequest {
+                schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+                call_id: "observe-account".into(),
+                action: BrowserAction::TakeSnapshot {
+                    page,
+                    max_elements: 64,
+                },
+            };
+            assert_eq!(
+                broker.preflight(&surface, &followup).is_ok(),
+                account == Some("gmail-web:owner@example.test")
+            );
+        }
         assert_eq!(
             broker.readiness().unwrap().adapter.engine,
             BrowserEngineKind::ChromeExtension
@@ -1713,6 +1742,9 @@ mod tests {
         assert!(!same_page_identity(&candidate, &authoritative));
         candidate = authoritative.clone();
         candidate.observed_at_unix_ms += 1;
+        assert!(!same_page_identity(&candidate, &authoritative));
+        candidate = authoritative.clone();
+        candidate.account_id = Some("gmail-web:other@example.test".into());
         assert!(!same_page_identity(&candidate, &authoritative));
     }
 }

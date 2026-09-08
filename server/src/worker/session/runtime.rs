@@ -1819,6 +1819,12 @@ impl WorkerSession {
                                                 && !ceiling.communication_handoff_enabled()
                                             {
                                                 Err("browser communication handoff is disabled by the host-local ceiling".to_string())
+                                            } else if ComputerActionKind::Browser(request.clone())
+                                                .required_capability()
+                                                == desk_agent_protocol::Capability::BrowserExternalSendConfirmed
+                                                && !ceiling.communication_send_enabled()
+                                            {
+                                                Err("browser external sending is disabled by the host-local ceiling".to_string())
                                             } else {
                                                 computer_use_broker
                                                     .preflight_browser_action(
@@ -3209,10 +3215,19 @@ pub(super) fn spawn_inbound_reader(
                         let mut settings = settings.write().await;
                         if payload.revision > settings.computer_use.revision {
                             settings.computer_use.revision = payload.revision;
+                            settings.computer_use.enabled = payload.enabled;
+                            settings.computer_use.browser_semantic = payload.browser_semantic;
+                            settings.computer_use.communication_handoff =
+                                payload.communication_handoff;
+                            settings.computer_use.communication_send = payload.communication_send;
                             settings.computer_use.allowed_application_paths =
                                 payload.allowed_application_paths.clone();
                         }
                         payload.revision = settings.computer_use.revision;
+                        payload.enabled = settings.computer_use.enabled;
+                        payload.browser_semantic = settings.computer_use.browser_semantic;
+                        payload.communication_handoff = settings.computer_use.communication_handoff;
+                        payload.communication_send = settings.computer_use.communication_send;
                         payload.allowed_application_paths =
                             settings.computer_use.allowed_application_paths.clone();
                         let _ =

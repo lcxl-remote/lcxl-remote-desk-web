@@ -1,3 +1,4 @@
+pub mod schedule_management;
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -739,6 +740,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
         }
         let mut control = MessageControl::Continue;
         match signaling_model.signaling_type {
+            SignalingType::ScheduledTasksManaged => {
+                return DeskSignalFacadeError::custom_error(
+                    DeskErrorCode::PERMISSION_ERROR,
+                    "task management responses may only originate from the central server",
+                );
+            }
             SignalingType::SendHeartbeat => {
                 let (response, should_close) = match &self.credential_policy {
                     CredentialPolicy::Plain => (
@@ -1230,7 +1237,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::GetDeviceAssistantCapabilities
             | SignalingType::UpdateDeviceAssistantContext
             | SignalingType::UpdateDeviceAssistantObjectContext
-            | SignalingType::SelectDeviceAssistantSession => {
+            | SignalingType::SelectDeviceAssistantSession
+            | SignalingType::ManageScheduledTasks => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
                     match authorizer
                         .authorize(&self.connection_state, &self.connection_map, &signaling_model)
@@ -1245,6 +1253,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         ControlFrameOutcome::Handled => return Ok(MessageControl::Continue),
                     }
                 } else {
+                    if signaling_model.signaling_type == SignalingType::ManageScheduledTasks {
+                        return DeskSignalFacadeError::custom_error(
+                            DeskErrorCode::FEATURE_UNAVAILABLE,
+                            "central scheduler is unavailable",
+                        );
+                    }
                     signaling_model
                 };
                 self.forward_to_peer(&to_forward, false).await?;

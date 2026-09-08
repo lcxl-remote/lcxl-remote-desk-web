@@ -9,11 +9,11 @@ import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from
 import { getDeviceAssistantSession } from "../../clients.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
-export const getDeviceAssistantSessionQueryKey = (params: GetDeviceAssistantSessionQueryParams) => [{ url: '/api/my/device-assistant-session' }, ...(params ? [params] : [])] as const
+export const getDeviceAssistantSessionQueryKey = (params?: GetDeviceAssistantSessionQueryParams) => [{ url: '/api/my/device-assistant-session' }, ...(params ? [params] : [])] as const
 
 export type GetDeviceAssistantSessionQueryKey = ReturnType<typeof getDeviceAssistantSessionQueryKey>
 
-export function getDeviceAssistantSessionQueryOptions(params: GetDeviceAssistantSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function getDeviceAssistantSessionQueryOptions(params?: GetDeviceAssistantSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = getDeviceAssistantSessionQueryKey(params)
         return queryOptions<GetDeviceAssistantSessionQueryResponse, ResponseErrorConfig<Error>, GetDeviceAssistantSessionQueryResponse, typeof queryKey>({
@@ -30,7 +30,7 @@ export function getDeviceAssistantSessionQueryOptions(params: GetDeviceAssistant
  * @summary Read a Device Assistant conversation snapshot (browser view)
  * {@link /api/my/device-assistant-session}
  */
-export function useGetDeviceAssistantSession<TData = GetDeviceAssistantSessionQueryResponse, TQueryData = GetDeviceAssistantSessionQueryResponse, TQueryKey extends QueryKey = GetDeviceAssistantSessionQueryKey>(params: GetDeviceAssistantSessionQueryParams, options: 
+export function useGetDeviceAssistantSession<TData = GetDeviceAssistantSessionQueryResponse, TQueryData = GetDeviceAssistantSessionQueryResponse, TQueryKey extends QueryKey = GetDeviceAssistantSessionQueryKey>(params?: GetDeviceAssistantSessionQueryParams, options: 
 {
   query?: Partial<QueryObserverOptions<GetDeviceAssistantSessionQueryResponse, ResponseErrorConfig<Error>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }

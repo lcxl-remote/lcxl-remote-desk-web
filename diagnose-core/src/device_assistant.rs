@@ -1647,7 +1647,8 @@ fn browser_page_schema() -> serde_json::Value {
             "origin": browser_origin_schema(),
             "document_revision": {"type": "integer", "minimum": 1},
             "url_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "observed_at_unix_ms": {"type": "integer", "minimum": 1}
+            "observed_at_unix_ms": {"type": "integer", "minimum": 1},
+            "account_id": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 320}, {"type": "null"}]}
         },
         "required": ["schema_version", "adapter", "page_id", "page_incarnation", "origin", "document_revision", "url_sha256", "observed_at_unix_ms"],
         "additionalProperties": false
@@ -3342,7 +3343,7 @@ fn prompt(locale: Option<&str>) -> String {
     );
     text = text.replace(
         "Copy every owner-provided value verbatim; do not translate, summarize, append, add Cc/Bcc, or add attachments. The account destination is fixed server-side to the current browser profile. After approval the reviewed adapter fills and semantically reads back those same three fields, stops with HandedOffToUser/ManualOnly, and never activates Send.",
-        "Copy every owner-provided value verbatim; do not translate, summarize, append, or add Cc/Bcc. You may attach at most one exact typed immutable artifact returned by an earlier file-creation tool in this run, using a fresh Gmail file-input element; never invent or pass a native path. Keep attachment_labels empty when attachment is null, otherwise set it to exactly the artifact file_name. The account destination is fixed server-side to the current browser profile. After approval the reviewed adapter fills and semantically reads back those same three fields and the visible attachment name, then stops without activating Send. A Chrome-extension result can carry an ExactGrantEligible sealed snapshot; a development-only DevTools result remains ManualOnly. Neither result itself authorizes sending.",
+        "Copy every owner-provided value verbatim; do not translate, summarize, append, or add Cc/Bcc. You may attach at most one exact typed immutable artifact returned by an earlier file-creation tool in this run, using a fresh Gmail file-input element; never invent or pass a native path. Keep attachment_labels empty when attachment is null, otherwise set it to exactly the artifact file_name. The Gmail account is bound to the provider-owned page.account_id; copy it unchanged and never invent a missing account. After approval the reviewed adapter fills and semantically reads back those same three fields and the visible attachment name, then stops without activating Send. A Chrome-extension result can carry an ExactGrantEligible sealed snapshot; a development-only DevTools result remains ManualOnly. Neither result itself authorizes sending.",
     );
     text = text.replace(
         "After approval the reviewed site adapter fills and semantically reads back only that composer, stops with HandedOffToUser/ManualOnly, accepts no attachments, and never activates Send.",
@@ -3906,6 +3907,9 @@ mod tests {
 
     #[test]
     fn prompt_is_explicit_about_the_bounded_artifact_mutations() {
+        assert!(
+            prompt(None).contains("Gmail account is bound to the provider-owned page.account_id")
+        );
         let message = build_device_assistant_system_message(Some("zh-CN"));
         assert!(
             message

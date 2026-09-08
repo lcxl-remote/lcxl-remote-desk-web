@@ -87,6 +87,24 @@ async fn controller_replays_before_readiness_and_rejects_changed_target_without_
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(response["data"]["state"], "partially_approved");
     }
+    for (expected, success) in [
+        ("request-permission-turn", true),
+        ("other-occurrence", false),
+        ("", false),
+    ] {
+        let mut fenced = payload.clone();
+        fenced["expectedRunRequestId"] = serde_json::json!(expected);
+        let response: serde_json::Value = actix_web::test::call_and_read_body_json(
+            &app,
+            actix_web::test::TestRequest::post()
+                .uri("/decision")
+                .set_json(&fenced)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response["success"], success, "{response}");
+        assert_eq!(state(&store).await, saved);
+    }
     let mut changed = payload.clone();
     changed["items"][1]["ttl_seconds"] = serde_json::json!(60);
     let response: serde_json::Value = actix_web::test::call_and_read_body_json(

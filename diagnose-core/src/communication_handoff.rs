@@ -143,8 +143,10 @@ fn exact_send_snapshot(
         .map_err(|_| invalid())
 }
 
-/// Project a verified reviewed-site Browser completion into a manual-only
-/// communication handoff. `None` means the tool is not a Web handoff.
+/// Project a verified reviewed-site Browser completion into a draft handoff.
+/// Paired extensions may seal a snapshot eligible for separate send approval;
+/// DevTools remains manual-only. Neither preparation result proves sending.
+/// `None` means the tool is not a Web handoff.
 pub fn project_web_draft_handoff(
     tool_name: &str,
     run_id: &str,
@@ -186,6 +188,7 @@ pub fn project_web_draft_handoff(
             || result.page.page_id != gmail.page.page_id
             || result.page.page_incarnation != gmail.page.page_incarnation
             || result.page.origin != gmail.page.origin
+            || result.page.account_id != gmail.page.account_id
             || result.page.document_revision <= gmail.page.document_revision
             || !gmail_exact_form_readback(result, &gmail)
         {
@@ -216,7 +219,8 @@ pub fn project_web_draft_handoff(
             adapter_id: crate::device_assistant::GMAIL_WEB_ADAPTER_ID.into(),
             adapter_version: crate::device_assistant::GMAIL_WEB_ADAPTER_VERSION.into(),
             profile_id: result.page.adapter.profile_incarnation.clone(),
-            account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+            account_id: crate::communication::gmail_web_account_id(&result.page)
+                .map_err(|_| invalid())?,
             revision: result.page.adapter.connection_revision,
         };
         let exact_send_eligible = surface.kind == CommunicationSurfaceKind::ChromeExtension;
@@ -319,7 +323,8 @@ pub fn project_web_draft_handoff(
         adapter_id: crate::device_assistant::SLACK_WEB_ADAPTER_ID.into(),
         adapter_version: crate::device_assistant::SLACK_WEB_ADAPTER_VERSION.into(),
         profile_id: result.page.adapter.profile_incarnation.clone(),
-        account_id: crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+        account_id: crate::communication::slack_web_account_id(&result.page)
+            .map_err(|_| invalid())?,
         revision: result.page.adapter.connection_revision,
     };
     let exact_send_eligible = surface.kind == CommunicationSurfaceKind::ChromeExtension;
@@ -438,6 +443,129 @@ pub fn project_web_send_receipt(
     Ok(Some(receipt))
 }
 
+/// Historical content tied to an explicit Sent receipt. The caller must also
+/// verify the original dispatch, subject and grant before using this as evidence.
+/// It is not a reusable authorization or proof of current provider readiness.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SentWebMessageEvidence {
+    pub snapshot: SendPayloadSnapshot,
+    pub receipt: SendReceipt,
+    pub subject: String,
+    pub body_plain_text: String,
+}
+
+/// Verified preparation only. This evidence never asserts that a message was sent.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PreparedWebMessageEvidence {
+    pub snapshot: SendPayloadSnapshot,
+    pub subject: String,
+    pub body_plain_text: String,
+}
+
+pub fn project_prepared_web_message(
+    context: &SentWebMessageContext<'_>,
+    tool_name: &str,
+    canonical_input: &str,
+    completion: &ComputerActionCompleted,
+) -> Result<Option<PreparedWebMessageEvidence>, AgentError> {
+    let digest = format!("{:x}", Sha256::digest(canonical_input.as_bytes()));
+    let Some(handoff) = project_web_draft_handoff(
+        tool_name,
+        context.conversation_id,
+        canonical_input,
+        &digest,
+        completion,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(snapshot) = handoff.send_payload_snapshot else {
+        return Ok(None);
+    };
+    if context.provider_device_id.is_empty()
+        || snapshot.payload.surface.device_id != context.provider_device_id
+        || snapshot.run_id != context.conversation_id
+        || snapshot.sealed_at_unix_ms > context.received_at_unix_ms
+    {
+        return Err(invalid());
+    }
+    let (subject, body_plain_text) = match tool_name {
+        "prepare_gmail_web_draft_handoff" => {
+            let input: GmailWebDraftHandoffInput =
+                serde_json::from_str(canonical_input).map_err(|_| invalid())?;
+            (input.draft.subject, input.draft.body_plain_text)
+        }
+        "prepare_slack_web_message_handoff" => {
+            let input: SlackWebDraftHandoffInput =
+                serde_json::from_str(canonical_input).map_err(|_| invalid())?;
+            (String::new(), input.body_plain_text)
+        }
+        _ => return Err(invalid()),
+    };
+    Ok(Some(PreparedWebMessageEvidence {
+        snapshot,
+        subject,
+        body_plain_text,
+    }))
+}
+
+/// Identity and receipt time from the server's original durable dispatch record.
+/// The device is the provider audience, not a manager database primary key.
+pub struct SentWebMessageContext<'a> {
+    pub conversation_id: &'a str,
+    pub provider_device_id: &'a str,
+    pub received_at_unix_ms: u64,
+}
+
+pub fn project_sent_web_message(
+    context: &SentWebMessageContext<'_>,
+    tool_name: &str,
+    canonical_input: &str,
+    completion: &ComputerActionCompleted,
+) -> Result<Option<SentWebMessageEvidence>, AgentError> {
+    let Some(receipt) = project_web_send_receipt(tool_name, canonical_input, completion)? else {
+        return Ok(None);
+    };
+    if receipt.outcome != SendOutcome::Sent {
+        return Ok(None);
+    }
+    let (snapshot, subject, body_plain_text) = match tool_name {
+        "send_gmail_web_exact" => {
+            let input: GmailWebExactSendInput =
+                serde_json::from_str(canonical_input).map_err(|_| invalid())?;
+            (
+                input.handoff.send_payload_snapshot.ok_or_else(invalid)?,
+                input.draft.subject,
+                input.draft.body_plain_text,
+            )
+        }
+        "send_slack_web_exact" => {
+            let input: SlackWebExactSendInput =
+                serde_json::from_str(canonical_input).map_err(|_| invalid())?;
+            (
+                input.handoff.send_payload_snapshot.ok_or_else(invalid)?,
+                String::new(),
+                input.body_plain_text,
+            )
+        }
+        _ => return Err(invalid()),
+    };
+    if context.conversation_id.is_empty()
+        || context.provider_device_id.is_empty()
+        || snapshot.run_id != context.conversation_id
+        || snapshot.payload.surface.device_id != context.provider_device_id
+        || receipt.observed_at_unix_ms > context.received_at_unix_ms
+    {
+        return Err(invalid());
+    }
+    Ok(Some(SentWebMessageEvidence {
+        snapshot,
+        receipt,
+        subject,
+        body_plain_text,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,6 +630,72 @@ mod tests {
             output: Some(ComputerActionOutput::Browser(result)),
         };
         (input, completed)
+    }
+
+    #[test]
+    fn gmail_prepared_snapshot_keeps_observed_account_and_rejects_switch_during_fill() {
+        let send = crate::communication::test_support::gmail_exact_send_input();
+        let input = GmailWebDraftHandoffInput {
+            schema_version: COMMUNICATION_SCHEMA_VERSION,
+            page: send.page.clone(),
+            to_field: send.to_field,
+            subject_field: send.subject_field,
+            body_field: send.body_field,
+            attachment: None,
+            draft: send.draft,
+        };
+        let mut page = input.page.clone();
+        page.document_revision += 1;
+        let readback: Vec<_> = [
+            (&input.to_field, input.draft.recipients[0].address.as_str()),
+            (&input.subject_field, input.draft.subject.as_str()),
+            (&input.body_field, input.draft.body_plain_text.as_str()),
+        ]
+        .into_iter()
+        .map(|(field, value)| {
+            json!({
+                "request_element_id":field.element_id,
+                "request_role":field.role,
+                "request_accessible_name":field.accessible_name,
+                "source_element_id":field.element_id,
+                "container_element_id":"compose",
+                "kind":"control_value", "value":value
+            })
+        })
+        .collect();
+        let native: BrowserActionResult = serde_json::from_value(json!({
+            "schema_version":1, "call_id":"request", "outcome":"form_filled", "page":page,
+            "snapshot":{"schema_version":1,"page":page,"elements":[],"truncated":false,"captured_at_unix_ms":300},
+            "form_readback":readback, "send_receipt":null,"completed_at_unix_ms":300
+        })).unwrap();
+        let (_, mut completed) = fixture();
+        completed.output = Some(ComputerActionOutput::Browser(native));
+        let canonical = serde_json::to_string(&input).unwrap();
+        let project = |completed: &ComputerActionCompleted| {
+            project_web_draft_handoff(
+                "prepare_gmail_web_draft_handoff",
+                "run",
+                &canonical,
+                &"b".repeat(64),
+                completed,
+            )
+        };
+        let handoff = project(&completed).unwrap().unwrap();
+        assert_eq!(
+            handoff
+                .send_payload_snapshot
+                .unwrap()
+                .payload
+                .surface
+                .account_id,
+            "gmail-web:owner@example.test"
+        );
+        let Some(ComputerActionOutput::Browser(native)) = completed.output.as_mut() else {
+            panic!("browser output")
+        };
+        native.page.account_id = Some("gmail-web:other@example.test".into());
+        native.snapshot.as_mut().unwrap().page = native.page.clone();
+        assert!(project(&completed).is_err());
     }
 
     #[test]
@@ -601,90 +795,199 @@ mod tests {
             "Message #review"
         );
         snapshot.validate_shape().unwrap();
+        let context = SentWebMessageContext {
+            conversation_id: "run",
+            provider_device_id: "device",
+            received_at_unix_ms: 45,
+        };
+        let prepared = project_prepared_web_message(
+            &context,
+            "prepare_slack_web_message_handoff",
+            &input,
+            &completed,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(prepared.snapshot, snapshot);
+        assert_eq!(prepared.body_plain_text, "Draft only");
+        assert!(
+            project_sent_web_message(
+                &context,
+                "prepare_slack_web_message_handoff",
+                &input,
+                &completed
+            )
+            .unwrap()
+            .is_none()
+        );
+        for (device, received) in [("other-device", 45), ("device", 43)] {
+            assert!(
+                project_prepared_web_message(
+                    &SentWebMessageContext {
+                        conversation_id: "run",
+                        provider_device_id: device,
+                        received_at_unix_ms: received
+                    },
+                    "prepare_slack_web_message_handoff",
+                    &input,
+                    &completed
+                )
+                .is_err()
+            );
+        }
+        let mut changed = input_value;
+        changed["body_plain_text"] = json!("Changed body");
+        assert!(
+            project_prepared_web_message(
+                &context,
+                "prepare_slack_web_message_handoff",
+                &changed.to_string(),
+                &completed
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn exact_send_receipt_projection_binds_snapshot_and_three_outcomes() {
         use desk_agent_protocol::communication::SendReceiptEvidence;
 
-        let input = slack_exact_send_input();
-        let snapshot = input.handoff.send_payload_snapshot.as_ref().unwrap();
-        let idempotency_key = crate::communication::send_idempotency_key(snapshot).unwrap();
-        let canonical_input = serde_json::to_string(&input).unwrap();
-        for (outcome, result, changed, verified, evidence, provider_receipt_id) in [
+        let slack = slack_exact_send_input();
+        let gmail = crate::communication::test_support::gmail_exact_send_input();
+        for (tool, canonical_input, page, snapshot, subject, body) in [
             (
-                SendOutcome::Sent,
-                ComputerActionResultClass::Verified,
-                true,
-                true,
-                SendReceiptEvidence::ProviderUiAcknowledgement,
-                Some("provider-receipt".to_string()),
+                "send_slack_web_exact",
+                serde_json::to_string(&slack).unwrap(),
+                slack.page,
+                slack.handoff.send_payload_snapshot.unwrap(),
+                String::new(),
+                slack.body_plain_text,
             ),
             (
-                SendOutcome::DefinitelyNotSent,
-                ComputerActionResultClass::Verified,
-                false,
-                true,
-                SendReceiptEvidence::PreconditionRejectedBeforeActivation,
-                None,
-            ),
-            (
-                SendOutcome::OutcomeUnknown,
-                ComputerActionResultClass::OutcomeUnknown,
-                true,
-                false,
-                SendReceiptEvidence::ReceiptNotObservedAfterActivation,
-                None,
+                "send_gmail_web_exact",
+                serde_json::to_string(&gmail).unwrap(),
+                gmail.page,
+                gmail.handoff.send_payload_snapshot.unwrap(),
+                gmail.draft.subject,
+                gmail.draft.body_plain_text,
             ),
         ] {
-            let receipt = SendReceipt {
-                schema_version: COMMUNICATION_SCHEMA_VERSION,
-                snapshot_id: snapshot.snapshot_id.clone(),
-                snapshot_sha256: snapshot.canonical_payload_sha256.clone(),
-                idempotency_key: idempotency_key.clone(),
-                outcome,
-                provider_receipt_id,
-                evidence,
-                observed_at_unix_ms: 300,
-            };
-            let completed = ComputerActionCompleted {
-                work_id: "1".into(),
-                action_request_id: "request".into(),
-                execution_generation: "generation".into(),
-                result,
-                facts: vec![ComputerActionStepFact {
-                    index: 0,
-                    changed,
-                    verified,
-                    summary: "reviewed send result".into(),
-                }],
-                message: None,
-                output: Some(ComputerActionOutput::Browser(BrowserActionResult {
-                    schema_version: 1,
-                    call_id: "request".into(),
-                    outcome: BrowserActionOutcome::ExternalSend,
-                    page: input.page.clone(),
-                    snapshot: None,
-                    form_readback: Vec::new(),
-                    send_receipt: Some(receipt.clone()),
-                    completed_at_unix_ms: 300,
-                })),
-            };
-            assert_eq!(
-                project_web_send_receipt("send_slack_web_exact", &canonical_input, &completed,)
-                    .unwrap(),
-                Some(receipt.clone())
-            );
+            let idempotency_key = crate::communication::send_idempotency_key(&snapshot).unwrap();
+            for (outcome, result, changed, verified, evidence, provider_receipt_id) in [
+                (
+                    SendOutcome::Sent,
+                    ComputerActionResultClass::Verified,
+                    true,
+                    true,
+                    SendReceiptEvidence::ProviderUiAcknowledgement,
+                    Some("provider-receipt".to_string()),
+                ),
+                (
+                    SendOutcome::DefinitelyNotSent,
+                    ComputerActionResultClass::Verified,
+                    false,
+                    true,
+                    SendReceiptEvidence::PreconditionRejectedBeforeActivation,
+                    None,
+                ),
+                (
+                    SendOutcome::OutcomeUnknown,
+                    ComputerActionResultClass::OutcomeUnknown,
+                    true,
+                    false,
+                    SendReceiptEvidence::ReceiptNotObservedAfterActivation,
+                    None,
+                ),
+            ] {
+                let receipt = SendReceipt {
+                    schema_version: COMMUNICATION_SCHEMA_VERSION,
+                    snapshot_id: snapshot.snapshot_id.clone(),
+                    snapshot_sha256: snapshot.canonical_payload_sha256.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                    outcome,
+                    provider_receipt_id,
+                    evidence,
+                    observed_at_unix_ms: 300,
+                };
+                let completed = ComputerActionCompleted {
+                    work_id: "1".into(),
+                    action_request_id: "request".into(),
+                    execution_generation: "generation".into(),
+                    result,
+                    facts: vec![ComputerActionStepFact {
+                        index: 0,
+                        changed,
+                        verified,
+                        summary: "reviewed send result".into(),
+                    }],
+                    message: None,
+                    output: Some(ComputerActionOutput::Browser(BrowserActionResult {
+                        schema_version: 1,
+                        call_id: "request".into(),
+                        outcome: BrowserActionOutcome::ExternalSend,
+                        page: page.clone(),
+                        snapshot: None,
+                        form_readback: Vec::new(),
+                        send_receipt: Some(receipt.clone()),
+                        completed_at_unix_ms: 300,
+                    })),
+                };
+                assert_eq!(
+                    project_web_send_receipt(tool, &canonical_input, &completed,).unwrap(),
+                    Some(receipt.clone())
+                );
 
-            let mut mismatched = completed;
-            let Some(ComputerActionOutput::Browser(result)) = &mut mismatched.output else {
-                unreachable!()
-            };
-            result.send_receipt.as_mut().unwrap().snapshot_sha256 = "c".repeat(64);
-            assert!(
-                project_web_send_receipt("send_slack_web_exact", &canonical_input, &mismatched,)
-                    .is_err()
-            );
+                let context = SentWebMessageContext {
+                    conversation_id: &snapshot.run_id,
+                    provider_device_id: &snapshot.payload.surface.device_id,
+                    received_at_unix_ms: 300,
+                };
+                let sent =
+                    project_sent_web_message(&context, tool, &canonical_input, &completed).unwrap();
+                if outcome == SendOutcome::Sent {
+                    for bad in [
+                        SentWebMessageContext {
+                            conversation_id: "another-run",
+                            ..context
+                        },
+                        SentWebMessageContext {
+                            conversation_id: "",
+                            ..context
+                        },
+                        SentWebMessageContext {
+                            provider_device_id: "another-device",
+                            ..context
+                        },
+                        SentWebMessageContext {
+                            provider_device_id: "",
+                            ..context
+                        },
+                        SentWebMessageContext {
+                            received_at_unix_ms: 299,
+                            ..context
+                        },
+                    ] {
+                        assert!(
+                            project_sent_web_message(&bad, tool, &canonical_input, &completed)
+                                .is_err()
+                        );
+                    }
+                }
+                assert_eq!(sent.is_some(), outcome == SendOutcome::Sent);
+                if let Some(sent) = sent {
+                    assert_eq!(sent.snapshot, snapshot);
+                    assert_eq!(sent.receipt, receipt);
+                    assert_eq!(sent.body_plain_text, body);
+                    assert_eq!(sent.subject, subject);
+                }
+
+                let mut mismatched = completed;
+                let Some(ComputerActionOutput::Browser(result)) = &mut mismatched.output else {
+                    unreachable!()
+                };
+                result.send_receipt.as_mut().unwrap().snapshot_sha256 = "c".repeat(64);
+                assert!(project_web_send_receipt(tool, &canonical_input, &mismatched,).is_err());
+            }
         }
     }
 }

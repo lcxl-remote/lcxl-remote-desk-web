@@ -1,0 +1,1 @@
+{"type":"string","enum":["unicode_address","mixed_ascii_and_non_ascii","bidirectional_or_invisible_control"],"x-readme-ref-name":"RecipientDisplayWarning"}

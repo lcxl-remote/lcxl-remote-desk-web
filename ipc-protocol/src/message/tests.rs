@@ -19,6 +19,10 @@ use std::collections::BTreeMap;
 #[test]
 fn application_policy_publication_and_exact_ack_round_trip() {
     let policy = ComputerUseLocalPolicyPayload {
+        enabled: true,
+        browser_semantic: true,
+        communication_handoff: false,
+        communication_send: true,
         operation_id: "application-policy-1".into(),
         revision: 23,
         allowed_application_paths: vec!["/Applications/Test.app/Contents/MacOS/Test".into()],
