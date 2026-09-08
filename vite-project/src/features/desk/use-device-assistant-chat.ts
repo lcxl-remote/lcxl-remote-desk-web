@@ -40,6 +40,7 @@ export type DeviceAssistantMessage = {
     id: string;
     role: 'user' | 'assistant' | 'tool_result';
     text: string;
+    reasoning?: string | null;
     provenance?: AiProvenance | null;
 };
 
@@ -168,6 +169,7 @@ export type DeviceAssistantUnknownOutcome = {
 };
 
 type PersistedSnapshotMessage = {
+    reasoning?: string | null;
     id: string;
     role: string;
     text: string;
@@ -209,11 +211,12 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
     let tools: DeviceAssistantToolActivity[] = [];
     let draft: ComputerActionDraftPreview | null = null;
     for (const message of snapshot.messages) {
-        if ((message.role === 'user' || message.role === 'assistant') && message.text) {
+        if ((message.role === 'user' || message.role === 'assistant') && (message.text || (message.role === 'assistant' && message.reasoning))) {
             messages.push({
                 id: message.id,
                 role: message.role,
                 text: message.text,
+                reasoning: message.role === 'assistant' ? message.reasoning : undefined,
             });
         }
         for (const call of message.toolCalls ?? []) {

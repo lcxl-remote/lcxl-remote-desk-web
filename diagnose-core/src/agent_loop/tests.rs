@@ -5925,7 +5925,10 @@ async fn enforced_model_turn_block_reviews_once_and_persists_only_fixed_placehol
                     },
                 ],
                 stop_reason: StopReason::ToolUse,
-                provider_meta: tool_meta(),
+                provider_meta: ProviderResponseMeta {
+                    display_reasoning: Some("blocked thinking".into()),
+                    ..tool_meta()
+                },
                 ..Default::default()
             }]
             .into(),
@@ -5974,7 +5977,17 @@ async fn enforced_model_turn_block_reviews_once_and_persists_only_fixed_placehol
     assert!(tools.calls.borrow().is_empty());
     let reviews = safety.model_turn_requests.borrow();
     assert_eq!(reviews.len(), 1, "one complete ModelTurn gets one review");
-    assert_eq!(reviews[0].text, REJECTED_TEXT);
+    assert!(reviews[0].text.contains(REJECTED_TEXT));
+    assert!(reviews[0].text.contains("blocked thinking"));
+    assert!(
+        sess.inner
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .conversation
+            .iter()
+            .all(|message| message.reasoning.is_none())
+    );
     assert_eq!(reviews[0].tool_calls.len(), 2);
     assert_eq!(
         reviews[0].tool_calls[0].canonical_arguments_json,
@@ -7858,3 +7871,49 @@ async fn scheduled_permission_pause_saves_exact_request_without_executing_remain
 }
 
 mod background_concurrency;
+
+#[tokio::test]
+async fn reasoning_display_is_saved_for_tool_turns_and_final_answers() {
+    let sess = MemSession::default();
+    let mut first = tool_use_args("call", "sysinfo", "{}");
+    first.provider_meta.display_reasoning = Some("Inspect the device first.".into());
+    let mut final_turn = answer("all good");
+    final_turn.provider_meta.display_reasoning =
+        Some("The returned evidence is sufficient.".into());
+    let model = ScriptModel {
+        turns: RefCell::new([first, final_turn].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "ok".into(),
+    };
+    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let result = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("user", ChatRole::User, "check"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, LoopOutcome::Answered("all good".into()));
+    let session = sess.inner.borrow();
+    let reasoning = session
+        .as_ref()
+        .unwrap()
+        .conversation
+        .iter()
+        .filter_map(|message| message.reasoning.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reasoning,
+        [
+            "Inspect the device first.",
+            "The returned evidence is sufficient."
+        ]
+    );
+    assert!(!sink.0.borrow().contains("Inspect the device first."));
+}

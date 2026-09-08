@@ -1097,6 +1097,7 @@ export default {
   'pages.deviceAssistant.executionDisabled': 'Execution is not available',
   'pages.deviceAssistant.questionPlaceholder': 'Describe your question or the task you want help with…',
   'pages.deviceAssistant.readOnlyReminder': 'Semantic observations are sent to the configured model. Writes and external-draft handoffs run only under exact grants, and mail is never sent automatically.',
+  'pages.deviceAssistant.reasoning': 'Thinking',
   'pages.deviceAssistant.stop': 'Stop',
   'pages.deviceAssistant.stopping': 'Stopping…',
   'pages.deviceAssistant.send': 'Send',

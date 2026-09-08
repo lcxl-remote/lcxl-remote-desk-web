@@ -73,6 +73,7 @@ pub mod provider_preflight;
 pub mod provider_probe;
 pub mod provider_registry;
 pub mod read_tools;
+pub mod reasoning_display;
 pub mod redaction;
 pub mod registry;
 pub mod replay;

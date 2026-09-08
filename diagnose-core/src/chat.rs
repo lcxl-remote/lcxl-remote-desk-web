@@ -209,6 +209,9 @@ pub struct ChatMessage {
     pub turn_id: Option<String>,
     pub role: ChatRole,
     pub text: String,
+    /// Reviewed presentation text; dialects must not add it to model input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_data_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -242,6 +245,7 @@ impl ChatMessage {
             background_task_id: None,
             replay_disposition: None,
             data_envelope: None,
+            reasoning: None,
         }
     }
 
@@ -288,6 +292,7 @@ impl ChatMessage {
             background_task_id: None,
             replay_disposition: Some(replay_disposition),
             data_envelope: None,
+            reasoning: None,
         }
     }
 
@@ -325,6 +330,7 @@ impl ChatMessage {
             background_task_id: Some(background_task_id.into()),
             replay_disposition: None,
             data_envelope: None,
+            reasoning: None,
         }
     }
 
@@ -345,6 +351,7 @@ impl ChatMessage {
             background_task_id: None,
             replay_disposition: None,
             data_envelope: None,
+            reasoning: None,
         }
     }
 
@@ -369,6 +376,7 @@ impl ChatMessage {
             background_task_id: Some(background_task_id),
             replay_disposition: None,
             data_envelope: None,
+            reasoning: None,
         }
     }
 }

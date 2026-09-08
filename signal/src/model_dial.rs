@@ -1017,6 +1017,8 @@ impl OpenAiStreamState {
                 arguments_json: call.arguments,
             })
             .collect();
+        let display_reasoning =
+            desk_diagnose_core::reasoning_display::bounded(&self.reasoning_content);
         let replay = (!tool_calls.is_empty()).then(|| match self.source_context_key {
             Some(source_context_key) if self.reasoning_observed => ReplayDisposition::Present {
                 envelope: ProviderReplayEnvelope::new(
@@ -1038,6 +1040,7 @@ impl OpenAiStreamState {
             text: self.text,
             tool_calls,
             provider_meta: ProviderResponseMeta {
+                display_reasoning,
                 reasoning_observed: self.reasoning_observed,
                 reasoning_tokens,
                 stop_reason,
@@ -1367,6 +1370,8 @@ impl AnthropicStreamState {
             }
         }
         let replay_payload = Value::Array(content_blocks.into_values().collect());
+        let display_reasoning =
+            desk_diagnose_core::reasoning_display::anthropic_blocks(&replay_payload);
         let tool_calls: Vec<_> = self
             .tool_uses
             .into_values()
@@ -1399,6 +1404,7 @@ impl AnthropicStreamState {
             text: self.text,
             tool_calls,
             provider_meta: ProviderResponseMeta {
+                display_reasoning,
                 reasoning_observed: self.reasoning_observed,
                 reasoning_tokens: None,
                 stop_reason,
@@ -2286,6 +2292,36 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_display_survives_final_answer_without_replay() {
+        let mut openai = OpenAiStreamState::default();
+        openai.apply(r#"{"choices":[{"delta":{"reasoning_content":"visible thought","content":"answer"},"finish_reason":"stop"}]}"#);
+        let turn = openai.into_turn();
+        assert_eq!(
+            turn.provider_meta.display_reasoning.as_deref(),
+            Some("visible thought")
+        );
+        assert!(turn.provider_meta.replay.is_none());
+        assert_eq!(turn.text, "answer");
+        let mut anthropic = AnthropicStreamState::default();
+        for payload in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"visible"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signature"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"secret"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+        ] {
+            anthropic.apply(payload);
+        }
+        assert_eq!(
+            anthropic
+                .into_turn()
+                .provider_meta
+                .display_reasoning
+                .as_deref(),
+            Some("visible")
+        );
+    }
+
+    #[test]
     fn openai_reasoning_content_and_anthropic_blocks_are_retained_as_opaque_replay() {
         let openai_source = SourceContextKey::derive(
             WireProtocol::OpenAiChatCompletions,
@@ -2309,6 +2345,10 @@ mod tests {
         };
         assert_eq!(envelope.codec, ReplayCodec::OpenAiReasoningContent);
         assert_eq!(envelope.payload, json!("step two"));
+        assert_eq!(
+            turn.provider_meta.display_reasoning.as_deref(),
+            Some("step two")
+        );
 
         let anthropic_source = SourceContextKey::derive(
             WireProtocol::AnthropicMessages,

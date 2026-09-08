@@ -2268,6 +2268,11 @@ export type SnapshotMessageDto = {
     */
     id: string;
     /**
+     * @description Reviewed readable reasoning; no signatures or opaque provider replay.
+     * @type string,null
+    */
+    reasoning?: string | null;
+    /**
      * @description Wire role token. An `assistant` message is AI-generated.
      * @type string
     */

@@ -183,6 +183,10 @@ impl ReplayDisposition {
 /// Provider metadata normalized by stream scanners.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderResponseMeta {
+    /// Readable provider reasoning for reviewed owner presentation only.
+    /// This is never a substitute for opaque protocol replay material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_reasoning: Option<String>,
     #[serde(default)]
     pub reasoning_observed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,6 +204,7 @@ pub struct ProviderResponseMeta {
 impl Default for ProviderResponseMeta {
     fn default() -> Self {
         Self {
+            display_reasoning: None,
             reasoning_observed: false,
             reasoning_tokens: None,
             stop_reason: StopReason::Other,

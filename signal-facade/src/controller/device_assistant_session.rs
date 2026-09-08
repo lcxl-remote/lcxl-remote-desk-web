@@ -198,6 +198,9 @@ pub struct SnapshotMessageDto {
     /// Wire role token. An `assistant` message is AI-generated.
     pub role: String,
     pub text: String,
+    /// Reviewed readable reasoning; no signatures or opaque provider replay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<SnapshotToolCallDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -266,6 +269,7 @@ pub fn project_snapshot_message_page(
     let mut start = end;
     let mut count = 0usize;
     let mut bytes = 2usize;
+    let mut selected_groups = Vec::new();
     for (group_start, group_end) in groups
         .iter()
         .copied()
@@ -273,14 +277,33 @@ pub fn project_snapshot_message_page(
         .rev()
     {
         let group_count = group_end - group_start;
-        let group = visible[group_start..group_end]
+        let mut group = visible[group_start..group_end]
             .iter()
             .cloned()
             .map(SnapshotMessageDto::from)
             .collect::<Vec<_>>();
-        let group_bytes = serde_json::to_vec(&group)
+        // Presentation-only reasoning must not make an otherwise readable
+        // original answer/tool group exceed the existing page budget.
+        let mut group_bytes = serde_json::to_vec(&group)
             .map_err(|_| "message page projection failed")?
             .len();
+        for index in 0..group.len() {
+            while group_bytes + 2 > MAX_SNAPSHOT_MESSAGE_PAGE_BYTES {
+                let Some(reasoning) = group[index].reasoning.take() else {
+                    break;
+                };
+                let mut end = reasoning.len() / 2;
+                while !reasoning.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end > 4 {
+                    group[index].reasoning = Some(format!("{}…", &reasoning[..end]));
+                }
+                group_bytes = serde_json::to_vec(&group)
+                    .map_err(|_| "message page projection failed")?
+                    .len();
+            }
+        }
         if count + group_count > limit
             || bytes.saturating_add(group_bytes) > MAX_SNAPSHOT_MESSAGE_PAGE_BYTES
         {
@@ -292,15 +315,12 @@ pub fn project_snapshot_message_page(
         start = group_start;
         count += group_count;
         bytes = bytes.saturating_add(group_bytes);
+        selected_groups.push(group);
     }
     let has_more = start > 0;
     let next_before_message_id = has_more.then(|| visible[start].message_id.clone());
     Ok(SnapshotMessagePageProjection {
-        messages: visible[start..end]
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect(),
+        messages: selected_groups.into_iter().rev().flatten().collect(),
         page: SnapshotMessagePageDto {
             has_more,
             next_before_message_id,
@@ -315,6 +335,11 @@ impl From<ChatMessage> for SnapshotMessageDto {
             id: message.message_id,
             turn_id: message.turn_id,
             role: message.role.as_str().to_string(),
+            reasoning: if message.role == desk_diagnose_core::chat::ChatRole::Assistant {
+                message.reasoning
+            } else {
+                None
+            },
             text: message.text,
             tool_calls: message
                 .tool_calls
@@ -1573,5 +1598,53 @@ mod command_task_projection_tests {
         );
         assert!(matches!(task.state, BackgroundTaskStateDto::OutcomeUnknown));
         assert!(task.result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod reasoning_display_tests {
+    use super::*;
+    #[test]
+    fn reasoning_display_never_makes_an_existing_answer_unreadable() {
+        let original = "x".repeat(MAX_SNAPSHOT_MESSAGE_PAGE_BYTES - 1024);
+        let mut message = ChatMessage::text(
+            "answer",
+            desk_diagnose_core::chat::ChatRole::Assistant,
+            original.clone(),
+        );
+        message.reasoning = Some("思考".repeat(10_000));
+        let page = project_snapshot_message_page(vec![message], None, None).unwrap();
+        assert_eq!(page.messages[0].text, original);
+        assert!(
+            serde_json::to_vec(&page.messages).unwrap().len() <= MAX_SNAPSHOT_MESSAGE_PAGE_BYTES
+        );
+    }
+
+    #[test]
+    fn reasoning_display_projects_reviewed_text_and_never_opaque_replay() {
+        use desk_diagnose_core::chat::ChatRole;
+        use desk_diagnose_core::replay::{
+            ProviderReplayEnvelope, ReplayCodec, ReplayDisposition, SourceContextKey,
+        };
+        let mut message = ChatMessage::text("answer", ChatRole::Assistant, "answer");
+        message.reasoning = Some("reviewed text".into());
+        message.replay_disposition = Some(ReplayDisposition::Present {
+            envelope: ProviderReplayEnvelope::new(
+                ReplayCodec::AnthropicContentBlocks,
+                SourceContextKey::derive(
+                    desk_diagnose_core::model_profile::WireProtocol::AnthropicMessages,
+                    "connection",
+                    "model",
+                    "model",
+                ),
+                serde_json::json!([{"type":"redacted_thinking", "data":"opaque-secret"}]),
+            ),
+        });
+        let value = serde_json::to_value(SnapshotMessageDto::from(message)).unwrap();
+        assert_eq!(value["reasoning"], "reviewed text");
+        assert!(!value.to_string().contains("opaque-secret"));
+        let mut user = ChatMessage::text("user", ChatRole::User, "question");
+        user.reasoning = Some("not assistant content".into());
+        assert!(SnapshotMessageDto::from(user).reasoning.is_none());
     }
 }

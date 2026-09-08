@@ -702,7 +702,10 @@ async fn review_model_turn(
         ContentSafetyMode::Enforced { seam, context } => seam
             .check_model_turn(SafetyModelTurn {
                 surface: context.surface,
-                text: turn.text.clone(),
+                text: crate::reasoning_display::review_text(
+                    &turn.text,
+                    turn.provider_meta.display_reasoning.as_deref(),
+                ),
                 tool_calls: safety_tool_calls(deps, turn),
                 original_allowed_intent: context.original_allowed_intent.clone(),
             })
@@ -2210,6 +2213,11 @@ async fn run_inner(
                     ChatMessage::text(mint(), crate::chat::ChatRole::Assistant, turn.text.clone())
                         .with_turn_id(session.current_turn_id.clone().unwrap_or_default());
                 message.data_envelope = turn.provider_meta.data_envelope.clone();
+                message.reasoning = turn
+                    .provider_meta
+                    .display_reasoning
+                    .as_deref()
+                    .and_then(crate::reasoning_display::bounded);
                 session.conversation.push(message);
                 // The model reacted to this request; drop any pending auto-trigger
                 // whose completion it saw here so it does not also fire a turn.
@@ -2239,6 +2247,11 @@ async fn run_inner(
                 )
                 .with_turn_id(session.current_turn_id.clone().unwrap_or_default());
                 message.data_envelope = turn.provider_meta.data_envelope.clone();
+                message.reasoning = turn
+                    .provider_meta
+                    .display_reasoning
+                    .as_deref()
+                    .and_then(crate::reasoning_display::bounded);
                 session.conversation.push(message);
                 // The model reacted to this request (with tool calls); drop any
                 // pending auto-trigger whose completion it saw here. Persisted with

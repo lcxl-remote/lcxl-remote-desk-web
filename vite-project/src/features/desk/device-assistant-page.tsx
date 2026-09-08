@@ -1,3 +1,4 @@
+import { AssistantReasoning } from './assistant-reasoning';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
@@ -752,7 +753,7 @@ export function DeviceAssistantWorkspace({
                                 }`}
                             >
                                 {message.role === 'tool_result' ? <AssistantCommandResult text={message.text} /> : message.role === 'assistant'
-                                    ? <MarkdownContent disableLinks>{message.text}</MarkdownContent>
+                                    ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
                                     : <p className="whitespace-pre-wrap">{message.text}</p>}
                             </div>
                             <AssistantContextNotices notices={chat.contextNotices.filter(notice => noticeMessageId(notice, chat.messages) === message.id)} />

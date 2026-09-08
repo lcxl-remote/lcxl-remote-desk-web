@@ -1101,6 +1101,23 @@ describe('useDeviceAssistantChat', () => {
         expect(result.current.running).toBe(true);
     });
 
+    it('restores reasoning on tool-only assistant messages and final answers', async () => {
+        localStorage.setItem('device-assistant-conversation:reasoning', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 3, active: false, messages: [
+                { id: 'user', role: 'user', text: 'check', reasoning: 'ignore' },
+                { id: 'thinking', role: 'assistant', text: '', reasoning: 'Inspect first.' },
+                { id: 'answer', role: 'assistant', text: 'all good', reasoning: 'Evidence is sufficient.' },
+            ],
+        } }) }));
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'reasoning',
+            subscribe: () => () => undefined, sendMessage: () => 'unused' }));
+        await waitFor(() => expect(result.current.messages).toHaveLength(3));
+        expect(result.current.messages.map(message => message.reasoning)).toEqual([undefined, 'Inspect first.', 'Evidence is sufficient.']);
+        expect(result.current.messages[2].text).toBe('all good');
+        unmount();
+    });
+
     it('restores command tasks and cancels only the selected original generation', async () => {
         localStorage.setItem('device-assistant-conversation:task-list', 'saved-conversation');
         const tasks = [
