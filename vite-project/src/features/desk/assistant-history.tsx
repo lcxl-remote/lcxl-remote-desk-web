@@ -1,3 +1,4 @@
+import { formatLocalTime } from '@/lib/local-time';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -61,7 +62,7 @@ export function AssistantHistory({ deskId, disabled, onSelect }: {
                         onClick={() => { if (session.conversationId && onSelect(session.conversationId)) setOpen(false); }}
                         className="block w-full rounded-lg border p-3 text-left hover:bg-muted disabled:opacity-50">
                         <span className="block whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{session.firstQuestion || t('pages.deviceAssistant.history.untitled')}</span>
-                        <span className="mt-1 block text-xs text-muted-foreground">{session.updatedAt}</span>
+                        <span className="mt-1 block text-xs text-muted-foreground">{formatLocalTime(session.updatedAt)}</span>
                         {!session.conversationId && <span className="block text-xs">{t('pages.deviceAssistant.history.unavailable')}</span>}
                     </button>)}
                 </div>

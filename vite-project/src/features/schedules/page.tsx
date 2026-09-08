@@ -326,10 +326,13 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
         </fieldset>}
         {timeForm && previewMatches && timePreview && <section className="rounded-md border p-3 space-y-2">
             <p>{t('schedules.timePreview.note')}</p>
-            {timePreview.spec.rule.kind === 'interval' ? <p>{formatTime(timePreview.spec.rule.anchor_at, 'UTC', i18n.language)} · {t('schedules.seconds')}: {timePreview.spec.rule.every_seconds}</p> :
-                ruleTimes(timePreview.spec, 'UTC', i18n.language).map(value => <p key={value}>UTC · {value}</p>)}
             <p>{t('schedules.timePreview.upcoming')}</p>
             {timePreview.upcoming.map(at => <p key={at}>{formatTime(at, zone, i18n.language)}</p>)}
+            <details>
+                <summary className="cursor-pointer">{t('schedules.timePreview.utcDetails')}</summary>
+                {timePreview.spec.rule.kind === 'interval' ? <p>{formatTime(timePreview.spec.rule.anchor_at, 'UTC', i18n.language)} · {t('schedules.seconds')}: {timePreview.spec.rule.every_seconds}</p> :
+                    ruleTimes(timePreview.spec, 'UTC', i18n.language).map(value => <p key={value}>UTC · {value}</p>)}
+            </details>
             <p>{t('schedules.utcNote')}</p>
         </section>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}

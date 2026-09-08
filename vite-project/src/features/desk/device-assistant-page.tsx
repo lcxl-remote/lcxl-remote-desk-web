@@ -1,3 +1,4 @@
+import { formatLocalTime } from '@/lib/local-time';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 import { AssistantContextMeter } from './assistant-context-meter';
@@ -846,7 +847,7 @@ export function DeviceAssistantWorkspace({
                                     </div>
                                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                                         <span>{t('pages.deviceAssistant.backgroundProgress', { sequence: task.progressSequence })}</span>
-                                        <span>{t('pages.deviceAssistant.backgroundUpdated', { time: task.updatedAt })}</span>
+                                        <span>{t('pages.deviceAssistant.backgroundUpdated', { time: formatLocalTime(task.updatedAt) })}</span>
                                     </div>
                                 </div>
                             ))}

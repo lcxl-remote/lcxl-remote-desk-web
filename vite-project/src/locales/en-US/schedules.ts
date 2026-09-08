@@ -1,10 +1,11 @@
 export default {
-    "schedules.timePreview.upcoming": "Upcoming times from the UTC rule",
+    "schedules.timePreview.utcDetails": "UTC storage details",
+    "schedules.timePreview.upcoming": "Upcoming times in the selected time zone",
     "schedules.timePreview.projection": "Preview only. Paused tasks do not execute until explicitly resumed.",
 
     "schedules.timePreview.show": "Preview time",
     "schedules.timePreview.confirm": "Confirm time and save",
-    "schedules.timePreview.note": "Review the fixed UTC rule before saving.",
+    "schedules.timePreview.note": "Review execution times in the selected time zone before saving.",
     "schedules.timePreview.changed": "The conversion changed. Review the updated preview and confirm again.",
 
     "schedules.diff.title": "Changes from the previous contract",

@@ -1,10 +1,11 @@
 export default {
-    "schedules.timePreview.upcoming": "UTC 规则对应的未来时点",
+    "schedules.timePreview.utcDetails": "UTC 存储详情",
+    "schedules.timePreview.upcoming": "未来执行时间（所选时区）",
     "schedules.timePreview.projection": "仅为规则预览。暂停任务需明确恢复后才会执行。",
 
     "schedules.timePreview.show": "预览时间",
     "schedules.timePreview.confirm": "确认时间并保存",
-    "schedules.timePreview.note": "保存前请核对固定 UTC 时间规则。",
+    "schedules.timePreview.note": "保存前请核对所选时区的执行时间。",
     "schedules.timePreview.changed": "时间转换已变化，请核对更新后的预览并再次确认。",
 
     "schedules.diff.title": "相较上一版契约的变化",
