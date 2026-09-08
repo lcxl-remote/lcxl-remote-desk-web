@@ -366,3 +366,79 @@ fn file_terminal_and_iwork_batch_authority_uses_only_original_attachment_refs() 
         );
     }
 }
+
+#[test]
+fn unselected_desktop_preflight_requires_explicit_r1_authority_on_both_surfaces() {
+    let registry = device_assistant_provider_registry();
+    let destination = destination();
+    let original = ReadContextSelection {
+        tool_names: vec![],
+        expires_at: None,
+        object_attachments: vec![],
+        live_targets: vec![],
+    };
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        for name in [
+            "inspect_desktop_session",
+            "inspect_desktop_ui",
+            "read_current_screen",
+        ] {
+            let call = ToolCall {
+                id: "read".into(),
+                name: name.into(),
+                arguments_json: "{}".into(),
+            };
+            let preflight = ReadCallPreflight::build(
+                &registry,
+                surface,
+                &call,
+                &ObjectReadBinding {
+                    original: &original,
+                    destination: &destination,
+                    now_unix_ms: 1000,
+                },
+            )
+            .unwrap();
+            let subject = ProviderCallSubject {
+                actor_id: "owner",
+                run_id: "run",
+                input_revision: 1,
+                target_device_id: "device",
+                policy_revision: 1,
+                readiness_revision: 1,
+                now_unix_ms: 1000,
+            };
+            assert_eq!(
+                preflight.grant_call(&subject).unwrap().risk_tier,
+                CapabilityRiskTier::R1
+            );
+        }
+        for name in [
+            "inspect_office_selection",
+            "inspect_selected_file_metadata",
+            "inspect_selected_terminal_output",
+        ] {
+            let call = ToolCall {
+                id: "read".into(),
+                name: name.into(),
+                arguments_json: "{}".into(),
+            };
+            assert!(
+                ReadCallPreflight::build(
+                    &registry,
+                    surface,
+                    &call,
+                    &ObjectReadBinding {
+                        original: &original,
+                        destination: &destination,
+                        now_unix_ms: 1000
+                    }
+                )
+                .is_err()
+            );
+        }
+    }
+}

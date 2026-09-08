@@ -3,6 +3,7 @@ import { act, renderHook } from '@testing-library/react';
 
 import {
     ownerSelectableWindows,
+    selectableApplications,
     useDeviceAssistantObservation,
     type ObservationEntry,
 } from './use-device-assistant-observation';
@@ -99,5 +100,37 @@ describe('ownerSelectableWindows', () => {
             },
             title: 'Calculator',
         }]);
+    });
+});
+
+
+describe('background application selection', () => {
+    it('fetches a fresh session then sends the selected opaque application root', () => {
+        let subscriber: SignalingSubscriber = () => {};
+        const subscribe = (handler: SignalingSubscriber) => { subscriber = handler; return () => {}; };
+        let seq = 0;
+        const sendMessage = vi.fn((_type: number, _data: unknown, _target?: string, _requestId?: string) => `request-${++seq}`);
+        const { result, unmount } = renderHook(() => useDeviceAssistantObservation({ deskId: 'mac', subscribe, sendMessage }));
+        const root = { token: 'session', snapshot_id: 'snapshot', object_kind: 'desktop_session', expires_at: new Date(Date.now() + 60_000).toISOString() };
+        const app = { ...root, token: 'calculator', object_kind: 'application' as const };
+        act(() => result.current.listApplications());
+        act(() => subscriber({ signaling_type: SIGNALING_TYPE_CODE_AGENT_CAPABILITY_COMPLETED, request_id: 'request-1',
+            signaling_data: { Ok: { ReadContext: { DesktopSessionInspect: { session: root, os: 'macos' } } } },
+        } as Parameters<SignalingSubscriber>[0]));
+        expect(sendMessage.mock.calls[1][1]).toMatchObject({ operation: { input: { params: { kind: { params: { root } } } } } });
+        const output = { ReadContext: { DesktopUiInspect: { nodes: [{ role: 'application', name: 'Calculator', object_ref: app }] } } };
+        act(() => subscriber({ signaling_type: SIGNALING_TYPE_CODE_AGENT_CAPABILITY_COMPLETED, request_id: 'request-2', signaling_data: { Ok: output } } as Parameters<SignalingSubscriber>[0]));
+        expect(result.current.applications[0].name).toBe('Calculator');
+        act(() => result.current.inspectUi(result.current.applications[0].objectRef));
+        expect(sendMessage.mock.calls[2][1]).toMatchObject({ operation: { input: { params: { kind: { params: { root: app } } } } } });
+        unmount();
+    });
+    it('does not accept incomplete application references or inspect an expired one', () => {
+        expect(selectableApplications({ phase: 'ready', requestId: 'x', outcome: { status: 'ok', data: { ReadContext: { DesktopUiInspect: { nodes: [{ role: 'application', object_ref: { object_kind: 'application' } }] } } } } })).toEqual([]);
+        const sendMessage = vi.fn();
+        const { result, unmount } = renderHook(() => useDeviceAssistantObservation({ deskId: 'mac', subscribe: () => () => {}, sendMessage }));
+        act(() => result.current.inspectUi({ token: 'expired', snapshot_id: 'old', object_kind: 'application', expires_at: '2000-01-01T00:00:00Z' }));
+        expect(sendMessage).not.toHaveBeenCalled();
+        unmount();
     });
 });

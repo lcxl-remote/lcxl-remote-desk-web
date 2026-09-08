@@ -1,12 +1,37 @@
 use super::*;
 use desk_diagnose_core::provider_preflight::ObservedCapabilityAuthority;
 
-#[tokio::test]
+#[test]
+fn capability_preparation_fits_production_thread_stack() {
+    std::thread::Builder::new()
+        .name("capability-preparation-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            actix_web::rt::System::new().block_on(Box::pin(
+                observed_scope_stays_exact_through_prepare_intent_completion_and_reopen(),
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 async fn observed_scope_stays_exact_through_prepare_intent_completion_and_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("observed-authority.db");
     let db = file_db(&path).await;
     insert_session(&db, 1, 1).await;
+    // Reproduce the persisted transcript size seen in the desktop-action crash.
+    let row = agent_session::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+    session.append_event_if_absent("large-evidence", &"x".repeat(320 * 1024), "t1");
+    let mut active: agent_session::ActiveModel = row.into();
+    active.state_json = Set(session.encode_json_for_storage().unwrap());
+    active.update(&db).await.unwrap();
     let store = SignalCapabilityGrantStore::new(db.clone());
     let mut broad = grant(2);
     broad.resource_scope.push("root:unused".into());

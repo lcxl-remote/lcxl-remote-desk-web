@@ -11,7 +11,18 @@ use sea_orm::{ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter,
 /// A scheduled continuation acquires the SQLite write lock by touching its task.
 /// Validation and the caller's action/outbox mutation share that transaction;
 /// an intervening writer cannot turn a stale read snapshot into a valid dispatch.
-pub(crate) async fn lock_action_session(
+// Keep child execution state on the heap instead of embedding it in each caller.
+#[inline(never)]
+pub(crate) fn lock_action_session<'a>(
+    txn: &'a DatabaseTransaction,
+    conversation_id: &'a str,
+) -> std::pin::Pin<
+    Box<impl std::future::Future<Output = Result<Option<agent_session::Model>, DbErr>> + 'a>,
+> {
+    Box::pin(lock_action_session_inner(txn, conversation_id))
+}
+
+async fn lock_action_session_inner(
     txn: &DatabaseTransaction,
     conversation_id: &str,
 ) -> Result<Option<agent_session::Model>, DbErr> {

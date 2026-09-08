@@ -245,9 +245,7 @@ pub fn build_permission_grants(
         let sensitive_content = capability.wire.data_policy.reads.iter().any(|category| {
             !matches!(
                 category,
-                CapabilityDataCategory::UserRequest
-                    | CapabilityDataCategory::DesktopSessionMetadata
-                    | CapabilityDataCategory::FileMetadata
+                CapabilityDataCategory::UserRequest | CapabilityDataCategory::FileMetadata
             )
         });
         let exact_external_query = capability.wire.authorization_hint.resources

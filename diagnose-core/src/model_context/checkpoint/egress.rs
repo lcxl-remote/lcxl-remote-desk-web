@@ -37,6 +37,37 @@ pub fn reconcile_context_eligibility(
     let entry = state.entries.iter().find(|entry| entry.policy_key == key);
     let floor = resolve_floor(conversation, &groups, entry)?;
     let retained = egress.retained_history_ids(conversation);
+    // A restriction-only floor is not a capacity checkpoint. Reconsider it when
+    // every original group is authorized again; normal planning below still
+    // enforces the byte budget and performs compression when required.
+    if floor > 0
+        && policy.strategy == ContextManagementStrategy::CheckpointSummary
+        && entry.is_some_and(|entry| entry.checkpoint.is_none())
+        && groups.iter().all(|group| group.replay_safe)
+        && conversation
+            .iter()
+            .all(|message| retained.contains(&message.message_id))
+    {
+        let mut next_state = state.clone();
+        let next = next_state
+            .entries
+            .iter_mut()
+            .find(|entry| entry.policy_key == key)
+            .unwrap();
+        next.floor_group_head_message_id = None;
+        next.floor_after_group_head_message_id = None;
+        next.last_used_session_version = version;
+        return Ok(Some(FloorReconciliationPlan {
+            notice_kind: ContextNoticeKind::Refreshed,
+            base_state: state.clone(),
+            next_state,
+            history_sha256: history_sha256(conversation)?,
+            discarded_through_message_id: conversation[groups[floor - 1].end - 1]
+                .message_id
+                .clone(),
+        }));
+    }
+
     let current_turn = conversation
         .iter()
         .rev()
@@ -476,22 +507,11 @@ fn authorize_sources(
             let message = messages
                 .get(source.message_id.as_str())
                 .ok_or_else(lineage_error)?;
-            if message.role == ChatRole::Tool
-                && message.data_envelope.as_ref().is_some_and(|envelope| {
-                    envelope.provenance.source_provider_id
-                        != crate::dynamic_run::RUN_CONTROL_PROVIDER_ID
-                        && !policy
-                            .selected_source_tools
-                            .contains(&envelope.provenance.source_tool_name)
-                })
-            {
-                return Err(lineage_error());
-            }
             let authorized = policy
-                .authorize_request(ModelRequest::text_only(
-                    vec![(*message).clone()],
-                    ResponseFormatSpec::None,
-                ))
+                .authorize_request_with_history(
+                    ModelRequest::text_only(vec![(*message).clone()], ResponseFormatSpec::None),
+                    conversation,
+                )
                 .map_err(|_| lineage_error())?;
             if authorized.request.messages.len() != 1 {
                 return Err(lineage_error());

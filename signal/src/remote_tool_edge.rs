@@ -1739,7 +1739,18 @@ impl SignalDeviceAssistantTools {
         }
     }
 
-    async fn authorize_and_execute_command(
+    // Keep child execution state on the heap instead of embedding it in each caller.
+    #[inline(never)]
+    fn authorize_and_execute_command<'a>(
+        &'a self,
+        call: &'a ToolCall,
+        ctx: &'a ExecContext,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<ExecOutcome, AgentError>> + 'a>>
+    {
+        Box::pin(self.authorize_and_execute_command_inner(call, ctx))
+    }
+
+    async fn authorize_and_execute_command_inner(
         &self,
         call: &ToolCall,
         ctx: &ExecContext,
@@ -1940,17 +1951,17 @@ impl SignalDeviceAssistantTools {
             .as_ref()
             .ok_or_else(completion::invalid)?;
         let model_export = self
-            .model_egress_policy
-            .as_ref()
-            .map(|policy| {
-                crate::capability_grant_store::computer_export::ComputerExportContext::capture_command(
-                    policy,
-                    &session,
-                    completion_context,
-                )
-            })
-            .transpose()
-            .map_err(|_| completion::invalid())?;
+        .model_egress_policy
+        .as_ref()
+        .map(|policy| {
+            crate::capability_grant_store::computer_export::ComputerExportContext::capture_command(
+                policy,
+                &session,
+                completion_context,
+            )
+        })
+        .transpose()
+        .map_err(|_| completion::invalid())?;
         match store
             .claim_command_dispatch(
                 &dispatch_id,
@@ -2146,7 +2157,17 @@ impl SignalDeviceAssistantTools {
         }
     }
 
-    async fn authorize_and_execute_semantic_action(
+    // Keep child execution state on the heap instead of embedding it in each caller.
+    #[inline(never)]
+    fn authorize_and_execute_semantic_action<'a>(
+        &'a self,
+        call: &'a ToolCall,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<ExecOutcome, AgentError>> + 'a>>
+    {
+        Box::pin(self.authorize_and_execute_semantic_action_inner(call))
+    }
+
+    async fn authorize_and_execute_semantic_action_inner(
         &self,
         call: &ToolCall,
     ) -> Result<ExecOutcome, AgentError> {
@@ -2644,172 +2665,172 @@ impl SignalDeviceAssistantTools {
         };
 
         let dispatch_material = async {
-            let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
-                .get_fresh(&self.target_connection_id, chrono::Utc::now())
-                .ok_or_else(|| {
-                    error(
-                        AgentErrorKind::TargetOffline,
-                        "semantic UI readiness expired before dispatch",
-                        false,
-                        true,
-                    )
-                })?;
-            let adapter = readiness
-                .readiness
-                .capabilities
-                .iter()
-                .find(|item| item.capability == required_capability && item.supported && item.ready)
-                .map(|item| item.adapter.clone())
-                .ok_or_else(|| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        "semantic UI adapter is no longer ready",
-                        false,
-                        true,
-                    )
-                })?;
-            if adapter.kind != adapter_kind {
-                return Err(error(
-                    AgentErrorKind::UnsupportedCapability,
-                    "the ready adapter does not match the selected semantic Provider",
-                    false,
-                    true,
-                ));
-            }
-            let generation = dispatch_id.clone();
-            let raw_input = required_capability
-                == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed;
-            let plan = SealedComputerActionPlan {
-                schema_version: COMPUTER_USE_SCHEMA_VERSION,
-                work_id: claimed.work_id.to_string(),
-                action_request_id: server_call_id.clone(),
-                execution_generation: generation.clone(),
-                device_id: self.target_device_id.clone(),
-                interactive_session_incarnation: readiness
-                    .readiness
-                    .interactive_session_incarnation,
-                adapter,
-                approval_id: grant_id.clone(),
-                approved_actor_id: self.actor_id.clone(),
-                draft_hash: canonical_input_digest_sha256,
-                expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
-                timeout_ms: 30_000,
-                actions: vec![ComputerActionStep {
-                    target: target_ref,
-                    action: computer_action,
-                    before_summary: "fresh exact object resolved from the inspected snapshot"
-                        .into(),
-                    after_intent: if raw_input {
-                        format!("perform one bounded {action_name} action")
-                    } else {
-                        format!("perform one bounded semantic {action_name} action")
-                    },
-                    verification: if raw_input {
-                        "re-observe foreground application and display/DPI, then require a later semantic or screen observation before completion"
-                            .into()
-                    } else {
-                        "re-locate the exact object and independently read back semantic state"
-                            .into()
-                    },
-                }],
-            };
-            plan.validate().map_err(|validation_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to seal semantic UI plan: {validation_error}"),
-                    false,
-                    false,
-                )
-            })?;
-            let target = {
-                let map = self.connections.read().await;
-                map.get(&self.target_connection_id).cloned()
-            }
+        let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
+            .get_fresh(&self.target_connection_id, chrono::Utc::now())
             .ok_or_else(|| {
                 error(
                     AgentErrorKind::TargetOffline,
-                    "target host is not connected",
+                    "semantic UI readiness expired before dispatch",
                     false,
                     true,
                 )
             })?;
-            let audience = target.model.version_info.client_id.clone().ok_or_else(|| {
+        let adapter = readiness
+            .readiness
+            .capabilities
+            .iter()
+            .find(|item| item.capability == required_capability && item.supported && item.ready)
+            .map(|item| item.adapter.clone())
+            .ok_or_else(|| {
                 error(
                     AgentErrorKind::PermissionDenied,
-                    "target host has no bound client id",
+                    "semantic UI adapter is no longer ready",
                     false,
-                    false,
+                    true,
                 )
             })?;
-            if audience != self.target_device_id {
-                return Err(error(
-                    AgentErrorKind::PermissionDenied,
-                    "target device binding changed before semantic UI dispatch",
-                    false,
-                    false,
-                ));
-            }
-            let authz = AuthorizationBlock {
-                version: AUTHORIZATION_BLOCK_VERSION,
-                exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
-                scope: AgentScope {
-                    granted: vec![required_capability],
-                    mode: ExecutionMode::ConfirmEachAction,
-                    expires_at: None,
-                    policy_name: Some("oss-device-assistant-semantic-action".into()),
-                },
-                orchestrator_grants: vec![capability.wire.capability_id.clone()],
-                max_risk: desk_agent_protocol::RiskLevel::Medium,
-                actor: AuthzActor {
-                    user_id: self.actor_id.parse().ok(),
-                },
-                device: AuthzDevice { device_id: None },
-                request_id: generation.clone(),
-                session_id: None,
-                expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339()),
-                issuer: "signal".into(),
-                audience,
-                signature: None,
-            };
-            let wrapper = AuthorizedControlPayload {
-                inner: serde_json::to_value(&plan).map_err(|encode_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to encode semantic UI plan: {encode_error}"),
-                        false,
-                        false,
-                    )
-                })?,
-                authz,
-            };
-            let mut frame = SignalingModel::new_request(
-                SignalingType::DispatchComputerAction,
-                None,
-                Some(&wrapper),
-            )
-            .map_err(|frame_error| {
-                error(
-                    AgentErrorKind::TransportError,
-                    format!("failed to build semantic UI frame: {frame_error}"),
-                    false,
-                    false,
-                )
-            })?;
-            frame.request_id = generation.clone();
-            let text = serde_json::to_string(&frame).map_err(|encode_error| {
-                error(
-                    AgentErrorKind::TransportError,
-                    format!("failed to encode semantic UI frame: {encode_error}"),
-                    false,
-                    false,
-                )
-            })?;
-            store.bind_computer_transport(&self.target_connection_id, &plan, &session, call, self.model_egress_policy.as_ref())
-                .await.map_err(|_| error(AgentErrorKind::Internal,
-                    "failed to freeze original Computer Action transport", false, false))?;
-            Ok::<_, AgentError>((target, generation, text, plan))
+        if adapter.kind != adapter_kind {
+            return Err(error(
+                AgentErrorKind::UnsupportedCapability,
+                "the ready adapter does not match the selected semantic Provider",
+                false,
+                true,
+            ));
         }
-        .await;
+        let generation = dispatch_id.clone();
+        let raw_input = required_capability
+            == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed;
+        let plan = SealedComputerActionPlan {
+            schema_version: COMPUTER_USE_SCHEMA_VERSION,
+            work_id: claimed.work_id.to_string(),
+            action_request_id: server_call_id.clone(),
+            execution_generation: generation.clone(),
+            device_id: self.target_device_id.clone(),
+            interactive_session_incarnation: readiness
+                .readiness
+                .interactive_session_incarnation,
+            adapter,
+            approval_id: grant_id.clone(),
+            approved_actor_id: self.actor_id.clone(),
+            draft_hash: canonical_input_digest_sha256,
+            expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+            timeout_ms: 30_000,
+            actions: vec![ComputerActionStep {
+                target: target_ref,
+                action: computer_action,
+                before_summary: "fresh exact object resolved from the inspected snapshot"
+                    .into(),
+                after_intent: if raw_input {
+                    format!("perform one bounded {action_name} action")
+                } else {
+                    format!("perform one bounded semantic {action_name} action")
+                },
+                verification: if raw_input {
+                    "re-observe foreground application and display/DPI, then require a later semantic or screen observation before completion"
+                        .into()
+                } else {
+                    "re-locate the exact object and independently read back semantic state"
+                        .into()
+                },
+            }],
+        };
+        plan.validate().map_err(|validation_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to seal semantic UI plan: {validation_error}"),
+                false,
+                false,
+            )
+        })?;
+        let target = {
+            let map = self.connections.read().await;
+            map.get(&self.target_connection_id).cloned()
+        }
+        .ok_or_else(|| {
+            error(
+                AgentErrorKind::TargetOffline,
+                "target host is not connected",
+                false,
+                true,
+            )
+        })?;
+        let audience = target.model.version_info.client_id.clone().ok_or_else(|| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                "target host has no bound client id",
+                false,
+                false,
+            )
+        })?;
+        if audience != self.target_device_id {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "target device binding changed before semantic UI dispatch",
+                false,
+                false,
+            ));
+        }
+        let authz = AuthorizationBlock {
+            version: AUTHORIZATION_BLOCK_VERSION,
+            exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
+            scope: AgentScope {
+                granted: vec![required_capability],
+                mode: ExecutionMode::ConfirmEachAction,
+                expires_at: None,
+                policy_name: Some("oss-device-assistant-semantic-action".into()),
+            },
+            orchestrator_grants: vec![capability.wire.capability_id.clone()],
+            max_risk: desk_agent_protocol::RiskLevel::Medium,
+            actor: AuthzActor {
+                user_id: self.actor_id.parse().ok(),
+            },
+            device: AuthzDevice { device_id: None },
+            request_id: generation.clone(),
+            session_id: None,
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339()),
+            issuer: "signal".into(),
+            audience,
+            signature: None,
+        };
+        let wrapper = AuthorizedControlPayload {
+            inner: serde_json::to_value(&plan).map_err(|encode_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to encode semantic UI plan: {encode_error}"),
+                    false,
+                    false,
+                )
+            })?,
+            authz,
+        };
+        let mut frame = SignalingModel::new_request(
+            SignalingType::DispatchComputerAction,
+            None,
+            Some(&wrapper),
+        )
+        .map_err(|frame_error| {
+            error(
+                AgentErrorKind::TransportError,
+                format!("failed to build semantic UI frame: {frame_error}"),
+                false,
+                false,
+            )
+        })?;
+        frame.request_id = generation.clone();
+        let text = serde_json::to_string(&frame).map_err(|encode_error| {
+            error(
+                AgentErrorKind::TransportError,
+                format!("failed to encode semantic UI frame: {encode_error}"),
+                false,
+                false,
+            )
+        })?;
+        store.bind_computer_transport(&self.target_connection_id, &plan, &session, call, self.model_egress_policy.as_ref())
+            .await.map_err(|_| error(AgentErrorKind::Internal,
+                "failed to freeze original Computer Action transport", false, false))?;
+        Ok::<_, AgentError>((target, generation, text, plan))
+    }
+    .await;
         let (target, generation, text, plan) = match dispatch_material {
             Ok(material) => material,
             Err(dispatch_error) => {
@@ -2851,7 +2872,17 @@ impl SignalDeviceAssistantTools {
             .await
     }
 
-    async fn authorize_and_execute_artifact(
+    // Keep child execution state on the heap instead of embedding it in each caller.
+    #[inline(never)]
+    fn authorize_and_execute_artifact<'a>(
+        &'a self,
+        call: &'a ToolCall,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<ExecOutcome, AgentError>> + 'a>>
+    {
+        Box::pin(self.authorize_and_execute_artifact_inner(call))
+    }
+
+    async fn authorize_and_execute_artifact_inner(
         &self,
         call: &ToolCall,
     ) -> Result<ExecOutcome, AgentError> {
@@ -2942,11 +2973,11 @@ impl SignalDeviceAssistantTools {
                     )
                 })?;
                 (
-                    ArtifactRequest::LocalDraft(args),
-                    desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed,
-                    "create_new_artifact",
-                    desk_diagnose_core::device_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID,
-                )
+                ArtifactRequest::LocalDraft(args),
+                desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed,
+                "create_new_artifact",
+                desk_diagnose_core::device_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID,
+            )
             }
             "create_workbook_from_merge_preview" => (
                 ArtifactRequest::Spreadsheet(serde_json::from_str(&call.arguments_json).map_err(
@@ -2965,16 +2996,16 @@ impl SignalDeviceAssistantTools {
             ),
             "create_formula_workbook_from_merge_preview" => {
                 let args: SpreadsheetFormulaArgs =
-                    serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
-                        error(
-                            AgentErrorKind::InvalidInput,
-                            format!(
-                                "invalid spreadsheet formula artifact Provider input: {decode_error}"
-                            ),
-                            false,
-                            true,
-                        )
-                    })?;
+                serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
+                    error(
+                        AgentErrorKind::InvalidInput,
+                        format!(
+                            "invalid spreadsheet formula artifact Provider input: {decode_error}"
+                        ),
+                        false,
+                        true,
+                    )
+                })?;
                 let validated = desk_diagnose_core::spreadsheet_formula::validate_formula_patch(
                     &args.formula,
                     &args.target_cell,
@@ -3002,14 +3033,14 @@ impl SignalDeviceAssistantTools {
                     ));
                 }
                 (
-                    ArtifactRequest::SpreadsheetFormula {
-                        args,
-                        policy_digest_sha256: validated.ast_digest_sha256,
-                    },
-                    desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed,
-                    "create_new_artifact",
-                    desk_diagnose_core::device_assistant::SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID,
-                )
+                ArtifactRequest::SpreadsheetFormula {
+                    args,
+                    policy_digest_sha256: validated.ast_digest_sha256,
+                },
+                desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed,
+                "create_new_artifact",
+                desk_diagnose_core::device_assistant::SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID,
+            )
             }
             "create_word_report_from_merge_preview" => {
                 let args: WordArgs =
@@ -3304,64 +3335,64 @@ impl SignalDeviceAssistantTools {
         );
         let generation = dispatch_id.clone();
         let (decoded_action, before_summary, after_intent, verification) = match args {
-            ArtifactRequest::Text(args) => (
-                ComputerActionKind::File(FilePatchAction::CreateTextArtifact {
+        ArtifactRequest::Text(args) => (
+            ComputerActionKind::File(FilePatchAction::CreateTextArtifact {
+                file_name: args.file_name,
+                content_utf8: args.content_utf8,
+            }),
+            "new artifact does not exist in the selected directory".into(),
+            "create one new UTF-8 artifact without overwrite".into(),
+            "reopen through the retained parent handle and verify exact bytes plus SHA-256"
+                .into(),
+        ),
+        ArtifactRequest::Spreadsheet(args) => (
+            ComputerActionKind::File(FilePatchAction::CreateSpreadsheetArtifact {
+                preview_id: args.preview_id,
+                file_name: args.file_name,
+            }),
+            "new workbook does not exist in the selected directory".into(),
+            "materialize the retained merge preview as one new formula-free XLSX without overwrite".into(),
+            "reopen through the retained parent handle and verify the exact generated XLSX bytes plus SHA-256".into(),
+        ),
+        ArtifactRequest::SpreadsheetFormula {
+            args,
+            policy_digest_sha256,
+        } => (
+            ComputerActionKind::File(FilePatchAction::CreateSpreadsheetFormulaArtifact {
+                preview_id: args.preview_id,
+                file_name: args.file_name,
+                target_cell: args.target_cell,
+                formula: args.formula,
+                locale: args.locale,
+                formula_policy_digest_sha256: policy_digest_sha256,
+            }),
+            "new formula workbook does not exist in the selected directory".into(),
+            "materialize the retained merge preview as one new XLSX copy with one AST-approved formula cell and no overwrite".into(),
+            "reopen the generated package, verify the exact formula cell and policy digest, then verify exact artifact bytes plus SHA-256".into(),
+        ),
+        ArtifactRequest::Word(args) => (
+            ComputerActionKind::File(FilePatchAction::CreateWordReportArtifact {
+                preview_id: args.preview_id,
+                file_name: args.file_name,
+                title: args.title,
+                web_sources: args.web_sources,
+            }),
+            "new Word report does not exist in the selected directory".into(),
+            "materialize the retained merge preview as one new deterministic macro-free DOCX without overwrite".into(),
+            "reopen through the retained parent handle and verify the exact generated DOCX bytes plus SHA-256".into(),
+        ),
+        ArtifactRequest::LocalDraft(args) => (
+            ComputerActionKind::File(
+                FilePatchAction::CreateLocalCommunicationDraftArtifact {
                     file_name: args.file_name,
-                    content_utf8: args.content_utf8,
-                }),
-                "new artifact does not exist in the selected directory".into(),
-                "create one new UTF-8 artifact without overwrite".into(),
-                "reopen through the retained parent handle and verify exact bytes plus SHA-256"
-                    .into(),
+                    draft: args.draft,
+                },
             ),
-            ArtifactRequest::Spreadsheet(args) => (
-                ComputerActionKind::File(FilePatchAction::CreateSpreadsheetArtifact {
-                    preview_id: args.preview_id,
-                    file_name: args.file_name,
-                }),
-                "new workbook does not exist in the selected directory".into(),
-                "materialize the retained merge preview as one new formula-free XLSX without overwrite".into(),
-                "reopen through the retained parent handle and verify the exact generated XLSX bytes plus SHA-256".into(),
-            ),
-            ArtifactRequest::SpreadsheetFormula {
-                args,
-                policy_digest_sha256,
-            } => (
-                ComputerActionKind::File(FilePatchAction::CreateSpreadsheetFormulaArtifact {
-                    preview_id: args.preview_id,
-                    file_name: args.file_name,
-                    target_cell: args.target_cell,
-                    formula: args.formula,
-                    locale: args.locale,
-                    formula_policy_digest_sha256: policy_digest_sha256,
-                }),
-                "new formula workbook does not exist in the selected directory".into(),
-                "materialize the retained merge preview as one new XLSX copy with one AST-approved formula cell and no overwrite".into(),
-                "reopen the generated package, verify the exact formula cell and policy digest, then verify exact artifact bytes plus SHA-256".into(),
-            ),
-            ArtifactRequest::Word(args) => (
-                ComputerActionKind::File(FilePatchAction::CreateWordReportArtifact {
-                    preview_id: args.preview_id,
-                    file_name: args.file_name,
-                    title: args.title,
-                    web_sources: args.web_sources,
-                }),
-                "new Word report does not exist in the selected directory".into(),
-                "materialize the retained merge preview as one new deterministic macro-free DOCX without overwrite".into(),
-                "reopen through the retained parent handle and verify the exact generated DOCX bytes plus SHA-256".into(),
-            ),
-            ArtifactRequest::LocalDraft(args) => (
-                ComputerActionKind::File(
-                    FilePatchAction::CreateLocalCommunicationDraftArtifact {
-                        file_name: args.file_name,
-                        draft: args.draft,
-                    },
-                ),
-                "new local communication draft does not exist in the selected directory".into(),
-                "create one inert local-only UTF-8 plain-text draft without overwrite or external delivery".into(),
-                "re-render with shared trusted logic, reopen through the retained parent handle, and verify exact bytes plus SHA-256".into(),
-            ),
-        };
+            "new local communication draft does not exist in the selected directory".into(),
+            "create one inert local-only UTF-8 plain-text draft without overwrite or external delivery".into(),
+            "re-render with shared trusted logic, reopen through the retained parent handle, and verify exact bytes plus SHA-256".into(),
+        ),
+    };
         let action = ComputerActionKind::File(artifact_preflight.action().clone());
         if action != decoded_action {
             let dispatch_error = error(
@@ -3559,7 +3590,17 @@ impl SignalDeviceAssistantTools {
         desk_diagnose_core::provider_preflight::browser_action_from_call(call, server_call_id)
     }
 
-    async fn authorize_and_execute_browser(
+    // Keep child execution state on the heap instead of embedding it in each caller.
+    #[inline(never)]
+    fn authorize_and_execute_browser<'a>(
+        &'a self,
+        call: &'a ToolCall,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<ExecOutcome, AgentError>> + 'a>>
+    {
+        Box::pin(self.authorize_and_execute_browser_inner(call))
+    }
+
+    async fn authorize_and_execute_browser_inner(
         &self,
         call: &ToolCall,
     ) -> Result<ExecOutcome, AgentError> {
@@ -4148,7 +4189,17 @@ impl SignalDeviceAssistantTools {
             .await
     }
 
-    async fn authorize_and_execute_outlook_handoff(
+    // Keep child execution state on the heap instead of embedding it in each caller.
+    #[inline(never)]
+    fn authorize_and_execute_outlook_handoff<'a>(
+        &'a self,
+        call: &'a ToolCall,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<ExecOutcome, AgentError>> + 'a>>
+    {
+        Box::pin(self.authorize_and_execute_outlook_handoff_inner(call))
+    }
+
+    async fn authorize_and_execute_outlook_handoff_inner(
         &self,
         call: &ToolCall,
     ) -> Result<ExecOutcome, AgentError> {
@@ -4510,31 +4561,31 @@ impl SignalDeviceAssistantTools {
         };
         let generation = dispatch_id.clone();
         let plan = SealedComputerActionPlan {
-            schema_version: COMPUTER_USE_SCHEMA_VERSION,
-            work_id: claimed.work_id.to_string(),
-            action_request_id: server_call_id.clone(),
-            execution_generation: generation.clone(),
-            device_id: self.target_device_id.clone(),
-            interactive_session_incarnation,
-            adapter: ComputerUseAdapterRef {
-                kind: ComputerUseAdapterKind::OutlookNewMailto,
-                version:
-                    desk_diagnose_core::device_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_VERSION
-                        .into(),
-            },
-            approval_id: grant_id,
-            approved_actor_id: self.actor_id.clone(),
-            draft_hash: canonical_input_digest_sha256,
-            expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
-            timeout_ms: 30_000,
-            actions: vec![ComputerActionStep {
-                target: surface_ref,
-                action: ComputerActionKind::Communication(request),
-                before_summary: "the reviewed Outlook (new) mailto handler is ready in the current interactive session".into(),
-                after_intent: "open one bounded compose surface and stop before send".into(),
-                verification: "return only AssistiveUnverified ManualOnly HandedOffToUser".into(),
-            }],
-        };
+        schema_version: COMPUTER_USE_SCHEMA_VERSION,
+        work_id: claimed.work_id.to_string(),
+        action_request_id: server_call_id.clone(),
+        execution_generation: generation.clone(),
+        device_id: self.target_device_id.clone(),
+        interactive_session_incarnation,
+        adapter: ComputerUseAdapterRef {
+            kind: ComputerUseAdapterKind::OutlookNewMailto,
+            version:
+                desk_diagnose_core::device_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_VERSION
+                    .into(),
+        },
+        approval_id: grant_id,
+        approved_actor_id: self.actor_id.clone(),
+        draft_hash: canonical_input_digest_sha256,
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+        timeout_ms: 30_000,
+        actions: vec![ComputerActionStep {
+            target: surface_ref,
+            action: ComputerActionKind::Communication(request),
+            before_summary: "the reviewed Outlook (new) mailto handler is ready in the current interactive session".into(),
+            after_intent: "open one bounded compose surface and stop before send".into(),
+            verification: "return only AssistiveUnverified ManualOnly HandedOffToUser".into(),
+        }],
+    };
         plan.validate().map_err(|validation_error| {
             error(
                 AgentErrorKind::Internal,

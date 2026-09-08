@@ -930,6 +930,9 @@ async fn prepare_model_context(
             floor_advanced: false,
         });
     }
+    if session.repair_recovery_result_labels()? {
+        deps.session_seam.save(session).await?;
+    }
     loop {
         if pinned_context.strategy
             == crate::model_context::ContextManagementStrategy::CheckpointSummary

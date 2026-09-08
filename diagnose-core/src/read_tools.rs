@@ -192,7 +192,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_desktop_ui",
             Capability::DesktopUiInspect,
-            "Read a bounded, redacted semantic UI tree from the active Windows application. Values from protected fields are never returned.",
+            "Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. Application catalog nodes do not contain UI contents or authorize actions. Protected field values are never returned.",
             json!({
                 "type": "object",
                 "properties": {

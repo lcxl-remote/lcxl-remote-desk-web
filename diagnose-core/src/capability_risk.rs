@@ -73,7 +73,8 @@ pub fn classify_provider_descriptor_floor(
     let sensitive_content = data_policy.reads.iter().any(|category| {
         matches!(
             category,
-            CapabilityDataCategory::UiSemanticTree
+            CapabilityDataCategory::DesktopSessionMetadata
+                | CapabilityDataCategory::UiSemanticTree
                 | CapabilityDataCategory::OfficeSelection
                 | CapabilityDataCategory::FileContent
                 | CapabilityDataCategory::TerminalOutput

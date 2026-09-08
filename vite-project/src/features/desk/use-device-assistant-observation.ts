@@ -42,6 +42,29 @@ export type ObservationEntry = {
     outcome: AgentOutcome | null;
 };
 
+export type ObservationRoot = {
+    token: string; snapshot_id: string; expires_at: string;
+    object_kind: 'desktop_session' | 'application' | 'window';
+};
+export type SelectableApplication = { objectRef: ObservationRoot; name: string };
+
+export function selectableApplications(entry: ObservationEntry): SelectableApplication[] {
+    if (entry.outcome?.status !== 'ok') return [];
+    const data = entry.outcome.data as { ReadContext?: { DesktopUiInspect?: { nodes?: unknown[] } } } | null;
+    const nodes = data?.ReadContext?.DesktopUiInspect?.nodes;
+    if (!Array.isArray(nodes)) return [];
+    return nodes.flatMap((node) => {
+        if (!node || typeof node !== 'object') return [];
+        const value = node as { object_ref?: ObservationRoot; role?: string; name?: unknown };
+        const ref = value.object_ref;
+        if (value.role !== 'application' || ref?.object_kind !== 'application'
+            || typeof ref.token !== 'string' || !ref.token
+            || typeof ref.snapshot_id !== 'string' || !ref.snapshot_id
+            || typeof ref.expires_at !== 'string' || !Number.isFinite(Date.parse(ref.expires_at))) return [];
+        return [{ objectRef: ref, name: typeof value.name === 'string' ? value.name : '' }];
+    });
+}
+
 export type OwnerSelectableWindow = {
     objectRef: {
         token: string;
@@ -111,6 +134,8 @@ export function useDeviceAssistantObservation({
         desktop_session_inspect: idleEntry(),
         desktop_ui_inspect: idleEntry(),
     });
+    const [applications, setApplications] = useState<SelectableApplication[]>([]);
+    const applicationCatalogRequested = useRef(false);
     const pending = useRef(new Map<string, ObservationKind>());
     const timers = useRef(new Map<string, number>());
     const delayedTimer = useRef<number | null>(null);
@@ -152,6 +177,8 @@ export function useDeviceAssistantObservation({
 
     useEffect(() => {
         cancelDelayedUi();
+        applicationCatalogRequested.current = false;
+        setApplications([]);
         setEntries({ desktop_session_inspect: idleEntry(), desktop_ui_inspect: idleEntry() });
         return () => {
             if (delayedTimer.current !== null) window.clearTimeout(delayedTimer.current);
@@ -213,12 +240,40 @@ export function useDeviceAssistantObservation({
         include_active_application: true,
     }), [invoke]);
 
-    const inspectUi = useCallback(() => invoke('desktop_ui_inspect', {
-        root: null,
+    const inspectUi = useCallback((root: ObservationRoot | null = null) => {
+        if (root && (!Number.isFinite(Date.parse(root.expires_at)) || Date.parse(root.expires_at) <= Date.now())) return null;
+        return invoke('desktop_ui_inspect', {
+        root,
         max_depth: 6,
         max_nodes: 300,
         max_bytes: 262_144,
-    }), [invoke]);
+    }); }, [invoke]);
+
+    const listApplications = useCallback(() => {
+        if (delayedTimer.current !== null || pending.current.size > 0) return;
+        applicationCatalogRequested.current = true;
+        setApplications([]);
+        if (!inspectSession()) applicationCatalogRequested.current = false;
+    }, [inspectSession]);
+
+    const sessionOutput = entries.desktop_session_inspect.outcome?.status === 'ok'
+        ? (entries.desktop_session_inspect.outcome.data as { ReadContext?: { DesktopSessionInspect?: { os?: string; session?: ObservationRoot } } })?.ReadContext?.DesktopSessionInspect
+        : undefined;
+    useEffect(() => {
+        if (!applicationCatalogRequested.current) return;
+        if (entries.desktop_session_inspect.phase === 'error') {
+            applicationCatalogRequested.current = false;
+        } else if (entries.desktop_session_inspect.phase === 'ready') {
+            applicationCatalogRequested.current = false;
+            const root = sessionOutput?.session;
+            if (sessionOutput?.os === 'macos' && root?.object_kind === 'desktop_session'
+                && root.token && root.snapshot_id) inspectUi(root);
+        }
+    }, [entries.desktop_session_inspect, sessionOutput, inspectUi]);
+    useEffect(() => {
+        const candidates = selectableApplications(entries.desktop_ui_inspect);
+        if (candidates.length) setApplications(candidates);
+    }, [entries.desktop_ui_inspect]);
 
     const scheduleUi = useCallback(() => {
         if (!deskId || !enabled || delayedTimer.current !== null
@@ -244,5 +299,6 @@ export function useDeviceAssistantObservation({
         delayedTimer.current = window.setTimeout(tick, 1_000);
     }, [cancelDelayedUi, deskId, enabled, inspectUi]);
 
-    return { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds };
+    return { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds,
+        applications, listApplications, applicationSelectionAvailable: !sessionOutput?.os || sessionOutput.os === 'macos' };
 }

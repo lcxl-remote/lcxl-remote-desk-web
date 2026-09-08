@@ -24,7 +24,7 @@ use sea_orm::{ColumnTrait, QueryFilter};
 use std::{sync::Arc, time::Duration};
 mod scheduled;
 
-fn tool_reply(name: &str, arguments: serde_json::Value) -> String {
+pub(super) fn tool_reply(name: &str, arguments: serde_json::Value) -> String {
     let delta = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("call-{name}"),"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]}}]});
     format!(
         "data: {delta}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
@@ -1127,4 +1127,17 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
     handle.stop(true).await;
     task.await.unwrap().unwrap();
     db.close().await.unwrap();
+}
+
+#[test]
+fn permission_scanner_fits_production_thread_stack() {
+    std::thread::Builder::new()
+        .name("permission-scanner-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            actix_web::rt::System::new().block_on(Box::pin(run_case(None, ResumeMode::Loop)));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

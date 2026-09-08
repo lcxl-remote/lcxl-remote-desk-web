@@ -147,10 +147,55 @@ fn completed_tool_call_and_result_remain_paired_on_next_day_followup() {
         envelope.retention.expires_at_unix_ms = Some(120_000);
         if message.role == ChatRole::Tool {
             envelope.provenance.source_tool_name = "read_processes".into();
+            envelope.allowed_destinations.clear();
         }
     }
     let mut later = policy();
     later.now_unix_ms = 86_400_000;
+    later.selected_source_tools.clear();
+    let mut restricted = ModelContextState::default();
+    restricted.entries.push(ModelContextEntry {
+        policy_key: context_policy().key(),
+        strategy: ContextManagementStrategy::CheckpointSummary,
+        floor_group_head_message_id: Some("followup".into()),
+        floor_after_group_head_message_id: None,
+        checkpoint: None,
+        last_used_session_version: 1,
+    });
+    let repair = reconcile_context_eligibility(
+        &later,
+        &conversation,
+        &restricted,
+        &context_policy(),
+        &ContextProtectionSet::default(),
+        2,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(repair.notice_kind, ContextNoticeKind::Refreshed);
+    let repaired = apply_floor_reconciliation(&repair, &conversation, &restricted).unwrap();
+    assert!(repaired.entries[0].floor_group_head_message_id.is_none());
+    let ContextBuildPlan::Ready(restored) = plan_model_context(
+        &conversation,
+        &repaired,
+        &context_policy(),
+        &ContextProtectionSet::default(),
+        2,
+    )
+    .unwrap() else {
+        panic!("restored history fits without compression");
+    };
+    assert_eq!(restored.view.messages, conversation);
+    let sources = vec![ContextSummarySourceV1 {
+        message_id: conversation[2].message_id.clone(),
+        message_sha256: sha256_hex(&canonical_bytes(&conversation[2]).unwrap()),
+    }];
+    assert_eq!(
+        authorize_sources(&later, &sources, &conversation)
+            .unwrap()
+            .len(),
+        1
+    );
     for strategy in [
         ContextManagementStrategy::Window,
         ContextManagementStrategy::CheckpointSummary,
@@ -406,7 +451,7 @@ fn required_inputs_cannot_be_pruned_rebound_or_mutated_before_compression() {
 }
 
 #[test]
-fn checkpoint_does_not_hide_deselected_tool_data() {
+fn checkpoint_keeps_completed_receipts_without_new_read_selection() {
     let mut conversation = history();
     let mut assistant = ChatMessage::assistant_tool_calls(
         "call-message",
@@ -453,7 +498,7 @@ fn checkpoint_does_not_hide_deselected_tool_data() {
     deselected.selected_source_tools.clear();
     assert!(
         authorize_context_checkpoint(&deselected, &state, &context_policy().key(), &conversation)
-            .is_err()
+            .is_ok()
     );
 }
 

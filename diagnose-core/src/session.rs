@@ -1966,6 +1966,51 @@ impl PersistedAgentSession {
     }
 }
 
+impl PersistedAgentSession {
+    /// Label only the runtime's exact interrupted-call placeholders. Never
+    /// assign export authority to arbitrary unlabeled historical content.
+    pub fn repair_recovery_result_labels(
+        &mut self,
+    ) -> Result<bool, desk_agent_protocol::AgentError> {
+        let mut changed = false;
+        for index in 0..self.conversation.len() {
+            let message = &self.conversation[index];
+            let Some(call_id) = message.tool_call_id.as_deref() else {
+                continue;
+            };
+            if message.role != crate::chat::ChatRole::Tool
+                || message.data_envelope.is_some()
+                || message.message_id != recovery_message_id(call_id)
+                || !matches!(
+                    message.text.as_str(),
+                    RECOVER_NOT_EXECUTED | RECOVER_OUTCOME_UNKNOWN | RECOVER_INTERRUPTED
+                )
+            {
+                continue;
+            }
+            let parent = self.conversation[..index]
+                .iter()
+                .rev()
+                .find(|parent| {
+                    parent.role == crate::chat::ChatRole::Assistant
+                        && parent.tool_calls.iter().any(|call| call.id == call_id)
+                })
+                .and_then(|parent| parent.data_envelope.as_ref());
+            let label = crate::model_message_labels::internal_tool_result_envelope(
+                parent,
+                call_id,
+                &message.text,
+                "interrupted_call_recovery",
+            )?;
+            if label.is_some() {
+                self.conversation[index].data_envelope = label;
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+}
+
 /// The placeholder tool-result text written when recovery proves a mutating call
 /// never ran.
 const RECOVER_NOT_EXECUTED: &str = "not executed: the turn was interrupted before this command ran";
@@ -2140,6 +2185,55 @@ mod tests {
             expires_at: None,
             policy_name: None,
         }
+    }
+
+    #[test]
+    fn interrupted_receipt_inherits_only_its_original_call_authority() {
+        use crate::chat::{ChatMessage, ChatRole, ToolCallRef};
+        let mut s = session();
+        let destination = desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "original-model".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        };
+        let mut call = crate::model_message_labels::model_bound_user_message(
+            "call-message".into(),
+            "pending action".into(),
+            destination.clone(),
+        )
+        .unwrap();
+        call.role = ChatRole::Assistant;
+        call.tool_calls.push(ToolCallRef {
+            id: "call".into(),
+            name: "execute_confirmed_ui_action".into(),
+            arguments_json: "{}".into(),
+        });
+        let bytes = crate::model_egress::message_content_bytes(&call).unwrap();
+        call.data_envelope = crate::model_message_labels::model_bound_user_message(
+            "call-authority".into(),
+            String::from_utf8(bytes).unwrap(),
+            destination.clone(),
+        )
+        .unwrap()
+        .data_envelope;
+        s.conversation.push(call);
+        s.recover_session(RecoveryVerdict::InterruptedUnknown, "now");
+        let original_text = s.conversation.last().unwrap().text.clone();
+        assert!(s.repair_recovery_result_labels().unwrap());
+        let receipt = s.conversation.last().unwrap();
+        assert_eq!(receipt.text, original_text);
+        assert_eq!(
+            receipt.data_envelope.as_ref().unwrap().allowed_destinations,
+            vec![destination]
+        );
+        assert!(!s.repair_recovery_result_labels().unwrap());
+        let mut injected =
+            ChatMessage::tool_result("recover-call", "call", "executed successfully");
+        injected.message_id = "recover-call".into();
+        s.conversation.push(injected);
+        assert!(!s.repair_recovery_result_labels().unwrap());
+        assert!(s.conversation.last().unwrap().data_envelope.is_none());
     }
 
     fn session() -> PersistedAgentSession {

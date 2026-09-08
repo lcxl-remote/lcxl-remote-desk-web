@@ -140,20 +140,29 @@ fn capability_enables_mutation(capability: &desk_agent_protocol::Capability) -> 
     )
 }
 
-fn has_active_resume_desktop_ui_inspect_grant(
+fn has_active_resume_desktop_read_grant(
     grants: &[desk_agent_protocol::capability_grant::CapabilityGrant],
+    tool_name: &str,
     now_unix_ms: u64,
 ) -> bool {
-    grants.iter().any(|grant| {
-        grant.provider_id == desk_diagnose_core::device_assistant::DESKTOP_UI_PROVIDER_ID
-            && grant.capability_id == desk_diagnose_core::device_assistant::DESKTOP_UI_CAPABILITY_ID
-            && grant.tool_name == "inspect_desktop_ui"
-            && grant.effect
-                == desk_agent_protocol::capability_provider::CapabilityEffect::ReadDevice
-            && grant.revoked_at_unix_ms.is_none()
-            && grant.expires_at_unix_ms > now_unix_ms
-            && grant.remaining_uses > 0
-    })
+    let providers = device_assistant_provider_registry();
+    let Some(capability) = providers.capability_for_tool(tool_name) else {
+        return false;
+    };
+    let provider = providers
+        .provider_for_capability(&capability.wire.capability_id)
+        .unwrap();
+    desk_diagnose_core::device_assistant::is_requestable_desktop_read(tool_name)
+        && grants.iter().any(|grant| {
+            grant.provider_id == provider.wire.provider_id
+                && grant.capability_id == capability.wire.capability_id
+                && grant.tool_name == tool_name
+                && grant.effect == capability.wire.effect
+                && grant.issued_at_unix_ms <= now_unix_ms
+                && grant.revoked_at_unix_ms.is_none()
+                && grant.expires_at_unix_ms > now_unix_ms
+                && grant.remaining_uses > 0
+        })
 }
 
 fn latest_committed_answer(
@@ -820,7 +829,37 @@ async fn run_turn_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn compose_turn(
+// Keep child execution state on the heap instead of embedding it in each caller.
+#[inline(never)]
+fn compose_turn(
+    connections: web::Data<SharedConnectionMap>,
+    db: DatabaseConnection,
+    request_id: String,
+    browser_connection_id: String,
+    target_connection_id: String,
+    actor_user_id: i32,
+    target_device_id: String,
+    ask: DeviceAssistantAsk,
+    resume_conversation_id: Option<PermissionResume>,
+    scheduled: Option<scheduled::PreparedResume>,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Option<LoopOutcome>, AgentError>>>>
+{
+    Box::pin(compose_turn_inner(
+        connections,
+        db,
+        request_id,
+        browser_connection_id,
+        target_connection_id,
+        actor_user_id,
+        target_device_id,
+        ask,
+        resume_conversation_id,
+        scheduled,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn compose_turn_inner(
     connections: web::Data<SharedConnectionMap>,
     db: DatabaseConnection,
     request_id: String,
@@ -1145,17 +1184,17 @@ async fn compose_turn(
     });
     if office_selected && selected_office_document.is_none() {
         stream_event(
-            connections.as_ref(),
-            &browser_connection_id,
-            &AgentEvent::error(
-                &request_id,
-                1,
-                transport_error(
-                    "the selected Excel document is no longer available; refresh context before sending",
-                ),
+        connections.as_ref(),
+        &browser_connection_id,
+        &AgentEvent::error(
+            &request_id,
+            1,
+            transport_error(
+                "the selected Excel document is no longer available; refresh context before sending",
             ),
-        )
-        .await;
+        ),
+    )
+    .await;
         return Ok(None);
     }
     let capability_grants =
@@ -1182,22 +1221,40 @@ async fn compose_turn(
         || scheduled
             .as_ref()
             .is_some_and(|resume| resume.permission_request_id.is_some());
-    let resume_desktop_ui_inspect = permission_decision_resume
-        && has_active_resume_desktop_ui_inspect_grant(&capability_grants, now_unix_ms);
+    let current_desktop_grants = capability_grants
+        .iter()
+        .filter(|grant| {
+            grant.surface
+                == desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner
+                && grant.actor_id == actor_id
+                && grant.run_id == conversation_id
+                && grant.target_device_id == target_device_id
+                && grant.input_revision == snapshot.as_ref().map_or(0, |s| s.input_revision)
+                && grant.policy_revision == PERSONAL_ASSISTANT_POLICY_REVISION
+                && grant.readiness_revision == readiness_revision
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let resumed_desktop_reads = [
+        "inspect_desktop_session",
+        "inspect_desktop_ui",
+        "read_current_screen",
+    ]
+    .into_iter()
+    .filter(|name| {
+        permission_decision_resume
+            && has_active_resume_desktop_read_grant(&current_desktop_grants, name, now_unix_ms)
+    })
+    .collect::<Vec<_>>();
     let mut selected_source_tools = ask
         .selected_capability_ids
         .iter()
         .filter_map(|capability_id| provider_registry.capability(capability_id))
         .map(|capability| capability.wire.tool_name.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    if resume_desktop_ui_inspect {
-        // This is the same server-triggered continuation of the owner's
-        // original requirement. The explicit read grant remains the authority;
-        // restoring the source tool here only keeps its read-back envelope
-        // eligible for the same model destination after the one-turn context
-        // attachment itself has expired.
-        selected_source_tools.insert("inspect_desktop_ui".into());
-    }
+    // Only owner-selected or currently approved desktop sources are eligible
+    // for read-back. Device invocation and model egress remain separate checks.
+    selected_source_tools.extend(resumed_desktop_reads.iter().map(|name| (*name).to_string()));
     if !selected_file_roots.is_empty() {
         selected_source_tools.insert("inspect_selected_file_metadata".into());
         let selected_file_count = selected_file_roots
@@ -1378,10 +1435,6 @@ async fn compose_turn(
         selected_tool_capability_ids
             .push(desk_diagnose_core::device_assistant::CURRENT_SCREEN_CAPABILITY_ID.to_string());
     }
-    if resume_desktop_ui_inspect {
-        selected_tool_capability_ids
-            .push(desk_diagnose_core::device_assistant::DESKTOP_UI_CAPABILITY_ID.into());
-    }
     selected_tool_capability_ids
         .push(desk_diagnose_core::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID.into());
     selected_tool_capability_ids.extend(
@@ -1423,14 +1476,14 @@ async fn compose_turn(
             );
             if has_output_directory {
                 selected_tool_capability_ids.extend(
-                    [
-                        desk_diagnose_core::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID,
-                        desk_diagnose_core::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID,
-                        desk_diagnose_core::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID,
-                    ]
-                    .into_iter()
-                    .map(str::to_string),
-                );
+                [
+                    desk_diagnose_core::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID,
+                ]
+                .into_iter()
+                .map(str::to_string),
+            );
             }
         }
         if has_output_directory {
@@ -1438,9 +1491,9 @@ async fn compose_turn(
                 desk_diagnose_core::device_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID.into(),
             );
             selected_tool_capability_ids.push(
-                desk_diagnose_core::device_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID
-                    .into(),
-            );
+            desk_diagnose_core::device_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID
+                .into(),
+        );
         }
     }
     if !selected_spreadsheet_roots.is_empty() {
@@ -1456,9 +1509,9 @@ async fn compose_turn(
                     .into(),
             );
             selected_tool_capability_ids.push(
-                desk_diagnose_core::device_assistant::SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID
-                    .into(),
-            );
+            desk_diagnose_core::device_assistant::SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID
+                .into(),
+        );
             selected_tool_capability_ids.push(
                 desk_diagnose_core::device_assistant::WORD_DOCUMENT_CREATE_CAPABILITY_ID.into(),
             );
@@ -1513,10 +1566,11 @@ async fn compose_turn(
         &selected_tool_capability_ids,
     );
     if let Some(original) = original_read_context.as_ref() {
-        // Readiness or a shared coarse capability must not add new read tools
-        // to a permission continuation of an already accepted input.
+        // Object reads retain the original selection. Desktop reads remain planning
+        // candidates; only a current owner grant can restore their scope.
         registry.retain(|tool| {
             tool.effect != desk_diagnose_core::registry::ToolEffect::ReadOnly
+                || desk_diagnose_core::device_assistant::is_requestable_desktop_read(tool.name())
                 || original.tool_names.iter().any(|name| name == tool.name())
         });
     }
@@ -1661,10 +1715,14 @@ async fn compose_turn(
         &ask.selected_capability_ids,
     )
     .expect("control authorizer validated selected Device Assistant context");
-    if resume_desktop_ui_inspect
-        && !granted.contains(&desk_agent_protocol::Capability::DesktopUiInspect)
-    {
-        granted.push(desk_agent_protocol::Capability::DesktopUiInspect);
+    for name in &resumed_desktop_reads {
+        let capability = provider_registry
+            .capability_for_tool(name)
+            .unwrap()
+            .required_capability;
+        if !granted.contains(&capability) {
+            granted.push(capability);
+        }
     }
     extend_fixed_exact_action_capabilities(&registry, &mut granted);
     granted.extend(desk_diagnose_core::device_assistant::system_diagnostic_capabilities());
@@ -1871,8 +1929,8 @@ async fn compose_turn(
     }
     if permission_decision_resume {
         system_prompt.text.push_str(
-            "\n\nPERMISSION DECISION RESUME (server authoritative): the owner has just decided the pending permission request. Re-read CURRENT AUTHORIZED GRANTS above. Do not request or ask for the same permission again. If a matching active grant exists, continue the existing user requirement now and call the authorized tool. If the item was denied or narrowed so the call no longer matches, adapt the plan or explain the remaining blocker. This trigger adds no new user requirement and does not change the original tool inputs.",
-        );
+        "\n\nPERMISSION DECISION RESUME (server authoritative): the owner has just decided the pending permission request. Re-read CURRENT AUTHORIZED GRANTS above. Do not request or ask for the same permission again. If a matching active grant exists, continue the existing user requirement now and call the authorized tool. If the item was denied or narrowed so the call no longer matches, adapt the plan or explain the remaining blocker. This trigger adds no new user requirement and does not change the original tool inputs.",
+    );
     }
     if let Some(expires_at_unix_ms) =
         capability_authorization.approved_exact_input_expires_at_unix_ms
@@ -2171,8 +2229,8 @@ async fn compose_turn(
                             sink.on_answer_committed(&answer);
                         } else {
                             sink.error(transport_error(
-                                "the accepted Device Assistant input settled without an answer; send a follow-up to retry",
-                            ));
+                            "the accepted Device Assistant input settled without an answer; send a follow-up to retry",
+                        ));
                         }
                         break;
                     }
@@ -2222,6 +2280,7 @@ async fn compose_turn(
 mod tests {
     use super::*;
     mod compaction;
+    mod desktop_permission;
     mod original_input;
     mod permission_object;
     mod rehearsal_entry;
@@ -2317,7 +2376,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_resume_recognizes_only_active_desktop_ui_read_grants() {
+    fn permission_resume_recognizes_only_active_desktop_read_grants() {
         use desk_agent_protocol::capability_grant::{
             CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant, CapabilityGrantIssuer,
             CapabilityGrantLimits, CapabilityGrantUsePolicy, CapabilityRiskTier,
@@ -2361,17 +2420,55 @@ mod tests {
             revoked_reason: None,
         };
 
-        assert!(has_active_resume_desktop_ui_inspect_grant(
+        let providers = device_assistant_provider_registry();
+        for name in [
+            "inspect_desktop_session",
+            "inspect_desktop_ui",
+            "read_current_screen",
+        ] {
+            let descriptor = providers.capability_for_tool(name).unwrap();
+            let mut current = grant.clone();
+            current.tool_name = name.into();
+            current.capability_id = descriptor.wire.capability_id.clone();
+            current.provider_id = providers
+                .provider_for_capability(&current.capability_id)
+                .unwrap()
+                .wire
+                .provider_id
+                .clone();
+            current.effect = descriptor.wire.effect;
+            assert!(has_active_resume_desktop_read_grant(
+                std::slice::from_ref(&current),
+                name,
+                500
+            ));
+            current.revoked_at_unix_ms = Some(400);
+            assert!(!has_active_resume_desktop_read_grant(
+                std::slice::from_ref(&current),
+                name,
+                500
+            ));
+            current.revoked_at_unix_ms = None;
+            current.remaining_uses = 0;
+            assert!(!has_active_resume_desktop_read_grant(&[current], name, 500));
+        }
+        assert!(has_active_resume_desktop_read_grant(
             std::slice::from_ref(&grant),
+            "inspect_desktop_ui",
             500
         ));
         let mut exhausted = grant.clone();
         exhausted.remaining_uses = 0;
-        assert!(!has_active_resume_desktop_ui_inspect_grant(
+        assert!(!has_active_resume_desktop_read_grant(
             &[exhausted],
+            "inspect_desktop_ui",
             500
         ));
-        assert!(!has_active_resume_desktop_ui_inspect_grant(&[grant], 1_000));
+        assert!(!has_active_resume_desktop_read_grant(
+            &[grant],
+            "inspect_desktop_ui",
+            1_000
+        ));
     }
 
     #[test]

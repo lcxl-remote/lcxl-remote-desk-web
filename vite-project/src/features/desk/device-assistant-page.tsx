@@ -33,6 +33,8 @@ import { isDeviceAssistantEnabled } from './device-assistant-switch';
 import {
     type ObservationEntry,
     type OwnerSelectableWindow,
+    type SelectableApplication,
+    type ObservationRoot,
     ownerSelectableWindows,
     useDeviceAssistantObservation,
 } from './use-device-assistant-observation';
@@ -68,6 +70,9 @@ function ObservationCard({
     onDelayedRefresh,
     onCancelDelayed,
     remainingSeconds = 0,
+    applications = [],
+    onListApplications,
+    onInspectApplication,
 }: {
     title: string;
     description: string;
@@ -79,6 +84,9 @@ function ObservationCard({
     onDelayedRefresh?: () => void;
     onCancelDelayed?: () => void;
     remainingSeconds?: number;
+    applications?: SelectableApplication[];
+    onListApplications?: () => void;
+    onInspectApplication?: (root: ObservationRoot) => void;
 }) {
     const { t } = useTranslation();
     const isPending = entry.phase === 'pending';
@@ -119,6 +127,21 @@ function ObservationCard({
                         <Button variant="outline" size="sm" onClick={onCancelDelayed}>
                             {t('pages.deviceAssistant.cancelObservation')}
                         </Button>
+                    </div>
+                )}
+                {onListApplications && (
+                    <div className="space-y-2 rounded-md border p-3">
+                        <Button variant="outline" size="sm" onClick={onListApplications} disabled={disabled || isPending || isScheduled}>
+                            {t('pages.deviceAssistant.listApplications')}
+                        </Button>
+                        <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.applicationSelectionHint')}</p>
+                        <div className="flex flex-wrap gap-2">
+                            {applications.map((app) => <Button key={app.objectRef.token} variant="outline" size="sm"
+                                disabled={disabled || isPending || isScheduled || Date.parse(app.objectRef.expires_at) <= Date.now()}
+                                onClick={() => onInspectApplication?.(app.objectRef)}>
+                                {app.name || t('pages.deviceAssistant.applicationUnnamed')}
+                            </Button>)}
+                        </div>
                     </div>
                 )}
                 {error && (
@@ -193,7 +216,7 @@ export function DeviceAssistantWorkspace({
     const { t } = useTranslation();
     const { i18n } = useTranslation();
     const { isConnected, subscribe, sendMessage } = useDeskSignaling();
-    const { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds } = useDeviceAssistantObservation({
+    const { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds, applications, listApplications, applicationSelectionAvailable } = useDeviceAssistantObservation({
         deskId,
         enabled: assistantEnabled && isConnected,
         subscribe,
@@ -631,6 +654,9 @@ export function DeviceAssistantWorkspace({
                     description={t('pages.deviceAssistant.uiDescription')}
                     entry={entries.desktop_ui_inspect}
                     onRefresh={() => inspectUi()}
+                    applications={applications}
+                    onListApplications={applicationSelectionAvailable ? listApplications : undefined}
+                    onInspectApplication={inspectUi}
                     onDelayedRefresh={scheduleUi}
                     onCancelDelayed={cancelDelayedUi}
                     remainingSeconds={remainingSeconds}

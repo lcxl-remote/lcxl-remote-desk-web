@@ -399,7 +399,19 @@ impl SignalCapabilityGrantStore {
         }
     }
 
-    pub async fn prepare_outcome(
+    // Keep child execution state on the heap instead of embedding it in each caller.
+    #[inline(never)]
+    pub fn prepare_outcome<'a>(
+        &'a self,
+        request: PrepareCapabilityCall<'a>,
+        registry: &'a desk_diagnose_core::provider_registry::ProviderRegistry,
+    ) -> std::pin::Pin<
+        Box<impl std::future::Future<Output = Result<CapabilityPreparation, DbErr>> + 'a>,
+    > {
+        Box::pin(self.prepare_outcome_inner(request, registry))
+    }
+
+    async fn prepare_outcome_inner(
         &self,
         request: PrepareCapabilityCall<'_>,
         registry: &desk_diagnose_core::provider_registry::ProviderRegistry,

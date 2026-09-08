@@ -140,6 +140,30 @@ pub(super) fn collect_foreground(
     max_nodes: u32,
     max_bytes: u32,
 ) -> Result<CollectedUiTree, AgentError> {
+    let current = frontmost_application()?;
+    if current.process_id != expected_process_id || current.image_path != expected_image_path {
+        return Err(failure(
+            AgentErrorKind::SessionUnavailable,
+            "the foreground application changed during inspection",
+            true,
+        ));
+    }
+    collect_application(
+        expected_process_id,
+        expected_image_path,
+        max_depth,
+        max_nodes,
+        max_bytes,
+    )
+}
+
+pub(super) fn collect_application(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    max_depth: u16,
+    max_nodes: u32,
+    max_bytes: u32,
+) -> Result<CollectedUiTree, AgentError> {
     if !crate::macos_permissions::probe().accessibility {
         return Err(failure(
             AgentErrorKind::PermissionDenied,
@@ -147,11 +171,11 @@ pub(super) fn collect_foreground(
             false,
         ));
     }
-    let current = frontmost_application()?;
+    let current = application_by_pid(expected_process_id)?;
     if current.process_id != expected_process_id || current.image_path != expected_image_path {
         return Err(failure(
             AgentErrorKind::SessionUnavailable,
-            "the foreground application changed during Accessibility inspection",
+            "the selected application changed during Accessibility inspection",
             true,
         ));
     }
@@ -159,7 +183,7 @@ pub(super) fn collect_foreground(
     if root.is_null() {
         return Err(failure(
             AgentErrorKind::SessionUnavailable,
-            "the foreground application has no Accessibility root",
+            "the selected application has no Accessibility root",
             true,
         ));
     }
@@ -176,6 +200,13 @@ pub(super) fn collect_foreground(
     let mut state = WalkState::default();
     let mut nodes = Vec::new();
     walk(root.0, None, 0, 0, &config, &mut state, &mut nodes);
+    if application_by_pid(expected_process_id)?.process_started_at != current.process_started_at {
+        return Err(failure(
+            AgentErrorKind::SessionUnavailable,
+            "the selected application restarted during inspection",
+            true,
+        ));
+    }
     Ok(CollectedUiTree {
         nodes,
         truncated: state.truncated,
@@ -268,7 +299,7 @@ pub(super) fn apply_action(
     validate_action_target(element.0, action)?;
     match action {
         UiSemanticAction::Invoke => {
-            let before = collect_foreground(
+            let before = collect_application(
                 expected_process_id,
                 expected_image_path,
                 INVOKE_READBACK_MAX_DEPTH,
@@ -285,7 +316,7 @@ pub(super) fn apply_action(
             perform_action(element.0, name)?;
             let readback_deadline = Instant::now() + INVOKE_READBACK_TIMEOUT;
             let verified = loop {
-                match collect_foreground(
+                match collect_application(
                     expected_process_id,
                     expected_image_path,
                     INVOKE_READBACK_MAX_DEPTH,
@@ -403,11 +434,11 @@ fn locate_action_target(
             false,
         ));
     }
-    let current = frontmost_application()?;
+    let current = application_by_pid(expected_process_id)?;
     if current.process_id != expected_process_id || current.image_path != expected_image_path {
         return Err(failure(
             AgentErrorKind::SessionUnavailable,
-            "the foreground application changed before the Accessibility action",
+            "the selected application changed before the Accessibility action",
             false,
         ));
     }
@@ -415,7 +446,7 @@ fn locate_action_target(
     if root.is_null() {
         return Err(failure(
             AgentErrorKind::SessionUnavailable,
-            "the foreground application has no Accessibility root",
+            "the selected application has no Accessibility root",
             false,
         ));
     }
@@ -698,23 +729,68 @@ fn read_node(
     )
 }
 
+pub(super) fn application_by_pid(process_id: u32) -> Result<ObservedApplication, AgentError> {
+    autoreleasepool(|_| unsafe {
+        let application: *mut AnyObject = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: process_id as i32];
+        application_identity(application)
+    })
+}
+
+/// Metadata only: do not traverse the AX trees of unselected applications.
+pub(super) fn running_applications() -> Result<Vec<ObservedApplication>, AgentError> {
+    autoreleasepool(|_| unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let applications: *mut AnyObject = msg_send![workspace, runningApplications];
+        if applications.is_null() {
+            return Ok(Vec::new());
+        }
+        let count: usize = msg_send![applications, count];
+        let mut result = Vec::new();
+        for index in 0..count.min(4096) {
+            let application: *mut AnyObject = msg_send![applications, objectAtIndex: index];
+            if application.is_null() {
+                continue;
+            }
+            let activation_policy: isize = msg_send![application, activationPolicy];
+            if activation_policy != 0 {
+                continue;
+            }
+            if let Ok(identity) = application_identity(application) {
+                result.push(identity);
+            }
+        }
+        result.sort_by(|a, b| (&a.image_path, a.process_id).cmp(&(&b.image_path, b.process_id)));
+        Ok(result)
+    })
+}
+
 fn frontmost_application() -> Result<ObservedApplication, AgentError> {
     autoreleasepool(|_| unsafe {
         let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
         let application: *mut AnyObject = msg_send![workspace, frontmostApplication];
-        if application.is_null() {
-            return Err(failure(
-                AgentErrorKind::SessionUnavailable,
-                "the macOS Aqua session has no frontmost application",
-                true,
-            ));
-        }
+        application_identity(application)
+    })
+}
+
+unsafe fn application_identity(
+    application: *mut AnyObject,
+) -> Result<ObservedApplication, AgentError> {
+    if application.is_null() {
+        return Err(failure(
+            AgentErrorKind::SessionUnavailable,
+            "the selected macOS application is no longer running",
+            true,
+        ));
+    }
+    // SAFETY: callers keep the NSRunningApplication alive inside an autorelease pool.
+    unsafe {
+        let terminated: bool = msg_send![application, isTerminated];
         let process_id: i32 = msg_send![application, processIdentifier];
         let executable_url: *mut AnyObject = msg_send![application, executableURL];
-        if process_id <= 0 || executable_url.is_null() {
+        if terminated || process_id <= 0 || executable_url.is_null() {
             return Err(failure(
                 AgentErrorKind::SessionUnavailable,
-                "cannot resolve the frontmost macOS application identity",
+                "cannot resolve the macOS application identity",
                 true,
             ));
         }
@@ -723,7 +799,7 @@ fn frontmost_application() -> Result<ObservedApplication, AgentError> {
         if utf8.is_null() {
             return Err(failure(
                 AgentErrorKind::SessionUnavailable,
-                "cannot resolve the frontmost macOS application path",
+                "cannot resolve the macOS application path",
                 true,
             ));
         }
@@ -731,9 +807,9 @@ fn frontmost_application() -> Result<ObservedApplication, AgentError> {
             window_handle: 0,
             process_id: process_id as u32,
             image_path: CStr::from_ptr(utf8).to_string_lossy().into_owned(),
-            process_started_at: None,
+            process_started_at: Some(process_start(process_id as u32)?),
         })
-    })
+    }
 }
 
 fn copy_attribute(element: AxUiElementRef, attribute: &str) -> Option<OwnedCf> {
@@ -1037,6 +1113,45 @@ fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a running background Calculator and Accessibility permission"]
+    fn live_background_calculator_can_be_selected_without_activation() {
+        let foreground = frontmost_application().unwrap();
+        let calculator = running_applications()
+            .unwrap()
+            .into_iter()
+            .find(|application| application.image_path.ends_with("/Calculator"))
+            .expect("running Calculator");
+        assert_ne!(
+            foreground.process_id, calculator.process_id,
+            "Calculator must be in the background"
+        );
+        let tree = collect_application(
+            calculator.process_id,
+            &calculator.image_path,
+            16,
+            1024,
+            1024 * 1024,
+        )
+        .unwrap();
+        assert!(!tree.nodes.is_empty());
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|node| node.role.starts_with("AXWindow"))
+        );
+        assert_eq!(
+            frontmost_application().unwrap().process_id,
+            foreground.process_id
+        );
+        assert_eq!(
+            application_by_pid(calculator.process_id)
+                .unwrap()
+                .process_started_at,
+            calculator.process_started_at
+        );
+    }
 
     #[test]
     fn bounded_strings_stop_on_utf8_boundaries() {

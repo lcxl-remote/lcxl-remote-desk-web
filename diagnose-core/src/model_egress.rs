@@ -54,14 +54,47 @@ pub struct AuthorizedModelRequest {
 }
 
 impl ModelEgressPolicy {
+    /// A persisted receipt remains readable by the model that requested the
+    /// exact tool call. This does not authorize another device invocation.
+    fn history_export_ids(&self, messages: &[ChatMessage]) -> HashSet<String> {
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| is_provider_output(message))
+            .filter_map(|(index, message)| {
+                let source = message.data_envelope.as_ref()?;
+                let call_id = message.tool_call_id.as_ref()?;
+                let parent = messages[..index].iter().find(|parent| {
+                    parent.role == ChatRole::Assistant
+                        && parent.tool_calls.iter().any(|call| {
+                            &call.id == call_id && call.name == source.provenance.source_tool_name
+                        })
+                })?;
+                let authority = parent.data_envelope.as_ref()?;
+                (authority.validate().is_ok()
+                    && authority.allowed_destinations.contains(&self.destination)
+                    && source.validate().is_ok()
+                    && (source.allowed_destinations.is_empty()
+                        || source.allowed_destinations.contains(&self.destination)))
+                .then(|| message.message_id.clone())
+            })
+            .collect()
+    }
+
     pub(crate) fn retained_history_ids(&self, messages: &[ChatMessage]) -> HashSet<String> {
+        self.retained_history_ids_with_exports(messages, &self.history_export_ids(messages))
+    }
+
+    fn retained_history_ids_with_exports(
+        &self,
+        messages: &[ChatMessage],
+        history_exports: &HashSet<String>,
+    ) -> HashSet<String> {
         let mut request =
             ModelRequest::text_only(messages.to_vec(), crate::prompt::ResponseFormatSpec::None);
-        // The browser-visible transcript remains intact, but a removed context
-        // authorization must also remove prior turns derived from that context
-        // from the next provider request. Dropping the complete turn keeps tool
-        // call/result grouping valid and prevents a prior model answer from
-        // becoming an indirect replay path for deselected device data.
+        // Current source selection controls new exports, not immutable receipts
+        // from a tool call already bound to this model. A missing selection is
+        // not an explicit revocation of the conversation's historical facts.
         let tool_call_turns = request
             .messages
             .iter()
@@ -92,6 +125,8 @@ impl ModelEgressPolicy {
                 // tool call and resurrect an older user request.
                 (envelope.provenance.source_provider_id
                     != crate::dynamic_run::RUN_CONTROL_PROVIDER_ID
+                    && !envelope.allowed_destinations.contains(&self.destination)
+                    && !history_exports.contains(&message.message_id)
                     && !self
                         .selected_source_tools
                         .contains(&envelope.provenance.source_tool_name))
@@ -132,7 +167,8 @@ impl ModelEgressPolicy {
                     // to pass ExportData below; it is not an old-model grant.
                     && !(envelope.allowed_destinations.is_empty()
                         && is_provider_output(message)
-                        && self.selected_source_tools.contains(&envelope.provenance.source_tool_name)))
+                        && (self.selected_source_tools.contains(&envelope.provenance.source_tool_name)
+                            || history_exports.contains(&message.message_id))))
                 .then_some(turn_id.clone())
             })
             .collect::<BTreeSet<_>>();
@@ -154,7 +190,7 @@ impl ModelEgressPolicy {
             });
         }
         // Historical results remain facts after their action/reference deadline.
-        // Only source selection and sink authorization affect eligibility here;
+        // Original call authority, new source selection and sink identity apply here;
         // the context planner independently applies the capacity budget.
         let mut omitted_turns = deselected_turns;
         // Unlabeled legacy content has no transferable export authority. Drop
@@ -194,7 +230,24 @@ impl ModelEgressPolicy {
 
     pub fn authorize_request(
         &self,
+        request: ModelRequest,
+    ) -> Result<AuthorizedModelRequest, ModelEgressError> {
+        let history_exports = self.history_export_ids(&request.messages);
+        self.authorize_request_with_exports(request, &history_exports)
+    }
+
+    pub(crate) fn authorize_request_with_history(
+        &self,
+        request: ModelRequest,
+        history: &[ChatMessage],
+    ) -> Result<AuthorizedModelRequest, ModelEgressError> {
+        self.authorize_request_with_exports(request, &self.history_export_ids(history))
+    }
+
+    fn authorize_request_with_exports(
+        &self,
         mut request: ModelRequest,
+        history_exports: &HashSet<String>,
     ) -> Result<AuthorizedModelRequest, ModelEgressError> {
         self.destination
             .validate()
@@ -207,7 +260,7 @@ impl ModelEgressPolicy {
                 "invalid export authorization id or byte cap".into(),
             ));
         }
-        let retained = self.retained_history_ids(&request.messages);
+        let retained = self.retained_history_ids_with_exports(&request.messages, history_exports);
         request
             .messages
             .retain(|message| retained.contains(&message.message_id));
@@ -231,7 +284,9 @@ impl ModelEgressPolicy {
             if message.image_data_url.is_some()
                 && (message.role != ChatRole::Tool
                     || source.provenance.source_tool_name != "read_current_screen"
-                    || !self.selected_source_tools.contains("read_current_screen")
+                    || !(self.selected_source_tools.contains("read_current_screen")
+                        || history_exports.contains(&message.message_id)
+                        || source.allowed_destinations.contains(&self.destination))
                     || source.sensitivity != Sensitivity::Sensitive)
             {
                 return Err(ModelEgressError::ImageNotSupported);
@@ -245,9 +300,10 @@ impl ModelEgressPolicy {
                 source
             } else {
                 if !is_provider_output(message)
-                    || !self
+                    || !(self
                         .selected_source_tools
                         .contains(&source.provenance.source_tool_name)
+                        || history_exports.contains(&message.message_id))
                 {
                     return Err(ModelEgressError::ExportNotSelected {
                         message_id: message.message_id.clone(),
@@ -1544,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn deselected_context_prunes_its_complete_prior_turn_but_not_visible_history() {
+    fn followup_without_read_selection_keeps_receipts_and_answers() {
         let destination = destination();
         let mut prior_call = message(
             "prior-call",
@@ -1564,6 +1620,14 @@ mod tests {
             name: "inspect_desktop_ui".into(),
             arguments_json: "{}".into(),
         }];
+        let bytes = message_content_bytes(&prior_call).unwrap();
+        prior_call.data_envelope = Some(envelope(
+            "prior-call-envelope",
+            "model-response",
+            &bytes,
+            Sensitivity::UserContent,
+            vec![destination.clone()],
+        ));
         let mut prior_tool = message(
             "prior-tool",
             ChatRole::Tool,
@@ -1607,19 +1671,28 @@ mod tests {
         let request = ModelRequest::text_only(visible_history.clone(), ResponseFormatSpec::None);
 
         let authorized = policy(&[]).authorize_request(request).unwrap();
-        assert_eq!(authorized.request.messages.len(), 1);
-        assert_eq!(authorized.request.messages[0].message_id, "current-user");
-        assert_eq!(
-            visible_history.len(),
-            4,
-            "projection must not mutate stored history"
-        );
+        assert_eq!(authorized.request.messages.len(), 4);
+        assert_eq!(authorized.request.messages[1].text, "sensitive old UI");
+        assert_eq!(visible_history.len(), 4);
+        // A result detached from its original call is not a new export grant.
+        let detached =
+            ModelRequest::text_only(vec![visible_history[1].clone()], ResponseFormatSpec::None);
+        assert!(matches!(
+            policy(&[]).authorize_request(detached),
+            Err(ModelEgressError::ExportNotSelected { .. })
+        ));
+        let mut other_sink = policy(&[]);
+        if let DestinationIdentity::Model {
+            ref mut profile_revision,
+            ..
+        } = other_sink.destination
+        {
+            *profile_revision += 1;
+        }
         assert!(
-            authorized
-                .request
-                .messages
-                .iter()
-                .all(|message| !message.text.contains("sensitive"))
+            !other_sink
+                .retained_history_ids(&visible_history)
+                .contains("prior-tool")
         );
     }
 

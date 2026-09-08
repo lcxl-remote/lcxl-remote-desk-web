@@ -103,7 +103,11 @@ impl ReadCallPreflight {
                     | CapabilityEffect::ReadFile
                     | CapabilityEffect::CaptureScreen
             )
-            || !binding.original.tool_names.contains(&call.name)
+            // Desktop reads may be selected by a later owner decision. This
+            // preflight derives bounds only; the runtime must consume the R1
+            // grant before dispatch, even when no object was attached.
+            || (!binding.original.tool_names.contains(&call.name)
+                && !crate::device_assistant::is_requestable_desktop_read(&call.name))
             || call.id.trim().is_empty()
             || call.id.len() > 512
             || call.arguments_json.len() > capability.wire.limits.max_input_bytes as usize

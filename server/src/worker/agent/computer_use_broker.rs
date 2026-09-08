@@ -2354,6 +2354,93 @@ impl ComputerUseBroker {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn inspect_application_catalog(
+        &self,
+        session_id: u32,
+        params: &UiInspectParams,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<UiInspectOutput, AgentError> {
+        let snapshot_id = self.next_snapshot_id();
+        let incarnation = format!("{}:{}", session_id, self.current_incarnation_nonce());
+        let mut output = UiInspectOutput {
+            snapshot_id: snapshot_id.clone(),
+            adapter: ComputerUseAdapterRef {
+                kind: ComputerUseAdapterKind::MacosAccessibility,
+                version: "macos-accessibility-read/v1".into(),
+            },
+            nodes: Vec::new(),
+            owner_selectable_windows: Vec::new(),
+            truncated: false,
+        };
+        for application in super::macos_accessibility_observer::running_applications()? {
+            if !ceiling.application_allowed(&application.image_path) {
+                continue;
+            }
+            if output.nodes.len() >= (params.max_nodes as usize).min(128) {
+                output.truncated = true;
+                break;
+            }
+            let name = std::path::Path::new(&application.image_path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            let object_ref = self.issue_ref(
+                &snapshot_id,
+                &incarnation,
+                ObjectKind::Application,
+                ResolvedObject::Application {
+                    window_handle: application.window_handle,
+                    process_id: application.process_id,
+                    image_path: application.image_path,
+                    process_started_at: application.process_started_at,
+                },
+            )?;
+            output.nodes.push(UiNodeProjection {
+                object_ref,
+                parent_index: None,
+                role: "application".into(),
+                name,
+                value: None,
+                is_protected: false,
+                enabled: true,
+                supported_actions: Vec::new(),
+            });
+            if serde_json::to_vec(&output)
+                .map_err(|_| {
+                    error(
+                        AgentErrorKind::Internal,
+                        "failed to encode the application catalog",
+                        false,
+                    )
+                })?
+                .len()
+                > params.max_bytes as usize
+            {
+                output.nodes.pop();
+                output.truncated = true;
+                break;
+            }
+        }
+        if serde_json::to_vec(&output)
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "failed to encode the application catalog",
+                    false,
+                )
+            })?
+            .len()
+            > params.max_bytes as usize
+        {
+            return Err(error(
+                AgentErrorKind::OutputLimitExceeded,
+                "application catalog byte budget is too small",
+                false,
+            ));
+        }
+        Ok(output)
+    }
+
     pub fn inspect_desktop_ui(
         &self,
         params: &UiInspectParams,
@@ -2390,20 +2477,43 @@ impl ComputerUseBroker {
         };
 
         let observed = observe_interactive_desktop()?;
-        let application = observed.foreground_application.ok_or_else(|| {
-            error(
-                AgentErrorKind::SessionUnavailable,
-                "the interactive desktop has no foreground application",
-                true,
-            )
-        })?;
+        #[cfg(target_os = "macos")]
+        if let Some(ResolvedObject::DesktopSession { session_id }) = &resolved_root
+            && *session_id == observed.session_id
+        {
+            return self.inspect_application_catalog(*session_id, params, ceiling);
+        }
+        #[cfg(target_os = "macos")]
+        let selected_application = match &resolved_root {
+            Some(ResolvedObject::Application { process_id, .. })
+            | Some(ResolvedObject::Window { process_id, .. }) => Some(
+                super::macos_accessibility_observer::application_by_pid(*process_id)?,
+            ),
+            _ => None,
+        };
+        #[cfg(not(target_os = "macos"))]
+        let selected_application = None;
+        let application = selected_application
+            .or(observed.foreground_application)
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::SessionUnavailable,
+                    "the interactive desktop has no foreground application",
+                    true,
+                )
+            })?;
         if !ceiling.application_allowed(&application.image_path) {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
-                "the foreground application is not in the device-local Computer Use allowlist",
+                "the selected application is not in the device-local Computer Use allowlist",
                 false,
             ));
         }
+        #[cfg(target_os = "macos")]
+        let selected_window = match &resolved_root {
+            Some(ResolvedObject::Window { fingerprint, .. }) => Some(fingerprint.clone()),
+            _ => None,
+        };
         match resolved_root {
             Some(ResolvedObject::DesktopSession { session_id })
                 if session_id == observed.session_id => {}
@@ -2426,7 +2536,7 @@ impl ComputerUseBroker {
             Some(_) => {
                 return Err(error(
                     AgentErrorKind::InvalidInput,
-                    "the UI inspection root is stale or is not the foreground application",
+                    "the UI inspection root is stale or does not match the selected application",
                     false,
                 ));
             }
@@ -2434,6 +2544,23 @@ impl ComputerUseBroker {
 
         let (collected, adapter_kind, adapter_version, adapter_name) =
             collect_foreground_desktop_ui(application.process_id, &application.image_path, params)?;
+
+        #[cfg(target_os = "macos")]
+        if super::macos_accessibility_observer::application_by_pid(application.process_id)?
+            .process_started_at
+            != application.process_started_at
+        {
+            return Err(error(
+                AgentErrorKind::SessionUnavailable,
+                "the selected application restarted during inspection",
+                true,
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        let collected = match selected_window {
+            Some(fingerprint) => select_window_tree(collected, &fingerprint)?,
+            None => collected,
+        };
 
         let snapshot_id = self.next_snapshot_id();
         let incarnation = format!(
@@ -2675,7 +2802,24 @@ impl ComputerUseBroker {
         if let Ok(mut objects) = self.objects.lock() {
             let before = objects.len();
             objects.retain(|_, object| {
-                matches!(&object.resolved, ResolvedObject::OfficeDocument { .. })
+                if matches!(&object.resolved, ResolvedObject::OfficeDocument { .. }) {
+                    return true;
+                }
+                // macOS application/session selectors are read identities, not
+                // UI snapshots. Clicking the picker must not invalidate them.
+                // Session changes and expiry still invalidate every selector.
+                #[cfg(target_os = "macos")]
+                if matches!(
+                    &object.resolved,
+                    ResolvedObject::DesktopSession { .. }
+                        | ResolvedObject::Application {
+                            process_started_at: Some(_),
+                            ..
+                        }
+                ) {
+                    return true;
+                }
+                false
             });
             log::debug!(
                 "[computer-use-ref] user input source={source:?} epoch={} retained={} removed={}",
@@ -3179,6 +3323,38 @@ pub(super) struct CollectedUiTree {
     pub(super) truncated: bool,
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn select_window_tree(
+    tree: CollectedUiTree,
+    fingerprint: &str,
+) -> Result<CollectedUiTree, AgentError> {
+    let mut remap = std::collections::HashMap::new();
+    let mut nodes = Vec::new();
+    for (index, mut node) in tree.nodes.into_iter().enumerate() {
+        let is_root = node.fingerprint == fingerprint
+            && (node.role == "AXWindow" || node.role.starts_with("AXWindow/"));
+        let parent = node
+            .parent_index
+            .and_then(|parent| remap.get(&parent).copied());
+        if is_root || parent.is_some() {
+            node.parent_index = parent;
+            remap.insert(index as u32, nodes.len() as u32);
+            nodes.push(node);
+        }
+    }
+    if nodes.is_empty() {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "the selected window is stale or outside the bounded observation",
+            true,
+        ));
+    }
+    Ok(CollectedUiTree {
+        nodes,
+        truncated: tree.truncated,
+    })
+}
+
 fn collect_foreground_desktop_ui(
     process_id: u32,
     image_path: &str,
@@ -3211,7 +3387,7 @@ fn collect_foreground_desktop_ui(
     #[cfg(target_os = "macos")]
     {
         Ok((
-            super::macos_accessibility_observer::collect_foreground(
+            super::macos_accessibility_observer::collect_application(
                 process_id,
                 image_path,
                 params.max_depth,
@@ -3360,6 +3536,39 @@ fn path_eq(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_window_tree_keeps_exact_subtree_and_original_fingerprints() {
+        let node = |role: &str, fingerprint: &str, parent| CollectedUiNode {
+            parent_index: parent,
+            role: role.into(),
+            name: None,
+            value: None,
+            is_protected: false,
+            enabled: true,
+            supported_actions: vec![],
+            fingerprint: fingerprint.into(),
+        };
+        let tree = || CollectedUiTree {
+            nodes: vec![
+                node("AXApplication", "app", None),
+                node("AXWindow", "first", Some(0)),
+                node("AXButton", "first-button", Some(1)),
+                node("AXWindow/AXStandardWindow", "selected", Some(0)),
+                node("AXGroup", "group", Some(3)),
+                node("AXButton", "selected-button", Some(4)),
+            ],
+            truncated: false,
+        };
+        let selected = select_window_tree(tree(), "selected").unwrap();
+        assert_eq!(selected.nodes.len(), 3);
+        assert_eq!(selected.nodes[0].parent_index, None);
+        assert_eq!(selected.nodes[1].parent_index, Some(0));
+        assert_eq!(selected.nodes[2].parent_index, Some(1));
+        assert_eq!(selected.nodes[2].fingerprint, "selected-button");
+        assert!(select_window_tree(tree(), "first-button").is_err());
+        assert!(select_window_tree(tree(), "gone-window").is_err());
+    }
 
     #[test]
     fn browser_state_is_unavailable_without_a_paired_extension() {
@@ -3680,14 +3889,49 @@ mod tests {
             .issue_ref(
                 &broker.next_snapshot_id(),
                 "test-incarnation",
-                ObjectKind::DesktopSession,
-                ResolvedObject::DesktopSession { session_id: 1 },
+                ObjectKind::UiElement,
+                ResolvedObject::UiElement {
+                    process_id: 1,
+                    image_path: "app".into(),
+                    fingerprint: "snapshot".into(),
+                },
             )
             .unwrap();
         assert!(broker.resolve_ref(&reference).is_ok());
         broker.note_browser_input();
         let error = broker.resolve_ref(&reference).unwrap_err();
         assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn human_input_preserves_application_selection_identity() {
+        let broker = ComputerUseBroker::new();
+        let reference = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "session",
+                ObjectKind::Application,
+                ResolvedObject::Application {
+                    window_handle: 0,
+                    process_id: 1,
+                    image_path: "/Applications/Calculator.app/Contents/MacOS/Calculator".into(),
+                    process_started_at: Some(7),
+                },
+            )
+            .unwrap();
+        broker.note_external_input();
+        assert!(broker.resolve_ref(&reference).is_ok());
+        // Removing or changing the process identity is still checked at read time.
+        assert!(matches!(
+            broker.resolve_ref(&reference).unwrap(),
+            ResolvedObject::Application {
+                process_started_at: Some(7),
+                ..
+            }
+        ));
+        broker.reset_worker_incarnation();
+        assert!(broker.resolve_ref(&reference).is_err());
     }
 
     #[test]
@@ -4243,6 +4487,89 @@ mod tests {
         let (ready, reason) = screen_capture_readiness(true, true, true, None, true, true);
         assert!(ready);
         assert_eq!(reason, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires background Calculator and Accessibility permission"]
+    fn live_background_application_catalog_selection_and_window_scope() {
+        let calculator = super::super::macos_accessibility_observer::running_applications()
+            .unwrap()
+            .into_iter()
+            .find(|app| app.image_path.ends_with("/Calculator"))
+            .unwrap();
+        let observed = observe_interactive_desktop().unwrap();
+        assert_ne!(
+            observed.foreground_application.unwrap().process_id,
+            calculator.process_id
+        );
+        let ceiling = ComputerUseSettings {
+            enabled: true,
+            observe: true,
+            generic_semantic_ui: true,
+            allowed_application_paths: vec![calculator.image_path.clone()],
+            ..Default::default()
+        };
+        let broker = ComputerUseBroker::new();
+        let session = broker
+            .inspect_desktop_session(
+                &DesktopSessionInspectParams {
+                    include_active_application: true,
+                },
+                &ceiling,
+            )
+            .unwrap();
+        let mut params = UiInspectParams {
+            root: Some(session.session),
+            max_depth: 16,
+            max_nodes: 300,
+            max_bytes: 262144,
+        };
+        let catalog = broker.inspect_desktop_ui(&params, &ceiling).unwrap();
+        assert_eq!(catalog.nodes.len(), 1);
+        assert_eq!(catalog.nodes[0].role, "application");
+        assert_eq!(
+            catalog.nodes[0].object_ref.object_kind,
+            ObjectKind::Application
+        );
+        assert!(catalog.nodes[0].supported_actions.is_empty());
+        assert!(catalog.owner_selectable_windows.is_empty());
+        let app = catalog.nodes[0].object_ref.clone();
+        broker.note_external_input();
+        params.root = Some(app.clone());
+        let tree = broker.inspect_desktop_ui(&params, &ceiling).unwrap();
+        assert!(!tree.nodes.is_empty());
+        assert!(!tree.owner_selectable_windows.is_empty());
+        let window = tree.owner_selectable_windows[0].object_ref.clone();
+        params.root = Some(window);
+        let window_tree = broker.inspect_desktop_ui(&params, &ceiling).unwrap();
+        assert!(window_tree.nodes[0].role.starts_with("AXWindow"));
+        assert_eq!(window_tree.nodes[0].parent_index, None);
+        let restricted = ComputerUseSettings {
+            allowed_application_paths: vec!["/no-such-application".into()],
+            ..ceiling.clone()
+        };
+        params.root = Some(app.clone());
+        assert_eq!(
+            broker
+                .inspect_desktop_ui(&params, &restricted)
+                .unwrap_err()
+                .kind,
+            AgentErrorKind::PermissionDenied
+        );
+        if let ResolvedObject::Application {
+            process_started_at, ..
+        } = &mut broker
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(&app.token)
+            .unwrap()
+            .resolved
+        {
+            *process_started_at = Some(0);
+        }
+        assert!(broker.inspect_desktop_ui(&params, &ceiling).is_err());
     }
 
     #[cfg(any(windows, target_os = "macos"))]
