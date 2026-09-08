@@ -6,6 +6,7 @@ import { v4 } from 'uuid';
 import type { AiProvenance } from '@/components/ai-generated-mark';
 import type {
     BackgroundTaskDto,
+    CommandTaskDto,
     CapabilityGrantDto,
     ContextNoticeDto,
     PermissionDecisionBody,
@@ -17,6 +18,7 @@ import type { DeviceAssistantEvent, DeviceAssistantVisualEvidence } from './devi
 import {
     SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT,
     SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT,
+    SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_OBJECT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_SESSION_SELECTED,
@@ -189,6 +191,7 @@ type PersistedSnapshot = {
     taskStatusProjection?: DeviceAssistantTaskStatusProjection | null;
     permissionRequests?: PermissionRequestDto[];
     backgroundTasks?: BackgroundTaskDto[];
+    commandTasks?: CommandTaskDto[];
     capabilityGrants?: CapabilityGrantDto[];
     unresolvedOutcome?: DeviceAssistantUnknownOutcome | null;
     messages: PersistedSnapshotMessage[];
@@ -300,6 +303,8 @@ export function useDeviceAssistantChat({
         useState<DeviceAssistantTaskStatusProjection | null>(null);
     const [permissionRequests, setPermissionRequests] = useState<PermissionRequestDto[]>([]);
     const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTaskDto[]>([]);
+    const [commandTasks, setCommandTasks] = useState<CommandTaskDto[]>([]);
+    const [taskCancelling, setTaskCancelling] = useState<string | null>(null);
     const [capabilityGrants, setCapabilityGrants] = useState<CapabilityGrantDto[]>([]);
     const [unresolvedOutcome, setUnresolvedOutcome] =
         useState<DeviceAssistantUnknownOutcome | null>(null);
@@ -430,6 +435,7 @@ export function useDeviceAssistantChat({
             setTaskStatusProjection(projected.taskStatusProjection);
             setPermissionRequests(projected.permissionRequests);
             setBackgroundTasks(projected.backgroundTasks);
+            setCommandTasks(snapshot.commandTasks ?? []);
             setCapabilityGrants(projected.capabilityGrants);
             setUnresolvedOutcome(projected.unresolvedOutcome);
             setPendingInputCount(projected.pendingInputCount);
@@ -578,6 +584,7 @@ export function useDeviceAssistantChat({
         setTaskStatusProjection(null);
         setPermissionRequests([]);
         setBackgroundTasks([]);
+        setCommandTasks([]);
         setCapabilityGrants([]);
         setUnresolvedOutcome(null);
         setOutcomeDisposing(false);
@@ -619,6 +626,7 @@ export function useDeviceAssistantChat({
             setTaskStatusProjection(null);
             setPermissionRequests([]);
             setBackgroundTasks([]);
+            setCommandTasks([]);
             setCapabilityGrants([]);
             setPermissionUpdating(false);
             setGrantRevoking(null);
@@ -1084,6 +1092,39 @@ export function useDeviceAssistantChat({
         }
     }, [deskId, loadSnapshot, outcomeDisposing, unresolvedOutcome]);
 
+    const cancelTask = useCallback(async (kind: 'command' | 'provider', taskId: string): Promise<void> => {
+        if (!conversationId.current || taskCancelling) throw new Error('Task cancellation is unavailable.');
+        const currentConversationId = conversationId.current;
+        setTaskCancelling(`${kind}:${taskId}`);
+        try {
+            if (kind === 'command') {
+                const task = commandTasks.find(item => item.taskId === taskId);
+                if (connected === false || !task || !['running', 'outcome_unknown'].includes(task.state)) {
+                    throw new Error('Task is no longer cancellable.');
+                }
+                sendMessage(SIGNALING_TYPE_CODE_CONTROL_EXECUTION, {
+                    execution_generation: task.executionGeneration,
+                    action: 'cancel', requested_by: 'control-end',
+                }, deskId);
+            } else {
+                const task = backgroundTasks.find(item => item.taskId === taskId);
+                if (!task?.supportsCancel || !['running', 'outcome_unknown'].includes(task.state)) {
+                    throw new Error('Task is no longer cancellable.');
+                }
+                const response = await fetch('/api/my/device-assistant-session/background-task/cancel', {
+                    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ connection: deskId, conversation: currentConversationId,
+                        taskId, requestId: v4(), reason: 'Cancelled by the conversation owner.' }),
+                });
+                const body = await response.json();
+                if (!response.ok || body.code !== deskErrorCodeEnum.SUCCESS) throw new Error(body.message || 'Cancellation failed.');
+            }
+            if (conversationId.current === currentConversationId) await loadSnapshot(currentConversationId);
+        } finally {
+            setTaskCancelling(null);
+        }
+    }, [backgroundTasks, commandTasks, connected, deskId, loadSnapshot, sendMessage, taskCancelling]);
+
     const stop = useCallback(() => {
         const requestId = activeRequest.current ?? snapshotActiveRequest.current;
         if (connected === false || !requestId || stopPending.current) return;
@@ -1137,6 +1178,7 @@ export function useDeviceAssistantChat({
         setTaskStatusProjection(null);
         setPermissionRequests([]);
         setBackgroundTasks([]);
+        setCommandTasks([]);
         setCapabilityGrants([]);
         setUnresolvedOutcome(null);
         setOutcomeDisposing(false);
@@ -1188,6 +1230,9 @@ export function useDeviceAssistantChat({
         taskStatusProjection,
         permissionRequests,
         backgroundTasks,
+        commandTasks,
+        taskCancelling,
+        cancelTask,
         capabilityGrants,
         unresolvedOutcome,
         outcomeDisposing,

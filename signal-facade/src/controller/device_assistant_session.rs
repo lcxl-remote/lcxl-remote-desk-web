@@ -496,6 +496,8 @@ pub struct DeviceAssistantSessionSnapshotDto {
     pub permission_requests: Vec<PermissionRequestDto>,
     /// Durable Provider executions that outlived their foreground wait.
     pub background_tasks: Vec<BackgroundTaskDto>,
+    /// Persisted command executions, including terminal results after reconnect.
+    pub command_tasks: Vec<CommandTaskDto>,
     /// Server-issued authority metadata. It never proves a call was dispatched.
     pub capability_grants: Vec<CapabilityGrantDto>,
     /// Bounded metadata-only lineage graph. It contains no message bodies,
@@ -874,6 +876,70 @@ pub enum BackgroundTaskStateDto {
     Failed,
     Cancelled,
     OutcomeUnknown,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandTaskDto {
+    pub task_id: String,
+    pub call_id: String,
+    pub execution_generation: String,
+    pub state: BackgroundTaskStateDto,
+    pub updated_at: String,
+    pub result: Option<String>,
+    pub result_truncated: bool,
+}
+
+impl CommandTaskDto {
+    pub fn project(
+        task_id: String,
+        call_id: String,
+        execution_generation: String,
+        status: &str,
+        updated_at: String,
+        outcome: Option<desk_agent_protocol::AgentOutcome>,
+    ) -> Self {
+        use desk_agent_protocol::{AgentErrorKind, AgentOutcome, OperationOutput};
+        let state = match &outcome {
+            Some(AgentOutcome::Err(error)) if error.kind == AgentErrorKind::Cancelled => {
+                BackgroundTaskStateDto::Cancelled
+            }
+            Some(AgentOutcome::Err(_)) => BackgroundTaskStateDto::Failed,
+            Some(AgentOutcome::Ok(OperationOutput::Exec(output))) if output.exit_code != 0 => {
+                BackgroundTaskStateDto::Failed
+            }
+            Some(AgentOutcome::Ok(_)) => BackgroundTaskStateDto::Succeeded,
+            None => match status {
+                "running" | "dispatching" | "dispatched" => BackgroundTaskStateDto::Running,
+                "cancel_requested" => BackgroundTaskStateDto::CancelRequested,
+                "cancelled" => BackgroundTaskStateDto::Cancelled,
+                "failed" | "rejected" | "expired" => BackgroundTaskStateDto::Failed,
+                _ => BackgroundTaskStateDto::OutcomeUnknown,
+            },
+        };
+        let mut result = outcome.and_then(|outcome| serde_json::to_string_pretty(&outcome).ok());
+        let mut result_truncated = false;
+        if let Some(text) = result.as_mut() {
+            const MAX_RESULT_BYTES: usize = 16 * 1024;
+            if text.len() > MAX_RESULT_BYTES {
+                let mut end = MAX_RESULT_BYTES;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.truncate(end);
+                result_truncated = true;
+            }
+        }
+        Self {
+            task_id,
+            call_id,
+            execution_generation,
+            state,
+            updated_at,
+            result,
+            result_truncated,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1465,5 +1531,47 @@ mod scheduled_query_tests {
             serde_json::from_value(serde_json::json!({"connection":"host", "conversation":"chat"}))
                 .unwrap();
         assert_eq!(query.scheduled_selection().unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod command_task_projection_tests {
+    use super::*;
+    use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome};
+
+    #[test]
+    fn command_projection_preserves_terminal_failure_and_bounds_unicode_output() {
+        let task = CommandTaskDto::project(
+            "task".into(),
+            "call".into(),
+            "generation".into(),
+            "done",
+            "2026-09-08T00:00:00Z".into(),
+            Some(AgentOutcome::Err(AgentError {
+                kind: AgentErrorKind::Cancelled,
+                message: "取消".repeat(20_000),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            })),
+        );
+        assert!(matches!(task.state, BackgroundTaskStateDto::Cancelled));
+        assert!(task.result_truncated);
+        assert!(task.result.as_ref().unwrap().len() <= 16 * 1024);
+        assert_eq!(task.execution_generation, "generation");
+    }
+
+    #[test]
+    fn missing_or_invalid_result_is_unknown_not_success() {
+        let task = CommandTaskDto::project(
+            "task".into(),
+            "call".into(),
+            "generation".into(),
+            "done",
+            "now".into(),
+            None,
+        );
+        assert!(matches!(task.state, BackgroundTaskStateDto::OutcomeUnknown));
+        assert!(task.result.is_none());
     }
 }

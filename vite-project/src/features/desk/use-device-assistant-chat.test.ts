@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT,
     SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT,
+    SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_OBJECT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_SESSION_SELECTED,
@@ -1098,6 +1099,29 @@ describe('useDeviceAssistantChat', () => {
         });
         expect(result.current.messages.some((message) => message.text === 'stale answer')).toBe(false);
         expect(result.current.running).toBe(true);
+    });
+
+    it('restores command tasks and cancels only the selected original generation', async () => {
+        localStorage.setItem('device-assistant-conversation:task-list', 'saved-conversation');
+        const tasks = [
+            { taskId: 'command-1', callId: 'call-1', executionGeneration: 'generation-1', state: 'running', updatedAt: '2026-09-08T00:00:00Z', result: null, resultTruncated: false },
+            { taskId: 'command-2', callId: 'call-2', executionGeneration: 'generation-2', state: 'succeeded', updatedAt: '2026-09-08T00:00:00Z', result: 'original output', resultTruncated: false },
+        ];
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 10, active: false, messages: [], commandTasks: tasks,
+        } }) }));
+        const sendMessage = vi.fn().mockReturnValue('control-request');
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'task-list',
+            subscribe: () => () => undefined, sendMessage }));
+        await waitFor(() => expect(result.current.commandTasks).toHaveLength(2));
+        await act(async () => result.current.cancelTask('command', 'command-1'));
+        expect(sendMessage).toHaveBeenCalledExactlyOnceWith(SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
+            { execution_generation: 'generation-1', action: 'cancel', requested_by: 'control-end' }, 'task-list');
+        expect(result.current.commandTasks[0].state).toBe('running');
+        expect(result.current.commandTasks[1].result).toBe('original output');
+        await act(async () => { await expect(result.current.cancelTask('command', 'command-2')).rejects.toThrow(); });
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        unmount();
     });
 
     it('stops the current turn once without clearing its conversation or messages', () => {

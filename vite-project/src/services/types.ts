@@ -790,6 +790,37 @@ export type CommandConfirmationDto = {
     timeoutMs: number;
 };
 
+export type CommandTaskDto = {
+    /**
+     * @type string
+    */
+    callId: string;
+    /**
+     * @type string
+    */
+    executionGeneration: string;
+    /**
+     * @type string,null
+    */
+    result?: string | null;
+    /**
+     * @type boolean
+    */
+    resultTruncated: boolean;
+    /**
+     * @type string
+    */
+    state: BackgroundTaskStateDto;
+    /**
+     * @type string
+    */
+    taskId: string;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
 export const communicationChannelEnum = {
     email: "email",
     chat: "chat",
@@ -2689,6 +2720,11 @@ export type DeviceAssistantSessionSnapshotDto = {
      * @type array
     */
     capabilityGrants: CapabilityGrantDto[];
+    /**
+     * @description Persisted command executions, including terminal results after reconnect.
+     * @type array
+    */
+    commandTasks: CommandTaskDto[];
     /**
      * @description Durable selection metadata only; no UI tree, cells, files or screenshots.
      * @type array
@@ -5492,6 +5528,11 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
          * @type array
         */
         capabilityGrants: CapabilityGrantDto[];
+        /**
+         * @description Persisted command executions, including terminal results after reconnect.
+         * @type array
+        */
+        commandTasks: CommandTaskDto[];
         /**
          * @description Durable selection metadata only; no UI tree, cells, files or screenshots.
          * @type array

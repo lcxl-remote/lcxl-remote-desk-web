@@ -24,6 +24,7 @@ use crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
 use crate::error::DeskSignalError;
 
 pub const TAG: &str = "DeviceAssistantSession";
+mod command_tasks;
 pub(crate) mod recovery;
 pub use desk_signal_facade::controller::device_assistant_session::*;
 
@@ -165,7 +166,7 @@ pub async fn get_device_assistant_session(
                 DeviceAssistantSessionSnapshotDto {
                     file_scope: snapshot.file_scope.into(),
                     terminal_error: snapshot.terminal_error,
-                    session_id,
+                    session_id: session_id.clone(),
                     context_usage: snapshot.context_usage.map(Into::into),
                     seq: snapshot.seq,
                     active: snapshot.active,
@@ -186,6 +187,7 @@ pub async fn get_device_assistant_session(
                     task_status_projection: snapshot.task_status_projection.map(Into::into),
                     permission_requests,
                     background_tasks: background_tasks.into_iter().map(Into::into).collect(),
+                    command_tasks: command_tasks::list(crate::db::get_db(), &session_id).await?,
                     capability_grants: capability_grants.into_iter().map(Into::into).collect(),
                     evidence_summary,
                     visual_evidence,

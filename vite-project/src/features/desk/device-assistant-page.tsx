@@ -1,4 +1,4 @@
-import { formatLocalTime } from '@/lib/local-time';
+import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 import { AssistantContextMeter } from './assistant-context-meter';
@@ -224,6 +224,7 @@ export function DeviceAssistantWorkspace({
     const [pairingCopied, setPairingCopied] = useState(false);
     const [question, setQuestion] = useState(rehearsal?.status === 'pending' ? rehearsal.prompt : '');
     const rehearsalCanStart = !rehearsal || (rehearsal.status === 'pending' && !chat.running && !chat.messages.some(message => message.role === 'user'));
+    const [taskPanelSession, setTaskPanelSession] = useState<string | null>(null);
     const [panel, setPanel] = useState<AssistantPanelId | null>(null);
     const [permissionHistorySession, setPermissionHistorySession] = useState<string | null>(null);
     const [directorySession, setDirectorySession] = useState<string | null>(null);
@@ -708,7 +709,6 @@ export function DeviceAssistantWorkspace({
                             </CardDescription>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
-                            {chat.status !== 'using_tool' && <Badge variant="outline">{t(`pages.deviceAssistant.chatPhase.${chat.status}`)}</Badge>}
                             <AssistantHistory deskId={deskId} disabled={!!rehearsal || chat.running || chat.hydrating || !!chat.grantRevoking}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
@@ -819,35 +819,12 @@ export function DeviceAssistantWorkspace({
                             ))}
                         </div>
                     )}
-                    {chat.backgroundTasks.length > 0 && (
-                        <div data-testid="device-assistant-background-tasks" className="space-y-3 rounded-md border border-blue-500/40 p-3">
-                            <div>
-                                <p className="text-sm font-medium">{t('pages.deviceAssistant.backgroundTitle')}</p>
-                                <p className="text-xs text-muted-foreground">
-                                    {t('pages.deviceAssistant.backgroundDescription')}
-                                </p>
-                            </div>
-                            {chat.backgroundTasks.map((task) => (
-                                <div key={task.taskId} className="space-y-2 rounded-md bg-muted/50 p-3">
-                                    <div className="flex flex-wrap items-center justify-between gap-2">
-                                        <div>
-                                            <p className="text-sm font-medium">{task.toolName}</p>
-                                            <p className="break-all text-xs text-muted-foreground">
-                                                {task.providerId} · {task.capabilityId}
-                                            </p>
-                                        </div>
-                                        <Badge variant={task.state === 'running' || task.state === 'cancel_requested' ? 'default' : 'outline'}>
-                                            {t(`pages.deviceAssistant.backgroundState.${task.state}`)}
-                                        </Badge>
-                                    </div>
-                                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                                        <span>{t('pages.deviceAssistant.backgroundProgress', { sequence: task.progressSequence })}</span>
-                                        <span>{t('pages.deviceAssistant.backgroundUpdated', { time: formatLocalTime(task.updatedAt) })}</span>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
+                    <AssistantBackgroundTasks key={`tasks:${permissionHistoryKey}`}
+                        open={taskPanelSession === permissionHistoryKey}
+                        onOpenChange={open => setTaskPanelSession(open ? permissionHistoryKey : null)}
+                        commands={chat.commandTasks} providers={chat.backgroundTasks} tools={chat.tools}
+                        connected={isConnected} canCancelProvider={featureProfile.background_task_cancel}
+                        cancelling={chat.taskCancelling} onCancel={chat.cancelTask} />
                     <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope}
                         open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory} />
@@ -932,6 +909,8 @@ export function DeviceAssistantWorkspace({
                         <div className="flex items-center justify-between gap-3">
                             <AssistantComposerTools
                                 meter={<AssistantContextMeter usage={chat.contextUsage} draft={question} />}
+                                onTasks={() => setTaskPanelSession(permissionHistoryKey)}
+                                runningTaskCount={[...chat.commandTasks, ...chat.backgroundTasks].filter(task => ['running', 'cancel_requested'].includes(task.state)).length}
                                 onDetails={() => setPanel('details')}
                                 onPermissionHistory={() => setPermissionHistorySession(permissionHistoryKey)}
                                 onDirectories={() => setDirectorySession(permissionHistoryKey)}
