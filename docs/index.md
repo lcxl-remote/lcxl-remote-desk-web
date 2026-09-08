@@ -19,7 +19,7 @@ hero:
 features:
   - icon: 🤖
     title: AI-Native by Design
-    details: A built-in diagnostic agent reads device state and may propose commands. Owner-only commands run only after an explicit per-command confirmation; the server remains the sole authority on permissions and risk.
+    details: A built-in AI assistant reads device state and may propose commands. Owner-only commands run only after an explicit per-command confirmation; the server remains the sole authority on permissions and risk.
     link: /features/ai-diagnostics
     linkText: AI Diagnostics
   - icon: 🔌

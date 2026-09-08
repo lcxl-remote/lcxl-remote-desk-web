@@ -1,6 +1,6 @@
 # Introduction
 
-**LCXL Remote Desk** is an **AI-native**, open-source, high-performance remote desktop. It treats AI as a **first-class control plane alongside the browser**: beyond browser-based remote control, it ships a built-in diagnostic AI agent that reads device state and can propose owner-confirmed commands, while exposing only the read capabilities to external AI assistants via a read-only [MCP](https://modelcontextprotocol.io/) server.
+**LCXL Remote Desk** is an **AI-native**, open-source, high-performance remote desktop. It treats AI as a **first-class control plane alongside the browser**: beyond browser-based remote control, it ships a built-in AI assistant that reads device state and can propose owner-confirmed commands, while exposing only the read capabilities to external AI assistants via a read-only [MCP](https://modelcontextprotocol.io/) server.
 
 The backend is written in Rust (Actix-Web); the frontend with React + Vite + Tailwind CSS.
 

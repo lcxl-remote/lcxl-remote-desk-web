@@ -175,7 +175,7 @@ AI inference is centrally orchestrated, while the controlled device is a thin ev
 - **Suggest-Only by Default**: A proposed command crosses a separate authorization path. It requires risk and blocklist checks plus per-command owner confirmation; the server seals the approved argv plan, and the edge independently checks its immutable fields and risk ceiling before execution.
 - **Privacy-Preserving Audit**: Model calls, approvals, denials, redaction failures, and execution outcomes emit audit metadata and summaries; raw prompts, model responses, stdout, and screenshots are not stored in audit events.
 
-**MCP Server.** `mcp-stdio` is intentionally separate from the diagnostic agent. It exposes exactly `lcxl_system_info`, `lcxl_process_list`, `lcxl_network_ports`, and `lcxl_recent_logs`; the last tool is evaluated against `allow_logs` on every call. The MCP server never calls a model and never exposes screenshots, execution, remote control, or writes.
+**MCP Server.** `mcp-stdio` is intentionally separate from the AI assistant. It exposes exactly `lcxl_system_info`, `lcxl_process_list`, `lcxl_network_ports`, and `lcxl_recent_logs`; the last tool is evaluated against `allow_logs` on every call. The MCP server never calls a model and never exposes screenshots, execution, remote control, or writes.
 
 > For provider configuration and day-to-day usage see [AI Diagnostics](docs/features/ai-diagnostics.md), for the complete trust boundary, redaction, and audit constraints see [AI Security Model](docs/security/ai-security-model.md), and for wiring up an external assistant see [MCP Server](docs/features/mcp-server.md).
 

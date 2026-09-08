@@ -19,7 +19,7 @@ hero:
 features:
   - icon: 🤖
     title: AI 原生设计
-    details: 内置诊断助手可以读取设备状态并提出命令建议。只有设备所有者逐条确认后，命令才会执行；权限与风险等级始终由服务端判断。
+    details: 内置AI 助手可以读取设备状态并提出命令建议。只有设备所有者逐条确认后，命令才会执行；权限与风险等级始终由服务端判断。
     link: /zh/features/ai-diagnostics
     linkText: AI 诊断
   - icon: 🔌

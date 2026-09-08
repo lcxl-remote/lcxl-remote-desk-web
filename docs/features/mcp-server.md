@@ -10,7 +10,7 @@ Running `--startup-mode mcp-stdio` turns the device into a [Model Context Protoc
 
 ## Why a Separate Mode?
 
-The MCP surface is intentionally narrower than the in-session diagnostic agent. Model inference, screen capturing, and any control/execution tools are completely excluded to keep the attack surface minimal for local AI assistants.
+The MCP surface is intentionally narrower than the in-session AI assistant. Model inference, screen capturing, and any control/execution tools are completely excluded to keep the attack surface minimal for local AI assistants.
 
 ## Running It
 
