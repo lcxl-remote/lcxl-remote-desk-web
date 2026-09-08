@@ -1,4 +1,5 @@
 export default {
+    'pages.deviceAssistant.hidePanel': '收起 AI 助手',
     "schedules.rehearsal.deviceOffline": "请连接此设备后再进入录制会话。",
     "schedules.rehearsal.open": "进入录制会话",
     "schedules.rehearsal.cancelPending": "取消未开始的录制",

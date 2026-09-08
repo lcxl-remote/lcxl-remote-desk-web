@@ -1,4 +1,5 @@
 export default {
+    'pages.deviceAssistant.hidePanel': 'Hide AI assistant',
     "schedules.rehearsal.deviceOffline": "Connect this device before opening a guided run.",
     "schedules.rehearsal.open": "Open guided run",
     "schedules.rehearsal.cancelPending": "Cancel unstarted guided run",

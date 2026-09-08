@@ -68,7 +68,8 @@ import { getKeyboardShortcuts } from "./keyboard-shortcuts"
 import type { DesktopControllerPlatform } from "./keyboard-mapping"
 
 type DeskControlBarProps = {
-    assistantHref?: string
+    onToggleAssistant?: () => void
+    assistantOpen?: boolean
     audioVolume: number
     clipboardEnabled: boolean
     controlBarRef: RefObject<HTMLDivElement | null>
@@ -100,7 +101,8 @@ type DeskControlBarProps = {
 }
 
 export function DeskControlBar({
-    assistantHref,
+    onToggleAssistant,
+    assistantOpen,
     audioVolume,
     clipboardEnabled,
     controlBarRef,
@@ -170,14 +172,13 @@ export function DeskControlBar({
                 onFocus={() => setIsHovered(true)}
             >
                 <div className="controlButtons">
-                    {assistantHref && (
+                    {onToggleAssistant && (
                         <Tooltip>
                             <TooltipTrigger asChild>
-                                <Button asChild className="controlButton" variant="ghost">
-                                    <a href={assistantHref} target="_blank" rel="noopener noreferrer"
-                                        aria-label={t("pages.deskDashboard.deviceAssistant")}>
-                                        <AiAssistantIcon />
-                                    </a>
+                                <Button className={`controlButton ${assistantOpen ? "bg-white/20" : ""}`} variant="ghost"
+                                    onClick={onToggleAssistant} aria-pressed={!!assistantOpen}
+                                    aria-label={t("pages.deskDashboard.deviceAssistant")}>
+                                    <AiAssistantIcon />
                                 </Button>
                             </TooltipTrigger>
                             <TooltipContent>{t("pages.deskDashboard.deviceAssistant")}</TooltipContent>

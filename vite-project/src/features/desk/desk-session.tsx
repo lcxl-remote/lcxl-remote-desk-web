@@ -1,7 +1,10 @@
+import { DeviceAssistantWorkspace } from "./device-assistant-page"
+import { DeskAssistantPanel } from "./desk-assistant-panel"
+import { OSS_DEVICE_ASSISTANT_FEATURES, hasDeviceAssistantBrowserEntry, type DeviceAssistantFeatureProfile } from "./device-assistant-features"
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { isDeviceAssistantEnabled } from "./device-assistant-switch"
 import { useEffect, useRef, useState, useCallback, useMemo } from "react"
-import { useParams, useNavigate, useHref } from "react-router-dom"
+import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
 import { v4 } from "uuid"
 import { AlertTriangle, Loader2 } from "lucide-react"
@@ -141,6 +144,7 @@ const SETTINGS_EFFECT_KEYS: Record<string, string> = {
  *  with no props, keeping the AI model selection personal-scoped. */
 type DeskSessionProps = {
     showAssistant?: boolean
+    assistantFeatureProfile?: DeviceAssistantFeatureProfile | null
     orgId?: number
     /** Manager injects `u:<user_id>`; standalone omits it for its fixed owner. */
     preferenceOwnerKey?: string | null
@@ -151,12 +155,14 @@ type DeskSessionProps = {
 export default function DeskSession({
     orgId,
     showAssistant = import.meta.env.BASE_URL !== "/console/",
+    assistantFeatureProfile = OSS_DEVICE_ASSISTANT_FEATURES,
     preferenceOwnerKey,
     preferenceOwnerLoading = false,
 }: DeskSessionProps = {}) {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
-    const assistantHref = useHref(`/desk/${deskId}/assistant`)
+    const [assistantOpen, setAssistantOpen] = useState(false)
+    const [assistantMounted, setAssistantMounted] = useState(false)
     const { data: assistantConnections } = useListConnections()
     const assistantConnection = assistantConnections?.find(connection => connection.connection_id === deskId)
     const { t } = useTranslation()
@@ -186,6 +192,13 @@ export default function DeskSession({
 
     // Restriction state derived from the redeemed grant (if any) for this target.
     const restricted = useRestrictedSession(deskId);
+    const assistantAvailable = showAssistant && restricted.ownerPlaneVisible
+        && isDeviceAssistantEnabled(assistantConnection?.version_info)
+        && hasDeviceAssistantBrowserEntry(assistantFeatureProfile);
+    useEffect(() => {
+        setAssistantOpen(false);
+        setAssistantMounted(false);
+    }, [deskId, assistantAvailable]);
     const grantSessionId = restricted.grantSessionId;
     // Grant classification happens before resolving any persistent device key.
     // Restricted sessions are always memory-only even if the target itself has
@@ -1825,11 +1838,30 @@ export default function DeskSession({
                             <ResolutionStatusToast toast={resolutionToast} />
                         )}
 
+                        {assistantAvailable && assistantMounted && deskId && assistantConnection && assistantFeatureProfile && (
+                            <DeskAssistantPanel open={assistantOpen}
+                                onClose={() => setAssistantOpen(false)} onFocus={releaseAllInputs}>
+                                <DeviceAssistantWorkspace key={deskId}
+                                    deskId={deskId}
+                                    stableDeviceId={assistantConnection.version_info.client_id ?? assistantConnection.device_id ?? deskId}
+                                    localPairingAvailable={!assistantConnection.device_id}
+                                    featureProfile={assistantFeatureProfile}
+                                    assistantEnabled={true}
+                                    onBrowserTakeover={() => {
+                                        setAssistantOpen(false);
+                                        videoRef.current?.focus();
+                                    }} />
+                            </DeskAssistantPanel>
+                        )}
+
                         {isConnected && (
                             <DeskControlBar
-                                assistantHref={showAssistant && restricted.ownerPlaneVisible
-                                    && isDeviceAssistantEnabled(assistantConnection?.version_info)
-                                    ? assistantHref : undefined}
+                                assistantOpen={assistantOpen}
+                                onToggleAssistant={assistantAvailable ? () => {
+                                    releaseAllInputs();
+                                    setAssistantMounted(true);
+                                    setAssistantOpen(open => !open);
+                                } : undefined}
                                 audioVolume={audioVolume}
                                 clipboardEnabled={clipboardEnabled}
                                 controlBarRef={controlBarRef}

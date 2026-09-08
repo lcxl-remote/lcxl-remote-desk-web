@@ -171,7 +171,7 @@ function ObservationCard({
     );
 }
 
-function DeviceAssistantWorkspace({
+export function DeviceAssistantWorkspace({
     rehearsal,
     deskId,
     stableDeviceId,
