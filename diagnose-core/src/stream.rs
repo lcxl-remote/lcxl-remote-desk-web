@@ -295,6 +295,23 @@ impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
         ));
     }
 
+    fn on_context_adjusted(
+        &mut self,
+        turn_id: &str,
+        kind: crate::model_context::ContextNoticeKind,
+    ) {
+        if self.terminated {
+            return;
+        }
+        let seq = self.next_seq();
+        self.sink.emit(AgentEvent::status_for_turn(
+            &self.request_id,
+            seq,
+            &kind.status().replace('-', "_"),
+            turn_id,
+        ));
+    }
+
     fn on_context_compacted(&mut self, turn_id: &str, generation: u32, covered_message_count: u32) {
         if self.terminated || self.context_compacted_generation == Some(generation) {
             return;
@@ -765,6 +782,19 @@ mod tests {
             events[0].retraction_reason,
             Some(StreamRetractionReason::SafeRedirect)
         );
+    }
+
+    #[test]
+    fn eligibility_notices_are_not_capacity_trims() {
+        let (store, sink) = recorder();
+        let mut bridge = StreamingTurnSink::new(sink, "r");
+        bridge.on_context_adjusted("turn", crate::model_context::ContextNoticeKind::Refreshed);
+        bridge.on_context_adjusted("turn", crate::model_context::ContextNoticeKind::Restricted);
+        bridge.on_answer_committed("done");
+        let events = store.borrow();
+        assert_eq!(events[0].status.as_deref(), Some("context_refreshed"));
+        assert_eq!(events[1].status.as_deref(), Some("context_restricted"));
+        assert_eq!(events[0].turn_id.as_deref(), Some("turn"));
     }
 
     #[test]

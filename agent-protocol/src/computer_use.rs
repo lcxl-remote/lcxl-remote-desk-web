@@ -121,7 +121,6 @@ pub enum ComputerUseAdapterKind {
     ScreenCapture,
     SystemDiagnostics,
     BrowserExtension,
-    BrowserDevtoolsMcp,
     OutlookNewMailto,
 }
 
@@ -1393,7 +1392,7 @@ fn validate_actions(
                 ComputerUseAdapterKind::FileSystem,
                 ComputerActionKind::File(_)
             ) | (
-                ComputerUseAdapterKind::BrowserDevtoolsMcp,
+                ComputerUseAdapterKind::BrowserExtension,
                 ComputerActionKind::Browser(_)
             ) | (
                 ComputerUseAdapterKind::OutlookNewMailto,
@@ -2684,8 +2683,8 @@ mod tests {
         let mut sealed = plan();
         sealed.action_request_id = "browser-call-1".into();
         sealed.adapter = ComputerUseAdapterRef {
-            kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
-            version: "chrome-devtools-mcp/1.7.0".into(),
+            kind: ComputerUseAdapterKind::BrowserExtension,
+            version: "lcxl-browser-extension/1".into(),
         };
         sealed.actions = vec![ComputerActionStep {
             target: ObjectRef {

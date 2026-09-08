@@ -77,7 +77,7 @@ async fn fixture(
         export_authorization_id: "original-owner-selected-context".into(),
         now_unix_ms: Utc::now().timestamp_millis() as u64,
         byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
-        omit_finite_retention_historical_turns: false,
+        permission_resume: false,
     };
     let mut user = desk_diagnose_core::model_message_labels::model_bound_user_message(
         "input-1".into(),

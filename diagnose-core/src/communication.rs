@@ -204,18 +204,13 @@ fn body_matches(snapshot: &SendPayloadSnapshot, body: &str) -> bool {
 }
 
 /// Resolve the signed-in Gmail identity from a provider-owned page observation.
-/// Development-only handoffs retain their explicitly manual profile destination.
 pub fn gmail_web_account_id(
     page: &desk_agent_protocol::browser_control::BrowserPageRef,
 ) -> Result<String, CommunicationSealError> {
-    use desk_agent_protocol::browser_control::BrowserEngineKind;
     page.validate()
         .map_err(|_| CommunicationSealError::InvalidEmailAddress)?;
     if page.origin.host_ascii != "mail.google.com" {
         return Err(CommunicationSealError::InvalidEmailAddress);
-    }
-    if page.adapter.engine == BrowserEngineKind::ChromeDevtoolsMcp {
-        return Ok(crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID.into());
     }
     let account = page
         .account_id
@@ -693,7 +688,7 @@ mod tests {
         CommunicationPayload {
             surface: CommunicationSurfaceRef {
                 channel: CommunicationChannel::Email,
-                kind: CommunicationSurfaceKind::ChromeDevtoolsMcp,
+                kind: CommunicationSurfaceKind::ChromeExtension,
                 scope: CommunicationSurfaceScope::WebOrigin {
                     origin: BrowserOrigin {
                         kind: BrowserOriginKind::Https,

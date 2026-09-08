@@ -24,10 +24,6 @@ pub struct ComputerUseSettings {
     /// Allow the built-in, closed-surface browser semantic adapter after the
     /// Chrome extension has been installed and paired on this device.
     pub browser_semantic: bool,
-    /// Development-only Chrome DevTools MCP adapter. It is never an automatic
-    /// fallback for the extension and defaults off because Chrome requires a
-    /// native approval prompt for each new debugging connection.
-    pub browser_devtools_mcp: bool,
     /// Allow reviewed communication draft handoff adapters, including Outlook
     /// (new) `mailto:` and typed Gmail/Slack Web preparation.
     /// This may create a cloud-synchronised draft, so central WriteExternalDraft
@@ -308,7 +304,6 @@ mod tests {
         assert!(!settings.office_semantic);
         assert!(!settings.iwork_semantic);
         assert!(!settings.browser_semantic);
-        assert!(!settings.browser_devtools_mcp);
         assert!(!settings.communication_handoff);
         assert!(!settings.communication_send_enabled());
         assert!(!settings.generic_semantic_ui);

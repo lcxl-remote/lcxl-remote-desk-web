@@ -48,9 +48,6 @@ use desk_diagnose_core::device_assistant::{
 
 use crate::model::settings::ComputerUseSettings;
 
-use super::browser_devtools_mcp::{
-    BrowserBrokerContext, BrowserDevtoolsBroker, ChromeDevtoolsMcpError,
-};
 use super::browser_extension_bridge::{BrowserExtensionBridgeError, BrowserExtensionBroker};
 use super::computer_use_writer::{
     InputPreemptionSource, WriterLeaseCoordinator, WriterLeaseRequest, WriterLeaseScope,
@@ -210,7 +207,6 @@ pub struct ComputerUseBroker {
     objects: Mutex<HashMap<String, StoredObject>>,
     writer_lease: WriterLeaseCoordinator,
     browser_extension: Arc<BrowserExtensionBroker>,
-    browser_devtools: BrowserDevtoolsBroker,
 }
 
 pub(crate) struct SemanticActionResult {
@@ -219,23 +215,6 @@ pub(crate) struct SemanticActionResult {
     pub(crate) summary: String,
     pub(crate) output: Option<ComputerActionOutput>,
 }
-
-#[derive(Debug)]
-pub(crate) enum BrowserProviderError {
-    Extension(BrowserExtensionBridgeError),
-    Devtools(ChromeDevtoolsMcpError),
-}
-
-impl std::fmt::Display for BrowserProviderError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Extension(error) => error.fmt(formatter),
-            Self::Devtools(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl std::error::Error for BrowserProviderError {}
 
 impl Default for ComputerUseBroker {
     fn default() -> Self {
@@ -259,7 +238,6 @@ impl ComputerUseBroker {
             objects: Mutex::new(HashMap::new()),
             writer_lease: WriterLeaseCoordinator::new(),
             browser_extension: Arc::new(BrowserExtensionBroker::default()),
-            browser_devtools: BrowserDevtoolsBroker::default(),
         }
     }
 
@@ -275,23 +253,6 @@ impl ComputerUseBroker {
             device_id,
             os_session_id,
         )
-    }
-
-    pub async fn refresh_browser_readiness(
-        &self,
-        device_id: String,
-        os_session_id: String,
-        enabled: bool,
-        interactive_session_unlocked: bool,
-    ) {
-        self.browser_devtools
-            .refresh(&BrowserBrokerContext {
-                device_id,
-                os_session_id,
-                enabled,
-                interactive_session_unlocked,
-            })
-            .await;
     }
 
     pub(crate) fn acquire_screen_capture_permit(
@@ -371,55 +332,22 @@ impl ComputerUseBroker {
         &self,
         surface: &ObjectRef,
         request: &BrowserActionRequest,
-    ) -> Result<(), BrowserProviderError> {
-        if self
-            .browser_extension
-            .surface_ref()
-            .as_ref()
-            .is_some_and(|candidate| super::same_browser_surface_identity(candidate, surface))
-        {
-            self.browser_extension
-                .preflight(surface, request)
-                .map_err(BrowserProviderError::Extension)
-        } else {
-            self.browser_devtools
-                .preflight(surface, request)
-                .map_err(BrowserProviderError::Devtools)
-        }
+    ) -> Result<(), BrowserExtensionBridgeError> {
+        self.browser_extension.preflight(surface, request)
     }
 
     pub(crate) async fn execute_browser_action(
         &self,
         surface: &ObjectRef,
         request: &BrowserActionRequest,
-    ) -> Result<BrowserActionResult, BrowserProviderError> {
-        if self
-            .browser_extension
-            .surface_ref()
-            .as_ref()
-            .is_some_and(|candidate| super::same_browser_surface_identity(candidate, surface))
-        {
-            self.browser_extension
-                .execute(surface, request)
-                .await
-                .map_err(BrowserProviderError::Extension)
-        } else {
-            self.browser_devtools
-                .execute(surface, request)
-                .await
-                .map_err(BrowserProviderError::Devtools)
-        }
+    ) -> Result<BrowserActionResult, BrowserExtensionBridgeError> {
+        self.browser_extension.execute(surface, request).await
     }
 
     fn selected_browser_state(&self) -> (Option<BrowserReadiness>, Option<ObjectRef>) {
-        if let Some(readiness) = self.browser_extension.readiness()
-            && readiness.connected
-        {
-            return (Some(readiness), self.browser_extension.surface_ref());
-        }
         (
-            self.browser_devtools.readiness(),
-            self.browser_devtools.surface_ref(),
+            self.browser_extension.readiness(),
+            self.browser_extension.surface_ref(),
         )
     }
 
@@ -1010,9 +938,7 @@ impl ComputerUseBroker {
                 .as_ref()
                 .and_then(|readiness| readiness.reason)
             {
-                Some(BrowserReadinessReason::UserApprovalRequired)
-                | Some(BrowserReadinessReason::UserDenied)
-                | Some(BrowserReadinessReason::PairingRequired)
+                Some(BrowserReadinessReason::PairingRequired)
                 | Some(BrowserReadinessReason::HostPermissionMissing) => {
                     ComputerUseReadinessReason::PermissionMissing
                 }
@@ -1042,9 +968,6 @@ impl ComputerUseBroker {
             .map(|readiness| ComputerUseAdapterRef {
                 kind: match readiness.adapter.engine {
                     BrowserEngineKind::ChromeExtension => ComputerUseAdapterKind::BrowserExtension,
-                    BrowserEngineKind::ChromeDevtoolsMcp => {
-                        ComputerUseAdapterKind::BrowserDevtoolsMcp
-                    }
                 },
                 version: readiness.adapter.adapter_version.clone(),
             })
@@ -3438,6 +3361,14 @@ fn path_eq(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn browser_state_is_unavailable_without_a_paired_extension() {
+        let broker = ComputerUseBroker::new();
+        let (readiness, surface) = broker.selected_browser_state();
+        assert!(readiness.is_none());
+        assert!(surface.is_none());
+    }
+
     fn enabled() -> ComputerUseSettings {
         ComputerUseSettings {
             enabled: true,
@@ -3957,7 +3888,7 @@ mod tests {
         let broker = ComputerUseBroker::new();
         let readiness = broker.readiness(&ComputerUseSettings::default(), false, false);
         readiness.validate().unwrap();
-        assert_eq!(readiness.capabilities.len(), 36);
+        assert_eq!(readiness.capabilities.len(), 37);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(
                 entry.capability,

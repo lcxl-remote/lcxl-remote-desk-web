@@ -1879,7 +1879,7 @@ mod tests {
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: "device".into(),
             target_session_id: None,
-            provider_id: "browser.devtools_mcp".into(),
+            provider_id: "browser.extension_mcp".into(),
             capability_id: "browser.activate".into(),
             tool_name: "browser_activate_element".into(),
             tool_schema_version: 1,
@@ -2105,12 +2105,12 @@ mod tests {
             "page": {
                 "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
                 "adapter": {
-                    "engine": "chrome_devtools_mcp",
+                    "engine": "chrome_extension",
                     "device_id": "device-1",
                     "os_session_id": "session-1",
                     "browser_major_version": 151,
                     "browser_version": "151.0.0.0",
-                    "adapter_id": "chrome-devtools-mcp",
+                    "adapter_id": "lcxl-browser-extension",
                     "adapter_version": "1.7.0",
                     "profile_incarnation": "profile-1",
                     "connection_revision": 7
@@ -2192,16 +2192,17 @@ mod tests {
         let page = serde_json::json!({
             "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
             "adapter": {
-                "engine": "chrome_devtools_mcp",
+                "engine": "chrome_extension",
                 "device_id": "device-1",
                 "os_session_id": "session-1",
                 "browser_major_version": 151,
                 "browser_version": "151.0.0.0",
-                "adapter_id": "chrome-devtools-mcp",
+                "adapter_id": "lcxl-browser-extension",
                 "adapter_version": "1.7.0",
                 "profile_incarnation": "profile-1",
                 "connection_revision": 7
             },
+            "account_id": "gmail-web:alice@example.com",
             "page_id": "page-1",
             "page_incarnation": "page-incarnation-1",
             "origin": {"kind": "https", "host_ascii": "mail.google.com", "port": 443},
@@ -2266,8 +2267,7 @@ mod tests {
             item.export_destinations,
             vec![
                 desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
-                    account_id: crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID
-                        .into(),
+                    account_id: "gmail-web:alice@example.com".into(),
                 }
             ]
         );

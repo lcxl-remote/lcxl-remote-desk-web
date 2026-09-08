@@ -13,7 +13,7 @@ fn plan() -> SealedComputerActionPlan {
         device_id: "host-client".into(),
         interactive_session_incarnation: "worker-1".into(),
         adapter: ComputerUseAdapterRef {
-            kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
+            kind: ComputerUseAdapterKind::BrowserExtension,
             version: "1".into(),
         },
         approval_id: "approval-1".into(),

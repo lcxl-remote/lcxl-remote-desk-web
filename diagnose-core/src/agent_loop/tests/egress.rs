@@ -60,9 +60,9 @@ impl ModelSeam for StrictCompressionModel {
 }
 
 #[tokio::test]
-async fn strict_compression_loop_commits_only_authorized_unexpired_summaries() {
+async fn strict_compression_loop_keeps_authorized_summaries_after_time_advances() {
     for (unlabeled_history, expire_after_compression, expected_calls) in
-        [(false, false, 2), (true, false, 0), (false, true, 1)]
+        [(false, false, 2), (true, false, 0), (false, true, 2)]
     {
         let policy = ModelEgressPolicy {
             destination: DestinationIdentity::Model {
@@ -75,7 +75,7 @@ async fn strict_compression_loop_commits_only_authorized_unexpired_summaries() {
             export_authorization_id: "send".into(),
             now_unix_ms: 1000,
             byte_cap: crate::sink_authorizer::MAX_SINK_BYTES,
-            omit_finite_retention_historical_turns: false,
+            permission_resume: false,
         };
         let user = |id: &str, size: usize| {
             model_bound_user_message(id.into(), "x".repeat(size), policy.destination.clone())

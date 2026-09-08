@@ -221,7 +221,7 @@ impl Fixture {
             device_id: "device-1".into(),
             interactive_session_incarnation: "desktop-1".into(),
             adapter: ComputerUseAdapterRef {
-                kind: ComputerUseAdapterKind::BrowserDevtoolsMcp,
+                kind: ComputerUseAdapterKind::BrowserExtension,
                 version: "1".into(),
             },
             approval_id: "grant-1".into(),

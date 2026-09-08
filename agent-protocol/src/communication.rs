@@ -83,9 +83,6 @@ pub enum CommunicationSurfaceKind {
     /// Generic paired LCXL Chrome extension Provider. Gmail, Slack, and
     /// future sites are semantic adapters above this browser surface.
     ChromeExtension,
-    /// Generic controlled-edge Chrome DevTools MCP Provider. Gmail, Slack,
-    /// and future sites may use it only in explicitly enabled development mode.
-    ChromeDevtoolsMcp,
     /// Built-in UIA/vision assistance. It may prepare a visible compose UI but
     /// can never claim exact read-back or AI send authority.
     AssistiveUi,
@@ -97,7 +94,7 @@ impl CommunicationSurfaceKind {
             Self::ClassicOutlookDesktop | Self::OutlookNewDesktop => {
                 channel == CommunicationChannel::Email
             }
-            Self::ChromeExtension | Self::ChromeDevtoolsMcp => {
+            Self::ChromeExtension => {
                 matches!(
                     channel,
                     CommunicationChannel::Email | CommunicationChannel::Chat
@@ -177,9 +174,6 @@ impl CommunicationSurfaceRef {
                 CommunicationSurfaceScope::DesktopApplication { .. }
             ) | (
                 CommunicationSurfaceKind::ChromeExtension,
-                CommunicationSurfaceScope::WebOrigin { .. }
-            ) | (
-                CommunicationSurfaceKind::ChromeDevtoolsMcp,
                 CommunicationSurfaceScope::WebOrigin { .. }
             ) | (CommunicationSurfaceKind::AssistiveUi, _)
         ) {
@@ -1521,12 +1515,12 @@ mod tests {
             account_id: None,
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
-                engine: BrowserEngineKind::ChromeDevtoolsMcp,
+                engine: BrowserEngineKind::ChromeExtension,
                 device_id: "device-1".into(),
                 os_session_id: "session-1".into(),
                 browser_major_version: 151,
                 browser_version: "151.0.0.0".into(),
-                adapter_id: "chrome-devtools-mcp".into(),
+                adapter_id: "lcxl-browser-extension".into(),
                 adapter_version: "1.7.0".into(),
                 profile_incarnation: "profile-1".into(),
                 connection_revision: 7,

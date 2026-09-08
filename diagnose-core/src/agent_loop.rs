@@ -920,6 +920,7 @@ async fn prepare_model_context(
         // This is an ephemeral exact-result view, not a replacement history
         // checkpoint. The assembled request below still enforces the byte cap.
         return Ok(crate::model_context::ModelContextView {
+            notice_kind: crate::model_context::ContextNoticeKind::Trimmed,
             messages: projected.messages,
             policy_key: pinned_context.key(),
             floor_group_head_message_id: None,
@@ -1013,7 +1014,10 @@ async fn prepare_model_context(
                 session.model_context_state = ready.next_state;
                 if floor_advanced {
                     session.record_context_notice(
-                        crate::model_context::ContextNotice::trimmed(turn_id),
+                        crate::model_context::ContextNotice::adjusted(
+                            turn_id,
+                            ready.view.notice_kind,
+                        ),
                         (deps.clock)(),
                     );
                 }
@@ -1039,7 +1043,11 @@ async fn prepare_model_context(
                     }
                 }
                 if floor_advanced {
-                    sink.on_context_trimmed(turn_id);
+                    if ready.view.notice_kind == crate::model_context::ContextNoticeKind::Trimmed {
+                        sink.on_context_trimmed(turn_id);
+                    } else {
+                        sink.on_context_adjusted(turn_id, ready.view.notice_kind);
+                    }
                 }
                 return Ok(ready.view);
             }
@@ -1061,7 +1069,7 @@ async fn prepare_model_context(
                     }
                 };
                 session.record_context_notice(
-                    crate::model_context::ContextNotice::trimmed(turn_id),
+                    crate::model_context::ContextNotice::adjusted(turn_id, plan.notice_kind),
                     (deps.clock)(),
                 );
                 if !lease_is_current(deps).await {
@@ -1087,7 +1095,7 @@ async fn prepare_model_context(
                     )
                     .await);
                 }
-                sink.on_context_trimmed(turn_id);
+                sink.on_context_adjusted(turn_id, plan.notice_kind);
                 // Rebuild protection and re-plan against the new version/floor.
             }
             crate::model_context::ContextBuildPlan::NeedsCompression(plan) => {

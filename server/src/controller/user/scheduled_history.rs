@@ -58,6 +58,7 @@ async fn scheduled_result_rest_owner_guard_and_original_subject() {
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             },
         },
+        time_confirmation: None,
         source_conversation_id: Some("original-session".into()),
         requirement_revision: Some(1),
         creation_source: ScheduleCreationSource::Manual,

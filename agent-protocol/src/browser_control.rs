@@ -1,7 +1,7 @@
 //! Current-schema contracts for the built-in browser-control provider.
 //!
-//! The edge adapter owns either the paired Chrome extension connection or an
-//! explicitly enabled development DevTools MCP connection. The model sees
+//! The edge adapter owns the authenticated, paired Chrome extension connection.
+//! The model sees
 //! only the closed semantic tool set declared here; adapter internals, browser
 //! credentials, cookies, storage, network logs, and arbitrary script
 //! execution are never part of the provider contract.
@@ -19,7 +19,6 @@ use crate::{
 };
 
 pub const BROWSER_CONTROL_SCHEMA_VERSION: u16 = 1;
-pub const MIN_CHROME_DEVTOOLS_MCP_MAJOR_VERSION: u16 = 144;
 pub const MAX_BROWSER_ID_BYTES: usize = 256;
 pub const MAX_BROWSER_VERSION_BYTES: usize = 64;
 pub const MAX_BROWSER_REASON_BYTES: usize = 512;
@@ -50,7 +49,6 @@ pub const MAX_BROWSER_WAIT_MS: u32 = 30_000;
 #[serde(rename_all = "snake_case")]
 pub enum BrowserEngineKind {
     ChromeExtension,
-    ChromeDevtoolsMcp,
 }
 
 #[derive(
@@ -139,15 +137,13 @@ pub struct BrowserAdapterRef {
     /// Opaque profile incarnation. It is not a filesystem path or Chrome
     /// profile name and changes when the connected profile/session changes.
     pub profile_incarnation: String,
-    /// Bumped whenever the MCP connection or approved browser session changes.
+    /// Bumped whenever the extension connection or approved browser session changes.
     pub connection_revision: u64,
 }
 
 impl BrowserAdapterRef {
     pub fn validate(&self) -> Result<(), BrowserControlContractError> {
-        if self.engine == BrowserEngineKind::ChromeDevtoolsMcp
-            && self.browser_major_version < MIN_CHROME_DEVTOOLS_MCP_MAJOR_VERSION
-        {
+        if self.browser_major_version < 120 {
             return Err(BrowserControlContractError::UnsupportedBrowserVersion);
         }
         validate_id("adapter.device_id", &self.device_id, MAX_BROWSER_ID_BYTES)?;
@@ -214,14 +210,9 @@ pub enum BrowserToolKind {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserReadinessReason {
-    UnsupportedBrowserVersion,
     ExtensionUnavailable,
     PairingRequired,
     HostPermissionMissing,
-    RemoteDebuggingDisabled,
-    UserApprovalRequired,
-    UserDenied,
-    McpUnavailable,
     Disconnected,
     InteractiveSessionLocked,
     ProfileChanged,
@@ -1018,8 +1009,8 @@ impl BrowserSemanticSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserControlContractError {
-    UnsupportedSchemaVersion(u16),
     UnsupportedBrowserVersion,
+    UnsupportedSchemaVersion(u16),
     EmptyField(&'static str),
     OversizedField(&'static str),
     InvalidText(&'static str),
@@ -1044,15 +1035,16 @@ pub enum BrowserControlContractError {
 impl fmt::Display for BrowserControlContractError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedBrowserVersion => {
+                formatter.write_str("Chrome extension requires Chrome 120 or newer")
+            }
             Self::UnsupportedSchemaVersion(version) => {
                 write!(
                     formatter,
                     "unsupported browser-control schema version: {version}"
                 )
             }
-            Self::UnsupportedBrowserVersion => {
-                formatter.write_str("Chrome version does not support DevTools MCP auto-connect")
-            }
+
             Self::EmptyField(field) => write!(formatter, "{field} must not be empty"),
             Self::OversizedField(field) => write!(formatter, "{field} is too long"),
             Self::InvalidText(field) => write!(formatter, "{field} contains invalid text"),
@@ -1196,12 +1188,12 @@ mod tests {
 
     fn adapter() -> BrowserAdapterRef {
         BrowserAdapterRef {
-            engine: BrowserEngineKind::ChromeDevtoolsMcp,
+            engine: BrowserEngineKind::ChromeExtension,
             device_id: "device-1".into(),
             os_session_id: "session-1".into(),
             browser_major_version: 144,
             browser_version: "144.0.7559.0".into(),
-            adapter_id: "chrome-devtools-mcp".into(),
+            adapter_id: "lcxl-browser-extension".into(),
             adapter_version: "1.7.0".into(),
             profile_incarnation: "profile-incarnation-1".into(),
             connection_revision: 7,
@@ -1224,6 +1216,23 @@ mod tests {
             url_sha256: "a".repeat(64),
             observed_at_unix_ms: 42,
         }
+    }
+
+    #[test]
+    fn browser_engine_contract_is_extension_only() {
+        assert_eq!(
+            serde_json::from_str::<BrowserEngineKind>(r#""chrome_extension""#).unwrap(),
+            BrowserEngineKind::ChromeExtension
+        );
+        assert!(serde_json::from_str::<BrowserEngineKind>(r#""chrome_devtools_mcp""#).is_err());
+        let mut current = adapter();
+        current.browser_major_version = 120;
+        current.validate().unwrap();
+        current.browser_major_version = 119;
+        assert_eq!(
+            current.validate(),
+            Err(BrowserControlContractError::UnsupportedBrowserVersion)
+        );
     }
 
     #[test]
@@ -1258,13 +1267,6 @@ mod tests {
 
     #[test]
     fn old_chrome_and_unapproved_connections_fail_closed() {
-        let mut old = adapter();
-        old.browser_major_version = 143;
-        assert_eq!(
-            old.validate(),
-            Err(BrowserControlContractError::UnsupportedBrowserVersion)
-        );
-
         let readiness = BrowserReadiness {
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: adapter(),
@@ -1311,7 +1313,7 @@ mod tests {
         for mismatch in 0..4 {
             let mut changed = page.clone();
             match mismatch {
-                0 => changed.adapter.engine = BrowserEngineKind::ChromeDevtoolsMcp,
+                0 => changed.origin.port = 80,
                 1 => changed.origin.host_ascii = "app.slack.com".into(),
                 2 => changed.account_id = Some("gmail-web:".to_owned() + &"a".repeat(321)),
                 _ => changed.account_id = Some("other-account".into()),

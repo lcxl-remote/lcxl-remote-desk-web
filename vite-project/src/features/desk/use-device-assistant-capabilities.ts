@@ -12,7 +12,6 @@ export type CapabilityBlockedReason =
     | 'version_mismatch'
     | 'edge_disconnected'
     | 'adapter_unavailable'
-    | 'remote_debugging_disabled'
     | 'browser_approval_required'
     | 'browser_disconnected'
     | 'application_not_installed'

@@ -264,8 +264,21 @@ pub struct ModelContextEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextNoticeKind {
+    Refreshed,
+    Restricted,
     Trimmed,
     Compacted,
+}
+
+impl ContextNoticeKind {
+    pub fn status(self) -> &'static str {
+        match self {
+            Self::Trimmed => "context-trimmed",
+            Self::Compacted => "context-compacted",
+            Self::Refreshed => "context-refreshed",
+            Self::Restricted => "context-restricted",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,13 +298,17 @@ pub struct ContextNotice {
 
 impl ContextNotice {
     pub fn trimmed(turn_id: impl Into<String>) -> Self {
+        Self::adjusted(turn_id, ContextNoticeKind::Trimmed)
+    }
+
+    pub fn adjusted(turn_id: impl Into<String>, kind: ContextNoticeKind) -> Self {
         let turn_id = turn_id.into();
         Self {
-            id: format!("context-trimmed:{turn_id}"),
+            id: format!("{}:{turn_id}", kind.status()),
             created_at: None,
             after_message_id: None,
             turn_id,
-            kind: ContextNoticeKind::Trimmed,
+            kind,
             checkpoint_generation: None,
             covered_message_count: None,
         }
@@ -317,6 +334,7 @@ impl ContextNotice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelContextView {
+    pub notice_kind: ContextNoticeKind,
     pub messages: Vec<ChatMessage>,
     pub policy_key: ContextPolicyKey,
     pub floor_group_head_message_id: Option<String>,
@@ -503,6 +521,14 @@ fn finish_view(
         },
     );
     Ok(ModelContextView {
+        notice_kind: if groups[old_position..selected_group_index]
+            .iter()
+            .any(|group| !group.replay_safe)
+        {
+            ContextNoticeKind::Restricted
+        } else {
+            ContextNoticeKind::Trimmed
+        },
         messages: conversation[start..].to_vec(),
         policy_key,
         floor_group_head_message_id,

@@ -318,7 +318,7 @@ mod source_derivation_tests {
             export_authorization_id: "export".into(),
             now_unix_ms: 1,
             byte_cap: 16384,
-            omit_finite_retention_historical_turns: false,
+            permission_resume: false,
         };
         let bridge =
             authorized_permission_resume_message("resume".into(), &policy, &original).unwrap();

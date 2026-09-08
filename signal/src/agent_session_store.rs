@@ -2759,7 +2759,7 @@ mod tests {
             export_authorization_id: "test-export".into(),
             now_unix_ms: 1_000,
             byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
-            omit_finite_retention_historical_turns: true,
+            permission_resume: true,
         };
         let bridge = desk_diagnose_core::permission_resume::authorized_scheduled_resume_message(
             "scheduled-control".into(),
@@ -3155,7 +3155,7 @@ mod tests {
                     export_authorization_id: "test-export".into(),
                     now_unix_ms: 1_000,
                     byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
-                    omit_finite_retention_historical_turns: true,
+                    permission_resume: true,
                 };
                 desk_diagnose_core::permission_resume::authorized_scheduled_resume_message(
                     "scheduled-bridge".into(),

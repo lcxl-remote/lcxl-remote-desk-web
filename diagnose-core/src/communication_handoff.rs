@@ -114,7 +114,6 @@ fn slack_exact_form_readback(
 fn communication_surface_kind(engine: BrowserEngineKind) -> CommunicationSurfaceKind {
     match engine {
         BrowserEngineKind::ChromeExtension => CommunicationSurfaceKind::ChromeExtension,
-        BrowserEngineKind::ChromeDevtoolsMcp => CommunicationSurfaceKind::ChromeDevtoolsMcp,
     }
 }
 
@@ -145,7 +144,7 @@ fn exact_send_snapshot(
 
 /// Project a verified reviewed-site Browser completion into a draft handoff.
 /// Paired extensions may seal a snapshot eligible for separate send approval;
-/// DevTools remains manual-only. Neither preparation result proves sending.
+/// Preparation results never authorize sending.
 /// `None` means the tool is not a Web handoff.
 pub fn project_web_draft_handoff(
     tool_name: &str,
@@ -223,49 +222,44 @@ pub fn project_web_draft_handoff(
                 .map_err(|_| invalid())?,
             revision: result.page.adapter.connection_revision,
         };
-        let exact_send_eligible = surface.kind == CommunicationSurfaceKind::ChromeExtension;
         let canonical_recipient =
             crate::communication::canonicalize_email_address(&gmail.draft.recipients[0].address)
                 .map_err(|_| invalid())?;
-        let send_payload_snapshot = exact_send_eligible
-            .then(|| {
-                exact_send_snapshot(
-                    format!("gmail-send-{compose_digest}"),
-                    run_id,
-                    CommunicationPayload {
-                        surface: surface.clone(),
-                        recipients: vec![RecipientIdentity {
-                            role: RecipientRole::To,
-                            kind: RecipientKind::EmailMailbox,
-                            stable_id: format!(
-                                "gmail-mailbox-{:x}",
-                                Sha256::digest(canonical_recipient.value.as_bytes())
-                            ),
-                            canonical_address: canonical_recipient.value,
-                            display_name: gmail.draft.recipients[0].display_name.clone(),
-                            display_warnings: canonical_recipient.display_warnings,
-                            resolved_members: Vec::new(),
-                            member_snapshot_sha256: None,
-                        }],
-                        subject: gmail.draft.subject.clone(),
-                        body: immutable_plain_text_body(&gmail.draft.body_plain_text),
-                        attachments: gmail
-                            .attachment
-                            .as_ref()
-                            .map(|attachment| ImmutableAttachmentSnapshot {
-                                content: attachment.artifact.content.clone(),
-                                file_name: attachment.artifact.file_name.clone(),
-                                media_type: attachment.artifact.media_type.clone(),
-                                size_bytes: attachment.artifact.size_bytes,
-                                digest_sha256: attachment.artifact.digest_sha256.clone(),
-                            })
-                            .into_iter()
-                            .collect(),
-                    },
-                    result.completed_at_unix_ms,
-                )
-            })
-            .transpose()?;
+        let send_payload_snapshot = Some(exact_send_snapshot(
+            format!("gmail-send-{compose_digest}"),
+            run_id,
+            CommunicationPayload {
+                surface: surface.clone(),
+                recipients: vec![RecipientIdentity {
+                    role: RecipientRole::To,
+                    kind: RecipientKind::EmailMailbox,
+                    stable_id: format!(
+                        "gmail-mailbox-{:x}",
+                        Sha256::digest(canonical_recipient.value.as_bytes())
+                    ),
+                    canonical_address: canonical_recipient.value,
+                    display_name: gmail.draft.recipients[0].display_name.clone(),
+                    display_warnings: canonical_recipient.display_warnings,
+                    resolved_members: Vec::new(),
+                    member_snapshot_sha256: None,
+                }],
+                subject: gmail.draft.subject.clone(),
+                body: immutable_plain_text_body(&gmail.draft.body_plain_text),
+                attachments: gmail
+                    .attachment
+                    .as_ref()
+                    .map(|attachment| ImmutableAttachmentSnapshot {
+                        content: attachment.artifact.content.clone(),
+                        file_name: attachment.artifact.file_name.clone(),
+                        media_type: attachment.artifact.media_type.clone(),
+                        size_bytes: attachment.artifact.size_bytes,
+                        digest_sha256: attachment.artifact.digest_sha256.clone(),
+                    })
+                    .into_iter()
+                    .collect(),
+            },
+            result.completed_at_unix_ms,
+        )?);
         let handoff = CommunicationDraftHandoff {
             schema_version: COMMUNICATION_SCHEMA_VERSION,
             handoff_id: format!("gmail-handoff-{compose_digest}"),
@@ -275,11 +269,7 @@ pub fn project_web_draft_handoff(
             prepared_payload_sha256: canonical_input_digest_sha256.into(),
             verification: CommunicationPrepareVerification::SemanticExact,
             readback_payload_sha256: Some(canonical_input_digest_sha256.into()),
-            send_authority: if exact_send_eligible {
-                CommunicationSendAuthority::ExactGrantEligible
-            } else {
-                CommunicationSendAuthority::ManualOnly
-            },
+            send_authority: CommunicationSendAuthority::ExactGrantEligible,
             send_payload_snapshot,
             handed_off_at_unix_ms: result.completed_at_unix_ms,
         };
@@ -295,6 +285,7 @@ pub fn project_web_draft_handoff(
         || result.page.page_id != slack.page.page_id
         || result.page.page_incarnation != slack.page.page_incarnation
         || result.page.origin != slack.page.origin
+        || result.page.account_id != slack.page.account_id
         || result.page.document_revision <= slack.page.document_revision
         || !slack_exact_form_readback(result, &slack)
     {
@@ -327,38 +318,31 @@ pub fn project_web_draft_handoff(
             .map_err(|_| invalid())?,
         revision: result.page.adapter.connection_revision,
     };
-    let exact_send_eligible = surface.kind == CommunicationSurfaceKind::ChromeExtension;
     let destination = slack.composer.accessible_name.trim().to_string();
-    let send_payload_snapshot = exact_send_eligible
-        .then(|| {
-            exact_send_snapshot(
-                format!("slack-send-{compose_digest}"),
-                run_id,
-                CommunicationPayload {
-                    surface: surface.clone(),
-                    recipients: vec![RecipientIdentity {
-                        role: RecipientRole::ChatDestination,
-                        kind: RecipientKind::ChatChannel,
-                        stable_id: format!(
-                            "slack-destination-{:x}",
-                            Sha256::digest(
-                                format!("{}:{destination}", surface.profile_id).as_bytes()
-                            )
-                        ),
-                        canonical_address: destination,
-                        display_name: None,
-                        display_warnings: Vec::new(),
-                        resolved_members: Vec::new(),
-                        member_snapshot_sha256: None,
-                    }],
-                    subject: String::new(),
-                    body: immutable_plain_text_body(&slack.body_plain_text),
-                    attachments: Vec::new(),
-                },
-                result.completed_at_unix_ms,
-            )
-        })
-        .transpose()?;
+    let send_payload_snapshot = Some(exact_send_snapshot(
+        format!("slack-send-{compose_digest}"),
+        run_id,
+        CommunicationPayload {
+            surface: surface.clone(),
+            recipients: vec![RecipientIdentity {
+                role: RecipientRole::ChatDestination,
+                kind: RecipientKind::ChatChannel,
+                stable_id: format!(
+                    "slack-destination-{:x}",
+                    Sha256::digest(format!("{}:{destination}", surface.profile_id).as_bytes())
+                ),
+                canonical_address: destination,
+                display_name: None,
+                display_warnings: Vec::new(),
+                resolved_members: Vec::new(),
+                member_snapshot_sha256: None,
+            }],
+            subject: String::new(),
+            body: immutable_plain_text_body(&slack.body_plain_text),
+            attachments: Vec::new(),
+        },
+        result.completed_at_unix_ms,
+    )?);
     let handoff = CommunicationDraftHandoff {
         schema_version: COMMUNICATION_SCHEMA_VERSION,
         handoff_id: format!("slack-handoff-{compose_digest}"),
@@ -368,11 +352,7 @@ pub fn project_web_draft_handoff(
         prepared_payload_sha256: canonical_input_digest_sha256.into(),
         verification: CommunicationPrepareVerification::SemanticExact,
         readback_payload_sha256: Some(canonical_input_digest_sha256.into()),
-        send_authority: if exact_send_eligible {
-            CommunicationSendAuthority::ExactGrantEligible
-        } else {
-            CommunicationSendAuthority::ManualOnly
-        },
+        send_authority: CommunicationSendAuthority::ExactGrantEligible,
         send_payload_snapshot,
         handed_off_at_unix_ms: result.completed_at_unix_ms,
     };
@@ -579,7 +559,7 @@ mod tests {
             "page": {
                 "schema_version": 1,
                 "adapter": {
-                    "engine":"chrome_devtools_mcp", "device_id":"device",
+                    "engine":"chrome_extension", "device_id":"device",
                     "os_session_id":"session", "browser_major_version":145,
                     "browser_version":"145", "adapter_id":"fixture",
                     "adapter_version":"1", "profile_incarnation":"profile",
@@ -588,7 +568,7 @@ mod tests {
                 "page_id":"page", "page_incarnation":"page-one",
                 "origin":{"kind":"https","host_ascii":"app.slack.com","port":443},
                 "document_revision":2, "url_sha256":"a".repeat(64),
-                "observed_at_unix_ms":1
+                "observed_at_unix_ms":1, "account_id":"slack-web:T123:U456"
             },
             "composer": {
                 "page_id":"page", "page_incarnation":"page-one",
@@ -699,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn slack_projection_requires_exact_verified_readback_and_stays_manual_only() {
+    fn slack_extension_projection_requires_exact_verified_readback() {
         let (input, completed) = fixture();
         let handoff = project_web_draft_handoff(
             "prepare_slack_web_message_handoff",
@@ -716,11 +696,11 @@ mod tests {
         );
         assert_eq!(
             handoff.send_authority,
-            CommunicationSendAuthority::ManualOnly
+            CommunicationSendAuthority::ExactGrantEligible
         );
         assert_eq!(handoff.readback_payload_sha256, Some("b".repeat(64)));
 
-        for case in 0..5 {
+        for case in 0..7 {
             let mut bad = completed.clone();
             let Some(ComputerActionOutput::Browser(result)) = &mut bad.output else {
                 unreachable!()
@@ -730,7 +710,9 @@ mod tests {
                 1 => bad.facts[0].verified = false,
                 2 => result.form_readback[0].value = "changed".into(),
                 3 => result.page.document_revision = 2,
-                _ => result.page.origin.host_ascii = "example.com".into(),
+                4 => result.page.origin.host_ascii = "example.com".into(),
+                5 => result.page.account_id = None,
+                _ => result.page.account_id = Some("slack-web:T999:U999".into()),
             }
             assert!(
                 project_web_draft_handoff(

@@ -767,7 +767,7 @@ async fn conversation_history_is_explicit_bounded_and_charged_to_current_focus()
     }
     let mut expired = crate::model_message_labels::model_bound_user_message(
         "expired-old".into(),
-        "expired history must not be replayed".into(),
+        "historical answer remains available".into(),
         destination,
     )
     .unwrap();
@@ -828,11 +828,11 @@ async fn conversation_history_is_explicit_bounded_and_charged_to_current_focus()
     assert!(history_result.text.contains("older question"));
     assert!(history_result.text.contains("older answer"));
     assert!(
-        !history_result
+        history_result
             .text
-            .contains("expired history must not be replayed")
+            .contains("historical answer remains available")
     );
-    assert!(history_result.text.contains("\"unavailable_count\":1"));
+    assert!(history_result.text.contains("\"unavailable_count\":0"));
     assert!(!history_result.text.contains("unrelated current question"));
     assert_eq!(
         history_result
@@ -842,7 +842,7 @@ async fn conversation_history_is_explicit_bounded_and_charged_to_current_focus()
             .provenance
             .source_envelope_ids
             .len(),
-        2
+        3
     );
 }
 
@@ -7512,7 +7512,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
     );
 
     let mut rewritten = exact;
-    rewritten["page"]["adapter"]["engine"] = serde_json::json!("chrome_devtools_mcp");
+    rewritten["page"]["adapter"]["connection_revision"] = serde_json::json!(999);
     let error = validate_browser_permission_references(
         &[browser_result],
         &request_for(serde_json::to_string(&rewritten).unwrap()),

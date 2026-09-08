@@ -21,7 +21,7 @@ async fn rehearsal_native_read_is_classified_once_with_original_receipt() {
 async fn report_fixture(read: bool) {
     let dir = tempfile::tempdir().unwrap();
     let page: desk_agent_protocol::browser_control::BrowserPageRef = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"adapter":{"engine":"chrome_devtools_mcp","device_id":"device-1",
+        "schema_version":1,"adapter":{"engine":"chrome_extension","device_id":"device-1",
         "os_session_id":"desktop-1","browser_major_version":145,"browser_version":"145","adapter_id":"fixture","adapter_version":"1",
         "profile_incarnation":"profile-1","connection_revision":1},
         "page_id":"page-1","page_incarnation":"page-first","origin":{"kind":"https","host_ascii":"example.test","port":443},

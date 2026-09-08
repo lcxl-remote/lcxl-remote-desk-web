@@ -144,78 +144,103 @@ impl SinkAuthorizer for DefaultSinkAuthorizer {
         now_unix_ms: u64,
         byte_cap: usize,
     ) -> Result<AuthorizedSinkProjection, SinkAuthorizationError> {
-        destination
-            .validate()
-            .map_err(|error| SinkAuthorizationError::InvalidDestination(error.to_string()))?;
-        if inputs.is_empty() {
-            return Err(SinkAuthorizationError::EmptyProjection);
-        }
-        if inputs.len() > MAX_SINK_ITEMS {
-            return Err(SinkAuthorizationError::TooManyItems);
-        }
-        if byte_cap == 0 || byte_cap > MAX_SINK_BYTES {
-            return Err(SinkAuthorizationError::InvalidByteCap);
-        }
-
-        let mut seen = BTreeSet::new();
-        let mut total_bytes = 0usize;
-        let mut items = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            input
-                .envelope
-                .validate()
-                .map_err(|error| SinkAuthorizationError::InvalidEnvelope(error.to_string()))?;
-            if !seen.insert(input.envelope.envelope_id.as_str()) {
-                return Err(SinkAuthorizationError::DuplicateEnvelope);
-            }
-            if input.envelope.sensitivity == Sensitivity::Secret && destination.is_external() {
-                return Err(SinkAuthorizationError::SecretExternalEgressDenied);
-            }
-            if !input
-                .envelope
-                .allowed_destinations
-                .iter()
-                .any(|allowed| allowed == destination)
-            {
-                return Err(SinkAuthorizationError::DestinationNotAllowed);
-            }
-            if is_expired(input.envelope, now_unix_ms) {
-                return Err(SinkAuthorizationError::ExpiredEnvelope);
-            }
-            let expected_size = content_size(&input.envelope.content);
-            if usize::try_from(expected_size).ok() != Some(input.bytes.len()) {
-                return Err(SinkAuthorizationError::ContentSizeMismatch);
-            }
-            let digest = hex_digest(input.bytes);
-            if digest != input.envelope.digest_sha256 {
-                return Err(SinkAuthorizationError::DigestMismatch);
-            }
-            total_bytes = total_bytes
-                .checked_add(input.bytes.len())
-                .ok_or(SinkAuthorizationError::ByteCapExceeded)?;
-            if total_bytes > byte_cap {
-                return Err(SinkAuthorizationError::ByteCapExceeded);
-            }
-            items.push(AuthorizedSinkItem {
-                envelope_id: input.envelope.envelope_id.clone(),
-                digest_sha256: digest,
-                bytes: input.bytes.to_vec(),
-            });
-        }
-
-        Ok(AuthorizedSinkProjection {
-            audit: SinkProjectionAudit {
-                destination: destination.clone(),
-                envelope_ids: items.iter().map(|item| item.envelope_id.clone()).collect(),
-                digests_sha256: items
-                    .iter()
-                    .map(|item| item.digest_sha256.clone())
-                    .collect(),
-                total_bytes,
-            },
-            items,
-        })
+        authorize_inputs(destination, inputs, now_unix_ms, byte_cap, true)
     }
+}
+
+/// Authorize immutable conversation evidence for model recollection only.
+/// Receipt deadlines govern fresh actions, not the lifetime of historical facts.
+/// This grants no execution authority and cannot target another external sink.
+pub(crate) fn authorize_model_history(
+    destination: &DestinationIdentity,
+    inputs: &[SinkInput<'_>],
+    now_unix_ms: u64,
+    byte_cap: usize,
+) -> Result<AuthorizedSinkProjection, SinkAuthorizationError> {
+    if !matches!(destination, DestinationIdentity::Model { .. }) {
+        return Err(SinkAuthorizationError::DestinationNotAllowed);
+    }
+    authorize_inputs(destination, inputs, now_unix_ms, byte_cap, false)
+}
+
+fn authorize_inputs(
+    destination: &DestinationIdentity,
+    inputs: &[SinkInput<'_>],
+    now_unix_ms: u64,
+    byte_cap: usize,
+    enforce_deadline: bool,
+) -> Result<AuthorizedSinkProjection, SinkAuthorizationError> {
+    destination
+        .validate()
+        .map_err(|error| SinkAuthorizationError::InvalidDestination(error.to_string()))?;
+    if inputs.is_empty() {
+        return Err(SinkAuthorizationError::EmptyProjection);
+    }
+    if inputs.len() > MAX_SINK_ITEMS {
+        return Err(SinkAuthorizationError::TooManyItems);
+    }
+    if byte_cap == 0 || byte_cap > MAX_SINK_BYTES {
+        return Err(SinkAuthorizationError::InvalidByteCap);
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    let mut items = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        input
+            .envelope
+            .validate()
+            .map_err(|error| SinkAuthorizationError::InvalidEnvelope(error.to_string()))?;
+        if !seen.insert(input.envelope.envelope_id.as_str()) {
+            return Err(SinkAuthorizationError::DuplicateEnvelope);
+        }
+        if input.envelope.sensitivity == Sensitivity::Secret && destination.is_external() {
+            return Err(SinkAuthorizationError::SecretExternalEgressDenied);
+        }
+        if !input
+            .envelope
+            .allowed_destinations
+            .iter()
+            .any(|allowed| allowed == destination)
+        {
+            return Err(SinkAuthorizationError::DestinationNotAllowed);
+        }
+        if enforce_deadline && is_expired(input.envelope, now_unix_ms) {
+            return Err(SinkAuthorizationError::ExpiredEnvelope);
+        }
+        let expected_size = content_size(&input.envelope.content);
+        if usize::try_from(expected_size).ok() != Some(input.bytes.len()) {
+            return Err(SinkAuthorizationError::ContentSizeMismatch);
+        }
+        let digest = hex_digest(input.bytes);
+        if digest != input.envelope.digest_sha256 {
+            return Err(SinkAuthorizationError::DigestMismatch);
+        }
+        total_bytes = total_bytes
+            .checked_add(input.bytes.len())
+            .ok_or(SinkAuthorizationError::ByteCapExceeded)?;
+        if total_bytes > byte_cap {
+            return Err(SinkAuthorizationError::ByteCapExceeded);
+        }
+        items.push(AuthorizedSinkItem {
+            envelope_id: input.envelope.envelope_id.clone(),
+            digest_sha256: digest,
+            bytes: input.bytes.to_vec(),
+        });
+    }
+
+    Ok(AuthorizedSinkProjection {
+        audit: SinkProjectionAudit {
+            destination: destination.clone(),
+            envelope_ids: items.iter().map(|item| item.envelope_id.clone()).collect(),
+            digests_sha256: items
+                .iter()
+                .map(|item| item.digest_sha256.clone())
+                .collect(),
+            total_bytes,
+        },
+        items,
+    })
 }
 
 fn content_size(content: &ContentRef) -> u64 {
@@ -372,6 +397,54 @@ mod tests {
                 delete_with_run: true,
             },
         }
+    }
+
+    #[test]
+    fn historical_model_recollection_does_not_renew_execution_or_export_deadlines() {
+        let destination = model("gateway");
+        let bytes = b"completed tool output";
+        let source = envelope(
+            "receipt",
+            bytes,
+            Sensitivity::Sensitive,
+            vec![destination.clone()],
+        );
+        let inputs = [SinkInput {
+            envelope: &source,
+            bytes,
+        }];
+        let history =
+            authorize_model_history(&destination, &inputs, 86_400_000, MAX_SINK_BYTES).unwrap();
+        assert_eq!(history.items[0].bytes, bytes);
+        assert_eq!(history.audit.envelope_ids, vec!["receipt"]);
+        assert_eq!(source.retention.expires_at_unix_ms, Some(200));
+        assert_eq!(
+            DefaultSinkAuthorizer
+                .authorize(&destination, &inputs, 86_400_000, MAX_SINK_BYTES)
+                .unwrap_err(),
+            SinkAuthorizationError::ExpiredEnvelope
+        );
+        assert_eq!(
+            authorize_model_history(&model("other"), &inputs, 86_400_000, MAX_SINK_BYTES)
+                .unwrap_err(),
+            SinkAuthorizationError::DestinationNotAllowed
+        );
+        assert_eq!(
+            authorize_model_history(&destination, &inputs, 86_400_000, 1).unwrap_err(),
+            SinkAuthorizationError::ByteCapExceeded
+        );
+        let authorization = ExportDataAuthorization {
+            authorization_id: "expired-grant".into(),
+            source_envelope_ids: vec![source.envelope_id.clone()],
+            destination,
+            max_sensitivity: Sensitivity::Sensitive,
+            expires_at_unix_ms: 200,
+            max_bytes: MAX_SINK_BYTES as u64,
+        };
+        assert_eq!(
+            authorize_export(&source, "export", &authorization, 200).unwrap_err(),
+            SinkAuthorizationError::InvalidExportAuthorization
+        );
     }
 
     #[test]

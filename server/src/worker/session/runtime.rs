@@ -299,7 +299,6 @@ impl WorkerSession {
             let readiness_writer = writer_tx.clone();
             let readiness_broker = computer_use_broker.clone();
             let readiness_settings = shared_settings.clone();
-            let readiness_os_session_id = init_payload.os_session_id.to_string();
             tokio::spawn(async move {
                 let mut first_report = true;
                 loop {
@@ -307,56 +306,7 @@ impl WorkerSession {
                     let ceiling = settings.computer_use.clone();
                     let allow_screen = settings.collection_policy.allow_screen;
                     let display_selected = !settings.desk.video_device_name.trim().is_empty();
-                    let browser_device_id = settings.system.get_client_id().unwrap_or_default();
                     drop(settings);
-                    let broker = readiness_broker.clone();
-                    let probe_ceiling = ceiling.clone();
-                    let base_readiness = match tokio::task::spawn_blocking(move || {
-                        broker.readiness(&probe_ceiling, allow_screen, display_selected)
-                    })
-                    .await
-                    {
-                        Ok(readiness) => readiness,
-                        Err(error) => {
-                            warn!("Computer Use readiness probe failed to join: {error}");
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                            continue;
-                        }
-                    };
-                    let interactive_session_unlocked =
-                        base_readiness.capabilities.iter().any(|entry| {
-                            entry.capability
-                                == desk_agent_protocol::Capability::DesktopSessionInspect
-                                && entry.ready
-                        });
-                    // Publish the cheap, current host snapshot before scheduling the optional
-                    // browser probe. Chrome may spend its full native-approval timeout here,
-                    // which is longer than the readiness lease. The probe therefore runs as a
-                    // single-flight background task while this loop keeps publishing the host
-                    // heartbeat every ten seconds. The next tick projects any material browser
-                    // state change and advances the revision.
-                    if readiness_writer
-                        .send(WorkerToService::ComputerUseReadinessUpdated(
-                            ComputerUseReadinessPayload {
-                                readiness: base_readiness,
-                            },
-                        ))
-                        .is_err()
-                    {
-                        return;
-                    }
-                    let browser_readiness_broker = readiness_broker.clone();
-                    let browser_readiness_session_id = readiness_os_session_id.clone();
-                    tokio::spawn(async move {
-                        browser_readiness_broker
-                            .refresh_browser_readiness(
-                                browser_device_id,
-                                browser_readiness_session_id,
-                                ceiling.browser_semantic && ceiling.browser_devtools_mcp,
-                                interactive_session_unlocked,
-                            )
-                            .await;
-                    });
                     let broker = readiness_broker.clone();
                     let readiness = match tokio::task::spawn_blocking(move || {
                         broker.readiness(&ceiling, allow_screen, display_selected)

@@ -10,6 +10,8 @@ On the controlled device, sign in as owner and open **Local AI Policy → Local 
 
 The Gmail extension send adapter compares the visible Google account at page snapshot time with the account immediately before activation. A missing, ambiguous or changed account returns DefinitelyNotSent without clicking. An account change after activation leaves OutcomeUnknown; a notice from another account cannot prove delivery. The account identifier also travels with the page reference into the draft snapshot and review contract. A new independent run must verify the same account; the complete background execution and real-send flow still require acceptance testing.
 
+Tool results, user messages and AI replies are conversation history and are not removed from model context merely because time passes or an execution authorization expires. Window trimming or summary compaction occurs only when the context capacity threshold is reached; the original transcript remains stored. Historical results describe what happened at the time, not the current device state, and do not authorize another execution. New actions still validate authorization deadlines, target identity and required current state. Changes to model destination or source authorization can still restrict disclosure of affected content.
+
 ## AI Assistant conversations
 
 Internal server messages used to resume a conversation are omitted from restored chats, conversation titles and message counts. They remain in the stored execution context and are not treated as new user input or additional permission.
@@ -26,7 +28,7 @@ Updates and deletions retain a private recovery directory beside the target: `ap
 
 In the Web UI, “Command result (from device)” is collapsed by default; select its title to expand it. Standard receipts show the exit code, execution time, and stdout/stderr; terminal mode retains combined output. Empty output, truncation, and redactions are labeled. The original receipt can be expanded separately. Non-JSON or unrecognized formats are shown unchanged, without altering the saved result or AI interpretation.
 
-Before resuming an older conversation, the model view excludes expired or no-longer-authorized history. It may advance past complete message groups and show a trimming notice; the original transcript stays intact. This is not a fallback after failed compression and never extends data permissions. Invalid protected context required by the current task still fails and must be selected or read again. New terminal errors are saved with the conversation, so refreshing or reopening displays the same specific reason; a new turn clears the previous error. Errors not saved before upgrading cannot be reconstructed.
+Older conversation history does not expire with time. Model destination and source authorization are still checked before disclosure. New terminal errors are saved with the conversation, so refreshing or reopening displays the same specific reason; a new turn clears the previous error. Errors not saved before upgrading cannot be reconstructed.
 
 System settings → Context management (`/system/context-management`) switches between checkpoint summaries and window trimming. Summaries are on by default. Changes apply on the next turn and survive restarts. Compaction makes an additional call to the current model and may incur charges; failures are explicit, without silent fallback to trimming.
 
@@ -34,7 +36,7 @@ Isolated background command interpretation does not reset the regular conversati
 
 AI natural-language replies use the interface language supplied when sending a message. Permission resumes and background follow-ups inherit the saved conversation language. This preference does not change tools, commands, JSON fields, or permissions. Existing conversations without a saved preference record it on the next normal message.
 
-On continuation, AI retrieves history on demand. Content whose authorization has expired, is near expiry, or does not cover the current model is not sent again. AI is told that some history is unavailable and may need fresh authorized evidence. The original UI history is not deleted, and historical commands are not automatically replayed.
+On continuation, AI retrieves history on demand. Elapsed time does not make historical content unavailable; disclosure must still be authorized for the current model. Historical commands are not automatically replayed.
 
 The ring at the left of the Send row shows context budget occupancy. Hover or focus it to see the compaction/trimming threshold, used bytes, remaining budget, and estimated text draft increase. The threshold is the latest prepared history budget after reserving system prompt and tool overhead. Summaries, retained messages, and subsequent replies and tool results count toward usage. Tool or context changes can alter the next budget, and the draft estimate excludes attachments not yet read; remaining bytes are not an exact character allowance. Usage is recalculated from the retained window after compaction/trimming. Missing usage displays “—”, not zero; an existing conversation needs a new model request preparation to produce this metadata.
 

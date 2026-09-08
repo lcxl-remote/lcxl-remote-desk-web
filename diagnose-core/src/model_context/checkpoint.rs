@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    ContextManagementStrategy, ContextPolicyKey, MessageGroup, ModelContextEntry,
-    ModelContextError, ModelContextState, ModelContextView, PinnedContextPolicy, checked_cost_sum,
-    group_messages, upsert_entry, validate_state,
+    ContextManagementStrategy, ContextNoticeKind, ContextPolicyKey, MessageGroup,
+    ModelContextEntry, ModelContextError, ModelContextState, ModelContextView, PinnedContextPolicy,
+    checked_cost_sum, group_messages, upsert_entry, validate_state,
 };
 use crate::chat::{ChatMessage, ChatRole};
 use crate::redaction::{Redactor, RegexRedactor};
@@ -220,6 +220,7 @@ pub struct ReadyContextPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloorReconciliationPlan {
+    pub notice_kind: ContextNoticeKind,
     pub base_state: ModelContextState,
     pub next_state: ModelContextState,
     pub history_sha256: String,
@@ -775,6 +776,7 @@ fn ready_checkpoint_view(
             false,
         )?,
         None => ModelContextView {
+            notice_kind: ContextNoticeKind::Trimmed,
             messages: conversation[groups
                 .get(floor)
                 .map_or(conversation.len(), |group| group.start)..]
@@ -814,6 +816,7 @@ fn checkpoint_view(
         .map_or(conversation.len(), |group| group.start);
     messages.extend_from_slice(&conversation[start..]);
     Ok(ModelContextView {
+        notice_kind: ContextNoticeKind::Compacted,
         messages,
         policy_key: policy_key.clone(),
         floor_group_head_message_id: groups
@@ -837,7 +840,7 @@ fn floor_reconciliation_plan(
         &mut next_state,
         ModelContextEntry {
             policy_key: policy.key(),
-            strategy: ContextManagementStrategy::CheckpointSummary,
+            strategy: policy.strategy,
             floor_group_head_message_id: groups
                 .get(next_floor)
                 .map(|group| conversation[group.start].message_id.clone()),
@@ -857,6 +860,7 @@ fn floor_reconciliation_plan(
         .map(|message| message.message_id.clone())
         .ok_or(ModelContextError::StaleCompressionPlan)?;
     Ok(FloorReconciliationPlan {
+        notice_kind: ContextNoticeKind::Restricted,
         base_state: state.clone(),
         next_state,
         history_sha256: history_sha256(conversation)?,

@@ -17,8 +17,8 @@ use sha2::{Digest, Sha256};
 use crate::chat::{ChatMessage, ChatRole, ModelTurn, ToolCall, ToolCallRef};
 use crate::seam::ModelRequest;
 use crate::sink_authorizer::{
-    DefaultSinkAuthorizer, ExportDataAuthorization, MAX_SINK_BYTES, SinkAuthorizationError,
-    SinkAuthorizer, SinkInput, SinkProjectionAudit, authorize_export,
+    ExportDataAuthorization, MAX_SINK_BYTES, SinkAuthorizationError, SinkInput,
+    SinkProjectionAudit, authorize_export,
 };
 
 mod lineage;
@@ -28,7 +28,7 @@ pub use lineage::{
     validate_model_output_lineage,
 };
 
-const MODEL_OUTPUT_TTL_MS: u64 = 5 * 60 * 1000;
+const MODEL_EXPORT_AUTHORIZATION_TTL_MS: u64 = 5 * 60 * 1000;
 pub(crate) const MODEL_CALL_RETENTION_HEADROOM_MS: u64 = 60 * 1000;
 
 #[derive(Debug, Clone)]
@@ -40,19 +40,16 @@ pub struct ModelEgressPolicy {
     pub export_authorization_id: String,
     pub now_unix_ms: u64,
     pub byte_cap: usize,
-    /// Permission decisions can arrive long after the model produced the
-    /// request. On that resume boundary, finite observations from every older
-    /// turn must be refreshed instead of being replayed or allowed to expire
-    /// the whole continuation. The server-owned resume message and exact grant
-    /// projection carry the durable requirement/authority needed to continue.
-    pub omit_finite_retention_historical_turns: bool,
+    /// A permission continuation may carry an optional reusable-result projection.
+    /// Its deadline is checked independently of the durable authorization.
+    pub permission_resume: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct AuthorizedModelRequest {
     pub request: ModelRequest,
     pub audit: SinkProjectionAudit,
-    /// Exact projected inputs used to conservatively label the model output.
+    /// Exact projected inputs used to preserve output sensitivity and provenance.
     pub input_envelopes: Vec<DataEnvelope>,
 }
 
@@ -139,53 +136,26 @@ impl ModelEgressPolicy {
                 .then_some(turn_id.clone())
             })
             .collect::<BTreeSet<_>>();
-        // Ephemeral observations and answers derived from them must not be
-        // replayed when their retention boundary cannot safely cover another
-        // model round trip. Keep the browser-visible transcript intact, but
-        // omit the complete *historical* turn from this provider request so
-        // tool call/result grouping remains valid. Without this headroom, a
-        // valid request can finish after an old input expires and strand the
-        // dynamic loop with an already-expired model output. The current turn
-        // is deliberately never omitted here: its selected observation still
-        // fails closed rather than being silently removed.
-        let historical_retention_cutoff = self
-            .now_unix_ms
-            .saturating_add(MODEL_CALL_RETENTION_HEADROOM_MS);
-        // Permission resumes synthesize a bounded registry of reusable Provider
-        // references at the recency edge. Its lineage deliberately inherits the
-        // most restrictive source retention, so a long user approval delay can
-        // make that freshly-created projection already stale. It is optional
-        // context rather than authority: omit it when it cannot cover another
-        // model round trip instead of letting an expired preview/search result
-        // strand an otherwise durable permission continuation. Artifact
-        // registry projections and the exact permission decision are separate
-        // messages and remain fail-closed.
-        if self.omit_finite_retention_historical_turns {
+        // This optional live reference catalog is rebuilt for a continuation.
+        // It is not a tool receipt or persisted conversation history. Do not
+        // advertise an expired operation reference as currently reusable.
+        if self.permission_resume {
             request.messages.retain(|message| {
-                message.data_envelope.as_ref().is_none_or(|envelope| {
-                    envelope.provenance.source_tool_name != "reusable_provider_result_projection"
-                        || !envelope_expires_by(envelope, historical_retention_cutoff)
-                })
+                message.role != ChatRole::System
+                    || message.data_envelope.as_ref().is_none_or(|envelope| {
+                        envelope.provenance.source_tool_name
+                            != "reusable_provider_result_projection"
+                            || !envelope_expires_by(
+                                envelope,
+                                self.now_unix_ms
+                                    .saturating_add(MODEL_CALL_RETENTION_HEADROOM_MS),
+                            )
+                    })
             });
         }
-        let expired_historical_turns = request
-            .messages
-            .iter()
-            .filter_map(|message| {
-                let envelope = message.data_envelope.as_ref()?;
-                let turn_id = message.turn_id.as_ref().or_else(|| {
-                    message
-                        .tool_call_id
-                        .as_ref()
-                        .and_then(|call_id| tool_call_turns.get(call_id))
-                })?;
-                (current_turn_id.as_ref() != Some(turn_id)
-                    && (envelope_expires_by(envelope, historical_retention_cutoff)
-                        || (self.omit_finite_retention_historical_turns
-                            && envelope_has_finite_retention(envelope))))
-                .then_some(turn_id.clone())
-            })
-            .collect::<BTreeSet<_>>();
+        // Historical results remain facts after their action/reference deadline.
+        // Only source selection and sink authorization affect eligibility here;
+        // the context planner independently applies the capacity budget.
         let mut omitted_turns = deselected_turns;
         // Unlabeled legacy content has no transferable export authority. Drop
         // complete historical turns, never relabel them for the current model.
@@ -203,7 +173,6 @@ impl ModelEgressPolicy {
                 .cloned()
         }));
         omitted_turns.extend(destination_mismatched_historical_turns);
-        omitted_turns.extend(expired_historical_turns);
         if !omitted_turns.is_empty() {
             request.messages.retain(|message| {
                 let turn_id = message.turn_id.as_ref().or_else(|| {
@@ -290,7 +259,9 @@ impl ModelEgressPolicy {
                     source_envelope_ids: vec![source.envelope_id.clone()],
                     destination: self.destination.clone(),
                     max_sensitivity: Sensitivity::Sensitive,
-                    expires_at_unix_ms: self.now_unix_ms.saturating_add(MODEL_OUTPUT_TTL_MS),
+                    expires_at_unix_ms: self
+                        .now_unix_ms
+                        .saturating_add(MODEL_EXPORT_AUTHORIZATION_TTL_MS),
                     max_bytes: u64::try_from(self.byte_cap)
                         .map_err(|_| ModelEgressError::InvalidPolicy("byte cap overflow".into()))?,
                 };
@@ -323,18 +294,13 @@ impl ModelEgressPolicy {
                 bytes: bytes.as_slice(),
             })
             .collect::<Vec<_>>();
-        if let Some(expired) = projected_envelopes
-            .iter()
-            .find(|envelope| envelope_is_expired(envelope, self.now_unix_ms))
-        {
-            return Err(ModelEgressError::ExpiredInputEnvelope {
-                envelope_id: expired.envelope_id.clone(),
-                source_tool_name: expired.provenance.source_tool_name.clone(),
-            });
-        }
-        let projection = DefaultSinkAuthorizer
-            .authorize(&self.destination, &inputs, self.now_unix_ms, self.byte_cap)
-            .map_err(ModelEgressError::Sink)?;
+        let projection = crate::sink_authorizer::authorize_model_history(
+            &self.destination,
+            &inputs,
+            self.now_unix_ms,
+            self.byte_cap,
+        )
+        .map_err(ModelEgressError::Sink)?;
 
         Ok(AuthorizedModelRequest {
             request,
@@ -351,13 +317,10 @@ impl ModelEgressPolicy {
         if inputs.is_empty() {
             return Err(ModelEgressError::EmptyInputs);
         }
-        if inputs
-            .iter()
-            .any(|input| envelope_is_expired(input, self.now_unix_ms))
-        {
-            return Err(ModelEgressError::Sink(
-                SinkAuthorizationError::ExpiredEnvelope,
-            ));
+        for input in inputs {
+            input
+                .validate()
+                .map_err(|error| ModelEgressError::InvalidDerivedEnvelope(error.to_string()))?;
         }
         let bytes = model_turn_content_bytes(turn)?;
         if bytes.is_empty() {
@@ -381,15 +344,14 @@ impl ModelEgressPolicy {
 
         let mut source_ids = Vec::with_capacity(inputs.len());
         let mut seen = HashSet::new();
-        let mut retention = RetentionBoundary {
-            expires_at_unix_ms: Some(self.now_unix_ms.saturating_add(MODEL_OUTPUT_TTL_MS)),
+        let retention = RetentionBoundary {
+            expires_at_unix_ms: None,
             delete_with_run: true,
         };
         for input in inputs {
             if seen.insert(input.envelope_id.as_str()) {
                 source_ids.push(input.envelope_id.clone());
             }
-            retention = retention.most_restrictive(input.retention);
         }
         let digest_sha256 = hex_digest(&bytes);
         // Equal text can be produced from different sources in the same clock tick.
@@ -410,15 +372,11 @@ impl ModelEgressPolicy {
         let envelope = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: format!("model-output-{}", short_digest(&identity)),
-            content: ContentRef::EphemeralObservation {
-                observation_id: format!(
-                    "model-response-{}",
-                    short_digest(digest_sha256.as_bytes())
-                ),
+            content: ContentRef::ImmutableBlob {
+                blob_id: format!("model-response-{}", short_digest(&bytes)),
+                sha256: digest_sha256.clone(),
                 size_bytes: bytes.len() as u64,
-                expires_at_unix_ms: retention
-                    .expires_at_unix_ms
-                    .unwrap_or_else(|| self.now_unix_ms.saturating_add(MODEL_OUTPUT_TTL_MS)),
+                media_type: "application/json".into(),
             },
             provenance: DataProvenance {
                 source_provider_id: "external-model".into(),
@@ -479,15 +437,6 @@ impl ModelEgressPolicy {
             .map_err(|error| ModelEgressError::InvalidDerivedEnvelope(error.to_string()))?;
         Ok(envelope)
     }
-}
-
-fn envelope_is_expired(envelope: &DataEnvelope, now_unix_ms: u64) -> bool {
-    envelope_expires_by(envelope, now_unix_ms)
-}
-
-fn envelope_has_finite_retention(envelope: &DataEnvelope) -> bool {
-    envelope.retention.expires_at_unix_ms.is_some()
-        || matches!(envelope.content, ContentRef::EphemeralObservation { .. })
 }
 
 pub(crate) fn envelope_expires_by(envelope: &DataEnvelope, cutoff_unix_ms: u64) -> bool {
@@ -609,10 +558,6 @@ pub enum ModelEgressError {
     EmptySystemPrompt,
     EmptyInputs,
     EmptyModelOutput,
-    ExpiredInputEnvelope {
-        envelope_id: String,
-        source_tool_name: String,
-    },
     DerivedDestinationLost,
     Encode(String),
     InvalidDerivedEnvelope(String),
@@ -640,13 +585,6 @@ impl std::fmt::Display for ModelEgressError {
             Self::EmptySystemPrompt => formatter.write_str("system prompt is empty"),
             Self::EmptyInputs => formatter.write_str("model output has no source envelopes"),
             Self::EmptyModelOutput => formatter.write_str("model output is empty"),
-            Self::ExpiredInputEnvelope {
-                envelope_id,
-                source_tool_name,
-            } => write!(
-                formatter,
-                "model input envelope {envelope_id} from {source_tool_name} is expired"
-            ),
             Self::DerivedDestinationLost => {
                 formatter.write_str("derived output lost the current model destination")
             }
@@ -679,6 +617,7 @@ mod tests {
     use super::*;
     use crate::chat::{StopReason, TokenUsage};
     use crate::prompt::ResponseFormatSpec;
+    use crate::sink_authorizer::{DefaultSinkAuthorizer, SinkAuthorizer};
 
     fn destination() -> DestinationIdentity {
         DestinationIdentity::Model {
@@ -740,7 +679,7 @@ mod tests {
             export_authorization_id: "explicit-user-context-selection".into(),
             now_unix_ms: 100,
             byte_cap: MAX_SINK_BYTES,
-            omit_finite_retention_historical_turns: false,
+            permission_resume: false,
         }
     }
 
@@ -777,21 +716,13 @@ mod tests {
                 .authorize_request(request(output.clone()))
                 .is_err()
         );
-        for change in 0..5 {
+        for change in 0..4 {
             let mut invalid = output.clone();
             match change {
                 0 => invalid.tool_call_id = None,
                 1 => invalid.background_task_id = None,
                 2 => invalid.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret,
-                3 => invalid.text.push_str("tampered"),
-                _ => {
-                    invalid
-                        .data_envelope
-                        .as_mut()
-                        .unwrap()
-                        .retention
-                        .expires_at_unix_ms = Some(99)
-                }
+                _ => invalid.text.push_str("tampered"),
             }
             assert!(
                 policy(&["browser_open_page"])
@@ -1196,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_historical_turn_is_omitted_without_changing_current_turn() {
+    fn historical_turn_survives_its_receipt_deadline() {
         let destination = destination();
         let mut expired_answer = envelope(
             "expired-answer-envelope",
@@ -1256,11 +1187,14 @@ mod tests {
             .iter()
             .map(|message| message.message_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(message_ids, vec!["system", "current-user"]);
+        assert_eq!(
+            message_ids,
+            vec!["system", "prior-user", "prior-answer", "current-user"]
+        );
     }
 
     #[test]
-    fn historical_turn_without_model_round_trip_headroom_is_omitted() {
+    fn historical_turn_does_not_require_deadline_headroom() {
         let destination = destination();
         let mut expiring_answer = envelope(
             "expiring-answer-envelope",
@@ -1304,11 +1238,11 @@ mod tests {
             .iter()
             .map(|message| message.message_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(message_ids, vec!["current-user"]);
+        assert_eq!(message_ids, vec!["prior-answer", "current-user"]);
     }
 
     #[test]
-    fn permission_resume_omits_finite_historical_turn_before_it_expires() {
+    fn permission_resume_keeps_authorized_history_with_sufficient_retention() {
         let destination = destination();
         let mut observation = envelope(
             "historical-observation-envelope",
@@ -1344,7 +1278,7 @@ mod tests {
             ResponseFormatSpec::None,
         );
         let mut resume_policy = policy(&["browser_take_snapshot"]);
-        resume_policy.omit_finite_retention_historical_turns = true;
+        resume_policy.permission_resume = true;
 
         let authorized = resume_policy.authorize_request(request).unwrap();
         let message_ids = authorized
@@ -1353,11 +1287,11 @@ mod tests {
             .iter()
             .map(|message| message.message_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(message_ids, vec!["permission-resume"]);
+        assert_eq!(message_ids, vec!["historical-tool", "permission-resume"]);
     }
 
     #[test]
-    fn permission_resume_omits_expired_reusable_result_projection() {
+    fn permission_resume_omits_only_expired_live_reference_catalog() {
         let destination = destination();
         let mut reusable = envelope(
             "reusable-result-envelope",
@@ -1392,7 +1326,7 @@ mod tests {
             ResponseFormatSpec::None,
         );
         let mut resume_policy = policy(&[]);
-        resume_policy.omit_finite_retention_historical_turns = true;
+        resume_policy.permission_resume = true;
 
         let authorized = resume_policy.authorize_request(request).unwrap();
         let message_ids = authorized
@@ -1480,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_current_turn_still_fails_closed() {
+    fn slow_current_turn_keeps_completed_observations() {
         let destination = destination();
         let mut expired_observation = envelope(
             "expired-current-envelope",
@@ -1517,14 +1451,14 @@ mod tests {
             ResponseFormatSpec::None,
         );
 
-        assert!(matches!(
-            policy(&["inspect_office_selection"]).authorize_request(request),
-            Err(ModelEgressError::ExpiredInputEnvelope { .. })
-        ));
+        let authorized = policy(&["inspect_office_selection"])
+            .authorize_request(request)
+            .unwrap();
+        assert_eq!(authorized.request.messages.len(), 3);
     }
 
     #[test]
-    fn input_that_expires_during_provider_call_cannot_label_model_output() {
+    fn model_output_is_immutable_history_after_input_deadline() {
         let destination = destination();
         let mut input = envelope(
             "dispatch-valid-envelope",
@@ -1543,12 +1477,15 @@ mod tests {
         let mut completion_policy = policy(&[]);
         completion_policy.now_unix_ms = 151;
 
-        assert!(matches!(
-            completion_policy.derive_model_output_envelope(&turn, &[input]),
-            Err(ModelEgressError::Sink(
-                SinkAuthorizationError::ExpiredEnvelope
-            ))
-        ));
+        let output = completion_policy
+            .derive_model_output_envelope(&turn, &[input])
+            .unwrap();
+        assert_eq!(output.retention.expires_at_unix_ms, None);
+        assert!(matches!(output.content, ContentRef::ImmutableBlob { .. }));
+        assert_eq!(
+            output.provenance.source_envelope_ids,
+            vec!["dispatch-valid-envelope"]
+        );
     }
 
     #[test]

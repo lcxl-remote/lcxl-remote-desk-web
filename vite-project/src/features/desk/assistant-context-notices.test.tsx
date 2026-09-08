@@ -6,6 +6,12 @@ import type { DeviceAssistantMessage } from './use-device-assistant-chat';
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => key }) }));
 
 describe('assistant context timeline notices', () => {
+    it.each(['refreshed', 'restricted'] as const)('distinguishes %s from capacity trimming', kind => {
+        const { unmount } = render(<AssistantContextNotices notices={[{ id: kind, turnId: 'turn', kind }]} />);
+        expect(screen.getByTestId('assistant-context-notice').textContent).toContain(`contextNotice.${kind}`);
+        expect(screen.getByTestId('assistant-context-notice').textContent).not.toContain('contextNotice.trimmed');
+        unmount();
+    });
     it('keeps its original message boundary when later turns arrive', () => {
         const notice = { id: 'a', turnId: 'turn-a', kind: 'compacted' as const, afterMessageId: 'hidden-tool' };
         const messages: DeviceAssistantMessage[] = [{ id: 'user', role: 'user', text: 'question', contextBoundaryIds: ['user', 'hidden-tool'] }];

@@ -187,8 +187,9 @@ pub fn internal_tool_result_envelope(
 /// A history page is a deterministic projection of several older message
 /// envelopes plus the model's current tool call. Its authority is the strict
 /// intersection of every input destination, its sensitivity is the maximum,
-/// and its retention is the most restrictive input boundary. This makes a
-/// model/profile switch or expired source fail at the ordinary egress gate.
+/// and operation-reference deadlines remain in its lineage metadata. A model
+/// switch still requires matching disclosure authority; elapsed time does not
+/// invalidate the historical page for model recollection.
 pub fn conversation_history_result_envelope(
     parent: Option<&DataEnvelope>,
     source_messages: &[ChatMessage],

@@ -118,7 +118,7 @@ pub(super) fn failed(plan: &SealedComputerActionPlan) -> ComputerActionCompleted
 pub(super) fn verified(plan: &SealedComputerActionPlan) -> ComputerActionCompleted {
     let output = serde_json::from_value(serde_json::json!({
         "schema_version":1,"call_id":plan.action_request_id,"outcome":"page_opened",
-        "page":{"schema_version":1,"adapter":{"engine":"chrome_devtools_mcp","device_id":plan.device_id,
+        "page":{"schema_version":1,"adapter":{"engine":"chrome_extension","device_id":plan.device_id,
             "os_session_id":"desktop-1","browser_major_version":145,"browser_version":"145","adapter_id":"fixture","adapter_version":"1",
             "profile_incarnation":"profile-1","connection_revision":1},
             "page_id":"page-1","page_incarnation":"page-first","origin":{"kind":"https","host_ascii":"example.test","port":443},

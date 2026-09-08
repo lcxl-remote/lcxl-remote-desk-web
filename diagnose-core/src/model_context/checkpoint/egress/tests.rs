@@ -19,7 +19,7 @@ fn policy() -> ModelEgressPolicy {
         export_authorization_id: "selected-send".into(),
         now_unix_ms: 1000,
         byte_cap: crate::sink_authorizer::MAX_SINK_BYTES,
-        omit_finite_retention_historical_turns: false,
+        permission_resume: false,
     }
 }
 
@@ -49,45 +49,168 @@ fn history() -> Vec<ChatMessage> {
 }
 
 #[test]
-fn expired_history_reconciles_before_compression_without_mutating_transcript() {
-    let mut conversation = history();
-    conversation[0]
-        .data_envelope
-        .as_mut()
-        .unwrap()
-        .retention
-        .expires_at_unix_ms = Some(500);
-    let original = conversation.clone();
-    let state = ModelContextState::default();
-    let repair = reconcile_context_eligibility(
-        &policy(),
-        &conversation,
-        &state,
-        &context_policy(),
-        &ContextProtectionSet::default(),
-        7,
-    )
-    .unwrap()
-    .unwrap();
-    let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
-    let ContextBuildPlan::Ready(ready) = plan_model_context(
-        &conversation,
-        &next,
-        &context_policy(),
-        &ContextProtectionSet::default(),
-        7,
-    )
-    .unwrap() else {
-        panic!("eligible tail should fit without compression");
-    };
-    assert_eq!(ready.view.messages.len(), 1);
-    assert_eq!(ready.view.messages[0].message_id, "recent");
-    assert_eq!(conversation, original);
+fn time_alone_never_advances_history_floor_in_either_strategy() {
+    for strategy in [
+        ContextManagementStrategy::Window,
+        ContextManagementStrategy::CheckpointSummary,
+    ] {
+        let mut conversation = vec![user("old", 100), user("recent", 100)];
+        let mut output = user("background-result", 100);
+        output.role = ChatRole::UntrustedOutput;
+        output.turn_id = None;
+        conversation.insert(1, output);
+        for message in &mut conversation {
+            message
+                .data_envelope
+                .as_mut()
+                .unwrap()
+                .retention
+                .expires_at_unix_ms = Some(500);
+        }
+        let original = conversation.clone();
+        let state = ModelContextState::default();
+        let mut pinned = context_policy();
+        pinned.strategy = strategy;
+        let mut protection = ContextProtectionSet::default();
+        protection.protect_message("recent");
+        for now in [499, 500, 1_000_000, 86_400_000] {
+            let mut later = policy();
+            later.now_unix_ms = now;
+            assert!(
+                reconcile_context_eligibility(
+                    &later,
+                    &conversation,
+                    &state,
+                    &pinned,
+                    &protection,
+                    7
+                )
+                .unwrap()
+                .is_none()
+            );
+            let ContextBuildPlan::Ready(ready) =
+                plan_model_context(&conversation, &state, &pinned, &protection, 7).unwrap()
+            else {
+                panic!("small history must fit");
+            };
+            assert_eq!(ready.view.messages, conversation);
+            assert_eq!(
+                later
+                    .authorize_request(ModelRequest::text_only(
+                        ready.view.messages,
+                        ResponseFormatSpec::None
+                    ))
+                    .unwrap()
+                    .request
+                    .messages
+                    .len(),
+                3
+            );
+        }
+        assert_eq!(conversation, original);
+    }
+}
+
+#[test]
+fn completed_tool_call_and_result_remain_paired_on_next_day_followup() {
+    let mut question = user("question", 100);
+    question.turn_id = Some("first".into());
+    let mut call = user("call", 100);
+    call.role = ChatRole::Assistant;
+    call.turn_id = Some("first".into());
+    call.text.clear();
+    call.replay_disposition = Some(crate::replay::ReplayDisposition::NotRequired {
+        source_context_key: context_policy().source_context_key,
+    });
+    call.tool_calls = vec![ToolCallRef {
+        id: "read-1".into(),
+        name: "read_processes".into(),
+        arguments_json: "{}".into(),
+    }];
+    let mut result = user("result", 100);
+    result.role = ChatRole::Tool;
+    result.turn_id = Some("first".into());
+    result.tool_call_id = Some("read-1".into());
+    let mut answer = user("answer", 100);
+    answer.role = ChatRole::Assistant;
+    answer.turn_id = Some("first".into());
+    let mut conversation = vec![question, call, result, answer, user("followup", 100)];
+    for message in &mut conversation {
+        let bytes = crate::model_egress::message_content_bytes(message).unwrap();
+        let envelope = message.data_envelope.as_mut().unwrap();
+        envelope.digest_sha256 = sha256_hex(&bytes);
+        envelope.content = ContentRef::EphemeralObservation {
+            observation_id: message.message_id.clone(),
+            size_bytes: bytes.len() as u64,
+            expires_at_unix_ms: 120_000,
+        };
+        envelope.retention.expires_at_unix_ms = Some(120_000);
+        if message.role == ChatRole::Tool {
+            envelope.provenance.source_tool_name = "read_processes".into();
+        }
+    }
+    let mut later = policy();
+    later.now_unix_ms = 86_400_000;
+    for strategy in [
+        ContextManagementStrategy::Window,
+        ContextManagementStrategy::CheckpointSummary,
+    ] {
+        let mut pinned = context_policy();
+        pinned.strategy = strategy;
+        let state = ModelContextState::default();
+        assert!(
+            reconcile_context_eligibility(
+                &later,
+                &conversation,
+                &state,
+                &pinned,
+                &ContextProtectionSet::default(),
+                1
+            )
+            .unwrap()
+            .is_none()
+        );
+        let ContextBuildPlan::Ready(ready) = plan_model_context(
+            &conversation,
+            &state,
+            &pinned,
+            &ContextProtectionSet::default(),
+            1,
+        )
+        .unwrap() else {
+            panic!("short completed turn must fit");
+        };
+        assert!(!ready.view.floor_advanced);
+        let authorized = later
+            .authorize_request(ModelRequest::text_only(
+                ready.view.messages,
+                ResponseFormatSpec::None,
+            ))
+            .unwrap();
+        assert_eq!(authorized.request.messages.len(), 5);
+        assert_eq!(
+            authorized.request.messages[1].tool_calls[0].id,
+            authorized.request.messages[2]
+                .tool_call_id
+                .as_ref()
+                .unwrap()
+                .as_str()
+        );
+    }
+}
+
+#[test]
+fn checkpoint_survives_elapsed_time_without_reopening_covered_prefix() {
+    let conversation = history();
+    let (state, _) = checkpoint(&conversation);
+    let original = state.clone();
+    let mut later = policy();
+    later.now_unix_ms = 86_400_000;
     assert!(
         reconcile_context_eligibility(
-            &policy(),
+            &later,
             &conversation,
-            &next,
+            &state,
             &context_policy(),
             &ContextProtectionSet::default(),
             8
@@ -95,183 +218,11 @@ fn expired_history_reconciles_before_compression_without_mutating_transcript() {
         .unwrap()
         .is_none()
     );
-    let mut protection = ContextProtectionSet::default();
-    protection.protect_message("old");
     assert!(
-        reconcile_context_eligibility(
-            &policy(),
-            &conversation,
-            &state,
-            &context_policy(),
-            &protection,
-            7
-        )
-        .is_err()
+        authorize_context_checkpoint(&later, &state, &context_policy().key(), &conversation)
+            .is_ok()
     );
-    conversation[1]
-        .data_envelope
-        .as_mut()
-        .unwrap()
-        .retention
-        .expires_at_unix_ms = Some(500);
-    assert!(
-        reconcile_context_eligibility(
-            &policy(),
-            &conversation,
-            &state,
-            &context_policy(),
-            &ContextProtectionSet::default(),
-            7
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn current_turn_uses_actual_retention_deadline_while_history_keeps_headroom() {
-    let mut conversation = history();
-    conversation[1]
-        .data_envelope
-        .as_mut()
-        .unwrap()
-        .retention
-        .expires_at_unix_ms = Some(1001);
-    let original = conversation.clone();
-    let state = ModelContextState::default();
-    let mut protection = ContextProtectionSet::default();
-    protection.protect_message("recent");
-    assert!(
-        reconcile_context_eligibility(
-            &policy(),
-            &conversation,
-            &state,
-            &context_policy(),
-            &protection,
-            7,
-        )
-        .unwrap()
-        .is_none()
-    );
-    assert_eq!(conversation, original);
-    for now in [1001, 1002] {
-        let mut expired = policy();
-        expired.now_unix_ms = now;
-        assert!(
-            reconcile_context_eligibility(
-                &expired,
-                &conversation,
-                &state,
-                &context_policy(),
-                &protection,
-                7,
-            )
-            .is_err()
-        );
-    }
-    conversation[0]
-        .data_envelope
-        .as_mut()
-        .unwrap()
-        .retention
-        .expires_at_unix_ms = Some(1001);
-    let repair = reconcile_context_eligibility(
-        &policy(),
-        &conversation,
-        &state,
-        &context_policy(),
-        &protection,
-        7,
-    )
-    .unwrap()
-    .unwrap();
-    let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
-    assert!(
-        reconcile_context_eligibility(
-            &policy(),
-            &conversation,
-            &next,
-            &context_policy(),
-            &protection,
-            8,
-        )
-        .unwrap()
-        .is_none()
-    );
-    assert_eq!(conversation[1], original[1]);
-}
-
-#[test]
-fn expired_checkpoint_is_removed_without_reopening_its_covered_prefix() {
-    let conversation = history();
-    let (state, _) = checkpoint(&conversation);
-    let mut later = policy();
-    later.now_unix_ms = 1_000_000;
-    let repair = reconcile_context_eligibility(
-        &later,
-        &conversation,
-        &state,
-        &context_policy(),
-        &ContextProtectionSet::default(),
-        8,
-    )
-    .unwrap()
-    .unwrap();
-    let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
-    assert!(next.entries[0].checkpoint.is_none());
-    assert_eq!(
-        next.entries[0].floor_group_head_message_id,
-        state.entries[0].floor_group_head_message_id
-    );
-    assert!(
-        reconcile_context_eligibility(
-            &later,
-            &conversation,
-            &next,
-            &context_policy(),
-            &ContextProtectionSet::default(),
-            9
-        )
-        .unwrap()
-        .is_none()
-    );
-}
-
-#[test]
-fn expired_standalone_background_result_cannot_strand_the_next_user_turn() {
-    let mut output = user("background-result", 100);
-    output.role = ChatRole::UntrustedOutput;
-    output.turn_id = None;
-    output
-        .data_envelope
-        .as_mut()
-        .unwrap()
-        .retention
-        .expires_at_unix_ms = Some(500);
-    let conversation = vec![user("old", 100), output, user("recent", 100)];
-    let state = ModelContextState::default();
-    let repair = reconcile_context_eligibility(
-        &policy(),
-        &conversation,
-        &state,
-        &context_policy(),
-        &ContextProtectionSet::default(),
-        7,
-    )
-    .unwrap()
-    .unwrap();
-    let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
-    let ContextBuildPlan::Ready(ready) = plan_model_context(
-        &conversation,
-        &next,
-        &context_policy(),
-        &ContextProtectionSet::default(),
-        7,
-    )
-    .unwrap() else {
-        panic!("only the new user turn should remain");
-    };
-    assert_eq!(ready.view.messages.len(), 1);
-    assert_eq!(ready.view.messages[0].message_id, "recent");
+    assert_eq!(state, original);
 }
 
 fn plan(conversation: &[ChatMessage], state: &ModelContextState) -> CompressionPlan {
@@ -433,14 +384,6 @@ fn required_inputs_cannot_be_pruned_rebound_or_mutated_before_compression() {
                 .clear()
         },
         |messages: &mut Vec<ChatMessage>| {
-            messages[0]
-                .data_envelope
-                .as_mut()
-                .unwrap()
-                .retention
-                .expires_at_unix_ms = Some(1000)
-        },
-        |messages: &mut Vec<ChatMessage>| {
             messages[0].data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret
         },
         |messages: &mut Vec<ChatMessage>| messages[1].data_envelope = None,
@@ -515,7 +458,7 @@ fn checkpoint_does_not_hide_deselected_tool_data() {
 }
 
 #[test]
-fn canonical_summary_preserves_observation_expiry_even_without_retention_field() {
+fn canonical_summary_retains_receipt_metadata_without_expiring_history() {
     let mut conversation = history();
     let envelope = conversation[0].data_envelope.as_mut().unwrap();
     envelope.sensitivity = Sensitivity::Sensitive;
@@ -534,11 +477,11 @@ fn canonical_summary_preserves_observation_expiry_even_without_retention_field()
     assert_eq!(lineage.envelope.retention.expires_at_unix_ms, Some(5000));
     let mut expired = policy();
     expired.now_unix_ms = 5000;
-    assert!(bind_context_summary_lineage(&expired, &mut validated, &turn, &input).is_err());
+    assert!(bind_context_summary_lineage(&expired, &mut validated, &turn, &input).is_ok());
     let (state, _) = checkpoint(&conversation);
     assert!(
         authorize_context_checkpoint(&expired, &state, &context_policy().key(), &conversation)
-            .is_err()
+            .is_ok()
     );
 }
 
@@ -716,4 +659,129 @@ fn restored_checkpoint_rejects_removed_dependencies_and_changed_model() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn prompt_permission_resume_keeps_fresh_history_without_a_notice() {
+    let mut conversation = vec![user("requirement", 100), user("decision", 100)];
+    conversation[0]
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(300_000);
+    let mut egress = policy();
+    egress.permission_resume = true;
+    for strategy in [
+        ContextManagementStrategy::Window,
+        ContextManagementStrategy::CheckpointSummary,
+    ] {
+        let mut pinned = context_policy();
+        pinned.strategy = strategy;
+        assert!(
+            reconcile_context_eligibility(
+                &egress,
+                &conversation,
+                &ModelContextState::default(),
+                &pinned,
+                &ContextProtectionSet::default(),
+                1
+            )
+            .unwrap()
+            .is_none()
+        );
+        let ContextBuildPlan::Ready(ready) = plan_model_context(
+            &conversation,
+            &ModelContextState::default(),
+            &pinned,
+            &ContextProtectionSet::default(),
+            1,
+        )
+        .unwrap() else {
+            panic!("fresh short history must fit");
+        };
+        assert!(!ready.view.floor_advanced);
+        assert_eq!(ready.view.messages, conversation);
+    }
+}
+
+#[test]
+fn model_switch_reports_restriction_in_both_context_strategies() {
+    let mut conversation = vec![user("old", 100), user("current", 100)];
+    conversation[0]
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .allowed_destinations
+        .clear();
+    for strategy in [
+        ContextManagementStrategy::Window,
+        ContextManagementStrategy::CheckpointSummary,
+    ] {
+        let mut pinned = context_policy();
+        pinned.strategy = strategy;
+        let state = ModelContextState::default();
+        let repair = reconcile_context_eligibility(
+            &policy(),
+            &conversation,
+            &state,
+            &pinned,
+            &ContextProtectionSet::default(),
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(repair.notice_kind, ContextNoticeKind::Restricted);
+        let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
+        let ContextBuildPlan::Ready(ready) = plan_model_context(
+            &conversation,
+            &next,
+            &pinned,
+            &ContextProtectionSet::default(),
+            1,
+        )
+        .unwrap() else {
+            panic!("retained tail fits");
+        };
+        assert_eq!(ready.view.messages, vec![conversation[1].clone()]);
+    }
+}
+
+#[test]
+fn delayed_permission_resume_keeps_history_in_both_strategies() {
+    let mut conversation = vec![user("old", 100), user("decision", 100)];
+    conversation[0]
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .retention
+        .expires_at_unix_ms = Some(61_000);
+    let mut egress = policy();
+    egress.permission_resume = true;
+    for strategy in [
+        ContextManagementStrategy::Window,
+        ContextManagementStrategy::CheckpointSummary,
+    ] {
+        let mut pinned = context_policy();
+        pinned.strategy = strategy;
+        let repair = reconcile_context_eligibility(
+            &egress,
+            &conversation,
+            &ModelContextState::default(),
+            &pinned,
+            &ContextProtectionSet::default(),
+            1,
+        )
+        .unwrap();
+        assert!(repair.is_none());
+        assert_eq!(
+            conversation[0]
+                .data_envelope
+                .as_ref()
+                .unwrap()
+                .retention
+                .expires_at_unix_ms,
+            Some(61_000)
+        );
+    }
 }

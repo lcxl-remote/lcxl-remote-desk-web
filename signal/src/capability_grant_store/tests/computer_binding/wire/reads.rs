@@ -164,7 +164,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
         30_000,
     );
     let page = json!({"schema_version":1, "adapter": {
-        "engine":"chrome_devtools_mcp", "device_id":"device-1", "os_session_id":"desktop-1", "browser_major_version":145,
+        "engine":"chrome_extension", "device_id":"device-1", "os_session_id":"desktop-1", "browser_major_version":145,
         "browser_version":"145", "adapter_id":"fixture", "adapter_version":"1", "profile_incarnation":"profile-1", "connection_revision":1
     }, "page_id":"page-1", "page_incarnation":"page-1-first", "origin":{"kind":"https","host_ascii":"example.test","port":443},
     "document_revision":1, "url_sha256":"a".repeat(64), "observed_at_unix_ms":now.timestamp_millis()});

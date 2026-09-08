@@ -50,21 +50,12 @@ pub fn browser_readiness_report(
 
 fn map_blocked_reason(reason: BrowserReadinessReason) -> CapabilityBlockedReason {
     match reason {
-        BrowserReadinessReason::UnsupportedBrowserVersion => {
-            CapabilityBlockedReason::VersionMismatch
-        }
         BrowserReadinessReason::ExtensionUnavailable => CapabilityBlockedReason::AdapterUnavailable,
         BrowserReadinessReason::PairingRequired => CapabilityBlockedReason::BrowserApprovalRequired,
         BrowserReadinessReason::HostPermissionMissing => CapabilityBlockedReason::PermissionMissing,
-        BrowserReadinessReason::RemoteDebuggingDisabled => {
-            CapabilityBlockedReason::RemoteDebuggingDisabled
+        BrowserReadinessReason::Disconnected | BrowserReadinessReason::ProfileChanged => {
+            CapabilityBlockedReason::BrowserDisconnected
         }
-        BrowserReadinessReason::UserApprovalRequired | BrowserReadinessReason::UserDenied => {
-            CapabilityBlockedReason::BrowserApprovalRequired
-        }
-        BrowserReadinessReason::McpUnavailable
-        | BrowserReadinessReason::Disconnected
-        | BrowserReadinessReason::ProfileChanged => CapabilityBlockedReason::BrowserDisconnected,
         BrowserReadinessReason::InteractiveSessionLocked => {
             CapabilityBlockedReason::NoInteractiveSession
         }
@@ -84,13 +75,13 @@ mod tests {
         BrowserReadiness {
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
-                engine: BrowserEngineKind::ChromeDevtoolsMcp,
+                engine: BrowserEngineKind::ChromeExtension,
                 device_id: "device-1".into(),
                 os_session_id: "session-1".into(),
                 browser_major_version: 144,
                 browser_version: "144.0.7559.0".into(),
-                adapter_id: "browser.chrome_devtools_mcp.edge".into(),
-                adapter_version: "chrome-devtools-mcp/1.7.0".into(),
+                adapter_id: "browser.chrome_extension.edge".into(),
+                adapter_version: "lcxl-browser-extension/1".into(),
                 profile_incarnation: "profile-incarnation-1".into(),
                 connection_revision: 7,
             },
@@ -103,7 +94,7 @@ mod tests {
             } else {
                 Vec::new()
             },
-            reason: (!connected).then_some(BrowserReadinessReason::RemoteDebuggingDisabled),
+            reason: (!connected).then_some(BrowserReadinessReason::Disconnected),
             observed_at_unix_ms: 100,
         }
     }
@@ -111,7 +102,7 @@ mod tests {
     #[test]
     fn connected_browser_is_callable_only_for_short_lived_revision() {
         let report = browser_readiness_report(
-            "browser.devtools",
+            "browser.extension",
             "browser.page.snapshot",
             &readiness(true),
             30_100,
@@ -123,14 +114,14 @@ mod tests {
         assert_eq!(report.revision, 7);
         assert_eq!(
             report.adapter_id.as_deref(),
-            Some("browser.chrome_devtools_mcp.edge")
+            Some("browser.chrome_extension.edge")
         );
     }
 
     #[test]
-    fn disabled_remote_debugging_is_discoverable_but_not_callable() {
+    fn disconnected_extension_is_discoverable_but_not_callable() {
         let report = browser_readiness_report(
-            "browser.devtools",
+            "browser.extension",
             "browser.page.snapshot",
             &readiness(false),
             30_100,
@@ -141,7 +132,7 @@ mod tests {
         assert!(!report.connected);
         assert_eq!(
             report.reason,
-            Some(CapabilityBlockedReason::RemoteDebuggingDisabled)
+            Some(CapabilityBlockedReason::BrowserDisconnected)
         );
     }
 
@@ -149,7 +140,7 @@ mod tests {
     fn stale_browser_heartbeat_is_rejected() {
         assert!(
             browser_readiness_report(
-                "browser.devtools",
+                "browser.extension",
                 "browser.page.snapshot",
                 &readiness(true),
                 30_101,

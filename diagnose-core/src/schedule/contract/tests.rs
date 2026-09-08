@@ -1257,7 +1257,7 @@ fn rehearsal_graph_requires_each_original_read_even_when_it_has_known_parents() 
         export_authorization_id: "original-export".into(),
         now_unix_ms: 100,
         byte_cap: crate::sink_authorizer::MAX_SINK_BYTES,
-        omit_finite_retention_historical_turns: false,
+        permission_resume: false,
     };
     let authorized = policy
         .authorize_request(ModelRequest::text_only(
@@ -1406,7 +1406,7 @@ fn compressed_answer_preserves_original_read_scope() {
         export_authorization_id: "original-export".into(),
         now_unix_ms: 100,
         byte_cap: crate::sink_authorizer::MAX_SINK_BYTES,
-        omit_finite_retention_historical_turns: false,
+        permission_resume: false,
     };
     let user = model_bound_user_message("input".into(), prompt, policy.destination.clone())
         .unwrap()

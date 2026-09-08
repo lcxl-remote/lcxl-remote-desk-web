@@ -722,7 +722,7 @@ async fn model_sources_fixture(compressed: bool) {
         ),
         now_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
         byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
-        omit_finite_retention_historical_turns: false,
+        permission_resume: false,
     };
     let model = SignalModelEgressStore::new(store.db.clone());
     let model_messages = if compressed {

@@ -2034,7 +2034,7 @@ mod tests {
             export_authorization_id: "original-owner-selection".into(),
             now_unix_ms: Utc::now().timestamp_millis() as u64,
             byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
-            omit_finite_retention_historical_turns: false,
+            permission_resume: false,
         };
         // Dispatch occurred 5m20s ago; the approved runtime is ten minutes.
         let completion = desk_diagnose_core::command_completion::CommandCompletionContext::capture(

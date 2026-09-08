@@ -59,7 +59,7 @@ fn scheduled_policy() -> crate::model_egress::ModelEgressPolicy {
         export_authorization_id: "scheduled-export".into(),
         now_unix_ms: 1_000,
         byte_cap: crate::sink_authorizer::MAX_SINK_BYTES,
-        omit_finite_retention_historical_turns: true,
+        permission_resume: true,
     }
 }
 struct ScheduledModel<'a>(&'a dyn ModelSeam);
@@ -503,7 +503,7 @@ async fn lease_loss_between_tools_closes_unexecuted_calls_without_dispatching_th
 
 #[tokio::test]
 async fn scheduled_original_must_remain_exportable_before_any_save_or_model_call() {
-    for reason in 0..5 {
+    for reason in [0, 1, 3, 4] {
         let mem = MemSession::default();
         let model = ScriptModel {
             turns: RefCell::new([answer("must not happen")].into()),
@@ -532,14 +532,6 @@ async fn scheduled_original_must_remain_exportable_before_any_save_or_model_call
         match reason {
             0 => {}
             1 => session.conversation[0].data_envelope = None,
-            2 => {
-                session.conversation[0]
-                    .data_envelope
-                    .as_mut()
-                    .unwrap()
-                    .retention
-                    .expires_at_unix_ms = Some(999)
-            }
             3 => session.conversation[0].text.push_str("tampered"),
             _ => session.conversation[0]
                 .data_envelope

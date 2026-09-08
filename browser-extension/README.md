@@ -4,4 +4,4 @@ This Manifest V3 extension is the default controlled-edge Browser Provider for L
 
 For development, load this directory as an unpacked extension in `chrome://extensions`. Pairing is a one-time device-local action. Gmail and Slack origins are built in; any other HTTPS origin requires an explicit Chrome host-permission grant from the extension popup.
 
-Chrome DevTools MCP remains a separate, default-disabled development adapter and is not an automatic fallback for this extension.
+The Chrome extension is the only supported browser adapter. There is no external MCP browser process or development adapter.

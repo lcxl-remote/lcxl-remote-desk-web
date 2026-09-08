@@ -18,7 +18,7 @@ export function AssistantContextNotices({ notices, historical = false }: { notic
                 ? <time dateTime={notice.createdAt!}>{new Date(timestamp).toLocaleString(i18n.language)}</time>
                 : t('pages.deviceAssistant.contextNotice.unknownTime')}
             {' · '}
-            {t(notice.kind === 'compacted' ? 'pages.deviceAssistant.contextNotice.compacted' : 'pages.deviceAssistant.contextNotice.trimmed')}
+            {t(`pages.deviceAssistant.contextNotice.${notice.kind}`)}
         </p>;
     });
     if (historical) return <details className="text-xs text-muted-foreground">

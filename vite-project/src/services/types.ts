@@ -804,7 +804,6 @@ export const communicationSurfaceKindEnum = {
     classic_outlook_desktop: "classic_outlook_desktop",
     outlook_new_desktop: "outlook_new_desktop",
     chrome_extension: "chrome_extension",
-    chrome_devtools_mcp: "chrome_devtools_mcp",
     assistive_ui: "assistive_ui"
 } as const;
 
@@ -1315,6 +1314,8 @@ export type ContextManagementDto = {
 };
 
 export const contextNoticeKindDtoEnum = {
+    refreshed: "refreshed",
+    restricted: "restricted",
     trimmed: "trimmed",
     compacted: "compacted"
 } as const;

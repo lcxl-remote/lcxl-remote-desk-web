@@ -143,7 +143,7 @@ fn policy() -> crate::model_egress::ModelEgressPolicy {
         export_authorization_id: "resume-test".into(),
         now_unix_ms: 1_000,
         byte_cap: crate::sink_authorizer::MAX_SINK_BYTES,
-        omit_finite_retention_historical_turns: true,
+        permission_resume: true,
     }
 }
 
@@ -191,21 +191,13 @@ fn authorized_bridge_keeps_original_lineage_sensitivity_and_deadline() {
 
 #[test]
 fn original_content_cannot_be_omitted_then_reminted_for_permission_resume() {
-    for mutation in 0..9 {
+    for mutation in [0, 1, 2, 4, 5, 6, 7, 8] {
         let mut original = original();
         let mut policy = policy();
         match mutation {
             0 => original.data_envelope = None,
             1 => original.text.push_str(" tampered"),
             2 => original.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret,
-            3 => {
-                original
-                    .data_envelope
-                    .as_mut()
-                    .unwrap()
-                    .retention
-                    .expires_at_unix_ms = Some(999)
-            }
             4 => {
                 if let DestinationIdentity::Model {
                     connection_revision,

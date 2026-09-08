@@ -13,7 +13,6 @@
 //! instead of failing the transport.
 
 pub mod audit_sink;
-pub mod browser_devtools_mcp;
 pub mod browser_extension_bridge;
 pub mod collectors;
 pub mod computer_use_broker;

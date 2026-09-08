@@ -468,7 +468,6 @@ pub enum CapabilityBlockedReason {
     VersionMismatch,
     EdgeDisconnected,
     AdapterUnavailable,
-    RemoteDebuggingDisabled,
     BrowserApprovalRequired,
     BrowserDisconnected,
     ApplicationNotInstalled,

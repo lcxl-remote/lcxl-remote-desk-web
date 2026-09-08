@@ -1,6 +1,6 @@
 # 浏览器助手扩展
 
-LCXL Chrome 扩展是AI助手默认的浏览器适配器。它运行在被控端 Chrome 中，通过带认证的 loopback bridge 与被控端连接。Chrome DevTools MCP 仅作为默认关闭的开发调试适配器保留，系统不会自动回退到它。
+LCXL Chrome 扩展是AI助手唯一支持的浏览器适配器。它运行在被控端 Chrome 中，通过带认证的 loopback bridge 与被控端连接。DevTools MCP 适配器、配置开关和启动逻辑均已移除。
 
 ## 一次配对
 
@@ -9,7 +9,7 @@ LCXL Chrome 扩展是AI助手默认的浏览器适配器。它运行在被控端
 3. 打开扩展弹窗，填入 bridge 地址和配对码，再点击“配对这个浏览器”。认证连接成功后，弹窗会显示已连接。
 4. Gmail 与 Slack 已内置。操作其他 HTTPS 站点前，先打开该站点，再在扩展弹窗点击“允许当前站点”；这次站点授权由 Chrome 自己提示。
 
-配对信息保存在当前 Chrome profile 中。之后的 typed 浏览器操作不再要求 DevTools 远程调试确认。切换 Chrome profile、清除扩展存储或轮换被控端数据都会使原配对失效。
+配对信息保存在当前 Chrome profile 中。后续浏览器操作通过该配对连接执行，仍受逐操作权限约束。切换 Chrome profile、清除扩展存储或轮换被控端数据都会使原配对失效。
 
 ## 安全边界
 
@@ -17,7 +17,7 @@ LCXL Chrome 扩展是AI助手默认的浏览器适配器。它运行在被控端
 
 密码不会进入投影。附件在跨越 edge bridge 前会核对大小与 SHA-256，扩展内部还会再次核对。页面和元素引用绑定 Chrome profile、标签页、文档 incarnation、origin 与 revision；页面导航或扩展重连后，旧引用会 fail closed。
 
-Gmail 与 Slack 的草稿准备不会激活“发送”。exact-send 必须绑定单独封存的 `SendExternal` payload 并取得中心授权。被控端本地 `computer_use.communication_send` 上限默认关闭，与草稿开关独立；还必须开启总开关、浏览器语义控制并配对 Chrome 扩展，不能自动回退到 DevTools。worker 派发前会再次检查本地发送上限。
+Gmail 与 Slack 的草稿准备不会激活“发送”。exact-send 必须绑定单独封存的 `SendExternal` payload 并取得中心授权。被控端本地 `computer_use.communication_send` 上限默认关闭，与草稿开关独立；还必须开启总开关、浏览器语义控制并配对 Chrome 扩展，扩展断开时不能执行浏览器操作。worker 派发前会再次检查本地发送上限。
 
 exact-send 回执检查会排除激活前已存在的成功提示和同正文消息，包括隐藏提示，并要求出现新的可见确认信息。页面复用旧提示或无法确认结果时，保持结果未知，不能据此认定已送达或自动重试。
 

@@ -286,7 +286,6 @@ fn equivalent_json_keeps_the_digest_but_changed_input_or_surface_does_not() {
 
 #[test]
 fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
-    use crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID;
     use desk_agent_protocol::capability_provider::CapabilityEffect;
     use desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION;
 
@@ -298,7 +297,14 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
             "app.slack.com"
         }
         .into();
-        page.account_id = gmail.then(|| "gmail-web:owner@example.test".into());
+        page.account_id = Some(
+            if gmail {
+                "gmail-web:owner@example.test"
+            } else {
+                "slack-web:T123:U456"
+            }
+            .into(),
+        );
         let field = |id: &str| {
             let mut field = element(&page);
             field.element_id = id.into();
@@ -322,7 +328,7 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
                 "prepare_slack_web_message_handoff",
                 json!({"schema_version":COMMUNICATION_SCHEMA_VERSION,"page":page,"composer":field("composer"),"body_plain_text":"Draft only"}),
                 DestinationIdentity::ChatAccount {
-                    account_id: SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                    account_id: "slack-web:T123:U456".into(),
                 },
             )
         };
@@ -369,10 +375,7 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
 
 #[test]
 fn exact_external_send_preflight_is_sealed_r3_authority() {
-    use crate::{
-        communication::test_support::{gmail_exact_send_input, slack_exact_send_input},
-        device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID,
-    };
+    use crate::communication::test_support::{gmail_exact_send_input, slack_exact_send_input};
     use desk_agent_protocol::capability_provider::CapabilityEffect;
 
     for (tool, input, destination) in [
@@ -387,7 +390,7 @@ fn exact_external_send_preflight_is_sealed_r3_authority() {
             "send_slack_web_exact",
             serde_json::to_value(slack_exact_send_input()).unwrap(),
             DestinationIdentity::ChatAccount {
-                account_id: SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into(),
+                account_id: "slack-web:T123:U456".into(),
             },
         ),
     ] {

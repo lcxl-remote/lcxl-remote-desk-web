@@ -1708,7 +1708,7 @@ mod tests {
             .insert(authoritative.page_id.clone(), authoritative.clone());
 
         let mut candidate = authoritative.clone();
-        candidate.adapter.engine = BrowserEngineKind::ChromeDevtoolsMcp;
+        candidate.adapter.adapter_version = "model-altered-version".into();
         let mut request = BrowserActionRequest {
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             call_id: "call-adapter-canonicalization".into(),
@@ -1732,7 +1732,7 @@ mod tests {
     fn page_identity_excludes_adapter_but_includes_observation_identity() {
         let authoritative = page();
         let mut candidate = authoritative.clone();
-        candidate.adapter.engine = BrowserEngineKind::ChromeDevtoolsMcp;
+        candidate.adapter.adapter_version = "model-altered-version".into();
         assert!(same_page_identity(&candidate, &authoritative));
 
         candidate.page_incarnation = "different-document".into();

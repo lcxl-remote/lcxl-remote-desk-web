@@ -334,6 +334,8 @@ impl From<ChatMessage> for SnapshotMessageDto {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextNoticeKindDto {
+    Refreshed,
+    Restricted,
     Trimmed,
     Compacted,
 }
@@ -341,6 +343,8 @@ pub enum ContextNoticeKindDto {
 impl From<desk_diagnose_core::model_context::ContextNoticeKind> for ContextNoticeKindDto {
     fn from(kind: desk_diagnose_core::model_context::ContextNoticeKind) -> Self {
         match kind {
+            desk_diagnose_core::model_context::ContextNoticeKind::Refreshed => Self::Refreshed,
+            desk_diagnose_core::model_context::ContextNoticeKind::Restricted => Self::Restricted,
             desk_diagnose_core::model_context::ContextNoticeKind::Trimmed => Self::Trimmed,
             desk_diagnose_core::model_context::ContextNoticeKind::Compacted => Self::Compacted,
         }

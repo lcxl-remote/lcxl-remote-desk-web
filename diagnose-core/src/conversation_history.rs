@@ -90,7 +90,7 @@ pub fn load_history_page(
     call: &ToolCall,
     conversation: &[ChatMessage],
     policy: Option<&crate::model_egress::ModelEgressPolicy>,
-    now_unix_ms: u64,
+    _now_unix_ms: u64,
 ) -> Result<HistoryLoadResult, AgentError> {
     if call.name != LOAD_CONVERSATION_HISTORY_TOOL_NAME {
         return Err(invalid("invalid history tool"));
@@ -125,11 +125,6 @@ pub fn load_history_page(
         .filter(|message| {
             message.data_envelope.as_ref().is_some_and(|envelope| {
                 envelope.validate().is_ok()
-                    && !crate::model_egress::envelope_expires_by(
-                        envelope,
-                        now_unix_ms
-                            .saturating_add(crate::model_egress::MODEL_CALL_RETENTION_HEADROOM_MS),
-                    )
                     && policy.is_none_or(|policy| {
                         envelope.allowed_destinations.contains(&policy.destination)
                     })
@@ -138,7 +133,7 @@ pub fn load_history_page(
         .collect::<Vec<_>>();
     let page = HistoryPage {
         unavailable_count: selected.len() - available.len(),
-        availability_notice: "Unavailable history is omitted because its model authorization is missing, expired, near expiry, or does not cover the current model. Do not infer omitted content; ask the user or obtain fresh authorized evidence if needed.".into(),
+        availability_notice: "Unavailable history is omitted because its model authorization is missing or does not cover the current model. Do not infer omitted content; ask the user or obtain fresh authorized evidence if needed.".into(),
         messages: available
             .iter()
             .map(|message| HistoryMessageProjection {
@@ -212,7 +207,7 @@ mod tests {
             export_authorization_id: "scheduled-test".into(),
             now_unix_ms: 1_000,
             byte_cap: 100_000,
-            omit_finite_retention_historical_turns: false,
+            permission_resume: false,
         };
         let bridge = crate::permission_resume::authorized_scheduled_resume_message(
             "scheduled-resume-1".into(),
@@ -236,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn filters_unavailable_history_without_renewing_it_and_advances_empty_pages() {
+    fn history_keeps_elapsed_results_but_rejects_missing_or_wrong_destination() {
         let valid = labeled("valid", ChatRole::User, "available question");
         let destination = valid.data_envelope.as_ref().unwrap().allowed_destinations[0].clone();
         let policy = crate::model_egress::ModelEgressPolicy {
@@ -245,7 +240,7 @@ mod tests {
             export_authorization_id: "test-export".into(),
             now_unix_ms: 100_000,
             byte_cap: 100_000,
-            omit_finite_retention_historical_turns: false,
+            permission_resume: false,
         };
         let mut expired = labeled("expired", ChatRole::Assistant, "expired secret");
         expired
@@ -293,26 +288,19 @@ mod tests {
         };
         let result = load_history_page(&call, &conversation, Some(&policy), 100_000).unwrap();
         let page: HistoryPage = serde_json::from_str(&result.content).unwrap();
-        assert!(page.messages.is_empty());
-        assert_eq!(page.unavailable_count, 5);
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|m| m.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["expired", "near", "ephemeral"]
+        );
+        assert_eq!(page.unavailable_count, 2);
         assert!(page.has_more);
         assert_eq!(page.next_before_message_id.as_deref(), Some("expired"));
-        assert!(result.source_messages.is_empty());
-        assert!(!result.content.contains("secret"));
-        let empty_page_envelope =
-            crate::model_message_labels::conversation_history_result_envelope(
-                valid.data_envelope.as_ref(),
-                &result.source_messages,
-                "empty-history",
-                &result.content,
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(empty_page_envelope.retention.expires_at_unix_ms, None);
-        assert_eq!(
-            empty_page_envelope.provenance.source_envelope_ids,
-            vec![valid.data_envelope.as_ref().unwrap().envelope_id.clone()]
-        );
+        assert_eq!(result.source_messages.len(), 3);
+        assert!(!result.content.contains("other-model secret"));
+        assert!(!result.content.contains("unlabeled secret"));
         call.arguments_json = r#"{"limit":4,"before_message_id":"expired"}"#.into();
         let result = load_history_page(&call, &conversation, Some(&policy), 100_000).unwrap();
         let page: HistoryPage = serde_json::from_str(&result.content).unwrap();

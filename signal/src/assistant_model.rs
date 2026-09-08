@@ -61,7 +61,7 @@ impl ModelSeam for MeteredModel {
             export_authorization_id: self.export_authorization_id.clone(),
             now_unix_ms,
             byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
-            omit_finite_retention_historical_turns: self.permission_resume,
+            permission_resume: self.permission_resume,
         }))
     }
 

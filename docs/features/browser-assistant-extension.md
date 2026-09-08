@@ -1,6 +1,6 @@
 # Browser Assistant extension
 
-The LCXL Chrome extension is the default browser adapter for AI Assistant. It runs in Chrome on the controlled device and connects to an authenticated loopback bridge. Chrome DevTools MCP remains available only as a default-disabled development adapter; LCXL never falls back to it automatically.
+The LCXL Chrome extension is the only supported browser adapter for AI Assistant. It runs in Chrome on the controlled device and connects to an authenticated loopback bridge. The DevTools MCP adapter, configuration switch and startup path have been removed.
 
 ## Pair once
 
@@ -9,7 +9,7 @@ The LCXL Chrome extension is the default browser adapter for AI Assistant. It ru
 3. Open the extension popup, enter the bridge URL and pairing code, then choose **Pair this browser**. The popup reports when the authenticated bridge is connected.
 4. Gmail and Slack are built in. For another HTTPS site, open that site and choose **Allow current site** in the popup. Chrome owns this permission prompt.
 
-Pairing is stored in that Chrome profile. Ordinary typed browser actions do not ask for the DevTools remote-debugging confirmation again. Changing Chrome profiles, removing extension storage, or rotating the device data invalidates the pairing.
+Pairing is stored in that Chrome profile. Subsequent browser actions use that paired connection and remain subject to per-operation authorization. Changing Chrome profiles, removing extension storage, or rotating the device data invalidates the pairing.
 
 ## Security boundary
 
@@ -17,7 +17,7 @@ The extension accepts only the versioned typed actions advertised by AI Assistan
 
 Passwords are never projected. Upload bytes are checked against their size and SHA-256 both before crossing the edge bridge and again inside the extension. Page and element references are bound to the Chrome profile, tab, document incarnation, origin, and revision; navigation or reconnection makes stale references fail closed.
 
-Gmail and Slack draft preparation never activates Send. Exact-send requires a separately sealed `SendExternal` payload and central authorization. The host-local `computer_use.communication_send` ceiling defaults off and is independent of draft handoff. Sending also requires the master switch, browser semantic control and a paired Chrome extension; DevTools is not an automatic fallback. The worker rechecks the local sending ceiling before dispatch.
+Gmail and Slack draft preparation never activates Send. Exact-send requires a separately sealed `SendExternal` payload and central authorization. The host-local `computer_use.communication_send` ceiling defaults off and is independent of draft handoff. Sending also requires the master switch, browser semantic control and a paired Chrome extension; browser actions are unavailable while the extension is disconnected. The worker rechecks the local sending ceiling before dispatch.
 
 The exact-send receipt check excludes success notices and matching messages that already existed before activation, including hidden notices. It requires a new visible acknowledgement. If the page reuses an old acknowledgement or the result cannot be confirmed, the outcome remains unknown; it must not be treated as successful delivery or retried automatically.
 

@@ -12,7 +12,7 @@ use crate::{
     model_egress::{ModelEgressPolicy, model_turn_content_bytes},
     prompt::ResponseFormatSpec,
     seam::ModelRequest,
-    sink_authorizer::{DefaultSinkAuthorizer, SinkAuthorizer, SinkInput},
+    sink_authorizer::SinkInput,
 };
 
 // Reserve one lineage slot for a prior checkpoint's own model-output envelope.
@@ -28,7 +28,7 @@ pub fn reconcile_context_eligibility(
     protection: &ContextProtectionSet,
     version: i64,
 ) -> Result<Option<FloorReconciliationPlan>, ModelContextError> {
-    if policy.strategy != ContextManagementStrategy::CheckpointSummary || conversation.is_empty() {
+    if conversation.is_empty() {
         return Ok(None);
     }
     let groups = group_messages(conversation, &policy.source_context_key)?;
@@ -41,34 +41,14 @@ pub fn reconcile_context_eligibility(
         .iter()
         .rev()
         .find_map(|message| message.turn_id.as_ref());
-    let cutoff = egress
-        .now_unix_ms
-        .saturating_add(crate::model_egress::MODEL_CALL_RETENTION_HEADROOM_MS);
     let last_invalid = groups
         .iter()
         .enumerate()
         .skip(floor)
         .filter_map(|(index, group)| {
-            // Headroom excludes historical observations before another round
-            // trip. Fresh current-turn results retain their actual deadline;
-            // request and response authorization still enforce that deadline.
-            let current_group = current_turn.is_some()
-                && conversation[group.start..group.end]
-                    .iter()
-                    .any(|message| message.turn_id.as_ref() == current_turn);
-            let group_cutoff = if current_group {
-                egress.now_unix_ms
-            } else {
-                cutoff
-            };
-            let ineligible = conversation[group.start..group.end].iter().any(|message| {
-                !retained.contains(&message.message_id)
-                    || message
-                        .data_envelope
-                        .as_ref()
-                        .and_then(|envelope| envelope.retention.expires_at_unix_ms)
-                        .is_some_and(|expiry| expiry <= group_cutoff)
-            });
+            let ineligible = conversation[group.start..group.end]
+                .iter()
+                .any(|message| !retained.contains(&message.message_id));
             ineligible.then_some(index)
         })
         .max();
@@ -91,7 +71,10 @@ pub fn reconcile_context_eligibility(
             last + 1,
             None,
         )
-        .map(Some);
+        .map(|mut plan| {
+            plan.notice_kind = ContextNoticeKind::Restricted;
+            Some(plan)
+        });
     }
     if entry.and_then(|entry| entry.checkpoint.as_ref()).is_some()
         && authorize_context_checkpoint(egress, state, &key, conversation).is_err()
@@ -110,7 +93,10 @@ pub fn reconcile_context_eligibility(
             floor,
             None,
         )
-        .map(Some);
+        .map(|mut plan| {
+            plan.notice_kind = ContextNoticeKind::Restricted;
+            Some(plan)
+        });
     }
     Ok(None)
 }
@@ -524,15 +510,14 @@ fn authorize_bytes(
     envelope: &DataEnvelope,
     bytes: &[u8],
 ) -> Result<(), ModelContextError> {
-    DefaultSinkAuthorizer
-        .authorize(
-            &policy.destination,
-            &[SinkInput { envelope, bytes }],
-            policy.now_unix_ms,
-            policy.byte_cap,
-        )
-        .map(|_| ())
-        .map_err(|_| lineage_error())
+    crate::sink_authorizer::authorize_model_history(
+        &policy.destination,
+        &[SinkInput { envelope, bytes }],
+        policy.now_unix_ms,
+        policy.byte_cap,
+    )
+    .map(|_| ())
+    .map_err(|_| lineage_error())
 }
 
 fn derive_projection(
@@ -577,8 +562,8 @@ fn derive_projection_metadata(
         },
     )
     .map_err(|_| lineage_error())?;
-    // An observation's content expiry is independently binding even when its
-    // retention field was absent. An immutable projection must not erase it.
+    // Preserve operation-reference deadlines in provenance metadata. Model
+    // recollection ignores these deadlines; external action sinks do not.
     for input in inputs {
         if let ContentRef::EphemeralObservation {
             expires_at_unix_ms, ..
