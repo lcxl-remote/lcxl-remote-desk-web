@@ -175,6 +175,7 @@ type PersistedSnapshotMessage = {
 };
 
 type PersistedSnapshot = {
+    requestId?: string;
     fileScope?: AssistantFileScopeView;
     terminalError?: { message: string } | null;
     contextNotices?: ContextNoticeDto[];
@@ -317,6 +318,16 @@ export function useDeviceAssistantChat({
     const [sessionTargetReady, setSessionTargetReady] = useState(!targetSelectionEnabled);
     const [sessionTargetResolving, setSessionTargetResolving] = useState(false);
     const activeRequest = useRef<string | null>(null);
+    const snapshotActiveRequest = useRef<string | null>(null);
+    const [stopping, setStopping] = useState(false);
+    const stopPending = useRef(false);
+    const clearStopping = useCallback(() => {
+        stopPending.current = false;
+        setStopping(false);
+    }, []);
+    useEffect(() => {
+        if (connected === false) clearStopping();
+    }, [connected, clearStopping]);
     const contextRequest = useRef<string | null>(null);
     const contextTimer = useRef<number | null>(null);
     const conversationId = useRef<string | null>(null);
@@ -409,6 +420,8 @@ export function useDeviceAssistantChat({
                 requestOrder: expectedRequestOrder,
                 inputRevision: snapshot.inputRevision,
             };
+            snapshotActiveRequest.current = snapshot.active ? snapshot.requestId ?? null : null;
+            if (!snapshot.active) clearStopping();
             setContextUsage(snapshot.contextUsage ?? null);
             setContextNotices([...new Map((snapshot.contextNotices ?? []).map(notice => [notice.id, notice])).values()]);
             const projected = projectPersistedSnapshot(snapshot);
@@ -556,6 +569,8 @@ export function useDeviceAssistantChat({
         setContextNotices([]);
         setRemoteActive(false);
         activeRequest.current = null;
+        snapshotActiveRequest.current = null;
+        clearStopping();
         contextRequest.current = null;
         if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
         contextTimer.current = null;
@@ -595,6 +610,8 @@ export function useDeviceAssistantChat({
                 return;
             }
             activeRequest.current = null;
+            snapshotActiveRequest.current = null;
+            clearStopping();
             contextRequest.current = null;
             if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
             contextTimer.current = null;
@@ -750,6 +767,7 @@ export function useDeviceAssistantChat({
                 setPartial('');
                 setStatus('done');
                 activeRequest.current = null;
+                clearStopping();
                 setRemoteActive(false);
                 if (conversationId.current) void loadSnapshot(conversationId.current);
                 break;
@@ -757,6 +775,7 @@ export function useDeviceAssistantChat({
                 setPartial('');
                 setStatus('permission_required');
                 activeRequest.current = null;
+                clearStopping();
                 setRemoteActive(false);
                 if (conversationId.current) void loadSnapshot(conversationId.current);
                 break;
@@ -766,6 +785,7 @@ export function useDeviceAssistantChat({
                 setPartial('');
                 setStatus('error');
                 activeRequest.current = null;
+                clearStopping();
                 setRemoteActive(false);
                 if (conversationId.current) void loadSnapshot(conversationId.current);
                 break;
@@ -1064,6 +1084,21 @@ export function useDeviceAssistantChat({
         }
     }, [deskId, loadSnapshot, outcomeDisposing, unresolvedOutcome]);
 
+    const stop = useCallback(() => {
+        const requestId = activeRequest.current ?? snapshotActiveRequest.current;
+        if (connected === false || !requestId || stopPending.current) return;
+        stopPending.current = true;
+        setStopping(true);
+        try {
+            sendMessage(SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT, null, deskId, requestId);
+        } catch (reason) {
+            clearStopping();
+            setError(reason instanceof Error ? reason.message : 'Failed to stop the assistant.');
+        }
+        // Keep the transcript and request binding until the server settles it.
+        // Stopping the current turn does not cancel independent background tasks.
+    }, [connected, deskId, sendMessage, clearStopping]);
+
     const reset = useCallback(() => {
         if (rehearsal) return;
         if (activeRequest.current) {
@@ -1075,6 +1110,8 @@ export function useDeviceAssistantChat({
             );
         }
         activeRequest.current = null;
+        snapshotActiveRequest.current = null;
+        clearStopping();
         contextRequest.current = null;
         if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
         contextTimer.current = null;
@@ -1163,6 +1200,10 @@ export function useDeviceAssistantChat({
         sessionTargets,
         sessionTargetReady,
         sessionTargetResolving,
+        stop,
+        stopping,
+        canStop: connected !== false && !!(activeRequest.current ?? snapshotActiveRequest.current),
+        turnRunning: activeRequest.current !== null || remoteActive,
         running: activeRequest.current !== null || remoteActive || contextUpdating || permissionUpdating || outcomeDisposing,
         start,
         updateContext,

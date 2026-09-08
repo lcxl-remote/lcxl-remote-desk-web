@@ -313,11 +313,19 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             if model.signaling_type == SignalingType::CancelTerminalCopilot {
                 return ControlFrameOutcome::Handled;
             }
-            // Device Assistant turns run centrally and expose no approval or
-            // mutation waiter. Cancellation is best-effort and never relayed to
-            // the host; a late event remains request-correlated and is discarded
-            // by a client that already moved on.
+            // Cancel only the cookie-authenticated actor's central turn. Background
+            // device tasks have their own cancellation API and remain independent.
             if model.signaling_type == SignalingType::CancelDeviceAssistant {
+                let Some(owner) = actor_user_id(&actor.auth_context) else {
+                    return ControlFrameOutcome::Reject {
+                        code: DeskErrorCode::PERMISSION_ERROR,
+                        message: "AI cancellation requires an authenticated operator".into(),
+                    };
+                };
+                crate::device_assistant_orchestrator::cancellation::cancel(
+                    owner,
+                    &model.request_id,
+                );
                 return ControlFrameOutcome::Handled;
             }
             if starts_device_assistant_work(model.signaling_type)
@@ -510,7 +518,11 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                             message: "unknown or non-context Device Assistant capability".into(),
                         };
                     }
-                    actix_web::rt::spawn(crate::device_assistant_orchestrator::run_turn(
+                    let cancellation = crate::device_assistant_orchestrator::cancellation::register(
+                        actor_user_id,
+                        &model.request_id,
+                    );
+                    let turn = crate::device_assistant_orchestrator::run_turn(
                         self.connection_map.clone(),
                         self.db.clone(),
                         model.request_id.clone(),
@@ -519,7 +531,11 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                         actor_user_id,
                         audience,
                         ask,
-                    ));
+                    );
+                    actix_web::rt::spawn(async move {
+                        let _cancellation = cancellation;
+                        turn.await;
+                    });
                     ControlFrameOutcome::Handled
                 }
                 SignalingType::GetDeviceAssistantCapabilities => {

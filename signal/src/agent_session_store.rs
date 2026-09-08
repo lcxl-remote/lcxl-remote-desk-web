@@ -150,8 +150,8 @@ impl SignalAgentSessionStore {
             .execution_state
             .waitable_task()
             .map(|action| action.execution_id.clone());
-        let unresolved_action = match &session.execution_state {
-            ExecutionState::OutcomeUnknown { action, .. } => Some(action.clone()),
+        let unresolved_action = match session.execution_state.unknown() {
+            Some(ExecutionState::OutcomeUnknown { action, .. }) => Some(action.clone()),
             _ => None,
         };
         Ok(Some(SessionSnapshot {
@@ -996,8 +996,8 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         .execution_state
         .waitable_task()
         .map(|action| action.execution_id.clone());
-    let unresolved_action = match &session.execution_state {
-        ExecutionState::OutcomeUnknown { action, .. } => Some(action.clone()),
+    let unresolved_action = match session.execution_state.unknown() {
+        Some(ExecutionState::OutcomeUnknown { action, .. }) => Some(action.clone()),
         _ => None,
     };
     Ok(SessionSnapshot {
@@ -3777,5 +3777,36 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+    #[tokio::test]
+    async fn concurrent_tasks_survive_persistence_and_next_user_turn() {
+        let store = store().await;
+        let mut session = store.claim_turn(claim("turn-1")).await.unwrap();
+        let a = ActionIdentity::agent_exec(101, "task-a", "gen-a");
+        let b = ActionIdentity::agent_exec(102, "task-b", "gen-b");
+        session
+            .execution_state
+            .insert(ExecutionState::Executing { action: a.clone() });
+        session
+            .execution_state
+            .insert(ExecutionState::Executing { action: b.clone() });
+        session.finish_turn(TurnState::Idle, chrono::Utc::now().to_rfc3339());
+        store.save(&mut session).await.unwrap();
+        let mut restored = store.claim_turn(claim("turn-2")).await.unwrap();
+        assert!(restored.execution_state.contains(&a));
+        assert!(restored.execution_state.contains(&b));
+        assert!(restored.apply_completion("done-b", "gen-b", "call-b", "task-b", "cancelled", "t"));
+        store.save(&mut restored).await.unwrap();
+        let snapshot = store
+            .read_snapshot("conversation-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot.active_execution_generation.as_deref(),
+            Some("gen-a")
+        );
+        assert!(restored.execution_state.contains(&a));
+        assert!(!restored.execution_state.contains(&b));
     }
 }

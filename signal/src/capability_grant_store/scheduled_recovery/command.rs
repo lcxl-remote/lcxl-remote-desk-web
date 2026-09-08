@@ -81,9 +81,12 @@ pub(super) async fn reconcile_on(
     }
     let action =
         ActionIdentity::agent_exec(task.id, &task.exec_request_id, &task.execution_generation);
-    if session.execution_state.waitable_task().is_some_and(|old| {
-        old.kind == WorkKind::AgentExec && old.work_id == task.id && old != &action
-    }) {
+    if session
+        .execution_state
+        .tasks()
+        .into_iter()
+        .any(|old| old.kind == WorkKind::AgentExec && old.work_id == task.id && old != &action)
+    {
         return Err(invalid());
     }
     if task.status == crate::agent_exec_store::STATUS_DONE {
@@ -145,11 +148,15 @@ pub(super) async fn reconcile_on(
             return Err(invalid());
         }
         if existing.is_empty() {
+            let execution = session
+                .execution_state
+                .execution(&action.execution_id)
+                .unwrap_or_default();
             if let ExecutionState::OutcomeUnknown {
                 action: current,
                 placeholder_message_id,
                 ..
-            } = &session.execution_state
+            } = &execution
                 && current == &action
                 && !session.conversation.iter().any(|m| {
                     &m.message_id == placeholder_message_id
@@ -168,9 +175,7 @@ pub(super) async fn reconcile_on(
                 timestamp(now_ms)?.to_rfc3339(),
             );
         }
-        if session.execution_state.waitable_task() == Some(&action) {
-            session.execution_state = ExecutionState::None;
-        }
+        session.execution_state.remove(&action);
         // The recovered turn owns delivery, including a foreground result with
         // a different message ID. A publisher must not create another follow-up.
         agent_exec_task::Entity::update_many()
@@ -205,8 +210,8 @@ pub(super) async fn reconcile_on(
         || task.deadline <= timestamp(now_ms)?
         || outbox.state == DISPATCH_OUTBOX_OUTCOME_UNKNOWN
         || matches!(
-            session.execution_state,
-            ExecutionState::OutcomeUnknown { .. }
+            session.execution_state.execution(&action.execution_id),
+            Some(ExecutionState::OutcomeUnknown { .. })
         );
     let mut message = ChatMessage::tool_result(
         format!("scheduled-command-status:{}", payload.dispatch_id),
@@ -247,7 +252,7 @@ pub(super) async fn reconcile_on(
         return Err(invalid());
     }
     if let Some(&index) = indexes.first() {
-        if session.execution_state.waitable_task() != Some(&action) {
+        if !session.execution_state.contains(&action) {
             return Err(invalid());
         }
         message.message_id = session.conversation[index].message_id.clone();
@@ -259,7 +264,7 @@ pub(super) async fn reconcile_on(
     } else {
         session.conversation.push(message);
     }
-    session.execution_state = if unknown {
+    session.execution_state.insert(if unknown {
         ExecutionState::OutcomeUnknown {
             action: action.clone(),
             placeholder_message_id: anchor,
@@ -269,6 +274,6 @@ pub(super) async fn reconcile_on(
         ExecutionState::Executing {
             action: action.clone(),
         }
-    };
+    });
     Ok((call.id, action, true))
 }

@@ -1084,6 +1084,8 @@ export default {
   'pages.deviceAssistant.executionDisabled': '执行功能未开放',
   'pages.deviceAssistant.questionPlaceholder': '描述你的问题或希望助手完成的任务…',
   'pages.deviceAssistant.readOnlyReminder': '语义观察会发送给已配置模型；写入或外部草稿交接只有在精确授权后才会执行，邮件不会自动发送。',
+  'pages.deviceAssistant.stop': '停止',
+  'pages.deviceAssistant.stopping': '正在停止…',
   'pages.deviceAssistant.send': '发送',
   'pages.deviceAssistant.chatPhase.context_trimmed': '正在调整上下文容量',
   'pages.deviceAssistant.chatPhase.context_refreshed': '正在刷新临时信息',

@@ -293,6 +293,7 @@ export function DeviceAssistantWorkspace({
 
     const submit = (event: FormEvent) => {
         event.preventDefault();
+        if (chat.turnRunning) return;
         if (!assistantEnabled || !rehearsalCanStart) return;
         const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
         if (chat.start(question, i18n.language, selectedContext)) {
@@ -707,7 +708,7 @@ export function DeviceAssistantWorkspace({
                             </CardDescription>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant="outline">{t(`pages.deviceAssistant.chatPhase.${chat.status}`)}</Badge>
+                            {chat.status !== 'using_tool' && <Badge variant="outline">{t(`pages.deviceAssistant.chatPhase.${chat.status}`)}</Badge>}
                             <AssistantHistory deskId={deskId} disabled={!!rehearsal || chat.running || chat.hydrating || !!chat.grantRevoking}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
@@ -762,12 +763,6 @@ export function DeviceAssistantWorkspace({
                             <MarkdownContent disableLinks className="max-w-[90%] rounded-lg bg-muted px-3 py-2 text-sm">
                                 {chat.partial}
                             </MarkdownContent>
-                        )}
-                        {chat.running && !chat.partial && (
-                            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                <LoaderCircle className="h-4 w-4 animate-spin" />
-                                {t('pages.deviceAssistant.working')}
-                            </div>
                         )}
                     </div>
 
@@ -941,10 +936,17 @@ export function DeviceAssistantWorkspace({
                                 onPermissionHistory={() => setPermissionHistorySession(permissionHistoryKey)}
                                 onDirectories={() => setDirectorySession(permissionHistoryKey)}
                             />
-                            <Button type="submit" disabled={!rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
-                                <Send className="mr-2 h-4 w-4" />
-                                {t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.deviceAssistant.send')}
-                            </Button>
+                            {chat.turnRunning ? (
+                                <Button type="button" onClick={chat.stop} disabled={!chat.canStop || chat.stopping}>
+                                    <LoaderCircle aria-hidden="true" className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+                                    {t(chat.stopping ? 'pages.deviceAssistant.stopping' : 'pages.deviceAssistant.stop')}
+                                </Button>
+                            ) : (
+                                <Button type="submit" disabled={!rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
+                                    <Send className="mr-2 h-4 w-4" />
+                                    {t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.deviceAssistant.send')}
+                                </Button>
+                            )}
                         </div>
                     </form>
                 </CardContent>

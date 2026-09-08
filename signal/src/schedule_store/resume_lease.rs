@@ -4,7 +4,7 @@ use crate::entity::{agent_schedule_run as run, agent_session as session_row};
 use desk_agent_protocol::schedule::SchedulePauseReason;
 use desk_diagnose_core::{
     schedule::lifecycle::FailureState,
-    session::{AgentSessionSurface, ExecutionState, PersistedAgentSession, TriggerOrigin},
+    session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait, sea_query::Expr};
 
@@ -233,10 +233,7 @@ impl ScheduleStore {
             || session.current_request_id.as_deref() != Some(lease.run_id)
             || session.active_control_connection_id.is_some()
             || session.input_revision != input_revision.unwrap() as u64
-            || matches!(
-                session.execution_state,
-                ExecutionState::OutcomeUnknown { .. } | ExecutionState::Interrupted { .. }
-            )
+            || session.execution_state.has_unresolved_outcome()
         {
             return Ok(false);
         }

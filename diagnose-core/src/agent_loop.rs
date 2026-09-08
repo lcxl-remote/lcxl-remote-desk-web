@@ -2488,7 +2488,9 @@ async fn run_inner(
                                         &action.action_request_id,
                                     ),
                                 )?;
-                                session.execution_state = ExecutionState::Executing { action };
+                                session
+                                    .execution_state
+                                    .insert(ExecutionState::Executing { action });
                                 finish_tool(session, &call.id, true, sink);
                                 deps.session_seam.save(session).await?;
                                 continue;
@@ -4002,8 +4004,8 @@ fn original_action_anchor(
             .background_task_id
             .as_ref()
             .is_some_and(|id| id != &action.action_request_id)
-        || session.execution_state.waitable_task() != Some(action)
-        || matches!(&session.execution_state, ExecutionState::OutcomeUnknown { placeholder_message_id, .. }
+        || !session.execution_state.contains(action)
+        || matches!(session.execution_state.execution(&action.execution_id).as_ref(), Some(ExecutionState::OutcomeUnknown { placeholder_message_id, .. })
             if *placeholder_message_id != message.message_id)
     {
         return Err(invalid_original_result());
@@ -4539,11 +4541,13 @@ async fn run_mutating<F: FnMut() -> String>(
                     OUTCOME_UNKNOWN_PLACEHOLDER,
                 ),
             )?;
-            session.execution_state = ExecutionState::OutcomeUnknown {
-                action: id,
-                placeholder_message_id: placeholder_id,
-                since: (deps.clock)(),
-            };
+            session
+                .execution_state
+                .insert(ExecutionState::OutcomeUnknown {
+                    action: id,
+                    placeholder_message_id: placeholder_id,
+                    since: (deps.clock)(),
+                });
             finish_tool(session, &call.id, false, sink);
             *halted = Some("not executed: a prior command's outcome is unknown".to_string());
         }
@@ -4551,20 +4555,18 @@ async fn run_mutating<F: FnMut() -> String>(
             // Background task model: close the tool call now with a task-id result (a
             // well-formed message the loop never rewrites) and record the outstanding
             // dispatch. The real result is appended later as a completion
-            // notification. The conversation stays usable — a result is coming — but
-            // no second mutation starts until this one finishes (`Executing` blocks
-            // `allows_new_mutation`).
+            // notification. Further authorized commands remain available; the host
+            // atomically enforces capacity across all callers.
             append_mutating_result(
                 deps,
                 session,
                 call,
                 ChatMessage::background_task_running(mint(), &call.id, &id.action_request_id),
             )?;
-            session.execution_state = ExecutionState::Executing { action: id };
+            session
+                .execution_state
+                .insert(ExecutionState::Executing { action: id });
             finish_tool(session, &call.id, true, sink);
-            *halted = Some(
-                "a prior command in this turn is still running as a background task".to_string(),
-            );
         }
         // A model-safe execution error becomes an error tool-result; a backend
         // transport error fails the turn. A seam may mark a pre-dispatch error
@@ -4646,7 +4648,7 @@ async fn run_wait<F: FnMut() -> String>(
     };
     // Only the session's own in-flight task may be waited on, matched by its stable
     // id. No task, or a mismatched id, is a well-formed error result.
-    let Some(action) = session.execution_state.waitable_task().cloned() else {
+    let Some(action) = session.execution_state.task(&task_id).cloned() else {
         append_mutating_result(
             deps,
             session,
@@ -4654,7 +4656,7 @@ async fn run_wait<F: FnMut() -> String>(
             ChatMessage::tool_result(
                 mint(),
                 &call.id,
-                "no background task is running; there is nothing to wait for",
+                format!("no running background task with id `{task_id}`"),
             ),
         )?;
         return Ok(None);
@@ -4782,7 +4784,7 @@ async fn run_wait<F: FnMut() -> String>(
             };
             ack_event_id = event_id;
             // The awaited task settled: a follow-up may mutate again.
-            session.execution_state = ExecutionState::None;
+            session.execution_state.remove(&action);
             let failure =
                 append_reviewed_tool_result(deps, session, message_id, &call.id, output, None)
                     .await?;
@@ -4820,7 +4822,10 @@ async fn run_wait<F: FnMut() -> String>(
                 return Err(invalid_original_result());
             }
             let index = original_action_anchor(session, &action, &original_call_id)?;
-            if matches!(session.execution_state, ExecutionState::Executing { .. }) {
+            if matches!(
+                session.execution_state.execution(&action.execution_id),
+                Some(ExecutionState::Executing { .. })
+            ) {
                 let original = &mut session.conversation[index];
                 original.data_envelope =
                     crate::model_message_labels::internal_tool_result_envelope(
@@ -4830,11 +4835,13 @@ async fn run_wait<F: FnMut() -> String>(
                         "background_task_outcome_unknown",
                     )?;
                 original.text = OUTCOME_UNKNOWN_PLACEHOLDER.into();
-                session.execution_state = ExecutionState::OutcomeUnknown {
-                    action,
-                    placeholder_message_id: original.message_id.clone(),
-                    since: (deps.clock)(),
-                };
+                session
+                    .execution_state
+                    .insert(ExecutionState::OutcomeUnknown {
+                        action,
+                        placeholder_message_id: original.message_id.clone(),
+                        since: (deps.clock)(),
+                    });
             }
             append_mutating_result(
                 deps,
@@ -4860,11 +4867,13 @@ async fn run_wait<F: FnMut() -> String>(
                     OUTCOME_UNKNOWN_PLACEHOLDER,
                 ),
             )?;
-            session.execution_state = ExecutionState::OutcomeUnknown {
-                action,
-                placeholder_message_id: placeholder_id,
-                since: (deps.clock)(),
-            };
+            session
+                .execution_state
+                .insert(ExecutionState::OutcomeUnknown {
+                    action,
+                    placeholder_message_id: placeholder_id,
+                    since: (deps.clock)(),
+                });
             finish_tool(session, &call.id, false, sink);
             *halted = Some("a prior command's outcome is unknown".to_string());
         }

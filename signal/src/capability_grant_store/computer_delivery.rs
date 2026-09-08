@@ -62,8 +62,9 @@ pub(super) fn validate_destination(
     if session.surface != AgentSessionSurface::DeviceAssistant
         || session
             .execution_state
-            .waitable_task()
-            .is_some_and(|current| current.execution_id == action.execution_id && current != action)
+            .tasks()
+            .into_iter()
+            .any(|current| current.execution_id == action.execution_id && current != action)
     {
         return Err(invalid());
     }
@@ -108,11 +109,15 @@ pub(super) fn validate_destination(
     if proposals.len() != 1 {
         return Err(invalid());
     }
+    let execution = session
+        .execution_state
+        .execution(&action.execution_id)
+        .unwrap_or_default();
     if let ExecutionState::OutcomeUnknown {
         action: current,
         placeholder_message_id,
         ..
-    } = &session.execution_state
+    } = &execution
         && current == action
     {
         let anchors: Vec<_> = session
@@ -196,8 +201,8 @@ impl SignalCapabilityGrantStore {
                 now.to_rfc3339(),
             );
             if !appended {
-                if session.execution_state.waitable_task() == Some(action) {
-                    session.execution_state = ExecutionState::None;
+                if session.execution_state.contains(action) {
+                    session.execution_state.remove(action);
                 } else {
                     return Ok(EventAppend::AlreadyPresent);
                 }
@@ -278,13 +283,9 @@ impl SignalCapabilityGrantStore {
                             &format!("{}:{}:{}", session.conversation_id, row.turn_id, call),
                         ) == row.action_request_id
                     });
-                let matches_current =
-                    session
-                        .execution_state
-                        .waitable_task()
-                        .is_some_and(|action| {
-                            action.work_id == row.id && action.kind == WorkKind::ComputerAction
-                        });
+                let matches_current = session.execution_state.tasks().into_iter().any(|action| {
+                    action.work_id == row.id && action.kind == WorkKind::ComputerAction
+                });
                 if !matches_open && !matches_current {
                     continue;
                 }
@@ -318,7 +319,7 @@ impl SignalCapabilityGrantStore {
                     &payload.dispatch_id,
                     WorkKind::ComputerAction,
                 );
-                if matches_current && session.execution_state.waitable_task() != Some(&action) {
+                if matches_current && !session.execution_state.contains(&action) {
                     return Err(invalid());
                 }
                 if matches_open {
@@ -505,7 +506,7 @@ impl SignalCapabilityGrantStore {
             let identity = desk_diagnose_core::session::ActionIdentity::new(
                 work.id, &payload.call_id, generation, WorkKind::ComputerAction
             );
-            if !matches!(&session.execution_state, ExecutionState::Executing { action } if action == &identity) {
+            if !matches!(session.execution_state.execution(&identity.execution_id), Some(ExecutionState::Executing { action }) if action == identity) {
                 return Ok(());
             }
             let now = Utc::now();

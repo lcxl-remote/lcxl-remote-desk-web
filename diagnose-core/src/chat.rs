@@ -29,6 +29,9 @@ pub fn background_task_running_result(background_task_id: &str) -> String {
     serde_json::json!({
         "status": BACKGROUND_TASK_RUNNING_STATUS,
         "background_task_id": background_task_id,
+        "completion_delivery": "automatic",
+        "polling_required": false,
+        "next_step": "Do not repeatedly poll this task. Continue independent work if available; otherwise end this turn with a brief pending-status answer. The system will deliver the original completion result automatically. Ending the turn does not cancel the task or mean it is complete.",
     })
     .to_string()
 }
@@ -719,6 +722,8 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&msg.text).unwrap();
         assert_eq!(value["status"], BACKGROUND_TASK_RUNNING_STATUS);
         assert_eq!(value["background_task_id"], "exec_task_8");
+        assert_eq!(value["completion_delivery"], "automatic");
+        assert_eq!(value["polling_required"], false);
     }
 
     /// The shared fence wraps the raw text between the open/close markers, so both

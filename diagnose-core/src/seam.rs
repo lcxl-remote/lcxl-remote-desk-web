@@ -470,8 +470,8 @@ pub enum ExecOutcome {
     /// and records [`ExecutionState::Executing`]; the real result arrives later as a
     /// completion notification appended to the conversation. Unlike
     /// [`Unknown`](Self::Unknown) the outcome is not in doubt — a result is coming —
-    /// so the conversation is not degraded, only barred from starting a second
-    /// mutation until this one completes.
+    /// so the conversation is not degraded. Further commands remain subject to
+    /// host concurrency admission and their own authorization.
     ///
     /// [`ExecutionState::Executing`]: crate::session::ExecutionState::Executing
     Dispatched(ExecIdentity),

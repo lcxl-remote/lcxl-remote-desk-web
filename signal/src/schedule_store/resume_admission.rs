@@ -4,7 +4,7 @@ use crate::entity::{agent_schedule_run as run, agent_session};
 use desk_agent_protocol::schedule::SchedulePauseReason;
 use desk_diagnose_core::{
     schedule::lifecycle::FailureState,
-    session::{AgentSessionSurface, ExecutionState, PersistedAgentSession, TriggerOrigin},
+    session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
 };
 use sea_orm::{ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter, sea_query::Expr};
 
@@ -121,10 +121,7 @@ pub(crate) async fn lock_action_session(
             || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
             || session.active_control_connection_id.is_some()
             || !session.turn_state.is_active()
-            || matches!(
-                session.execution_state,
-                ExecutionState::Interrupted { .. } | ExecutionState::OutcomeUnknown { .. }
-            )
+            || session.execution_state.has_unresolved_outcome()
             || session.surface != AgentSessionSurface::DeviceAssistant
             || row
                 .lease_deadline
@@ -153,10 +150,7 @@ pub(crate) async fn fresh_action_authority_on(
             desk_diagnose_core::session::TurnState::Running
                 | desk_diagnose_core::session::TurnState::AwaitingApproval
         )
-        || matches!(
-            session.execution_state,
-            ExecutionState::Interrupted { .. } | ExecutionState::OutcomeUnknown { .. }
-        )
+        || session.execution_state.has_unresolved_outcome()
     {
         return Err(invalid());
     }
@@ -210,6 +204,7 @@ mod tests {
     use super::super::{ClaimedContinuation, ContinuationClaim, ScheduleStore};
     use super::*;
     use desk_agent_protocol::{AgentScope, ExecutionMode};
+    use desk_diagnose_core::session::ExecutionState;
     use desk_diagnose_core::session::TurnState;
     use sea_orm::{ActiveModelTrait, Set, TransactionTrait};
 

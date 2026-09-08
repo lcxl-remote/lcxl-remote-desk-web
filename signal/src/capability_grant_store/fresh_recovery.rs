@@ -76,10 +76,15 @@ pub(crate) async fn restore_completed_calls(
         }
     }
     let mut calls = next.unclosed_tool_call_ids();
-    if let Some(action) = session.execution_state.waitable_task()
-        && !rows
-            .iter()
-            .any(|row| row.id == action.work_id && row.status == CAPABILITY_WORK_OUTCOME_UNKNOWN)
+    for action in session
+        .execution_state
+        .tasks()
+        .into_iter()
+        .filter(|action| {
+            !rows.iter().any(|row| {
+                row.id == action.work_id && row.status == CAPABILITY_WORK_OUTCOME_UNKNOWN
+            })
+        })
     {
         let row = rows
             .iter()
@@ -175,15 +180,11 @@ pub(crate) async fn restore_completed_calls(
                 now,
             );
         }
-        if next.execution_state.waitable_task() == Some(&original.receipt.action) {
-            next.execution_state = ExecutionState::None;
-        }
+        next.execution_state.remove(&original.receipt.action);
     }
     if !next.unclosed_tool_call_ids().is_empty()
-        || !matches!(
-            next.execution_state,
-            ExecutionState::None | ExecutionState::OutcomeUnknown { .. }
-        )
+        || next.execution_state.is_running()
+        || next.execution_state.interrupted()
     {
         return Ok(false);
     }

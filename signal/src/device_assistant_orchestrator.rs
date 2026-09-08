@@ -1,5 +1,7 @@
 //! OSS Signal's owner-only Device Assistant orchestrator.
 
+pub(crate) mod cancellation;
+
 use actix_web::web;
 use desk_agent_protocol::agent_event::AgentEvent;
 use desk_agent_protocol::computer_use::ComputerUseReadiness;
@@ -643,10 +645,14 @@ pub async fn update_object_context(
 }
 
 struct SignalStoreHeartbeat {
+    cancel: tokio_util::sync::CancellationToken,
     store: crate::agent_session_store::SignalAgentSessionStore,
 }
 
 impl LeaseHeartbeat for SignalStoreHeartbeat {
+    fn is_healthy(&self) -> bool {
+        !self.cancel.is_cancelled()
+    }
     fn start(&self, conversation_id: String, lease_token: u64) -> Box<dyn HeartbeatGuard> {
         let store = self.store.clone();
         let handle = actix_web::rt::spawn(async move {
@@ -826,6 +832,7 @@ async fn compose_turn(
     resume_conversation_id: Option<PermissionResume>,
     mut scheduled: Option<scheduled::PreparedResume>,
 ) -> Result<Option<LoopOutcome>, AgentError> {
+    let cancel_registration = cancellation::register(actor_user_id, &request_id);
     stream_event(
         connections.as_ref(),
         &browser_connection_id,
@@ -849,7 +856,7 @@ async fn compose_turn(
             return Ok(None);
         }
     };
-    let model_cancel = tokio_util::sync::CancellationToken::new();
+    let model_cancel = (*cancel_registration).clone();
     let seam = match SignalModelSeam::from_config(&config) {
         Ok(seam) => seam
             .with_context_db(db.clone())
@@ -1566,6 +1573,7 @@ async fn compose_turn(
     registry
         .extend(desk_diagnose_core::capability_disclosure::capability_discovery_tool_registry());
     registry.extend(desk_diagnose_core::conversation_history::conversation_history_tool_registry());
+    registry.extend(desk_diagnose_core::wait_tools::wait_tool_registry());
     let context_selection = match context_selection_claim(
         &provider_registry,
         &inventory,
@@ -1645,6 +1653,7 @@ async fn compose_turn(
             .map_err(|_| transport_error("scheduled leases changed"))?,
         ),
         None => Box::new(SignalStoreHeartbeat {
+            cancel: model_cancel.clone(),
             store: sessions.clone(),
         }),
     };
@@ -2222,6 +2231,22 @@ mod tests {
     use sea_orm::{Database, EntityTrait};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[actix_web::test]
+    async fn user_cancellation_stops_the_turn_at_tool_boundaries() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let registration = cancellation::register(17, &request_id);
+        let heartbeat = SignalStoreHeartbeat {
+            cancel: (*registration).clone(),
+            store: crate::agent_session_store::SignalAgentSessionStore::new(db),
+        };
+        assert!(heartbeat.check_current().await);
+        assert!(!cancellation::cancel(18, &request_id));
+        assert!(heartbeat.check_current().await);
+        assert!(cancellation::cancel(17, &request_id));
+        assert!(!heartbeat.check_current().await);
+    }
 
     #[test]
     fn permission_resume_bridge_replays_original_requirement_with_user_sensitivity() {

@@ -5,7 +5,7 @@ use desk_agent_protocol::schedule::management::ResumeConversationSource;
 use desk_diagnose_core::{
     chat::ChatRole,
     conversation_key::{derive_conversation_key, is_valid_client_conversation_id},
-    session::{AgentSessionSurface, ExecutionState, PersistedAgentSession, TriggerOrigin},
+    session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
@@ -62,10 +62,7 @@ pub(super) async fn list(
             || session.input_revision > i64::MAX as u64
             || session.turn_state.is_active()
             || session.trigger_origin == TriggerOrigin::ScheduledTask
-            || matches!(
-                session.execution_state,
-                ExecutionState::OutcomeUnknown { .. } | ExecutionState::Interrupted { .. }
-            )
+            || session.execution_state.has_unresolved_outcome()
         {
             continue;
         }

@@ -28,7 +28,7 @@ pub(crate) async fn reconcile_on(
 ) -> Result<(), DbErr> {
     if session.trigger_origin != TriggerOrigin::ScheduledContinuation
         || session.turn_state != TurnState::Running
-        || matches!(session.execution_state, ExecutionState::Interrupted { .. })
+        || session.execution_state.interrupted()
     {
         return Err(invalid());
     }
@@ -38,15 +38,20 @@ pub(crate) async fn reconcile_on(
         .order_by_asc(agent_action_item::Column::Id)
         .all(txn)
         .await?;
-    let carried = session.execution_state.waitable_task().cloned();
+    let carried: Vec<_> = session
+        .execution_state
+        .tasks()
+        .into_iter()
+        .cloned()
+        .collect();
     let mut matched = BTreeSet::new();
     let mut matched_actions = Vec::new();
-    let mut pending = false;
     for row in rows {
         if row.turn_id != turn {
-            if carried.as_ref().is_some_and(|action| {
-                action.kind == WorkKind::ComputerAction && action.work_id == row.id
-            }) {
+            if carried
+                .iter()
+                .any(|action| action.kind == WorkKind::ComputerAction && action.work_id == row.id)
+            {
                 return Err(invalid());
             }
             continue;
@@ -76,22 +81,20 @@ pub(crate) async fn reconcile_on(
         let (outbox, work, payload) =
             super::computer_binding::original_on(txn, &outbox.dispatch_id).await?;
         if payload.command_origin.is_some() {
-            let (call, action, waiting) =
+            let (call, action, _waiting) =
                 command::reconcile_on(txn, session, &outbox, &work, &payload, now_ms).await?;
-            if !matched.insert(call) || (pending && waiting) {
+            if !matched.insert(call) {
                 return Err(invalid());
             }
-            pending |= waiting;
             matched_actions.push(action);
             continue;
         }
         if outbox.computer_binding_json.is_none() {
             let (call, action) =
                 unbound::reconcile_on(txn, session, &outbox, &work, &payload, now_ms).await?;
-            if !matched.insert(call) || pending {
+            if !matched.insert(call) {
                 return Err(invalid());
             }
-            pending = true;
             matched_actions.push(action);
             continue;
         }
@@ -135,7 +138,7 @@ pub(crate) async fn reconcile_on(
             WorkKind::ComputerAction,
         );
         matched_actions.push(action.clone());
-        if carried.as_ref().is_some_and(|old| {
+        if carried.iter().any(|old| {
             old.kind == WorkKind::ComputerAction && old.work_id == work.id && old != &action
         }) {
             return Err(invalid());
@@ -172,23 +175,17 @@ pub(crate) async fn reconcile_on(
                     timestamp(now_ms)?.to_rfc3339(),
                 );
             }
-            if session.execution_state.waitable_task() == Some(&action) {
-                session.execution_state = ExecutionState::None;
-            }
+            session.execution_state.remove(&action);
         } else {
-            if pending
-                || !matches!(
-                    outbox.state.as_str(),
-                    DISPATCH_OUTBOX_SENDING | DISPATCH_OUTBOX_OUTCOME_UNKNOWN
-                )
-                || !matches!(
-                    work.status.as_str(),
-                    CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
-                )
-            {
+            if !matches!(
+                outbox.state.as_str(),
+                DISPATCH_OUTBOX_SENDING | DISPATCH_OUTBOX_OUTCOME_UNKNOWN
+            ) || !matches!(
+                work.status.as_str(),
+                CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
+            ) {
                 return Err(invalid());
             }
-            pending = true;
             let running = super::computer_background::task_on(txn, &work, now_ms)
                 .await?
                 .is_some_and(|task| {
@@ -200,8 +197,8 @@ pub(crate) async fn reconcile_on(
             let unknown = !running
                 || outbox.state == DISPATCH_OUTBOX_OUTCOME_UNKNOWN
                 || matches!(
-                    session.execution_state,
-                    ExecutionState::OutcomeUnknown { .. }
+                    session.execution_state.execution(&action.execution_id),
+                    Some(ExecutionState::OutcomeUnknown { .. })
                 );
             let id = format!("scheduled-action-status:{}", payload.dispatch_id);
             let mut message = ChatMessage::tool_result(
@@ -249,7 +246,7 @@ pub(crate) async fn reconcile_on(
                 return Err(invalid());
             }
             if let Some(index) = index {
-                if session.execution_state.waitable_task() != Some(&action) {
+                if !session.execution_state.contains(&action) {
                     return Err(invalid());
                 }
                 message.message_id = session.conversation[index].message_id.clone();
@@ -261,7 +258,7 @@ pub(crate) async fn reconcile_on(
             } else {
                 session.conversation.push(message);
             }
-            session.execution_state = if unknown {
+            session.execution_state.insert(if unknown {
                 ExecutionState::OutcomeUnknown {
                     action,
                     placeholder_message_id: anchor,
@@ -269,7 +266,7 @@ pub(crate) async fn reconcile_on(
                 }
             } else {
                 ExecutionState::Executing { action }
-            };
+            });
         }
     }
     reads::close_untracked_on(txn, session, &mut matched).await?;
@@ -281,8 +278,8 @@ pub(crate) async fn reconcile_on(
             .flat_map(|message| message.tool_calls.iter())
             .any(|call| !matched.contains(&call.id))
         || carried
-            .as_ref()
-            .is_some_and(|action| !matched_actions.contains(action))
+            .iter()
+            .any(|action| !matched_actions.contains(action))
     {
         return Err(invalid());
     }

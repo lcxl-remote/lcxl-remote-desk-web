@@ -16,6 +16,9 @@
 //! rebound on reconnect; the **turn routing** fields (connection / request /
 //! turn id) are transient and rebind each turn.
 
+mod executions;
+pub use executions::{BackgroundExecution, UnknownExecution};
+
 use std::collections::HashSet;
 
 use desk_agent_protocol::AgentScope;
@@ -183,11 +186,13 @@ pub enum SessionDecodeError {
     InvalidContextAttachment(String),
     InvalidDataEnvelope { message_id: String, error: String },
     InvalidDynamicRun(String),
+    InvalidExecutionState(String),
 }
 
 impl std::fmt::Display for SessionDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidExecutionState(error) => write!(f, "invalid execution state: {error}"),
             Self::Json(error) => write!(f, "invalid agent session JSON: {error}"),
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported conversation schema version {version}")
@@ -314,6 +319,12 @@ pub enum ExecutionState {
     ///
     /// [`OutcomeUnknown`]: ExecutionState::OutcomeUnknown
     Interrupted { since: String },
+    /// Multiple independently correlated tasks; an unbound interruption remains
+    /// a conversation-wide safety barrier without discarding tracked work.
+    Concurrent {
+        tasks: Vec<BackgroundExecution>,
+        interrupted_since: Option<String>,
+    },
 }
 
 /// Server-owned evidence of an owner's manual disposition, never a provider receipt.
@@ -329,13 +340,13 @@ const MANUALLY_DISPOSED_OUTCOME_UNKNOWN: &str = "The user manually disposed this
 
 impl ExecutionState {
     /// Whether a mutating tool may be exposed/started right now. A new mutation is
-    /// allowed only from a clean [`None`] state; while an outcome is unknown or the
+    /// allowed while known background tasks run; while an outcome is unknown or the
     /// session was interrupted with no recoverable identity, only read-only
     /// follow-up is allowed.
     ///
     /// [`None`]: ExecutionState::None
     pub fn allows_new_mutation(&self) -> bool {
-        matches!(self, ExecutionState::None)
+        !self.has_unresolved_outcome()
     }
 
     /// The in-flight task a `wait_for_task` call could wait on, as
@@ -717,6 +728,10 @@ impl PersistedAgentSession {
             // not infer a working set or re-enable the old full catalog.
             return Err(SessionDecodeError::UnsupportedVersion(version));
         }
+        session
+            .execution_state
+            .validate()
+            .map_err(SessionDecodeError::InvalidExecutionState)?;
         validate_attachment_set(&session.context_attachments)
             .map_err(|error| SessionDecodeError::InvalidContextAttachment(error.to_string()))?;
         for attachment in &session.context_attachments {
@@ -1313,14 +1328,16 @@ impl PersistedAgentSession {
             protection.protect_message(pending.event_id.clone());
             protection.protect_tool_call(pending.tool_call_id.clone());
         }
-        if let ExecutionState::OutcomeUnknown {
-            placeholder_message_id,
-            ..
-        } = &self.execution_state
-        {
-            protection.protect_message(placeholder_message_id.clone());
+        for state in self.execution_state.states() {
+            if let ExecutionState::OutcomeUnknown {
+                placeholder_message_id,
+                ..
+            } = state
+            {
+                protection.protect_message(placeholder_message_id);
+            }
         }
-        if let Some(action) = self.execution_state.waitable_task() {
+        for action in self.execution_state.tasks() {
             for message in &self.conversation {
                 if message.background_task_id.as_deref() == Some(action.action_request_id.as_str())
                 {
@@ -1440,15 +1457,46 @@ impl PersistedAgentSession {
             .min()
     }
 
+    /// Run a task-specific reconciliation without changing sibling tasks. Preserve
+    /// the original collection on a no-op, including its presentation order.
+    fn with_execution<R>(&mut self, execution_id: &str, update: impl FnOnce(&mut Self) -> R) -> R {
+        let mut original = std::mem::take(&mut self.execution_state);
+        let selected = original.execution(execution_id).unwrap_or_default();
+        self.execution_state = selected.clone();
+        let result = update(self);
+        let updated = std::mem::take(&mut self.execution_state);
+        if updated != selected {
+            if let Some(action) = selected.waitable_task() {
+                original.remove(action);
+            }
+            original.insert(updated);
+        }
+        self.execution_state = original;
+        result
+    }
+
     /// Reconcile a late execution result against an unknown outcome (§6.2): if the
     /// execution machine is [`ExecutionState::OutcomeUnknown`] for `execution_id`,
     /// replace the placeholder tool-result message (matched by its `message_id`)
     /// text **in place** — never appending a second tool result for the same call —
-    /// and clear the execution machine to [`ExecutionState::None`]. Returns whether
+    /// and remove only this execution, preserving other tasks. Returns whether
     /// a reconciliation happened (false if already resolved / a different
     /// execution / not unknown). The durable result is written first by the caller;
     /// this only mutates the conversation + execution state.
     pub fn reconcile_late_result(
+        &mut self,
+        execution_id: &str,
+        result_text: impl Into<String>,
+        now: impl Into<String>,
+    ) -> bool {
+        let result_text = result_text.into();
+        let now = now.into();
+        self.with_execution(execution_id, |session| {
+            session.reconcile_late_result_single(execution_id, result_text, now)
+        })
+    }
+
+    fn reconcile_late_result_single(
         &mut self,
         execution_id: &str,
         result_text: impl Into<String>,
@@ -1480,6 +1528,18 @@ impl PersistedAgentSession {
     /// is no longer allowed to replace the placeholder, but may still be appended
     /// by the completion path as fenced untrusted audit evidence.
     pub fn manually_dispose_unknown(
+        &mut self,
+        work_id: i64,
+        execution_id: &str,
+        now: impl Into<String>,
+    ) -> bool {
+        let now = now.into();
+        self.with_execution(execution_id, |session| {
+            session.manually_dispose_unknown_single(work_id, execution_id, now)
+        })
+    }
+
+    fn manually_dispose_unknown_single(
         &mut self,
         work_id: i64,
         execution_id: &str,
@@ -1548,6 +1608,18 @@ impl PersistedAgentSession {
     /// [`reconcile_late_result`]: Self::reconcile_late_result
     /// [`apply_completion`]: Self::apply_completion
     pub fn mark_execution_unknown(
+        &mut self,
+        execution_id: &str,
+        tool_call_id: &str,
+        now: impl Into<String>,
+    ) -> bool {
+        let now = now.into();
+        self.with_execution(execution_id, |session| {
+            session.mark_execution_unknown_single(execution_id, tool_call_id, now)
+        })
+    }
+
+    fn mark_execution_unknown_single(
         &mut self,
         execution_id: &str,
         tool_call_id: &str,
@@ -1657,6 +1729,39 @@ impl PersistedAgentSession {
     /// replayed into a later model turn.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_completion_with_envelope(
+        &mut self,
+        event_id: &str,
+        execution_id: &str,
+        tool_call_id: &str,
+        background_task_id: &str,
+        result_text: impl Into<String>,
+        result_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+        now: impl Into<String>,
+    ) -> bool {
+        if self.execution_state.tasks().into_iter().any(|action| {
+            (action.execution_id == execution_id || action.action_request_id == background_task_id)
+                && (action.execution_id != execution_id
+                    || action.action_request_id != background_task_id)
+        }) {
+            return false;
+        }
+        let result_text = result_text.into();
+        let now = now.into();
+        self.with_execution(execution_id, |session| {
+            session.apply_completion_with_envelope_single(
+                event_id,
+                execution_id,
+                tool_call_id,
+                background_task_id,
+                result_text,
+                result_envelope,
+                now,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_completion_with_envelope_single(
         &mut self,
         event_id: &str,
         execution_id: &str,
@@ -1805,7 +1910,7 @@ impl PersistedAgentSession {
                             RECOVER_NOT_EXECUTED,
                         ));
                 }
-                self.execution_state = ExecutionState::None;
+                // Previously dispatched tasks remain independently recoverable.
             }
             RecoveryVerdict::OutcomeUnknown {
                 tool_call_id,
@@ -1822,16 +1927,17 @@ impl PersistedAgentSession {
                             &tool_call_id,
                             RECOVER_OUTCOME_UNKNOWN,
                         ));
-                    self.execution_state = ExecutionState::OutcomeUnknown {
+                    self.execution_state.insert(ExecutionState::OutcomeUnknown {
                         action,
                         placeholder_message_id: placeholder_id,
                         since: now.clone(),
-                    };
+                    });
                 } else {
                     // A runtime supplied an identity that cannot be correlated to
                     // the persisted conversation. Fail closed rather than attach
                     // the late result to the wrong tool call.
-                    self.execution_state = ExecutionState::Interrupted { since: now.clone() };
+                    self.execution_state
+                        .insert(ExecutionState::Interrupted { since: now.clone() });
                 }
                 for call_id in unclosed.iter().filter(|call_id| *call_id != &tool_call_id) {
                     self.conversation
@@ -1851,7 +1957,8 @@ impl PersistedAgentSession {
                             RECOVER_INTERRUPTED,
                         ));
                 }
-                self.execution_state = ExecutionState::Interrupted { since: now.clone() };
+                self.execution_state
+                    .insert(ExecutionState::Interrupted { since: now.clone() });
             }
         }
         self.finish_turn(TurnState::Failed, now);
@@ -2657,7 +2764,7 @@ mod tests {
             "dispatched; still running",
         ));
         s.execution_state = ExecutionState::Executing {
-            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
+            action: ActionIdentity::agent_exec(8, "task-9", "e9"),
         };
         let base = s.conversation.len();
 
@@ -2730,7 +2837,7 @@ mod tests {
             "execution outcome unknown; the command may have executed",
         ));
         s.execution_state = ExecutionState::OutcomeUnknown {
-            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
+            action: ActionIdentity::agent_exec(8, "task-9", "e9"),
             placeholder_message_id: "ph-1".into(),
             since: "2026-06-20T00:00:00Z".into(),
         };
@@ -3380,5 +3487,82 @@ mod tests {
         json.as_object_mut().unwrap().remove("trigger_origin");
         let back: PersistedAgentSession = serde_json::from_value(json).unwrap();
         assert_eq!(back.trigger_origin, TriggerOrigin::User);
+    }
+    #[test]
+    fn concurrent_completions_are_independent_and_generation_fenced() {
+        let mut s = session();
+        let a = ActionIdentity::agent_exec(1, "task-a", "gen-a");
+        let b = ActionIdentity::agent_exec(2, "task-b", "gen-b");
+        s.execution_state
+            .insert(ExecutionState::Executing { action: a.clone() });
+        s.execution_state
+            .insert(ExecutionState::Executing { action: b.clone() });
+        assert!(s.execution_state.allows_new_mutation());
+        let mut s =
+            PersistedAgentSession::decode_json(&s.encode_json_for_storage().unwrap()).unwrap();
+        assert_eq!(s.execution_state.tasks().len(), 2);
+        assert!(!s.apply_completion("wrong", "gen-a", "call-b", "task-b", "wrong", "t"));
+        assert!(!s.apply_completion("stale", "old-b", "call-b", "task-b", "wrong", "t"));
+        assert_eq!(s.execution_state.tasks().len(), 2);
+        assert!(s.apply_completion("done-b", "gen-b", "call-b", "task-b", "cancelled", "t"));
+        assert!(s.execution_state.contains(&a));
+        assert!(!s.execution_state.contains(&b));
+        assert!(!s.apply_completion("done-b", "gen-b", "call-b", "task-b", "again", "t"));
+        assert!(s.execution_state.contains(&a));
+        assert!(s.apply_completion("done-a", "gen-a", "call-a", "task-a", "success", "t"));
+        assert_eq!(s.execution_state, ExecutionState::None);
+    }
+
+    #[test]
+    fn concurrent_unknown_retains_anchor_and_other_running_tasks() {
+        let mut s = session();
+        let a = ActionIdentity::agent_exec(1, "task-a", "gen-a");
+        let b = ActionIdentity::agent_exec(2, "task-b", "gen-b");
+        s.conversation.push(crate::chat::ChatMessage::tool_result(
+            "unknown-a",
+            "call-a",
+            "unknown",
+        ));
+        s.execution_state.insert(ExecutionState::OutcomeUnknown {
+            action: a.clone(),
+            placeholder_message_id: "unknown-a".into(),
+            since: "t".into(),
+        });
+        s.execution_state
+            .insert(ExecutionState::Executing { action: b.clone() });
+        assert!(!s.execution_state.allows_new_mutation());
+        assert!(s.apply_completion("done-b", "gen-b", "call-b", "task-b", "success", "t"));
+        assert!(!s.execution_state.allows_new_mutation());
+        assert!(s.execution_state.contains(&a));
+        assert!(s.apply_completion("done-a", "gen-a", "call-a", "task-a", "success", "t"));
+        assert!(s.execution_state.allows_new_mutation());
+        assert!(
+            s.conversation
+                .iter()
+                .any(|m| m.message_id == "done-a" && m.text == "success")
+        );
+    }
+
+    #[test]
+    fn concurrent_duplicate_identity_rejected_when_loading() {
+        let mut s = session();
+        let action = ActionIdentity::agent_exec(1, "task", "gen");
+        s.execution_state = ExecutionState::Concurrent {
+            tasks: vec![
+                BackgroundExecution {
+                    action: action.clone(),
+                    unknown: None,
+                },
+                BackgroundExecution {
+                    action,
+                    unknown: None,
+                },
+            ],
+            interrupted_since: None,
+        };
+        assert!(matches!(
+            PersistedAgentSession::decode_json(&s.encode_json_for_storage().unwrap()),
+            Err(SessionDecodeError::InvalidExecutionState(_))
+        ));
     }
 }

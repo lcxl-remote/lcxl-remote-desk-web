@@ -204,3 +204,9 @@ Editing task instructions invalidates the previous authorization; independent ta
 The OSS owner can configure server-wide independent task limits in **Settings → Scheduled task budgets**. Initial ceilings are 24 occurrences per UTC day, 64 tool calls, 100,000 model tokens and 900 seconds per run. Changes use a persisted revision check. Lower ceilings can block existing contracts; higher ceilings do not expand task permissions or resume paused tasks. Reload after a save conflict or uncertain response.
 
 When rescheduling, the editor displays the existing rule in the selected time zone. Saving unchanged values preserves the UTC rule; changing the display zone projects the original rule again. After changing the timing, preview up to five future occurrences and confirm before saving. The server checks the conversion input and version again; changed results require renewed confirmation. Interval anchors are also converted by the server, then run at fixed elapsed intervals. Future times shown for paused tasks are a rule preview, not an indication that the task is enabled.
+
+## While a background command is running
+
+A conversation can track multiple background tasks, each with its own task ID for waiting, cancellation, and completion receipts. The controlled host atomically admits new commands up to its configured concurrency limit. At capacity it explicitly rejects the command without queuing or automatic retry. Synchronous queries remain available. Per-command authorization, exclusive desktop/browser writer leases, and safeguards for unknown outcomes still apply.
+
+Background results are delivered automatically; polling and keeping the current AI turn open are unnecessary. In an interactive conversation, when no independent work remains, the assistant should briefly report that the task is pending and end the turn. Ending the response neither cancels the background task nor means that it has completed.

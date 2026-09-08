@@ -1,9 +1,7 @@
 //! Bind each model budget reservation to the currently held fresh-task session.
 use super::{ScheduleStore, ScheduleStoreError, TaskBudgetKind, TaskBudgetRequest};
 use crate::entity::{agent_session, agent_task_budget_reservation};
-use desk_diagnose_core::session::{
-    AgentSessionSurface, ExecutionState, PersistedAgentSession, TriggerOrigin,
-};
+use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin};
 use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
@@ -32,10 +30,7 @@ impl ScheduleStore {
             || held.current_turn_id.as_deref() != Some(format!("{}-turn", request.run_id).as_str())
             || held.active_control_connection_id.is_some()
             || held.input_revision != 1
-            || matches!(
-                held.execution_state,
-                ExecutionState::OutcomeUnknown { .. } | ExecutionState::Interrupted { .. }
-            )
+            || held.execution_state.has_unresolved_outcome()
         {
             return Err(ScheduleStoreError::Conflict);
         }

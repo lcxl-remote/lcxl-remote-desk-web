@@ -55,8 +55,9 @@ pub(in crate::capability_grant_store) async fn close_on(
         || work.result_schema_version.is_some()
         || session
             .execution_state
-            .waitable_task()
-            .is_some_and(|action| action.work_id == work.id)
+            .tasks()
+            .into_iter()
+            .any(|action| action.work_id == work.id)
     {
         return Err(invalid());
     }

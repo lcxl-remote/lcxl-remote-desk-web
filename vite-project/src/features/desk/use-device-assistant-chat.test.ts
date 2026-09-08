@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT,
+    SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_OBJECT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_SESSION_SELECTED,
@@ -1097,6 +1098,51 @@ describe('useDeviceAssistantChat', () => {
         });
         expect(result.current.messages.some((message) => message.text === 'stale answer')).toBe(false);
         expect(result.current.running).toBe(true);
+    });
+
+    it('stops the current turn once without clearing its conversation or messages', () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const sendMessage = vi.fn().mockReturnValue('request-stop');
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'stop-local',
+            subscribe: handler => { subscriber = handler; return () => undefined; },
+            sendMessage,
+        }));
+        act(() => { result.current.start('keep this question'); });
+        const conversation = localStorage.getItem('device-assistant-conversation:stop-local');
+        act(() => { result.current.stop(); result.current.stop(); });
+        expect(sendMessage).toHaveBeenCalledTimes(2);
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT, null, 'stop-local', 'request-stop');
+        expect(result.current.stopping).toBe(true);
+        expect(result.current.turnRunning).toBe(true);
+        expect(result.current.messages[0].text).toBe('keep this question');
+        expect(localStorage.getItem('device-assistant-conversation:stop-local')).toBe(conversation);
+        act(() => subscriber?.({ request_id: 'request-stop',
+            signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
+            signaling_data: { seq: 1, kind: 'error', error: { message: 'cancelled' } },
+        }));
+        expect(result.current.stopping).toBe(false);
+        expect(result.current.turnRunning).toBe(false);
+        expect(result.current.messages[0].text).toBe('keep this question');
+    });
+
+    it('stops a restored active turn using its server request id', async () => {
+        localStorage.setItem('device-assistant-conversation:stop-restored', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', requestId: 'server-request', seq: 10, active: true,
+            messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
+        } }) }));
+        const sendMessage = vi.fn().mockReturnValue('unused');
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'stop-restored', subscribe: () => () => undefined, sendMessage,
+        }));
+        await waitFor(() => expect(result.current.turnRunning).toBe(true));
+        act(() => result.current.stop());
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT, null, 'stop-restored', 'server-request');
+        expect(result.current.messages[0].text).toBe('continue');
+        unmount();
     });
 
     it('accepts a follow-up while running and observes only the newest request stream', () => {

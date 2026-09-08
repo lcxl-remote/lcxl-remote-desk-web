@@ -96,10 +96,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        if !matches!(
-            session.execution_state,
-            ExecutionState::OutcomeUnknown { .. }
-        ) {
+        if !session.execution_state.unknown().is_some() {
             return Ok(false);
         }
         let actions = action::Entity::find()

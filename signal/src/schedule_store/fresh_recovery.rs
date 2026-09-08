@@ -131,7 +131,7 @@ impl ScheduleStore {
                 && row
                     .lease_deadline
                     .is_none_or(|deadline| deadline.timestamp_millis() > now))
-            || matches!(session.execution_state, ExecutionState::Interrupted { .. })
+            || session.execution_state.interrupted()
             || session.terminal_permission_request_id.is_some()
             || (work.result_ref.is_none() && !session.permission_requests.is_empty())
             || session.permission_requests.iter().any(|request| {

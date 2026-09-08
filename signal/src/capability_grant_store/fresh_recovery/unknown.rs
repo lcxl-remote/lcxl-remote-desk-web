@@ -44,11 +44,11 @@ pub(super) async fn restore(
         &payload.dispatch_id,
         WorkKind::ComputerAction,
     );
-    if session
-        .execution_state
-        .waitable_task()
-        .is_some_and(|current| current != &action)
-    {
+    if session.execution_state.tasks().into_iter().any(|current| {
+        (current.action_request_id == action.action_request_id
+            || current.execution_id == action.execution_id)
+            && current != &action
+    }) {
         return Err(invalid());
     }
     let calls: Vec<_> = session
@@ -115,7 +115,7 @@ pub(super) async fn restore(
             session.conversation.push(message.clone());
         }
         [index] => {
-            if session.execution_state.waitable_task() != Some(&action) {
+            if !session.execution_state.contains(&action) {
                 return Err(invalid());
             }
             message.message_id = session.conversation[*index].message_id.clone();
@@ -124,10 +124,12 @@ pub(super) async fn restore(
         }
         _ => return Err(invalid()),
     }
-    session.execution_state = ExecutionState::OutcomeUnknown {
-        action,
-        placeholder_message_id: message.message_id,
-        since: work.dispatch_intent_at.ok_or_else(invalid)?.to_rfc3339(),
-    };
+    session
+        .execution_state
+        .insert(ExecutionState::OutcomeUnknown {
+            action,
+            placeholder_message_id: message.message_id,
+            since: work.dispatch_intent_at.ok_or_else(invalid)?.to_rfc3339(),
+        });
     Ok(())
 }

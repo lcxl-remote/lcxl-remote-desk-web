@@ -1,6 +1,6 @@
 //! The `wait_for_task` tool: lets the model actively wait on the background task it
-//! just dispatched, so a completed result becomes that call's real tool result
-//! rather than a passively injected notification.
+//! just dispatched when an explicit status check is useful. Automatic completion
+//! delivery does not require calling this tool.
 //!
 //! Exposure is gated by [`ToolEffect::WaitTask`](crate::registry::ToolEffect::WaitTask)
 //! (offered only while the session has an in-flight task); the loop validates the
@@ -17,6 +17,10 @@ use crate::registry::{RegisteredTool, ToolEffect};
 
 /// The tool the agent loop exposes to wait on a running background task.
 pub const WAIT_TOOL_NAME: &str = "wait_for_task";
+
+/// Shared model guidance for interactive conversations; task execution authority
+/// and scheduled-run completion rules remain owned by their respective runtimes.
+pub const BACKGROUND_TASK_GUIDANCE: &str = "\n\nBackground results arrive automatically; polling is unnecessary. In interactive conversations, continue independent work or end this turn with a brief pending status. Ending the turn neither cancels the task nor completes the user's request. Use wait_for_task only for an explicit status/wait request or an immediate dependent step; if still running, do not poll again or use sleep commands. Do not ask the user to return just to retrieve the result, or promise new actions without authorization.";
 
 /// The wait tool's model-facing arguments.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -47,8 +51,11 @@ pub fn wait_tool_registry() -> Vec<RegisteredTool> {
             name: WAIT_TOOL_NAME.to_string(),
             description: "Wait for a previously dispatched background command to \
                 finish and return its result. Pass `background_task_id` from the \
-                structured dispatch result. Returns promptly if it is still running \
-                so you can keep working or wait again."
+                structured dispatch result. Completion results are delivered automatically; \
+                polling is not required. Use only for an explicit user wait/status request \
+                or a brief check needed for an immediate dependent step. If still running, \
+                do not immediately wait again: continue independent work or end this turn \
+                with a pending-status answer and await automatic delivery."
                 .to_string(),
             parameters_schema: json!({
                 "type": "object",

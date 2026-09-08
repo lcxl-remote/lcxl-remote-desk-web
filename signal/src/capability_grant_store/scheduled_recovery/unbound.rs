@@ -127,11 +127,13 @@ pub(super) async fn reconcile_on(
     record.resolution = Set(Some("scheduled_original_binding_unavailable".into()));
     record.updated_at = Set(now);
     record.update(txn).await?;
-    session.execution_state = ExecutionState::OutcomeUnknown {
-        action: action.clone(),
-        placeholder_message_id: message.message_id.clone(),
-        since: work.dispatch_intent_at.ok_or_else(invalid)?.to_rfc3339(),
-    };
+    session
+        .execution_state
+        .insert(ExecutionState::OutcomeUnknown {
+            action: action.clone(),
+            placeholder_message_id: message.message_id.clone(),
+            since: work.dispatch_intent_at.ok_or_else(invalid)?.to_rfc3339(),
+        });
     if append {
         session.conversation.push(message);
     }

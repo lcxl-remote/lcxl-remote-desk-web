@@ -382,13 +382,8 @@ impl ScheduleStore {
             .await
             .map_err(|_| ScheduleStoreError::Conflict)?;
         }
-        let awaiting_result =
-            interrupted && matches!(session.execution_state, ExecutionState::Executing { .. });
-        let unknown_result = interrupted
-            && matches!(
-                session.execution_state,
-                ExecutionState::OutcomeUnknown { .. }
-            );
+        let awaiting_result = interrupted && session.execution_state.is_running();
+        let unknown_result = interrupted && session.execution_state.unknown().is_some();
         if unknown_result {
             outcome = ScheduledRunStatus::OutcomeUnknown;
             error_kind = Some("outcome_unknown".into());
@@ -403,8 +398,9 @@ impl ScheduleStore {
             if (awaiting_result || unknown_result)
                 && session
                     .execution_state
-                    .waitable_task()
-                    .is_some_and(|identity| match identity.kind {
+                    .tasks()
+                    .into_iter()
+                    .any(|identity| match identity.kind {
                         desk_diagnose_core::session::WorkKind::ComputerAction => {
                             identity.work_id == action.id
                         }
@@ -445,15 +441,12 @@ impl ScheduleStore {
         if executions.iter().any(|execution| {
             execution.status != "done"
                 && !((awaiting_result || unknown_result)
-                    && session
-                        .execution_state
-                        .waitable_task()
-                        .is_some_and(|action| {
-                            action.kind == desk_diagnose_core::session::WorkKind::AgentExec
-                                && action.work_id == execution.id
-                                && action.action_request_id == execution.exec_request_id
-                                && action.execution_id == execution.execution_generation
-                        }))
+                    && session.execution_state.tasks().into_iter().any(|action| {
+                        action.kind == desk_diagnose_core::session::WorkKind::AgentExec
+                            && action.work_id == execution.id
+                            && action.action_request_id == execution.exec_request_id
+                            && action.execution_id == execution.execution_generation
+                    }))
         }) {
             return Err(ScheduleStoreError::Conflict);
         }

@@ -213,9 +213,9 @@ async fn old_answers_and_still_running_sessions_are_not_terminal_evidence() {
     );
     session.conversation.last_mut().unwrap().turn_id = Some(work.turn_id.clone());
     session.turn_state = TurnState::Running;
-    session.execution_state = ExecutionState::Interrupted {
+    session.execution_state.insert(ExecutionState::Interrupted {
         since: chrono::Utc::now().to_rfc3339(),
-    };
+    });
     save_session(&store, &session).await;
     assert_eq!(
         store
@@ -226,9 +226,9 @@ async fn old_answers_and_still_running_sessions_are_not_terminal_evidence() {
         1
     );
     session.turn_state = TurnState::Idle;
-    session.execution_state = ExecutionState::Interrupted {
+    session.execution_state.insert(ExecutionState::Interrupted {
         since: chrono::Utc::now().to_rfc3339(),
-    };
+    });
     save_session(&store, &session).await;
     assert_eq!(
         store

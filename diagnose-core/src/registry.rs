@@ -101,7 +101,7 @@ pub fn is_exposed(
     // The wait tool operates on the session's own task, not the device: it needs no
     // capability grant and is offered only while there is a task to wait on.
     if tool.effect == ToolEffect::WaitTask {
-        return execution_state.waitable_task().is_some();
+        return !execution_state.tasks().is_empty();
     }
     if tool.effect == ToolEffect::RunProjection {
         return true;
