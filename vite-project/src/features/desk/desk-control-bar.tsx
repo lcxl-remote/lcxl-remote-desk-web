@@ -1,3 +1,4 @@
+import { AiAssistantIcon } from "@/components/ai-assistant-icon"
 import { useState } from "react"
 import type {
     MouseEvent as ReactMouseEvent,
@@ -67,6 +68,7 @@ import { getKeyboardShortcuts } from "./keyboard-shortcuts"
 import type { DesktopControllerPlatform } from "./keyboard-mapping"
 
 type DeskControlBarProps = {
+    assistantHref?: string
     audioVolume: number
     clipboardEnabled: boolean
     controlBarRef: RefObject<HTMLDivElement | null>
@@ -98,6 +100,7 @@ type DeskControlBarProps = {
 }
 
 export function DeskControlBar({
+    assistantHref,
     audioVolume,
     clipboardEnabled,
     controlBarRef,
@@ -167,6 +170,19 @@ export function DeskControlBar({
                 onFocus={() => setIsHovered(true)}
             >
                 <div className="controlButtons">
+                    {assistantHref && (
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <Button asChild className="controlButton" variant="ghost">
+                                    <a href={assistantHref} target="_blank" rel="noopener noreferrer"
+                                        aria-label={t("pages.deskDashboard.deviceAssistant")}>
+                                        <AiAssistantIcon />
+                                    </a>
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{t("pages.deskDashboard.deviceAssistant")}</TooltipContent>
+                        </Tooltip>
+                    )}
                     {restricted.isRestricted && (
                         <Tooltip>
                             <TooltipTrigger asChild>

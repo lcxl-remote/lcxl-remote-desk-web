@@ -1,5 +1,7 @@
+import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
+import { isDeviceAssistantEnabled } from "./device-assistant-switch"
 import { useEffect, useRef, useState, useCallback, useMemo } from "react"
-import { useParams, useNavigate } from "react-router-dom"
+import { useParams, useNavigate, useHref } from "react-router-dom"
 import { useTranslation } from "react-i18next"
 import { v4 } from "uuid"
 import { AlertTriangle, Loader2 } from "lucide-react"
@@ -138,6 +140,7 @@ const SETTINGS_EFFECT_KEYS: Record<string, string> = {
  *  (via a static wrapper); the open-source standalone app renders `<DeskSession/>`
  *  with no props, keeping the AI model selection personal-scoped. */
 type DeskSessionProps = {
+    showAssistant?: boolean
     orgId?: number
     /** Manager injects `u:<user_id>`; standalone omits it for its fixed owner. */
     preferenceOwnerKey?: string | null
@@ -147,11 +150,15 @@ type DeskSessionProps = {
 
 export default function DeskSession({
     orgId,
+    showAssistant = import.meta.env.BASE_URL !== "/console/",
     preferenceOwnerKey,
     preferenceOwnerLoading = false,
 }: DeskSessionProps = {}) {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
+    const assistantHref = useHref(`/desk/${deskId}/assistant`)
+    const { data: assistantConnections } = useListConnections()
+    const assistantConnection = assistantConnections?.find(connection => connection.connection_id === deskId)
     const { t } = useTranslation()
     const { toast } = useToast()
 
@@ -1820,6 +1827,9 @@ export default function DeskSession({
 
                         {isConnected && (
                             <DeskControlBar
+                                assistantHref={showAssistant && restricted.ownerPlaneVisible
+                                    && isDeviceAssistantEnabled(assistantConnection?.version_info)
+                                    ? assistantHref : undefined}
                                 audioVolume={audioVolume}
                                 clipboardEnabled={clipboardEnabled}
                                 controlBarRef={controlBarRef}
