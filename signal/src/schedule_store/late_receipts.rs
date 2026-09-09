@@ -4,9 +4,7 @@ use crate::entity::{agent_action_item as action, agent_schedule_run as run, agen
 use desk_diagnose_core::session::{
     ExecutionState, PersistedAgentSession, TriggerOrigin, TurnState,
 };
-use sea_orm::{
-    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 impl ScheduleStore {
     pub(super) async fn late_receipt_candidates(
@@ -30,7 +28,7 @@ impl ScheduleStore {
         &self,
         run_id: &str,
     ) -> Result<bool, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
 
         let initial = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))

@@ -24,10 +24,7 @@ use desk_diagnose_core::model_profile::{
 };
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, TransactionTrait,
-    TryInsertResult,
-};
+use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, TryInsertResult};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -737,7 +734,7 @@ pub async fn save_probe_observation_if_current(
 ) -> Result<bool, DbErr> {
     let validated_capabilities = serde_json::to_string(&observation.validated_capabilities)
         .map_err(|error| DbErr::Custom(error.to_string()))?;
-    let txn = db.begin().await?;
+    let txn = crate::db::begin_write(&db, crate::entity::model_provider::Entity).await?;
     let matched = model_provider::Entity::update_many()
         .col_expr(
             model_provider::Column::Id,

@@ -11,9 +11,10 @@ use desk_diagnose_core::schedule::{
     lifecycle::FailureState,
     next_after, parse_json, validate_publication,
 };
+#[cfg(test)]
+use sea_orm::TransactionTrait;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 
@@ -131,7 +132,7 @@ impl ScheduleStore {
         expected_revision: i64,
         input: &TaskContract,
     ) -> Result<contract_row::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let task = owned(&txn, owner, &input.schedule_id).await?;
         if task.revision != expected_revision
@@ -219,7 +220,7 @@ impl ScheduleStore {
         }
         let identity = digest(&json(&(&input.schedule_id, &input.client_publish_key))?);
         let payload_digest = digest(&json(input)?);
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         if let Some(existing) = authorization::Entity::find()
             .filter(authorization::Column::OwnerUserId.eq(owner))
             .filter(authorization::Column::PublicationIdentity.eq(&identity))

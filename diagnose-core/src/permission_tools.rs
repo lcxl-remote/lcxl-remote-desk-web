@@ -100,6 +100,18 @@ pub fn capability_authorization_prompt(
             // shapes or guess fields from a digest.
             state = "schema_incompatible";
         }
+        if state != "active" {
+            let existing = entries.iter_mut().find(|entry: &&mut serde_json::Value| {
+                entry["tool_name"] == grant.tool_name && entry["state"] == state
+            });
+            if let Some(entry) = existing {
+                entry["grant_count"] = json!(entry["grant_count"].as_u64().unwrap_or(0) + 1);
+            } else {
+                entries
+                    .push(json!({"tool_name": grant.tool_name, "state": state, "grant_count": 1}));
+            }
+            continue;
+        }
         let mut entry = json!({
             "provider_id": grant.provider_id,
             "capability_id": grant.capability_id,
@@ -423,9 +435,11 @@ struct RequestParams {
 #[serde(deny_unknown_fields)]
 struct RequestItem {
     item_id: String,
-    provider_id: String,
+    #[serde(default)]
+    provider_id: Option<String>,
     tool_name: String,
-    expected_effect: CapabilityEffect,
+    #[serde(default)]
+    expected_effect: Option<CapabilityEffect>,
     #[serde(default)]
     resource_scope: Vec<String>,
     #[serde(default)]
@@ -503,7 +517,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-            description: "Ask the user for one bounded batch of tool permissions. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
+            description: "Ask the user for one bounded batch of tool permissions. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -515,13 +529,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                             "type": "object",
                             "properties": {
                                 "item_id": {"type": "string", "maxLength": 128},
-                                "provider_id": {"type": "string", "maxLength": 128},
                                 "tool_name": {"type": "string", "maxLength": 128},
-                                "expected_effect": {"type": "string", "enum": [
-                                    "read_device", "read_file", "read_external", "export_data",
-                                    "write_artifact", "mutate_application", "write_external_draft",
-                                    "send_external", "capture_screen", "input_fallback", "execute_command"
-                                ]},
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, desktop semantic UI actions, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
@@ -529,7 +537,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
                             },
-                            "required": ["item_id", "provider_id", "tool_name", "expected_effect", "suggested_ttl_seconds", "suggested_max_uses", "reason"],
+                            "required": ["item_id", "tool_name", "suggested_ttl_seconds", "suggested_max_uses", "reason"],
                             "additionalProperties": false
                         }
                     }
@@ -558,11 +566,11 @@ pub fn build_permission_request(
     if params.items.is_empty() || params.items.len() > MAX_PERMISSION_REQUEST_ITEMS {
         return Err(invalid("permission batch size is out of bounds"));
     }
-    if params
-        .items
-        .iter()
-        .any(|item| item.expected_effect == CapabilityEffect::SendExternal)
-        && params.items.len() != 1
+    if params.items.iter().any(|item| {
+        registry
+            .capability_for_tool(&item.tool_name)
+            .is_some_and(|capability| capability.wire.effect == CapabilityEffect::SendExternal)
+    }) && params.items.len() != 1
     {
         return Err(invalid(
             "SendExternal must be requested separately as one exact one-shot confirmation",
@@ -577,20 +585,27 @@ pub fn build_permission_request(
         let provider = registry
             .provider_for_capability(&capability.wire.capability_id)
             .expect("compiled capability has a provider");
-        if provider.wire.provider_id != item.provider_id {
+        if item
+            .provider_id
+            .as_ref()
+            .is_some_and(|id| id != &provider.wire.provider_id)
+        {
             return Err(invalid(format!(
                 "tool `{}` belongs to provider `{}`",
                 item.tool_name, provider.wire.provider_id
             )));
         }
-        if capability.wire.effect != item.expected_effect {
+        if item
+            .expected_effect
+            .is_some_and(|effect| effect != capability.wire.effect)
+        {
             return Err(invalid(format!(
                 "tool `{}` effect does not match the compiled descriptor",
                 item.tool_name
             )));
         }
         if !matches!(
-            item.expected_effect,
+            capability.wire.effect,
             CapabilityEffect::ExportData
                 | CapabilityEffect::WriteExternalDraft
                 | CapabilityEffect::SendExternal
@@ -613,7 +628,7 @@ pub fn build_permission_request(
             None => (None, None),
         };
         let inherently_r3 = matches!(
-            item.expected_effect,
+            capability.wire.effect,
             CapabilityEffect::SendExternal
                 | CapabilityEffect::WriteExternalDraft
                 | CapabilityEffect::InputFallback
@@ -902,9 +917,9 @@ pub fn build_permission_request(
         };
         items.push(GrantRequestItem {
             item_id: item.item_id.trim().to_string(),
-            provider_id: item.provider_id,
+            provider_id: provider.wire.provider_id.clone(),
             tool_name: item.tool_name,
-            expected_effect: item.expected_effect,
+            expected_effect: capability.wire.effect,
             resource_scope,
             operation_scope: compiled_scope.map_or_else(
                 || normalize_scope(item.operation_scope),
@@ -1191,6 +1206,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("require exact_input"));
+    }
+
+    #[test]
+    fn permission_request_derives_provider_and_effect_from_tool_name() {
+        let request = build_permission_request(
+            &call(r#"{"items":[{"item_id":"read","tool_name":"inspect_desktop_session","suggested_ttl_seconds":60,"suggested_max_uses":2,"reason":"Inspect windows"}]}"#),
+            &crate::device_assistant::device_assistant_provider_registry(), "permission-derived".into(),
+            1, "2026-09-08T00:00:00Z".into()).unwrap();
+        assert_eq!(request.items[0].provider_id, "desktop.session");
+        assert_eq!(
+            request.items[0].expected_effect,
+            CapabilityEffect::ReadDevice
+        );
     }
 
     #[test]
@@ -1960,6 +1988,12 @@ mod tests {
         );
         assert_eq!(prompt.approved_exact_input_expires_at_unix_ms, None);
 
+        let mut expired = grant.clone();
+        expired.expires_at_unix_ms = 200;
+        let compact = capability_authorization_prompt(&[expired.clone(), expired], &[], 500, 1, 1);
+        assert!(compact.text.contains("\"grant_count\":2"));
+        assert!(!compact.text.contains("target:current_device"));
+        assert!(!compact.text.contains("expires_at_unix_ms"));
         let stale_focus = capability_authorization_prompt(&[grant], &[], 500, 2, 1);
         assert!(!stale_focus.text.contains("inspect_office_selection"));
         assert_eq!(stale_focus.approved_exact_input_expires_at_unix_ms, None);

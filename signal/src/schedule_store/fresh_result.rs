@@ -5,7 +5,7 @@ use desk_diagnose_core::{
     chat::ChatRole,
     session::{ExecutionState, PersistedAgentSession, TriggerOrigin, TurnState},
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
 
 #[derive(Clone, Copy)]
 enum FreshResult<'a> {
@@ -58,7 +58,7 @@ impl ScheduleStore {
             FreshResult::Answer(_) | FreshResult::Permission(_) => (TurnState::Idle, None),
             FreshResult::Failure(error) => (TurnState::Failed, Some(error)),
         };
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let initial = agent_session::Entity::find()
             .filter(agent_session::Column::ConversationId.eq(lease.run_id))
             .one(&txn)

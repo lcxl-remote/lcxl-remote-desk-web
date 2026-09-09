@@ -780,6 +780,36 @@ pub enum ClaimError {
 /// in DB with optimistic-concurrency CAS and is the authority across instances.
 #[async_trait(?Send)]
 pub trait SessionSeam {
+    /// Store verified pixels before publishing screenshot success. None is an
+    /// explicitly transient runtime; durable runtimes must override this hook.
+    async fn store_image(
+        &self,
+        _session: &PersistedAgentSession,
+        _attachment: &crate::conversation_image::ImageAttachment,
+        _pixels: &[u8],
+    ) -> Result<bool, AgentError> {
+        Ok(false)
+    }
+
+    async fn list_images(
+        &self,
+        _session: &PersistedAgentSession,
+        _before: Option<&str>,
+    ) -> Result<Vec<crate::conversation_image::ImageAttachment>, AgentError> {
+        Ok(vec![])
+    }
+
+    async fn read_image(
+        &self,
+        _session: &PersistedAgentSession,
+        _tool_call_id: Option<&str>,
+        _attachment_id: Option<&str>,
+    ) -> Result<ChatMessage, AgentError> {
+        Err(crate::conversation_image::error(
+            "Stored screenshot is unavailable",
+        ))
+    }
+
     /// Commit an owner-review-only schedule draft and this call's result together.
     async fn propose_schedule(
         &self,

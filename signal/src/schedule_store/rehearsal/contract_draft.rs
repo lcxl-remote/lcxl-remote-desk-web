@@ -15,7 +15,7 @@ impl ScheduleStore {
         schedule_id: &str,
         expected_revision: i64,
     ) -> Result<TaskContract, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let task = entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
             .filter(entity::Column::ScheduleId.eq(schedule_id))

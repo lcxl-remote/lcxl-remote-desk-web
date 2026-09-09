@@ -763,7 +763,30 @@ enum ToolOutputSafetyFailure {
 /// Append one tool result only after its optional image has passed the shared
 /// image gate. Every tool effect uses this entry point so adding an image to a
 /// mutating or wait seam cannot silently bypass manager enforcement later.
-async fn append_reviewed_tool_result(
+// Keep image persistence/review state on the heap for every caller, including
+// non-image tools. Otherwise the image branch enlarges the entire loop future.
+#[inline(never)]
+fn append_reviewed_tool_result<'a, 'd: 'a>(
+    deps: &'a LoopDeps<'d>,
+    session: &'a mut crate::session::PersistedAgentSession,
+    message_id: String,
+    call_id: &'a str,
+    output: crate::seam::ToolRunOutput,
+    data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<ToolOutputSafetyFailure>, AgentError>> + 'a>,
+> {
+    Box::pin(append_reviewed_tool_result_inner(
+        deps,
+        session,
+        message_id,
+        call_id,
+        output,
+        data_envelope,
+    ))
+}
+
+async fn append_reviewed_tool_result_inner(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
     message_id: String,
@@ -806,7 +829,7 @@ async fn append_reviewed_tool_result(
                         safe_for_model: false,
                         error_code: None,
                     })?;
-                crate::visual_evidence::record_live_observation(
+                let frame = crate::visual_evidence::record_live_observation(
                     session,
                     call_id,
                     &image_data_url,
@@ -819,6 +842,24 @@ async fn append_reviewed_tool_result(
                     safe_for_model: false,
                     error_code: None,
                 })?;
+                let (attachment, pixels) = crate::conversation_image::ImageAttachment::prepare(
+                    session,
+                    &frame,
+                    deps.model.model_egress_policy()?.as_ref(),
+                )?;
+                if deps
+                    .session_seam
+                    .store_image(session, &attachment, &pixels)
+                    .await?
+                {
+                    if let Some(stored) = session
+                        .visual_evidence
+                        .iter_mut()
+                        .find(|item| item.evidence_id == frame.evidence_id)
+                    {
+                        *stored = attachment.frame;
+                    }
+                }
             }
             Ok(None)
         }
@@ -2369,7 +2410,10 @@ async fn run_inner(
                             turn.provider_meta.data_envelope.as_ref(),
                             mint(),
                             &call.id,
-                            format!("tool `{}` is not available in the current scope", call.name),
+                            format!(
+                                "tool `{}` is not available in the current scope. Discover its capability, load its details, and request permission by tool_name if available. Do not infer that the device lacks this capability.",
+                                call.name
+                            ),
                             "unavailable_tool_call",
                         )?;
                         continue;
@@ -2383,7 +2427,15 @@ async fn run_inner(
                             turn.provider_meta.data_envelope.as_ref(),
                             mint(),
                             &call.id,
-                            format!("tool `{}` is not loaded in the current focus", call.name),
+                            format!(
+                                "tool `{}` is not loaded in the current focus. Call load_capability_details to load it; this does not itself grant permission. Currently advertised tools: {}",
+                                call.name,
+                                exposed
+                                    .iter()
+                                    .map(|tool| tool.name())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
                             "unloaded_tool_call",
                         )?;
                         continue;
@@ -3176,6 +3228,37 @@ async fn run_inner(
                         }
                         ToolEffect::ConversationHistory => {
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            if call.name == crate::conversation_image::READ_IMAGE_TOOL {
+                                let result = Box::pin(read_conversation_image(
+                                    deps,
+                                    session,
+                                    call,
+                                    turn.provider_meta.data_envelope.as_ref(),
+                                ))
+                                .await;
+                                let (message, ok) = match result {
+                                    Ok(mut message) => {
+                                        message.message_id = mint();
+                                        message.tool_call_id = Some(call.id.clone());
+                                        message.turn_id = session.current_turn_id.clone();
+                                        (message, true)
+                                    }
+                                    Err(error) => {
+                                        let content = format!("tool error: {}", error.message);
+                                        let envelope = crate::model_message_labels::conversation_history_result_envelope(
+                                            turn.provider_meta.data_envelope.as_ref(), &[], &call.id, &content)?;
+                                        let mut message =
+                                            ChatMessage::tool_result(mint(), &call.id, content);
+                                        message.data_envelope = envelope;
+                                        (message, false)
+                                    }
+                                };
+                                session.conversation.push(message);
+                                retain_latest_session_image(session)?;
+                                deps.session_seam.save(session).await?;
+                                finish_tool(session, &call.id, ok, sink);
+                                continue;
+                            }
                             let result = crate::conversation_history::load_history_page(
                                 call,
                                 &session.conversation,
@@ -4933,3 +5016,108 @@ async fn run_wait<F: FnMut() -> String>(
 mod tests;
 
 mod task_permission;
+
+async fn read_conversation_image(
+    deps: &LoopDeps<'_>,
+    session: &mut crate::session::PersistedAgentSession,
+    call: &crate::chat::ToolCall,
+    parent: Option<&desk_agent_protocol::data_lineage::DataEnvelope>,
+) -> Result<ChatMessage, AgentError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input {
+        tool_call_id: Option<String>,
+        attachment_id: Option<String>,
+        before_attachment_id: Option<String>,
+    }
+    let input: Input = serde_json::from_str(&call.arguments_json)
+        .map_err(|_| crate::conversation_image::error("Invalid screenshot lookup input"))?;
+    if input.tool_call_id.is_none() && input.attachment_id.is_none() {
+        if input
+            .before_attachment_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 256)
+        {
+            return Err(crate::conversation_image::error(
+                "Invalid screenshot cursor",
+            ));
+        }
+        let records = deps
+            .session_seam
+            .list_images(session, input.before_attachment_id.as_deref())
+            .await?;
+        let next = if records.len() == 32 {
+            records.last().map(|r| r.frame.evidence_id.clone())
+        } else {
+            None
+        };
+        let policy = deps.model.model_egress_policy()?;
+        let records = records
+            .into_iter()
+            .filter(|r| {
+                crate::conversation_image::authorize_read(&r.message, policy.as_ref()).is_ok()
+            })
+            .collect::<Vec<_>>();
+        let content = serde_json::json!({"images": records.iter().map(|r| serde_json::json!({
+            "attachment_id":r.frame.evidence_id, "tool_call_id":r.frame.tool_call_id,
+            "captured_at_unix_ms":r.frame.captured_at_unix_ms})).collect::<Vec<_>>(),
+            "next_before_attachment_id":next, "notice":"Historical images only; unavailable model destinations are omitted."}).to_string();
+        session
+            .focus_epoch
+            .record_history_result(content.len())
+            .map_err(crate::conversation_image::error)?;
+        let sources = records.into_iter().map(|r| r.message).collect::<Vec<_>>();
+        let envelope = crate::model_message_labels::conversation_history_result_envelope(
+            parent, &sources, &call.id, &content,
+        )?;
+        let mut message = ChatMessage::tool_result("image-index", &call.id, content);
+        message.data_envelope = envelope;
+        return Ok(message);
+    }
+    if input.before_attachment_id.is_some()
+        || (input.tool_call_id.is_some() && input.attachment_id.is_some())
+        || input
+            .tool_call_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 512)
+        || input
+            .attachment_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 256)
+    {
+        return Err(crate::conversation_image::error(
+            "Invalid screenshot tool_call_id",
+        ));
+    }
+    let message = deps
+        .session_seam
+        .read_image(
+            session,
+            input.tool_call_id.as_deref(),
+            input.attachment_id.as_deref(),
+        )
+        .await?;
+    crate::conversation_image::authorize_read(
+        &message,
+        deps.model.model_egress_policy()?.as_ref(),
+    )?;
+    let url = message
+        .image_data_url
+        .as_deref()
+        .ok_or_else(|| crate::conversation_image::error("Screenshot pixels are unavailable"))?;
+    let info = crate::image_input::validate_image_data_url(url).map_err(image_input_error)?;
+    if !matches!(
+        review_image(deps, url, &info.media_type).await,
+        Ok(ContentSafetyDecision::Allow)
+    ) {
+        return Err(crate::conversation_image::error(
+            "Stored screenshot was blocked by content safety policy",
+        ));
+    }
+    session
+        .focus_epoch
+        .record_history_result(message.text.len())
+        .map_err(crate::conversation_image::error)?;
+    // Historical pixels never advance the fresh-observation fence.
+    Ok(message)
+}

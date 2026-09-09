@@ -27,3 +27,5 @@ pub mod agent_task_authorization;
 pub mod agent_task_budget_reservation;
 
 pub mod agent_task_rehearsal;
+
+pub mod agent_image_attachment;

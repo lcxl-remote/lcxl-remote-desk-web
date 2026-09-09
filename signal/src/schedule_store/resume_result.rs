@@ -10,7 +10,7 @@ use desk_diagnose_core::{
         AgentSessionSurface, ExecutionState, PersistedAgentSession, TriggerOrigin, TurnState,
     },
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait, sea_query::Expr};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
 enum CommittedResult<'a> {
     Answer(&'a str),
@@ -230,7 +230,7 @@ impl ScheduleStore {
         if lease.owner <= 0 || lease.run_epoch <= 0 || lease.session_token == 0 {
             return Err(ScheduleStoreError::Invalid);
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let work = run::Entity::find()
             .filter(run::Column::RunId.eq(lease.run_id))
             .filter(run::Column::OwnerUserId.eq(lease.owner))

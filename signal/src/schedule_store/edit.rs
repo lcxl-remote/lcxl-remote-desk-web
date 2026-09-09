@@ -4,7 +4,7 @@ use super::{ScheduleStore, ScheduleStoreError, entity, json};
 use crate::entity::agent_schedule_run as run;
 use desk_agent_protocol::schedule::ScheduleSpec;
 use desk_diagnose_core::schedule::{normalize, validate_publication};
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set};
 
 /// Called only while the task's version CAS owns the transaction.
 pub(super) async fn stop_pending(
@@ -58,7 +58,7 @@ impl ScheduleStore {
         expected: i64,
         threshold: u32,
     ) -> Result<entity::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let task = entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
             .filter(entity::Column::ScheduleId.eq(id))
@@ -187,7 +187,7 @@ impl ScheduleStore {
         prompt: Option<&str>,
         delete: bool,
     ) -> Result<entity::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let row = entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))

@@ -146,7 +146,7 @@ impl SignalCapabilityGrantStore {
         &self,
         generation: &str,
     ) -> Result<EventAppend, DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, generation).await?;
             let binding = bound(&outbox, &work, &payload)?;
@@ -265,7 +265,7 @@ impl SignalCapabilityGrantStore {
         if session.surface != AgentSessionSurface::DeviceAssistant {
             return Ok(false);
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
             let rows = agent_action_item::Entity::find()
                 .filter(agent_action_item::Column::ConversationId.eq(&session.conversation_id))
@@ -484,7 +484,7 @@ impl SignalCapabilityGrantStore {
     }
 
     async fn project_computer_unknown(&self, generation: &str) -> Result<(), DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, generation).await?;
             if work.status != CAPABILITY_WORK_OUTCOME_UNKNOWN {

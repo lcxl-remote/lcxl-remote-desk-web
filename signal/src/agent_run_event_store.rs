@@ -64,10 +64,9 @@ impl SignalAgentRunEventStore {
     ) -> Result<UserFollowupAck, AgentError> {
         validate_append_params(&params)?;
         for _ in 0..APPEND_ATTEMPTS {
-            let txn =
-                self.db.begin().await.map_err(|error| {
-                    internal(format!("begin user follow-up transaction: {error}"))
-                })?;
+            let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
+                .await
+                .map_err(|error| internal(format!("begin user follow-up transaction: {error}")))?;
 
             crate::schedule_store::validate_rehearsal_input_on(
                 &txn,

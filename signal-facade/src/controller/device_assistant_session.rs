@@ -1648,3 +1648,16 @@ mod reasoning_display_tests {
         assert!(SnapshotMessageDto::from(user).reasoning.is_none());
     }
 }
+
+/// Opaque conversation id is a selector, never access authority.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct AssistantImageQuery {
+    pub session: String,
+    pub attachment: Option<String>,
+    pub before: Option<String>,
+}
+
+/// Raw image response; the HTTP body contains bytes rather than a JSON array.
+#[derive(utoipa::ToSchema)]
+#[schema(value_type = String, format = Binary)]
+pub struct AssistantImageBytes(pub Vec<u8>);

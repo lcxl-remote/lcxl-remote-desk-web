@@ -1005,3 +1005,6 @@ mod tests {
         }
     }
 }
+
+mod images;
+pub use images::{delete_assistant_image, get_assistant_image, list_assistant_images};

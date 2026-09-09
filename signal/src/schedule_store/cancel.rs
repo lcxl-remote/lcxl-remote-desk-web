@@ -2,7 +2,7 @@
 use super::queue::database_now;
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::entity::agent_schedule_run as run;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     /// The executor observes cancel_requested_at and cancels the matching run lease.
@@ -11,7 +11,7 @@ impl ScheduleStore {
         owner: i32,
         run_id: &str,
     ) -> Result<run::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let work = run::Entity::find()
             .filter(run::Column::OwnerUserId.eq(owner))

@@ -235,7 +235,7 @@ impl SignalCapabilityGrantStore {
         actor: &str,
         device: &str,
     ) -> Result<bool, DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, generation).await?;
             if work.conversation_id != run

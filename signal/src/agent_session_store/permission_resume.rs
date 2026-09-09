@@ -254,7 +254,9 @@ impl SignalAgentSessionStore {
         {
             self.settle_lapsed_session(&row, now).await?;
         }
-        let txn = self.db.begin().await.map_err(storage)?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
+            .await
+            .map_err(storage)?;
         let row = find(&txn, &candidate.run_id)
             .await
             .map_err(storage)?
@@ -320,9 +322,7 @@ impl SignalAgentSessionStore {
         let now = DateTime::parse_from_rfc3339(&params.now)
             .map_err(|_| ClaimError::Backend(invalid()))?
             .with_timezone(&Utc);
-        let txn = self
-            .db
-            .begin()
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
             .await
             .map_err(|e| ClaimError::Backend(storage(e)))?;
         let row = find(&txn, &params.conversation_id)

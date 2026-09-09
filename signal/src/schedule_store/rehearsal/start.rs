@@ -10,7 +10,7 @@ impl ScheduleStore {
         owner: i32,
         rehearsal_id: &str,
     ) -> Result<rehearsal::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let row = rehearsal::Entity::find()
             .filter(rehearsal::Column::OwnerUserId.eq(owner))
             .filter(rehearsal::Column::RehearsalId.eq(rehearsal_id))

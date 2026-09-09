@@ -3,7 +3,6 @@ use super::*;
 use desk_diagnose_core::{
     schedule::contract::ValidatedTaskContract, session::PersistedAgentSession,
 };
-use sea_orm::TransactionTrait;
 
 pub(super) struct FreshContext {
     pub contract: ValidatedTaskContract,
@@ -51,8 +50,7 @@ pub async fn resume_fresh_task(
     {
         return Err(transport_error("invalid fresh task claim"));
     }
-    let txn = db
-        .begin()
+    let txn = crate::db::begin_write(&db, crate::entity::agent_session::Entity)
         .await
         .map_err(|_| transport_error("task storage unavailable"))?;
     let row = crate::schedule_store::lock_action_session(&txn, &claimed.conversation_id)

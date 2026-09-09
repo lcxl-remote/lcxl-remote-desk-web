@@ -3,7 +3,6 @@ use super::*;
 use crate::{agent_run_event_store::ReadContextSelection, schedule_store::ClaimedContinuation};
 use desk_diagnose_core::session::PersistedAgentSession;
 use desk_signal_facade::model::{auth_context::AuthKind, signal::RemoteDeskTypeEnum};
-use sea_orm::TransactionTrait;
 
 pub(super) struct PreparedResume {
     pub claimed: ClaimedContinuation,
@@ -85,8 +84,7 @@ pub(super) async fn prepare(
             "invalid scheduled continuation owner or lease",
         ));
     }
-    let txn = db
-        .begin()
+    let txn = crate::db::begin_write(&db, crate::entity::agent_session::Entity)
         .await
         .map_err(|_| transport_error("scheduled input storage unavailable"))?;
     let row = crate::schedule_store::lock_action_session(&txn, &claimed.run.conversation_id)

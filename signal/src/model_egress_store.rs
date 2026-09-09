@@ -1,10 +1,11 @@
 //! Durable, metadata-only model-egress receipts for the OSS runtime.
 
 use desk_diagnose_core::sink_authorizer::SinkProjectionAudit;
+#[cfg(test)]
+use sea_orm::TransactionTrait;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
-    TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 
@@ -34,7 +35,8 @@ impl SignalModelEgressStore {
         audit: &SinkProjectionAudit,
         inputs: &[desk_agent_protocol::data_lineage::DataEnvelope],
     ) -> Result<model_egress_receipt::Model, DbErr> {
-        let txn = self.db.begin().await?;
+        let txn =
+            crate::db::begin_write(&self.db, crate::entity::model_egress_receipt::Entity).await?;
         let row = Self::record_dispatch_intent_on(
             &txn,
             receipt_id,
@@ -141,7 +143,8 @@ impl SignalModelEgressStore {
         receipt_id: &str,
         output: &desk_agent_protocol::data_lineage::DataEnvelope,
     ) -> Result<(), DbErr> {
-        let txn = self.db.begin().await?;
+        let txn =
+            crate::db::begin_write(&self.db, crate::entity::model_egress_receipt::Entity).await?;
         // Acquire SQLite's writer slot before reading the validation snapshot.
         // A deferred read followed by UPDATE can fail immediately with BUSY_SNAPSHOT
         // despite busy_timeout when another connection commits in between.

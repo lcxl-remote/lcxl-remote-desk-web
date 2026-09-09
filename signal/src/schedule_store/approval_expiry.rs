@@ -1,9 +1,7 @@
 //! Expire quiescent approval waits without reclaiming or dispatching work.
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::entity::{agent_action_item as work_item, agent_schedule_run as run, agent_session};
-use sea_orm::{
-    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 impl ScheduleStore {
     pub(super) async fn approval_wait_candidates(
@@ -26,7 +24,7 @@ impl ScheduleStore {
         &self,
         run_id: &str,
     ) -> Result<bool, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
 
         let initial = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))

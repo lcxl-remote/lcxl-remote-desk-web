@@ -129,3 +129,5 @@ pub const MIN_SAME_TOOL_PER_TURN: u32 = 1;
 pub const MAX_SAME_TOOL_PER_TURN_LIMIT: u32 = 50;
 
 pub mod ui_model_output;
+
+pub mod conversation_image;

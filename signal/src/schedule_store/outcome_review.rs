@@ -1,7 +1,7 @@
 //! Owner acknowledgement of reconciled history, without resuming or dispatching work.
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::entity::agent_schedule_run as run;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 mod manual;
 
@@ -89,7 +89,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Invalid);
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let task = entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
             .filter(entity::Column::ScheduleId.eq(schedule_id))

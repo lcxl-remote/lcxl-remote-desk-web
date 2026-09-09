@@ -158,7 +158,9 @@ impl SignalAgentSessionStore {
         let now_ms = u64::try_from(time.timestamp_millis()).map_err(|_| error())?;
         let id = event_id(params);
         for _ in 0..CLAIM_ATTEMPTS {
-            let txn = self.db.begin().await.map_err(storage_error)?;
+            let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
+                .await
+                .map_err(storage_error)?;
             let row = agent_session::Entity::find()
                 .filter(agent_session::Column::ConversationId.eq(&params.run_id))
                 .one(&txn)

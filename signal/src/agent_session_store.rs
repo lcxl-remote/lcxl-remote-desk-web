@@ -230,9 +230,7 @@ impl SignalAgentSessionStore {
             device_id,
         } = subject;
         for _ in 0..CLAIM_ATTEMPTS {
-            let txn = self
-                .db
-                .begin()
+            let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
                 .await
                 .map_err(|error| internal(format!("begin permission decision: {error}")))?;
             let task_expiry =
@@ -1090,6 +1088,53 @@ async fn find_recovery_task(
 
 #[async_trait(?Send)]
 impl SessionSeam for SignalAgentSessionStore {
+    async fn store_image(
+        &self,
+        session: &PersistedAgentSession,
+        attachment: &desk_diagnose_core::conversation_image::ImageAttachment,
+        pixels: &[u8],
+    ) -> Result<bool, AgentError> {
+        crate::agent_image_store::store(&self.db, session, attachment, pixels)
+            .await
+            .map_err(|e| internal(format!("Screenshot storage failed: {e}")))?;
+        Ok(true)
+    }
+    async fn list_images(
+        &self,
+        session: &PersistedAgentSession,
+        before: Option<&str>,
+    ) -> Result<Vec<desk_diagnose_core::conversation_image::ImageAttachment>, AgentError> {
+        crate::agent_image_store::list_records(
+            &self.db,
+            &session.conversation_id,
+            &session.actor_id,
+            before,
+        )
+        .await
+        .map_err(|_| {
+            desk_diagnose_core::conversation_image::error("Stored screenshot index is unavailable")
+        })
+    }
+    async fn read_image(
+        &self,
+        session: &PersistedAgentSession,
+        tool_call_id: Option<&str>,
+        attachment_id: Option<&str>,
+    ) -> Result<desk_diagnose_core::chat::ChatMessage, AgentError> {
+        let (attachment, pixels) = crate::agent_image_store::read(
+            &self.db,
+            &session.conversation_id,
+            &session.actor_id,
+            attachment_id,
+            tool_call_id,
+        )
+        .await
+        .map_err(|_| {
+            desk_diagnose_core::conversation_image::error("Stored screenshot is unavailable")
+        })?;
+        attachment.restore(&pixels)
+    }
+
     async fn permission_request_can_renew(
         &self,
         session: &PersistedAgentSession,
@@ -1375,9 +1420,9 @@ impl SessionSeam for SignalAgentSessionStore {
         desk_diagnose_core::image_input::retain_latest_session_image(&mut session.conversation)
             .map_err(|error| internal(format!("invalid session image: {error}")))?;
         let mut stored = session.clone();
-        // Images are a one-turn model-egress projection, never durable session
-        // state. Keep the validated image in the live in-memory session so the
-        // next model step can consume it, but persist only the image-free view.
+        // Pixels persist separately as attachments. Keep the latest validated
+        // image in the live turn for the next model step, but save only the
+        // text projection and attachment references in session JSON.
         desk_diagnose_core::image_input::strip_session_images(&mut stored.conversation);
         stored.version = new_version;
         let state_json = stored
@@ -1438,9 +1483,7 @@ impl SessionSeam for SignalAgentSessionStore {
             return Err(internal("task-status event does not match session state"));
         }
 
-        let txn = self
-            .db
-            .begin()
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
             .await
             .map_err(|error| internal(format!("begin task-status transaction: {error}")))?;
         let now = Utc::now();
@@ -1547,9 +1590,7 @@ impl SessionSeam for SignalAgentSessionStore {
             return Err(internal("permission event does not match session state"));
         }
 
-        let txn = self
-            .db
-            .begin()
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
             .await
             .map_err(|error| internal(format!("begin permission transaction: {error}")))?;
         crate::schedule_store::validate_task_permission_on(&txn, session, &update.request)
@@ -1645,9 +1686,7 @@ impl SessionSeam for SignalAgentSessionStore {
         now: &str,
     ) -> Result<bool, AgentError> {
         for _ in 0..CLAIM_ATTEMPTS {
-            let txn = self
-                .db
-                .begin()
+            let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
                 .await
                 .map_err(|error| internal(format!("begin superseded transaction: {error}")))?;
             let Some(row) = agent_session::Entity::find()
@@ -2626,7 +2665,7 @@ mod tests {
         assert_eq!(grant.expires_at_unix_ms, 121_000);
         assert_eq!(
             grant.risk_tier,
-            desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
+            desk_agent_protocol::capability_grant::CapabilityRiskTier::R1
         );
     }
 

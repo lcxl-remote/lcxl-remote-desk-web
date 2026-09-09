@@ -253,7 +253,7 @@ async fn outlook_projection_preserves_assistive_manual_only_handoff_and_original
 }
 
 #[tokio::test]
-async fn gmail_and_slack_projection_require_exact_readback_and_never_enable_send() {
+async fn gmail_and_slack_projection_bind_account_and_exact_send_eligibility() {
     use desk_agent_protocol::browser_control::*;
     let dir = tempfile::tempdir().unwrap();
     let f = Fixture::new(file_db(&dir.path().join("web-drafts.db")).await).await;
@@ -269,6 +269,14 @@ async fn gmail_and_slack_projection_require_exact_readback_and_never_enable_send
             "app.slack.com"
         }
         .into();
+        page.account_id = Some(
+            if gmail {
+                "gmail-web:owner@example.test"
+            } else {
+                "slack-web:T123:U456"
+            }
+            .into(),
+        );
         let field = |id: &str| BrowserElementRef {
             page_id: page.page_id.clone(),
             page_incarnation: page.page_incarnation.clone(),
@@ -362,20 +370,23 @@ async fn gmail_and_slack_projection_require_exact_readback_and_never_enable_send
         );
         assert_eq!(
             handoff.send_authority,
-            CommunicationSendAuthority::ManualOnly
+            CommunicationSendAuthority::ExactGrantEligible
         );
         assert_eq!(handoff.prepared_payload_sha256, plan.draft_hash);
-        for fault in ["value", "page", "revision"] {
+        for fault in ["value", "page", "revision", "account", "missing-account"] {
             let mut bad = native.clone();
             let Some(ComputerActionOutput::Browser(b)) = &mut bad.output else {
                 unreachable!()
             };
             match fault {
                 "value" => b.form_readback[0].value = "wrong".into(),
+                "account" => b.page.account_id = Some("slack-web:T999:U999".into()),
+                "missing-account" => b.page.account_id = None,
                 "page" => b.page.page_incarnation = "wrong".into(),
                 "revision" => b.page.document_revision -= 1,
                 _ => unreachable!(),
             };
+            b.snapshot.as_mut().unwrap().page = b.page.clone();
             assert!(
                 project(&plan, name, "run-1", &call.arguments_json, &bad).is_err(),
                 "{gmail}/{fault}"

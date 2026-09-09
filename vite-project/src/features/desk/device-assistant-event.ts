@@ -1,3 +1,4 @@
+import type { ContentRef } from '@/services/types';
 import type { AiProvenance } from '@/components/ai-generated-mark';
 
 export type DeviceAssistantEventKind =
@@ -31,6 +32,7 @@ export type DeviceAssistantEvent = {
 };
 
 export type DeviceAssistantVisualEvidence = {
+    content?: ContentRef | null;
     schema_version: number;
     evidence_id: string;
     conversation_id: string;

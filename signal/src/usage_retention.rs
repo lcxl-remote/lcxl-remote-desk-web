@@ -18,7 +18,7 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, QueryTrait, Statement, TransactionTrait, Value,
+    QuerySelect, QueryTrait, Statement, Value,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -247,7 +247,7 @@ async fn delete_expired_session_candidates(
     ids: &[i64],
     cutoff: DateTimeUtc,
 ) -> Result<u64, DbErr> {
-    let txn = db.begin().await?;
+    let txn = crate::db::begin_write(&db, crate::entity::agent_session::Entity).await?;
     let result = async {
         let rows = agent_session::Entity::find()
             .filter(agent_session::Column::Id.is_in(ids.iter().copied()))
@@ -323,6 +323,9 @@ pub async fn cleanup_once(
     db: &DatabaseConnection,
     now: DateTimeUtc,
 ) -> Result<(u64, u64, u64, u64), DbErr> {
+    if let Err(error) = crate::agent_image_store::cleanup(db).await {
+        log::warn!("Screenshot attachment cleanup failed: {error}");
+    }
     let cfg = load(db).await?;
     let turn = cleanup_table(
         db,

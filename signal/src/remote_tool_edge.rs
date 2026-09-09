@@ -5958,7 +5958,7 @@ mod tests {
                 &call("inspect_desktop_session", "{}")
             )
             .unwrap(),
-            CapabilityRiskTier::R0
+            CapabilityRiskTier::R1
         );
         assert_eq!(
             SignalDeviceAssistantTools::capability_risk(

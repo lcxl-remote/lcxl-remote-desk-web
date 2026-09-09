@@ -187,7 +187,9 @@ pub fn durable_projection(
         .cloned()
         .map(|mut frame| {
             frame.preview_data_url = None;
-            frame.status = if frame
+            frame.status = if matches!(frame.content, Some(ContentRef::Artifact { .. })) {
+                frame.status
+            } else if frame
                 .expires_at_unix_ms
                 .is_some_and(|expires| expires <= now_unix_ms)
             {
@@ -203,7 +205,9 @@ pub fn durable_projection(
 pub fn strip_previews(frames: &mut [VisualEvidenceFrame]) {
     for frame in frames {
         frame.preview_data_url = None;
-        if frame.status == VisualEvidenceStatus::Available {
+        if frame.status == VisualEvidenceStatus::Available
+            && !matches!(frame.content, Some(ContentRef::Artifact { .. }))
+        {
             frame.status = VisualEvidenceStatus::NotRetained;
         }
     }

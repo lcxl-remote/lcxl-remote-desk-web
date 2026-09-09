@@ -11,10 +11,7 @@ use desk_signal_facade::service::{
     HostRemoteAccessController, RemoteAccessAdmissionAuthorizer, RemoteAccessAdmissionOutcome,
 };
 use desk_utils::error::DeskErrorCode;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
-    TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use tokio::sync::RwLock;
 
 use crate::entity::{device_code, host_remote_access_state};
@@ -47,7 +44,7 @@ impl SignalRemoteAccessControl {
         client_id: &str,
         request: &UpdateRemoteAccessLockData,
     ) -> Result<RemoteAccessLockUpdatedData, sea_orm::DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::device_code::Entity).await?;
         let code = device_code::Entity::find()
             .filter(device_code::Column::ClientId.eq(client_id))
             .one(&txn)

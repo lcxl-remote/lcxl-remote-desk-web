@@ -1,0 +1,1 @@
+{"type":"string","format":"binary","description":"Raw image response; the HTTP body contains bytes rather than a JSON array.","x-readme-ref-name":"AssistantImageBytes"}

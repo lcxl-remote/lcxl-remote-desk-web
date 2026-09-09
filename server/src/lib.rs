@@ -91,8 +91,9 @@ use desk_signal::{
         connection::list_connections,
         device_assistant_session::{
             cancel_device_assistant_background_task, decide_device_assistant_permission,
-            dispose_device_assistant_unknown_outcome, get_device_assistant_session,
-            list_device_assistant_sessions, revoke_device_assistant_capability_grant,
+            delete_assistant_image, dispose_device_assistant_unknown_outcome, get_assistant_image,
+            get_device_assistant_session, list_assistant_images, list_device_assistant_sessions,
+            revoke_device_assistant_capability_grant,
         },
         device_code::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
@@ -255,6 +256,9 @@ pub fn configure_api_surface(
                 if opts.include_signaling {
                     cfg.service(create_token)
                         .service(get_device_assistant_session)
+                        .service(list_assistant_images)
+                        .service(get_assistant_image)
+                        .service(delete_assistant_image)
                         .service(dispose_device_assistant_unknown_outcome)
                         .service(decide_device_assistant_permission)
                         .service(revoke_device_assistant_capability_grant)

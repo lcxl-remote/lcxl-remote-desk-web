@@ -21,7 +21,7 @@ use desk_diagnose_core::session::{PersistedAgentSession, WorkKind};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    Set, TransactionTrait,
+    Set,
 };
 use sha2::{Digest, Sha256};
 
@@ -218,7 +218,8 @@ impl SignalBackgroundTaskStore {
             .validate()
             .map_err(|error| DbErr::Custom(format!("invalid background progress: {error}")))?;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let txn = self.db.begin().await?;
+            let txn =
+                crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
             let row = load_task_row(&txn, &progress.task.task_id).await?;
             let Some(row) = row else {
                 txn.rollback().await.ok();
@@ -305,7 +306,8 @@ impl SignalBackgroundTaskStore {
             .validate()
             .map_err(|error| DbErr::Custom(format!("invalid background completion: {error}")))?;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let txn = self.db.begin().await?;
+            let txn =
+                crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
             let row = load_task_row(&txn, &completion.task.task_id).await?;
             let Some(row) = row else {
                 txn.rollback().await.ok();
@@ -451,7 +453,8 @@ impl SignalBackgroundTaskStore {
             .validate()
             .map_err(|error| DbErr::Custom(format!("invalid background cancel: {error}")))?;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let txn = self.db.begin().await?;
+            let txn =
+                crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
             let row = load_task_row(&txn, &request.task.task_id).await?;
             let Some(row) = row else {
                 txn.rollback().await.ok();
@@ -601,7 +604,8 @@ impl SignalBackgroundTaskStore {
             .map_err(|error| DbErr::Custom(format!("invalid delivered cancel: {error}")))?;
         let event_id = cancel_delivered_event_id(request);
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let txn = self.db.begin().await?;
+            let txn =
+                crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
             if agent_run_event::Entity::find()
                 .filter(agent_run_event::Column::EventId.eq(&event_id))
                 .one(&txn)

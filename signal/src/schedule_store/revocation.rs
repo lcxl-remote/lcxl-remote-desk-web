@@ -4,7 +4,7 @@ use super::{ScheduleStore, ScheduleStoreError, entity, json};
 use crate::entity::{agent_schedule_run as run, agent_task_authorization as authorization};
 use desk_agent_protocol::schedule::SchedulePauseReason;
 use desk_diagnose_core::schedule::lifecycle::FailureState;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     pub async fn read_authorization(
@@ -75,7 +75,7 @@ impl ScheduleStore {
         if reason.trim().is_empty() || reason.len() > 512 {
             return Err(ScheduleStoreError::Invalid);
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let row = authorization::Entity::find()
             .filter(authorization::Column::OwnerUserId.eq(owner))

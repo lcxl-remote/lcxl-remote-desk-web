@@ -37,8 +37,8 @@ use std::time::Duration;
 use desk_agent_protocol::exec_lifecycle::{ExecState, ExecStateReplyPayload};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
-    DbErr, EntityTrait, QueryFilter, Schema, Set, TransactionTrait,
+    ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr, EntityTrait,
+    QueryFilter, Schema, Set,
 };
 
 pub mod entity;
@@ -216,9 +216,8 @@ impl ExecLedger {
         .await
     }
 
-    /// Apply a state change under a transaction, refusing it unless the row is in
-    /// one of `allowed_from`. The read and the write share the transaction so two
-    /// concurrent reports cannot both see a non-terminal row and both apply.
+    /// Atomically change state only while the row is in `allowed_from`.
+    /// Concurrent terminal reports cannot overwrite the first committed result.
     async fn advance(
         &self,
         generation: &str,
@@ -227,42 +226,28 @@ impl ExecLedger {
         result_json: Option<String>,
         allowed_from: &[State],
     ) -> Result<bool, DbErr> {
-        let generation = generation.to_string();
-        let containment_identity = containment_identity.map(str::to_string);
-        let allowed: Vec<String> = allowed_from
-            .iter()
-            .map(|s| s.as_str().to_string())
-            .collect();
-        self.db
-            .transaction::<_, bool, DbErr>(|txn| {
-                Box::pin(async move {
-                    let Some(row) = exec_ledger_entry::Entity::find_by_id(&generation)
-                        .one(txn)
-                        .await?
-                    else {
-                        return Ok(false);
-                    };
-                    if !allowed.contains(&row.state) {
-                        return Ok(false);
-                    }
-                    let mut active: exec_ledger_entry::ActiveModel = row.into();
-                    active.state = Set(to.as_str().to_string());
-                    if let Some(id) = containment_identity {
-                        active.containment_identity = Set(Some(id));
-                    }
-                    if let Some(json) = result_json {
-                        active.result_json = Set(Some(json));
-                    }
-                    active.updated_at = Set(chrono::Utc::now().naive_utc());
-                    active.update(txn).await?;
-                    Ok(true)
-                })
-            })
-            .await
-            .map_err(|e| match e {
-                sea_orm::TransactionError::Connection(e) => e,
-                sea_orm::TransactionError::Transaction(e) => e,
-            })
+        use sea_orm::sea_query::Expr;
+        let allowed: Vec<&str> = allowed_from.iter().map(|state| state.as_str()).collect();
+        // One conditional UPDATE is both the state check and the transition.
+        // No deferred read snapshot can race another terminal report.
+        let mut update = exec_ledger_entry::Entity::update_many()
+            .filter(exec_ledger_entry::Column::ExecutionGeneration.eq(generation))
+            .filter(exec_ledger_entry::Column::State.is_in(allowed))
+            .col_expr(exec_ledger_entry::Column::State, Expr::value(to.as_str()))
+            .col_expr(
+                exec_ledger_entry::Column::UpdatedAt,
+                Expr::value(chrono::Utc::now().naive_utc()),
+            );
+        if let Some(id) = containment_identity {
+            update = update.col_expr(
+                exec_ledger_entry::Column::ContainmentIdentity,
+                Expr::value(id),
+            );
+        }
+        if let Some(json) = result_json {
+            update = update.col_expr(exec_ledger_entry::Column::ResultJson, Expr::value(json));
+        }
+        Ok(update.exec(&self.db).await?.rows_affected == 1)
     }
 
     /// Read one generation's record, whether live or a tombstone.
@@ -609,6 +594,33 @@ mod tests {
         let row = l.get("gen-1").await.unwrap().unwrap();
         assert_eq!(row.state, State::Terminal.as_str());
         assert!(row.result_json.unwrap().contains("exit_code"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_terminal_reports_keep_one_immutable_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = ExecLedger::open(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let right = ExecLedger::open(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        left.reserve("task-1", "gen-1", "fp-1", Some("pid:42"))
+            .await
+            .unwrap();
+        let (a, b) = tokio::join!(
+            left.mark_terminal("gen-1", Terminal::Completed("first".into())),
+            right.mark_terminal("gen-1", Terminal::Completed("second".into())),
+        );
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_ne!(a, b);
+        let row = left.get("gen-1").await.unwrap().unwrap();
+        assert_eq!(
+            row.result_json.as_deref(),
+            Some(if a { "first" } else { "second" })
+        );
+        assert_eq!(row.containment_identity.as_deref(), Some("pid:42"));
     }
 
     /// A crash between reserving and confirming the spawn leaves a record the host

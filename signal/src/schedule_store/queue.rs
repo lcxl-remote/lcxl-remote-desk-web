@@ -1,5 +1,7 @@
 //! Transactional calendar materialization and lease claims.
 use super::{ScheduleStore, ScheduleStoreError, digest, entity, json};
+#[cfg(test)]
+use sea_orm::TransactionTrait;
 
 #[cfg(test)]
 mod tests;
@@ -12,7 +14,6 @@ use desk_diagnose_core::schedule::{
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
-    TransactionTrait,
     sea_query::{Alias, Expr, Query},
 };
 
@@ -67,7 +68,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Invalid);
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let task = entity::Entity::find()
             .filter(entity::Column::ScheduleId.eq(schedule_id))
@@ -194,7 +195,7 @@ impl ScheduleStore {
         schedule_id: &str,
         expected_revision: i64,
     ) -> Result<Option<run::Model>, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let row = entity::Entity::find()
             .filter(entity::Column::ScheduleId.eq(schedule_id))
@@ -336,7 +337,7 @@ impl ScheduleStore {
         node_id: &str,
         lease_seconds: u32,
     ) -> Result<run::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let result = Self::claim_queued_on(&txn, run_id, node_id, lease_seconds).await?;
         txn.commit().await?;
         Ok(result)

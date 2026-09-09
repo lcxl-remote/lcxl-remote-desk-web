@@ -1214,6 +1214,7 @@ export function useDeviceAssistantChat({
 
     return {
         conversationId: conversationId.current,
+        sessionId: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.sessionId : undefined,
         inputRevision: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.inputRevision : undefined,
         selectConversation,
         contextUsage,

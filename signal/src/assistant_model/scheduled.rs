@@ -10,7 +10,7 @@ use desk_diagnose_core::{model_egress::AuthorizedModelRequest, session::Persiste
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
-use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, TransactionTrait};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter};
 use std::sync::Arc;
 
 pub(crate) struct FreshTaskModelContext {
@@ -75,7 +75,7 @@ impl MeteredModel {
             .inner
             .task_request_budget(&authorized.request)
             .map_err(|_| denied())?;
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         ScheduleStore::lock_run_authority(
             &txn,
             SINGLE_ACCOUNT_USER_ID,
@@ -153,9 +153,7 @@ impl MeteredModel {
         if desk_diagnose_core::schedule::model_usage::terminal_token_units(usage).is_none() {
             return Ok(());
         }
-        let txn = self
-            .db
-            .begin()
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
             .await
             .map_err(|_| transport_error("task accounting unavailable"))?;
         let reservation = ScheduleStore::settle_fresh_model_dispatch_on(

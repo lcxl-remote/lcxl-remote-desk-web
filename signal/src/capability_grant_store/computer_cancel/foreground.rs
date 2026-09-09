@@ -108,7 +108,7 @@ impl SignalCapabilityGrantStore {
         if !valid_request_id(request_id) || reason.len() > 4096 {
             return Err(invalid());
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         lock_task(&txn, task).await?;
         let Some(work) = agent_action_item::Entity::find()
             .filter(agent_action_item::Column::ActionRequestId.eq(task))

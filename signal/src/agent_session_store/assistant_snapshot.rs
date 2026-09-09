@@ -50,9 +50,7 @@ impl SignalAgentSessionStore {
         actor: &str,
         device: &str,
     ) -> Result<Option<AssistantSnapshot>, AgentError> {
-        let txn = self
-            .db
-            .begin()
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
             .await
             .map_err(|_| internal("begin Assistant snapshot failed"))?;
         let result = async {

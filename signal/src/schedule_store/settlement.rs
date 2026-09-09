@@ -4,9 +4,7 @@ use super::{ScheduleStore, ScheduleStoreError, entity, json};
 use crate::entity::agent_schedule_run as run;
 use desk_agent_protocol::schedule::ScheduledRunStatus;
 use desk_diagnose_core::schedule::lifecycle::FailureState;
-use sea_orm::{
-    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 impl ScheduleStore {
     /// Supersede only unstarted work, under the same task/session order as a claim.
@@ -17,7 +15,7 @@ impl ScheduleStore {
     ) -> Result<bool, ScheduleStoreError> {
         use crate::entity::agent_session;
         use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let work = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))
             .filter(run::Column::OwnerUserId.eq(owner))
@@ -119,7 +117,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Invalid);
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let work = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))
@@ -149,7 +147,7 @@ impl ScheduleStore {
 
     /// Unstarted work can expire safely; leased work must first be reconciled.
     pub async fn expire_pending(&self, run_id: &str) -> Result<run::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let work = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))

@@ -3,12 +3,12 @@ use super::queue::database_now;
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::entity::agent_schedule_run as run;
 use desk_diagnose_core::schedule::lifecycle::FailureState;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     /// Called by trusted device resolution before any model or action dispatch.
     pub async fn wait_for_device(&self, run_id: &str) -> Result<run::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let work = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))

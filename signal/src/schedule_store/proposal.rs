@@ -5,7 +5,7 @@ use desk_diagnose_core::{
     chat::{ChatMessage, ChatRole, ToolCall},
     session::PersistedAgentSession,
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 impl ScheduleStore {
     pub(crate) async fn propose_from_session(
         &self,
@@ -18,7 +18,7 @@ impl ScheduleStore {
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let draft = desk_diagnose_core::schedule::proposal::draft(session, call)
             .map_err(|_| ScheduleStoreError::Invalid)?;
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         if owner != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID {
             return Err(ScheduleStoreError::NotFound);
         }

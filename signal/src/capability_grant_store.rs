@@ -330,7 +330,7 @@ impl SignalCapabilityGrantStore {
                 "invalid capability grant revocation reason".into(),
             ));
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let row = agent_capability_grant::Entity::find()
             .filter(agent_capability_grant::Column::GrantId.eq(grant_id))
             .one(&txn)
@@ -417,7 +417,7 @@ impl SignalCapabilityGrantStore {
         registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
     ) -> Result<CapabilityPreparation, DbErr> {
         validate_prepare(&request)?;
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         if let Some(existing) = load_prepared(&txn, request.call_id).await? {
             let prepared = validate_replay(&existing, &request)?;
             txn.rollback().await.ok();
@@ -575,7 +575,7 @@ impl SignalCapabilityGrantStore {
         request: PrepareCapabilityCall<'_>,
     ) -> Result<DispatchIntentResult, DbErr> {
         validate_prepare(&request)?;
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let existing = load_prepared(&txn, request.call_id)
             .await?
             .ok_or_else(|| DbErr::Custom("capability call was not prepared".into()))?;
@@ -830,7 +830,7 @@ impl SignalCapabilityGrantStore {
             Option<&computer_export::ComputerExportContext>,
         )>,
     ) -> Result<DispatchClaimResult, DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let outbox = agent_capability_dispatch_outbox::Entity::find()
             .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
             .one(&txn)
@@ -1109,7 +1109,7 @@ impl SignalCapabilityGrantStore {
         generation: u64,
         now_unix_ms: u64,
     ) -> Result<DispatchUnknownResult, DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let outbox = agent_capability_dispatch_outbox::Entity::find()
             .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
             .one(&txn)
@@ -1211,7 +1211,7 @@ impl SignalCapabilityGrantStore {
         target_device_id: &str,
         now_unix_ms: u64,
     ) -> Result<CapabilityManualDispositionResult, DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let Some(outbox) = agent_capability_dispatch_outbox::Entity::find()
             .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
             .filter(agent_capability_dispatch_outbox::Column::WorkId.eq(work_id))
@@ -1320,7 +1320,7 @@ impl SignalCapabilityGrantStore {
         completion: &CapabilityDispatchCompletion,
         now_unix_ms: u64,
     ) -> Result<DispatchCompletionResult, DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = Self::record_dispatch_completion_on(&txn, completion, now_unix_ms).await;
         match result {
             Ok(result) => {
@@ -1460,7 +1460,7 @@ impl SignalCapabilityGrantStore {
         &self,
         now_unix_ms: u64,
     ) -> Result<u64, DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let rows = agent_capability_dispatch_outbox::Entity::find()
             .filter(
                 agent_capability_dispatch_outbox::Column::State
@@ -2569,6 +2569,110 @@ mod tests {
         assert_eq!(work.status, CAPABILITY_WORK_PREPARED);
         assert!(work.dispatch_intent_at.is_none());
         reopened.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_reusable_preparations_wait_for_writer_before_reading() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = file_db(&directory.path().join("reusable-writers.db")).await;
+        insert_session(&db, 1, 1).await;
+        let store = SignalCapabilityGrantStore::new(db.clone());
+        store.issue(&grant(2)).await.unwrap();
+        let resources = vec!["root:selected".into()];
+        let operations = vec!["create_new".into()];
+        let args = r#"{"path":"parallel.txt"}"#;
+        let digest = format!("{:x}", Sha256::digest(args.as_bytes()));
+        let (left, right) = tokio::join!(
+            store.prepare(request(
+                "parallel-a",
+                args,
+                &digest,
+                &resources,
+                &operations,
+                1
+            )),
+            store.prepare(request(
+                "parallel-b",
+                args,
+                &digest,
+                &resources,
+                &operations,
+                1
+            )),
+        );
+        left.unwrap();
+        right.unwrap();
+        assert_eq!(
+            agent_grant_reservation::Entity::find()
+                .count(&db)
+                .await
+                .unwrap(),
+            2
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_dispatch_intents_and_claims_preserve_one_handoff() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = file_db(&directory.path().join("dispatch-writers.db")).await;
+        insert_session(&db, 1, 1).await;
+        let store = SignalCapabilityGrantStore::new(db.clone());
+        store.issue(&grant(1)).await.unwrap();
+        let resources = vec!["root:selected".into()];
+        let operations = vec!["create_new".into()];
+        let args = r#"{"path":"parallel.txt"}"#;
+        let digest = format!("{:x}", Sha256::digest(args.as_bytes()));
+        let input = || request("same-call", args, &digest, &resources, &operations, 1);
+        store.prepare(input()).await.unwrap();
+        let (left, right) = tokio::join!(
+            store.record_dispatch_intent(input()),
+            store.record_dispatch_intent(input()),
+        );
+        let DispatchIntentResult::Recorded {
+            dispatch_id,
+            idempotent_replay: first_replay,
+            ..
+        } = left.unwrap()
+        else {
+            panic!("intent must be recorded")
+        };
+        let DispatchIntentResult::Recorded {
+            dispatch_id: second_id,
+            idempotent_replay: second_replay,
+            ..
+        } = right.unwrap()
+        else {
+            panic!("intent must be recorded")
+        };
+        assert_eq!(dispatch_id, second_id);
+        assert_ne!(first_replay, second_replay);
+        let (left, right) = tokio::join!(
+            store.claim_dispatch(&dispatch_id, 1001),
+            store.claim_dispatch(&dispatch_id, 1001),
+        );
+        assert_ne!(
+            left.is_ok(),
+            right.is_ok(),
+            "only one handoff may be claimed"
+        );
+        let rejected = left.err().or_else(|| right.err()).unwrap();
+        assert!(!rejected.to_string().contains("locked"), "{rejected}");
+        assert_eq!(
+            agent_capability_dispatch_outbox::Entity::find()
+                .count(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            agent_grant_reservation::Entity::find()
+                .count(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

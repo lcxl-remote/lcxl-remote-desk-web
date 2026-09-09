@@ -115,8 +115,7 @@ impl ScheduleStore {
         now_ms: i64,
     ) -> Result<entity::Model, ScheduleStoreError> {
         use crate::entity::agent_schedule_run as work_entity;
-        use sea_orm::TransactionTrait;
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let row = entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
             .filter(entity::Column::ScheduleId.eq(schedule_id))

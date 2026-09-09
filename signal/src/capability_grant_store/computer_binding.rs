@@ -203,7 +203,7 @@ impl SignalCapabilityGrantStore {
         call: &ToolCall,
         model_policy: Option<&desk_diagnose_core::model_egress::ModelEgressPolicy>,
     ) -> Result<(), DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, &plan.execution_generation).await?;
             if stable_id(
@@ -364,7 +364,7 @@ impl SignalCapabilityGrantStore {
         {
             return Err(invalid());
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, frame_request_id).await?;
             if !work.is_side_effecting && outbox.computer_binding_json.is_none() {

@@ -1,3 +1,4 @@
+import { AssistantImages } from './assistant-images';
 import { AssistantReasoning } from './assistant-reasoning';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
@@ -881,33 +882,7 @@ export function DeviceAssistantWorkspace({
                             </div>
                         );
                     })}
-                    {chat.visualEvidence.length > 0 && (
-                        <div data-testid="device-assistant-visual-evidence" className="grid gap-3 sm:grid-cols-2">
-                            {chat.visualEvidence.map((evidence) => (
-                                <div key={evidence.evidence_id} className="overflow-hidden rounded-md border bg-muted/30">
-                                    {evidence.preview_data_url ? (
-                                        <img
-                                            src={evidence.preview_data_url}
-                                            alt={t('pages.deviceAssistant.visualEvidenceAlt')}
-                                            className="max-h-56 w-full object-contain"
-                                        />
-                                    ) : (
-                                        <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">
-                                            {evidence.status === 'expired'
-                                                ? t('pages.deviceAssistant.visualEvidenceExpired')
-                                                : t('pages.deviceAssistant.visualEvidenceNotRetained')}
-                                        </div>
-                                    )}
-                                    <div className="space-y-1 border-t p-2 text-xs">
-                                        <div>{t(`pages.deviceAssistant.visualEvidencePhase.${evidence.phase}`)}</div>
-                                        <div className="text-muted-foreground">
-                                            {new Date(evidence.captured_at_unix_ms).toLocaleString()}
-                                        </div>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
+                    <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence} />
                     {chat.error && (
                         <Alert variant="destructive">
                             <AlertTitle>{t('pages.deviceAssistant.chatErrorTitle')}</AlertTitle>

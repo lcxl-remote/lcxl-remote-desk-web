@@ -18,7 +18,7 @@ impl ScheduleStore {
         owner: i32,
         rehearsal_id: &str,
     ) -> Result<RehearsalReadReport, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let report = Self::read_rehearsal_reads_on(&txn, owner, rehearsal_id).await?;
         txn.commit().await?;
         Ok(report)

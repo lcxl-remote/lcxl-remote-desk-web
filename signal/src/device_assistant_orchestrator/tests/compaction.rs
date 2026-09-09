@@ -2,7 +2,7 @@
 use super::*;
 
 #[actix_web::test]
-async fn expired_history_continues_without_exporting_old_content() {
+async fn expired_history_remains_available_without_compaction() {
     use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
     let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
     let address = listener.local_addr().unwrap();
@@ -69,8 +69,8 @@ async fn expired_history_continues_without_exporting_old_content() {
         .unwrap()
         .unwrap();
     let body = String::from_utf8(body).unwrap();
-    assert!(!body.contains("expired-question-marker"));
-    assert!(!body.contains("expired-answer-marker"));
+    assert!(body.contains("expired-question-marker"));
+    assert!(body.contains("expired-answer-marker"));
     let run = derive_conversation_key("7", "device", Some("expired-history"), "unused");
     let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .read_snapshot(&run)
@@ -90,7 +90,7 @@ async fn expired_history_continues_without_exporting_old_content() {
             .any(|message| message.text == "expired-answer-marker")
     );
     assert!(
-        snapshot
+        !snapshot
             .context_notices
             .iter()
             .any(|notice| notice.checkpoint_generation.is_none())

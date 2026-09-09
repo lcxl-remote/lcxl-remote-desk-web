@@ -3,7 +3,9 @@ use super::publication::key;
 use super::{ScheduleStore, ScheduleStoreError, digest, entity, json};
 use crate::entity::agent_task_rehearsal as rehearsal;
 use desk_diagnose_core::conversation_key::derive_conversation_key;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+#[cfg(test)]
+use sea_orm::TransactionTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     /// Called only after an authenticated owner requests an actual interactive run.
@@ -22,7 +24,7 @@ impl ScheduleStore {
         }
         let identity = digest(&json(&(owner, client_key))?);
         let payload = digest(&json(&(schedule_id, expected_revision))?);
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let existing = rehearsal::Entity::find()
             .filter(rehearsal::Column::OwnerUserId.eq(owner))
             .filter(rehearsal::Column::CreationIdentity.eq(&identity))
@@ -152,7 +154,7 @@ impl ScheduleStore {
         rehearsal_id: &str,
         expected_revision: i64,
     ) -> Result<rehearsal::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let row = rehearsal::Entity::find()
             .filter(rehearsal::Column::OwnerUserId.eq(owner))
             .filter(rehearsal::Column::RehearsalId.eq(rehearsal_id))

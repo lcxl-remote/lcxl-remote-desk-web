@@ -6,7 +6,7 @@ use desk_diagnose_core::{
     schedule::lifecycle::FailureState,
     session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait, sea_query::Expr};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
 /// Server-held identity returned by the atomic continuation claim.
 pub struct ContinuationLease<'a> {
@@ -74,7 +74,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Invalid);
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         // Acquire SQLite's write reservation before establishing a read snapshot.
         // Concurrent timer and pre-call renewals must wait for each other rather
         // than fail when a deferred read transaction upgrades to a writer in WAL.

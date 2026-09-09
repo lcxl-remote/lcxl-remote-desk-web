@@ -18,6 +18,33 @@ use crate::entity::{
 use crate::error::DeskSignalError;
 use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
 
+/// Begin a write-capable SQLite transaction before establishing any read snapshot.
+/// The entity must already exist; no row is changed and row triggers do not fire.
+/// Keep device/network I/O outside the transaction. Pure reads should use begin().
+pub(crate) async fn begin_write<E: EntityTrait>(
+    db: &DatabaseConnection,
+    _entity: E,
+) -> Result<sea_orm::DatabaseTransaction, DbErr> {
+    use sea_orm::{Iterable, PrimaryKeyToColumn, QueryFilter};
+    let column = E::PrimaryKey::iter()
+        .next()
+        .ok_or_else(|| DbErr::Custom("write transaction entity has no primary key".into()))?
+        .into_column();
+    let txn = db.begin().await?;
+    // SeaORM's SQLite begin is deferred. Reserve the WAL writer with a zero-row
+    // UPDATE so busy_timeout applies before any snapshot can become stale.
+    if let Err(error) = E::update_many()
+        .col_expr(column, sea_orm::sea_query::Expr::col(column))
+        .filter(sea_orm::sea_query::Expr::cust("0 = 1"))
+        .exec(&txn)
+        .await
+    {
+        txn.rollback().await.ok();
+        return Err(error);
+    }
+    Ok(txn)
+}
+
 static DB_CONN: OnceCell<DatabaseConnection> = OnceCell::const_new();
 
 fn path_to_sqlite_url(path: &Path) -> String {
@@ -180,7 +207,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 14;
+const SIGNAL_SCHEMA_VERSION: i32 = 15;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -238,6 +265,7 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, usage_retention::Entity).await?;
     create_entity(db, &schema, host_remote_access_state::Entity).await?;
     create_entity(db, &schema, agent_session::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_image_attachment::Entity).await?;
     create_entity(db, &schema, agent_exec_task::Entity).await?;
     create_entity(db, &schema, agent_action_item::Entity).await?;
     create_entity(db, &schema, agent_capability_grant::Entity).await?;
@@ -427,6 +455,7 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     check_entity!(usage_retention);
     check_entity!(host_remote_access_state);
     check_entity!(agent_session);
+    check_entity!(agent_image_attachment);
     check_entity!(agent_exec_task);
     check_entity!(agent_action_item);
     check_entity!(agent_capability_grant);
@@ -624,6 +653,7 @@ mod tests {
             "usage_retention",
             "host_remote_access_state",
             "agent_session",
+            "agent_image_attachment",
             "agent_exec_task",
             "agent_action_item",
             "agent_capability_grant",
@@ -742,3 +772,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod write_tests;

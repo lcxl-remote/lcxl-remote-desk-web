@@ -284,7 +284,7 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             .await
             .unwrap()
             .unwrap();
-        let allowed = matches!(case, "running" | "crash");
+        let allowed = matches!(case, "running" | "crash" | "expired-label");
         if case == "model-claim-race" {
             f.store.db.execute_unprepared(
                 "CREATE TRIGGER rotate_model_on_automatic_claim AFTER UPDATE ON agent_session

@@ -6,7 +6,7 @@ use desk_diagnose_core::{
     schedule::{SCHEDULE_CALC_VERSION, lifecycle::FailureState},
     session::{AgentSessionSurface, ExecutionState, PersistedAgentSession, TriggerOrigin},
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 /// Server-resolved personal subject policy. Never deserialize this from a client
 /// or infer it from the stored task. Device/session policy is rechecked per call.
@@ -84,7 +84,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Invalid);
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let work = run::Entity::find()
             .filter(run::Column::RunId.eq(input.run_id))
             .filter(run::Column::OwnerUserId.eq(input.owner))

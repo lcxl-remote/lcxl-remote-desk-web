@@ -9,7 +9,7 @@ use desk_diagnose_core::session::PersistedAgentSession;
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 /// Scope and policy must come from current server-side projection.
 pub struct FreshTaskClaim<'a> {
@@ -56,7 +56,7 @@ impl ScheduleStore {
         if input.owner != SINGLE_ACCOUNT_USER_ID || !settings.enabled {
             return Err(ScheduleStoreError::NotFound);
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let pending = agent_schedule_run::Entity::find()
             .filter(agent_schedule_run::Column::OwnerUserId.eq(input.owner))
             .filter(agent_schedule_run::Column::RunId.eq(input.run_id))

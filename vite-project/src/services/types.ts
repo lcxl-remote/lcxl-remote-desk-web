@@ -184,6 +184,11 @@ export type ApprovalAckParams = {
     req_id: string;
 };
 
+/**
+ * @description Raw image response; the HTTP body contains bytes rather than a JSON array.
+*/
+export type AssistantImageBytes = Blob;
+
 export const audioDataFlowEnum = {
     Render: "Render",
     Capture: "Capture"
@@ -7133,6 +7138,105 @@ export type RestResponseUsageRetentionConfig = {
     success: boolean;
 };
 
+export type RestResponseVecVisualEvidenceFrame = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type array | undefined
+    */
+    data?: {
+        /**
+         * @type string,null
+        */
+        application_summary?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        captured_at_unix_ms: number;
+        content?: (null | ContentRef);
+        /**
+         * @type string
+        */
+        conversation_id: string;
+        /**
+         * @type string
+        */
+        device_id: string;
+        /**
+         * @type string,null
+        */
+        digest_sha256?: string | null;
+        /**
+         * @type string,null
+        */
+        display_summary?: string | null;
+        /**
+         * @type string
+        */
+        evidence_id: string;
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        expires_at_unix_ms?: number | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        focus_input_revision: number;
+        /**
+         * @type string
+        */
+        frame_id: string;
+        /**
+         * @type string,null
+        */
+        media_type?: string | null;
+        /**
+         * @type string
+        */
+        phase: VisualEvidencePhase;
+        /**
+         * @description Bounded data URL already authorized for this active owner stream. It is\nnever accepted from a client and is never persisted by the session store.
+         * @type string,null
+        */
+        preview_data_url?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        schema_version: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        size_bytes: number;
+        /**
+         * @type string
+        */
+        status: VisualEvidenceStatus;
+        /**
+         * @type string
+        */
+        tool_call_id: string;
+        /**
+         * @type string
+        */
+        turn_id: string;
+    }[];
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseVirtualDisplayDriverStatusResponse = {
     /**
      * @type integer, int32
@@ -11124,6 +11228,74 @@ export type RevokeDeviceAssistantCapabilityGrantMutationResponse = RevokeDeviceA
 export type RevokeDeviceAssistantCapabilityGrantMutation = {
     Response: RevokeDeviceAssistantCapabilityGrant200;
     Request: RevokeDeviceAssistantCapabilityGrantMutationRequest;
+    Errors: any;
+};
+
+export type GetAssistantImageQueryParams = {
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @type string
+    */
+    attachment: string;
+};
+
+/**
+ * @description Stored image bytes
+*/
+export type GetAssistantImage200 = AssistantImageBytes;
+
+export type GetAssistantImage404 = any;
+
+export type GetAssistantImageQueryResponse = GetAssistantImage200;
+
+export type GetAssistantImageQuery = {
+    Response: GetAssistantImage200;
+    QueryParams: GetAssistantImageQueryParams;
+    Errors: GetAssistantImage404;
+};
+
+export type DeleteAssistantImageQueryParams = {
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @type string
+    */
+    attachment: string;
+};
+
+export type DeleteAssistantImage200 = RestResponseBool;
+
+export type DeleteAssistantImageMutationResponse = DeleteAssistantImage200;
+
+export type DeleteAssistantImageMutation = {
+    Response: DeleteAssistantImage200;
+    QueryParams: DeleteAssistantImageQueryParams;
+    Errors: any;
+};
+
+export type ListAssistantImagesQueryParams = {
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @type string | undefined
+    */
+    before?: string;
+};
+
+export type ListAssistantImages200 = RestResponseVecVisualEvidenceFrame;
+
+export type ListAssistantImagesQueryResponse = ListAssistantImages200;
+
+export type ListAssistantImagesQuery = {
+    Response: ListAssistantImages200;
+    QueryParams: ListAssistantImagesQueryParams;
     Errors: any;
 };
 

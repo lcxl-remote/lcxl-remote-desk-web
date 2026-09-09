@@ -3,7 +3,7 @@ use super::settlement::{Settlement, settle};
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::entity::agent_schedule_run as run;
 use desk_agent_protocol::schedule::ScheduledRunStatus;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait, sea_query::Expr};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, sea_query::Expr};
 
 impl ScheduleStore {
     /// No model, grant or work is created. Race with claim/cancel using the same
@@ -13,7 +13,7 @@ impl ScheduleStore {
         owner: i32,
         run_id: &str,
     ) -> Result<bool, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let work = run::Entity::find()
             .filter(run::Column::OwnerUserId.eq(owner))
             .filter(run::Column::RunId.eq(run_id))

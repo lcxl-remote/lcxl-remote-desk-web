@@ -164,7 +164,9 @@ impl SignalAgentSessionStore {
         let now =
             DateTime::<Utc>::from_timestamp_millis(now.timestamp_millis()).ok_or_else(failure)?;
         for _ in 0..CLAIM_ATTEMPTS {
-            let txn = self.db.begin().await.map_err(storage)?;
+            let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
+                .await
+                .map_err(storage)?;
             let row = agent_session::Entity::find()
                 .filter(agent_session::Column::ConversationId.eq(&update.subject.conversation_id))
                 .one(&txn)

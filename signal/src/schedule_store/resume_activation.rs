@@ -8,7 +8,7 @@ use desk_diagnose_core::{
     },
     session::{AgentSessionSurface, ExecutionState, PersistedAgentSession},
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     /// Called for an explicit owner confirmation, never merely an AI proposal.
@@ -44,7 +44,7 @@ impl ScheduleStore {
         resume: bool,
         verifier: Option<&dyn super::TaskPublicationVerifier>,
     ) -> Result<entity::Model, ScheduleStoreError> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let task = entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
             .filter(entity::Column::ScheduleId.eq(schedule_id))

@@ -43,3 +43,5 @@ pub mod web_research;
 pub mod web_search_config;
 
 pub mod schedule_management;
+
+pub(crate) mod agent_image_store;

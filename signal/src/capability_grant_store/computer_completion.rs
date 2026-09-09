@@ -311,7 +311,8 @@ impl SignalCapabilityGrantStore {
             + std::time::Duration::from_millis(SQLITE_COMPLETION_BUSY_BUDGET_MS);
         let mut delay = SQLITE_COMPLETION_BUSY_INITIAL_DELAY_MS;
         loop {
-            let txn = self.db.begin().await?;
+            let txn =
+                crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
             let result = self
                 .accept_computer_completion_on(&txn, connection, audience, frame, completed)
                 .await;
@@ -529,7 +530,7 @@ impl SignalCapabilityGrantStore {
         actor_id: &str,
         device_id: &str,
     ) -> Result<bool, DbErr> {
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
             let Some(row) = agent_action_item::Entity::find()
                 .filter(agent_action_item::Column::CompletionEventId.eq(event))

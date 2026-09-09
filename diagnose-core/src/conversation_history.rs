@@ -61,6 +61,18 @@ pub struct HistoryLoadResult {
 pub fn conversation_history_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
+            name: crate::conversation_image::READ_IMAGE_TOOL.into(),
+            description: "Omit image selectors to list stored screenshot references (page with before_attachment_id); supply attachment_id to read one image, or use an unambiguous original tool_call_id. Use only when image details are needed after history compression. Returns the historical image, never a fresh observation or live UI authority. Images deleted by the owner or unauthorized for the current model are unavailable.".into(),
+            parameters_schema: json!({"type":"object", "properties":{
+                "tool_call_id":{"type":"string","minLength":1,"maxLength":512},
+                "attachment_id":{"type":"string","minLength":1,"maxLength":256},
+                "before_attachment_id":{"type":"string","minLength":1,"maxLength":256}},
+                "additionalProperties":false}),
+        },
+        required_capability: Capability::SystemInfo,
+        effect: ToolEffect::ConversationHistory,
+    }, RegisteredTool {
+        spec: ToolSpec {
             name: LOAD_CONVERSATION_HISTORY_TOOL_NAME.into(),
             description: "Load one bounded page of older user/assistant text from this same conversation. The first call omits the current user requirement; pass next_before_message_id to page farther backward. Tool calls, permission authority, schemas, attachments, and raw evidence are never returned.".into(),
             parameters_schema: json!({

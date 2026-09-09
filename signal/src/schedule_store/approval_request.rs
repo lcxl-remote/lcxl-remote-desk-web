@@ -4,7 +4,7 @@ use desk_diagnose_core::{
     dynamic_run::PermissionRequest,
     session::{PersistedAgentSession, TriggerOrigin},
 };
-use sea_orm::{DatabaseTransaction, TransactionTrait};
+use sea_orm::DatabaseTransaction;
 
 impl ScheduleStore {
     pub async fn validate_task_permission_request(
@@ -15,7 +15,7 @@ impl ScheduleStore {
         if session.trigger_origin != TriggerOrigin::ScheduledTask {
             return Ok(());
         }
-        let txn = self.db.begin().await?;
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
 
         validate_task_permission_on(&txn, session, request).await?;
         txn.commit().await?;
