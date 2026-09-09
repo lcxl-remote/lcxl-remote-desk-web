@@ -1436,6 +1436,7 @@ mod tests {
             ),
             (
                 ContextKind::DesktopUiInspect(computer_use::UiInspectParams {
+                    scope: Default::default(),
                     root: None,
                     max_depth: 8,
                     max_nodes: 256,

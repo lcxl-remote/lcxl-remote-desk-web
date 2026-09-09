@@ -5226,10 +5226,26 @@ impl SignalDeviceAssistantTools {
                     ProviderInvokeError::known(
                         error,
                         CapabilityDispatchOutcome::Succeeded,
-                        result_digest_sha256,
+                        result_digest_sha256.clone(),
                     )
                 })?;
-                Ok(output)
+                Ok(ToolRunOutput {
+                    content: desk_diagnose_core::ui_model_output::serialize(&value).map_err(
+                        |_| {
+                            ProviderInvokeError::known(
+                                error(
+                                    AgentErrorKind::Internal,
+                                    "UI output serialization failed",
+                                    false,
+                                    true,
+                                ),
+                                CapabilityDispatchOutcome::Succeeded,
+                                result_digest_sha256,
+                            )
+                        },
+                    )?,
+                    ..output
+                })
             }
             AgentOutcome::Err(remote_error) => Err(ProviderInvokeError::known(
                 remote_error,

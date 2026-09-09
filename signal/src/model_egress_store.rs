@@ -142,6 +142,20 @@ impl SignalModelEgressStore {
         output: &desk_agent_protocol::data_lineage::DataEnvelope,
     ) -> Result<(), DbErr> {
         let txn = self.db.begin().await?;
+        // Acquire SQLite's writer slot before reading the validation snapshot.
+        // A deferred read followed by UPDATE can fail immediately with BUSY_SNAPSHOT
+        // despite busy_timeout when another connection commits in between.
+        if self.db.get_database_backend() == sea_orm::DbBackend::Sqlite {
+            model_egress_receipt::Entity::update_many()
+                .col_expr(
+                    model_egress_receipt::Column::ReceiptId,
+                    Expr::col(model_egress_receipt::Column::ReceiptId).into(),
+                )
+                .filter(model_egress_receipt::Column::ReceiptId.eq(receipt_id))
+                .exec(&txn)
+                .await?;
+        }
+
         let row = model_egress_receipt::Entity::find_by_id(receipt_id)
             .one(&txn)
             .await?
@@ -761,6 +775,61 @@ mod tests {
         assert_eq!(
             model_egress_receipt::Entity::find().all(&db).await.unwrap(),
             vec![expected]
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_completion_waits_for_writer_without_read_lock_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("audit.db").display()
+        );
+        let mut options = sea_orm::ConnectOptions::new(url);
+        options.max_connections(4).map_sqlx_sqlite_opts(|options| {
+            options
+                .journal_mode(sea_orm::sqlx::sqlite::SqliteJournalMode::Wal)
+                .busy_timeout(std::time::Duration::from_secs(2))
+        });
+        let db = Database::connect(options).await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let store = SignalModelEgressStore::new(db.clone());
+        store
+            .record_dispatch_intent(
+                "contended".into(),
+                "export".into(),
+                1,
+                &audit(),
+                &test_inputs(&audit()),
+            )
+            .await
+            .unwrap();
+        let writer = db.begin().await.unwrap();
+        model_egress_receipt::Entity::update_many()
+            .col_expr(model_egress_receipt::Column::UsageJson, Expr::value("{}"))
+            .filter(model_egress_receipt::Column::ReceiptId.eq("contended"))
+            .exec(&writer)
+            .await
+            .unwrap();
+        let completion =
+            tokio::spawn(
+                async move { store.mark_succeeded("contended", &output("complete")).await },
+            );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !completion.is_finished(),
+            "audit should wait for the writer instead of failing a read-to-write upgrade"
+        );
+        writer.commit().await.unwrap();
+        completion.await.unwrap().unwrap();
+        assert_eq!(
+            model_egress_receipt::Entity::find_by_id("contended")
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            STATE_SUCCEEDED
         );
     }
 

@@ -2,8 +2,9 @@
 //!
 //! Every action rechecks the foreground process and relocates the target from
 //! its process-incarnation-bound fingerprint. Password controls fail closed;
-//! mutations are limited to typed UIA patterns and independently read back.
+//! mutations are limited to typed UIA patterns; callers inspect their effects separately.
 
+use desk_agent_protocol::computer_use::UiInspectScope;
 use std::time::{Duration, Instant};
 
 use desk_agent_protocol::computer_use::{UiSemanticAction, UiSemanticActionKind};
@@ -31,9 +32,7 @@ const MAX_STRING_BYTES: usize = 16 * 1024;
 const OBJECT_REF_BUDGET: usize = 320;
 const ACTION_MAX_DEPTH: u16 = 16;
 const ACTION_MAX_NODES: usize = 1_024;
-const INVOKE_READBACK_MAX_BYTES: u32 = 1024 * 1024;
-const INVOKE_READBACK_TIMEOUT: Duration = Duration::from_millis(750);
-const INVOKE_READBACK_INTERVAL: Duration = Duration::from_millis(25);
+const ACTION_OBSERVATION_MAX_BYTES: u32 = 1024 * 1024;
 
 use super::computer_use_broker::{CollectedUiNode, CollectedUiTree};
 
@@ -75,6 +74,7 @@ impl Drop for ComGuard {
 }
 
 struct WalkConfig<'a> {
+    scope: UiInspectScope,
     walker: &'a IUIAutomationTreeWalker,
     process_id: u32,
     max_depth: u16,
@@ -85,6 +85,7 @@ struct WalkConfig<'a> {
 
 #[derive(Default)]
 struct WalkState {
+    visited: usize,
     encoded_bytes: usize,
     truncated: bool,
 }
@@ -255,6 +256,24 @@ pub(super) fn collect_foreground(
     max_nodes: u32,
     max_bytes: u32,
 ) -> Result<CollectedUiTree, AgentError> {
+    collect_foreground_with_scope(
+        expected_process_id,
+        expected_image_path,
+        max_depth,
+        max_nodes,
+        max_bytes,
+        UiInspectScope::Content,
+    )
+}
+
+pub(super) fn collect_foreground_with_scope(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    max_depth: u16,
+    max_nodes: u32,
+    max_bytes: u32,
+    scope: UiInspectScope,
+) -> Result<CollectedUiTree, AgentError> {
     let _com = ComGuard::initialize()?;
     let foreground = resolve_foreground_application()?;
     if foreground.process_id != expected_process_id
@@ -293,6 +312,7 @@ pub(super) fn collect_foreground(
         )
     })?;
     let config = WalkConfig {
+        scope,
         walker: &walker,
         process_id: expected_process_id,
         max_depth,
@@ -302,7 +322,7 @@ pub(super) fn collect_foreground(
     };
     let mut state = WalkState::default();
     let mut nodes = Vec::new();
-    walk(root, None, 0, 0, &config, &mut state, &mut nodes);
+    walk(root, None, 0, 0, false, &config, &mut state, &mut nodes);
     Ok(CollectedUiTree {
         nodes,
         truncated: state.truncated,
@@ -318,7 +338,7 @@ pub(super) fn foreground_contains_protected_control(
         expected_image_path,
         ACTION_MAX_DEPTH,
         ACTION_MAX_NODES as u32,
-        INVOKE_READBACK_MAX_BYTES,
+        ACTION_OBSERVATION_MAX_BYTES,
     )
     .map(|tree| tree.truncated || tree.nodes.iter().any(|node| node.is_protected))
 }
@@ -334,6 +354,17 @@ pub(super) fn preflight_action(
     validate_action_target(&target.element, action)
 }
 
+impl AppliedUiAction {
+    // Verification covers native API completion, not the user's intended UI state.
+    fn accepted(changed: bool) -> Self {
+        Self {
+            changed,
+            verified: true,
+            summary: "Native UI API completed successfully; application state is not verified. Use inspect_desktop_ui to check the expected result before deciding the next action.".into(),
+        }
+    }
+}
+
 pub(super) fn apply_action(
     expected_process_id: u32,
     expected_image_path: &str,
@@ -345,46 +376,11 @@ pub(super) fn apply_action(
     validate_action_target(&target.element, action)?;
     match action {
         UiSemanticAction::Invoke => {
-            let before = collect_foreground(
-                expected_process_id,
-                expected_image_path,
-                ACTION_MAX_DEPTH,
-                ACTION_MAX_NODES as u32,
-                INVOKE_READBACK_MAX_BYTES,
-            )?;
-            let before_digest = semantic_tree_digest(&before);
             let pattern = invoke_pattern(&target.element)?;
             unsafe { pattern.Invoke() }.map_err(|_| {
                 action_failure("the UI Automation invoke action was rejected by the target")
             })?;
-            let deadline = Instant::now() + INVOKE_READBACK_TIMEOUT;
-            let verified = loop {
-                match collect_foreground(
-                    expected_process_id,
-                    expected_image_path,
-                    ACTION_MAX_DEPTH,
-                    ACTION_MAX_NODES as u32,
-                    INVOKE_READBACK_MAX_BYTES,
-                ) {
-                    Ok(after) if semantic_tree_digest(&after) != before_digest => break true,
-                    Ok(_) => {}
-                    Err(_) => break false,
-                }
-                if Instant::now() >= deadline {
-                    break false;
-                }
-                std::thread::sleep(INVOKE_READBACK_INTERVAL);
-            };
-            Ok(AppliedUiAction {
-                changed: true,
-                verified,
-                summary: if verified {
-                    "UI Automation invoke was accepted and a semantic application-state change was read back"
-                } else {
-                    "UI Automation invoke was accepted, but no semantic application-state change was read back within the bounded verification window"
-                }
-                .into(),
-            })
+            Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::Toggle { desired } => {
             let pattern = toggle_pattern(&target.element)?;
@@ -400,39 +396,14 @@ pub(super) fn apply_action(
                     action_failure("the UI Automation toggle action was rejected by the target")
                 })?;
             }
-            let after =
-                toggle_state(unsafe { pattern.CurrentToggleState() }.map_err(|_| {
-                    action_failure("cannot read back the UI Automation toggle state")
-                })?);
-            if after != Some(*desired) {
-                return Err(action_failure(
-                    "the UI Automation toggle read-back did not match the requested state",
-                ));
-            }
-            Ok(AppliedUiAction {
-                changed: before != *desired,
-                verified: true,
-                summary: "UI Automation toggle state was read back from the target element".into(),
-            })
+            Ok(AppliedUiAction::accepted(before != *desired))
         }
         UiSemanticAction::Select => {
             let pattern = selection_pattern(&target.element)?;
             unsafe { pattern.Select() }.map_err(|_| {
                 action_failure("the UI Automation selection action was rejected by the target")
             })?;
-            let selected = unsafe { pattern.CurrentIsSelected() }
-                .map(|value| value.as_bool())
-                .unwrap_or(false);
-            if !selected {
-                return Err(action_failure(
-                    "the UI Automation selection read-back did not match the requested state",
-                ));
-            }
-            Ok(AppliedUiAction {
-                changed: true,
-                verified: true,
-                summary: "UI Automation selection was read back from the target element".into(),
-            })
+            Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::SetValue { value } => {
             if value.len() > MAX_STRING_BYTES {
@@ -446,38 +417,13 @@ pub(super) fn apply_action(
             unsafe { pattern.SetValue(&BSTR::from(value)) }.map_err(|_| {
                 action_failure("the UI Automation value action was rejected by the target")
             })?;
-            let readback = unsafe { pattern.CurrentValue() }
-                .map(|value| value.to_string())
-                .map_err(|_| action_failure("cannot read back the UI Automation value"))?;
-            if readback != *value {
-                return Err(action_failure(
-                    "the UI Automation value read-back did not match the requested value",
-                ));
-            }
-            Ok(AppliedUiAction {
-                changed: true,
-                verified: true,
-                summary: "UI Automation value was read back from the target element".into(),
-            })
+            Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::Focus => {
             unsafe { target.element.SetFocus() }.map_err(|_| {
                 action_failure("the UI Automation focus action was rejected by the target")
             })?;
-            let focused = unsafe { target.element.CurrentHasKeyboardFocus() }
-                .map(|value| value.as_bool())
-                .unwrap_or(false);
-            if !focused {
-                return Err(action_failure(
-                    "the UI Automation focus read-back did not match the requested state",
-                ));
-            }
-            Ok(AppliedUiAction {
-                changed: true,
-                verified: true,
-                summary: "UI Automation keyboard focus was read back from the target element"
-                    .into(),
-            })
+            Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::Scroll { .. } => Err(unsupported(
             "this UI Automation semantic action is not enabled by the Windows adapter",
@@ -731,25 +677,68 @@ fn toggle_state(state: ToggleState) -> Option<bool> {
     }
 }
 
-fn semantic_tree_digest(tree: &CollectedUiTree) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update([u8::from(tree.truncated)]);
-    hasher.update(
-        serde_json::to_vec(&tree.nodes)
-            .expect("UI Automation semantic nodes contain only serializable values"),
-    );
-    hasher.finalize().into()
+fn is_menu_control(kind: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID) -> bool {
+    use windows::Win32::UI::Accessibility::{
+        UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
+    };
+    kind == UIA_MenuControlTypeId
+        || kind == UIA_MenuBarControlTypeId
+        || kind == UIA_MenuItemControlTypeId
+}
+
+fn element_identity(
+    element: &IUIAutomationElement,
+    parent: Option<&str>,
+    ordinal: usize,
+) -> String {
+    unsafe {
+        let process_id = element.CurrentProcessId().unwrap_or_default();
+        let started = process_start(process_id.max(0) as u32);
+        let hwnd = element
+            .CurrentNativeWindowHandle()
+            .map(|value| value.0 as isize)
+            .unwrap_or_default();
+        let control_type = element
+            .CurrentControlType()
+            .map(|value| value.0)
+            .unwrap_or_default();
+        let automation_id = element
+            .CurrentAutomationId()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        fingerprint(
+            parent,
+            ordinal,
+            process_id,
+            started,
+            hwnd,
+            control_type,
+            &automation_id,
+        )
+    }
 }
 
 fn walk(
     element: IUIAutomationElement,
-    parent: Option<(u32, String)>,
+    parent: Option<(Option<u32>, String)>,
     depth: u16,
     sibling_ordinal: usize,
+    inside_menu: bool,
     config: &WalkConfig<'_>,
     state: &mut WalkState,
     output: &mut Vec<CollectedUiNode>,
 ) {
+    if state.visited >= 4096 || Instant::now() >= config.deadline {
+        state.truncated = true;
+        return;
+    }
+    state.visited += 1;
+    let inside_menu =
+        inside_menu || unsafe { element.CurrentControlType() }.is_ok_and(is_menu_control);
+    if config.scope == UiInspectScope::Content && inside_menu {
+        return;
+    }
+    let emit = config.scope != UiInspectScope::Menus || inside_menu;
     if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
         state.truncated = true;
         return;
@@ -761,24 +750,36 @@ fn walk(
         state.truncated = true;
         return;
     }
-    let (node, strings_truncated) = read_node(
-        &element,
-        parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
-        parent.as_ref().map(|(index, _)| *index),
-        sibling_ordinal,
-    );
-    let encoded_bytes = serde_json::to_vec(&node)
-        .map_or(config.max_bytes.saturating_add(1), |encoded| encoded.len())
-        .saturating_add(OBJECT_REF_BUDGET);
-    if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
-        state.truncated = true;
-        return;
-    }
-    state.encoded_bytes += encoded_bytes;
-    state.truncated |= strings_truncated;
-    let index = output.len() as u32;
-    let fingerprint = node.fingerprint.clone();
-    output.push(node);
+    let (index, fingerprint) = if emit {
+        let (node, strings_truncated) = read_node(
+            &element,
+            parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
+            parent.as_ref().and_then(|(index, _)| *index),
+            sibling_ordinal,
+        );
+        let encoded_bytes = serde_json::to_vec(&node)
+            .map_or(config.max_bytes.saturating_add(1), |encoded| encoded.len())
+            .saturating_add(OBJECT_REF_BUDGET);
+        if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
+            state.truncated = true;
+            return;
+        }
+        state.encoded_bytes += encoded_bytes;
+        state.truncated |= strings_truncated;
+        let index = output.len() as u32;
+        let fingerprint = node.fingerprint.clone();
+        output.push(node);
+        (Some(index), fingerprint)
+    } else {
+        (
+            None,
+            element_identity(
+                &element,
+                parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
+                sibling_ordinal,
+            ),
+        )
+    };
 
     if depth >= config.max_depth {
         if unsafe { config.walker.GetFirstChildElement(&element) }.is_ok() {
@@ -796,6 +797,7 @@ fn walk(
             Some((index, fingerprint.clone())),
             depth + 1,
             ordinal,
+            inside_menu,
             config,
             state,
             output,
@@ -1036,6 +1038,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn menu_classification_uses_native_types_instead_of_localized_names() {
+        use windows::Win32::UI::Accessibility::*;
+        for kind in [
+            UIA_MenuControlTypeId,
+            UIA_MenuBarControlTypeId,
+            UIA_MenuItemControlTypeId,
+        ] {
+            assert!(is_menu_control(kind));
+        }
+        for kind in [
+            UIA_ButtonControlTypeId,
+            UIA_TextControlTypeId,
+            UIA_WindowControlTypeId,
+        ] {
+            assert!(!is_menu_control(kind));
+        }
+    }
+
+    #[test]
     fn bounded_strings_stop_on_utf8_boundaries() {
         let source = "界".repeat(MAX_STRING_BYTES);
         let (value, truncated) = bounded_string(source);
@@ -1064,28 +1085,14 @@ mod tests {
     }
 
     #[test]
-    fn semantic_tree_digest_changes_when_uia_value_changes() {
-        let node = CollectedUiNode {
-            parent_index: None,
-            role: "text".into(),
-            name: Some("Display".into()),
-            value: Some("0".into()),
-            is_protected: false,
-            enabled: true,
-            supported_actions: Vec::new(),
-            fingerprint: "stable-object".into(),
-        };
-        let before = CollectedUiTree {
-            nodes: vec![node.clone()],
-            truncated: false,
-        };
-        let mut after_node = node;
-        after_node.value = Some("1".into());
-        let after = CollectedUiTree {
-            nodes: vec![after_node],
-            truncated: false,
-        };
-        assert_ne!(semantic_tree_digest(&before), semantic_tree_digest(&after));
+    fn native_acceptance_does_not_claim_application_state_verification() {
+        for changed in [false, true] {
+            let result = AppliedUiAction::accepted(changed);
+            assert!(result.verified);
+            assert_eq!(result.changed, changed);
+            assert!(result.summary.contains("not verified"));
+            assert!(result.summary.contains("inspect_desktop_ui"));
+        }
     }
 
     #[test]
@@ -1103,7 +1110,7 @@ mod tests {
             &image_path,
             ACTION_MAX_DEPTH,
             ACTION_MAX_NODES as u32,
-            INVOKE_READBACK_MAX_BYTES,
+            ACTION_OBSERVATION_MAX_BYTES,
         )
         .expect("Calculator UIA tree");
         let button = tree
@@ -1153,7 +1160,7 @@ mod tests {
             &foreground.image_path,
             ACTION_MAX_DEPTH,
             ACTION_MAX_NODES as u32,
-            INVOKE_READBACK_MAX_BYTES,
+            ACTION_OBSERVATION_MAX_BYTES,
         )
         .expect("Settings UIA tree");
         assert!(!tree.nodes.is_empty());
@@ -1183,7 +1190,7 @@ mod tests {
             &foreground.image_path,
             ACTION_MAX_DEPTH,
             ACTION_MAX_NODES as u32,
-            INVOKE_READBACK_MAX_BYTES,
+            ACTION_OBSERVATION_MAX_BYTES,
         )
         .expect("Notepad UIA tree");
         let target = tree

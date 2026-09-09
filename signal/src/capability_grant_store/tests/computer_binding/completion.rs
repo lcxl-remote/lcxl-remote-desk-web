@@ -446,14 +446,14 @@ async fn semantic_projection_preserves_idempotent_success_and_unknown_effects() 
     plan.adapter.kind = ComputerUseAdapterKind::MacosAccessibility;
     plan.actions[0].target.object_kind = ObjectKind::UiElement;
     plan.actions[0].action =
-        ComputerActionKind::Ui(desk_agent_protocol::computer_use::UiSemanticAction::Focus);
+        ComputerActionKind::Ui(desk_agent_protocol::computer_use::UiSemanticAction::Invoke);
     let mut native = failed(&plan);
     native.result = ComputerActionResultClass::Verified;
     native.facts = vec![ComputerActionStepFact {
         index: 0,
         changed: false,
         verified: true,
-        summary: "already selected".into(),
+        summary: "Native UI API completed successfully; application state is not verified. Use inspect_desktop_ui to check the expected result.".into(),
     }];
     assert_eq!(
         project(&plan, "execute_confirmed_ui_action", "run-1", "{}", &native)

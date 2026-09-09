@@ -34,7 +34,7 @@ describe('delayed observation', () => {
         act(() => vi.advanceTimersByTime(1));
         expect(sendMessage).toHaveBeenCalledTimes(1);
         expect(sendMessage.mock.calls[0]).toEqual([expect.any(Number), expect.objectContaining({
-            operation: { risk_hint: null, input: { kind: 'read_context', params: { kind: { kind: 'desktop_ui_inspect', params: { root: null, max_depth: 6, max_nodes: 300, max_bytes: 262144 } } } } },
+            operation: { risk_hint: null, input: { kind: 'read_context', params: { kind: { kind: 'desktop_ui_inspect', params: { root: null, scope: 'content', max_depth: 6, max_nodes: 300, max_bytes: 262144 } } } } },
         }), 'device-1']);
         act(() => result.current.scheduleUi());
         act(() => vi.advanceTimersByTime(5_000));

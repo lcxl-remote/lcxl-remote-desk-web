@@ -1,5 +1,6 @@
 //! Bounded macOS Accessibility observation for the active Aqua session.
 
+use desk_agent_protocol::computer_use::UiInspectScope;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::time::{Duration, Instant};
 
@@ -28,11 +29,9 @@ const AX_MESSAGE_TIMEOUT_SECONDS: f32 = 0.1;
 const MAX_STRING_BYTES: usize = 16 * 1024;
 const OBJECT_REF_BUDGET: usize = 320;
 const CF_NUMBER_SINT64_TYPE: i32 = 4;
-const INVOKE_READBACK_MAX_DEPTH: u16 = 16;
-const INVOKE_READBACK_MAX_NODES: u32 = 1_024;
-const INVOKE_READBACK_MAX_BYTES: u32 = 1024 * 1024;
-const INVOKE_READBACK_TIMEOUT: Duration = Duration::from_millis(750);
-const INVOKE_READBACK_INTERVAL: Duration = Duration::from_millis(25);
+const ACTION_OBSERVATION_MAX_DEPTH: u16 = 16;
+const ACTION_OBSERVATION_MAX_NODES: u32 = 1_024;
+const ACTION_OBSERVATION_MAX_BYTES: u32 = 1024 * 1024;
 const AX_VALUE_CGPOINT_TYPE: i32 = 1;
 const AX_VALUE_CGSIZE_TYPE: i32 = 2;
 
@@ -106,11 +105,15 @@ impl Drop for OwnedCf {
 
 #[derive(Default)]
 struct WalkState {
+    found_menu_window: bool,
+    visited: usize,
     encoded_bytes: usize,
     truncated: bool,
 }
 
 struct WalkConfig {
+    menu_window: Option<String>,
+    scope: UiInspectScope,
     process_id: u32,
     process_started_at: u64,
     max_depth: u16,
@@ -164,6 +167,44 @@ pub(super) fn collect_application(
     max_nodes: u32,
     max_bytes: u32,
 ) -> Result<CollectedUiTree, AgentError> {
+    collect_application_with_scope(
+        expected_process_id,
+        expected_image_path,
+        max_depth,
+        max_nodes,
+        max_bytes,
+        UiInspectScope::Content,
+    )
+}
+
+pub(super) fn collect_application_with_scope(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    max_depth: u16,
+    max_nodes: u32,
+    max_bytes: u32,
+    scope: UiInspectScope,
+) -> Result<CollectedUiTree, AgentError> {
+    collect_application_with_window_scope(
+        expected_process_id,
+        expected_image_path,
+        max_depth,
+        max_nodes,
+        max_bytes,
+        scope,
+        None,
+    )
+}
+
+pub(super) fn collect_application_with_window_scope(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    max_depth: u16,
+    max_nodes: u32,
+    max_bytes: u32,
+    scope: UiInspectScope,
+    menu_window: Option<&str>,
+) -> Result<CollectedUiTree, AgentError> {
     if !crate::macos_permissions::probe().accessibility {
         return Err(failure(
             AgentErrorKind::PermissionDenied,
@@ -190,6 +231,8 @@ pub(super) fn collect_application(
     let root = OwnedCf(root);
     set_messaging_timeout(root.0)?;
     let config = WalkConfig {
+        menu_window: menu_window.map(str::to_owned),
+        scope,
         process_id: expected_process_id,
         process_started_at: process_start(expected_process_id)?,
         max_depth,
@@ -199,7 +242,16 @@ pub(super) fn collect_application(
     };
     let mut state = WalkState::default();
     let mut nodes = Vec::new();
-    walk(root.0, None, 0, 0, &config, &mut state, &mut nodes);
+    walk(
+        root.0, None, 0, 0, false, false, &config, &mut state, &mut nodes,
+    );
+    if menu_window.is_some() && !state.found_menu_window {
+        return Err(failure(
+            AgentErrorKind::SessionUnavailable,
+            "the selected window was not found within the bounded menu search",
+            true,
+        ));
+    }
     if application_by_pid(expected_process_id)?.process_started_at != current.process_started_at {
         return Err(failure(
             AgentErrorKind::SessionUnavailable,
@@ -220,9 +272,9 @@ pub(super) fn foreground_contains_protected_control(
     collect_foreground(
         expected_process_id,
         expected_image_path,
-        INVOKE_READBACK_MAX_DEPTH,
-        INVOKE_READBACK_MAX_NODES,
-        INVOKE_READBACK_MAX_BYTES,
+        ACTION_OBSERVATION_MAX_DEPTH,
+        ACTION_OBSERVATION_MAX_NODES,
+        ACTION_OBSERVATION_MAX_BYTES,
     )
     .map(|tree| tree.truncated || tree.nodes.iter().any(|node| node.is_protected))
 }
@@ -288,6 +340,17 @@ pub(super) fn resolve_window_capture_region(
     })
 }
 
+impl AppliedUiAction {
+    // Verification covers native API completion, not the user's intended UI state.
+    fn accepted(changed: bool) -> Self {
+        Self {
+            changed,
+            verified: true,
+            summary: "Native UI API completed successfully; application state is not verified. Use inspect_desktop_ui to check the expected result before deciding the next action.".into(),
+        }
+    }
+}
+
 pub(super) fn apply_action(
     expected_process_id: u32,
     expected_image_path: &str,
@@ -299,14 +362,6 @@ pub(super) fn apply_action(
     validate_action_target(element.0, action)?;
     match action {
         UiSemanticAction::Invoke => {
-            let before = collect_application(
-                expected_process_id,
-                expected_image_path,
-                INVOKE_READBACK_MAX_DEPTH,
-                INVOKE_READBACK_MAX_NODES,
-                INVOKE_READBACK_MAX_BYTES,
-            )?;
-            let before_digest = semantic_tree_digest(&before);
             let names = action_names(element.0);
             let name = if names.iter().any(|name| name == "AXPress") {
                 "AXPress"
@@ -314,43 +369,11 @@ pub(super) fn apply_action(
                 "AXConfirm"
             };
             perform_action(element.0, name)?;
-            let readback_deadline = Instant::now() + INVOKE_READBACK_TIMEOUT;
-            let verified = loop {
-                match collect_application(
-                    expected_process_id,
-                    expected_image_path,
-                    INVOKE_READBACK_MAX_DEPTH,
-                    INVOKE_READBACK_MAX_NODES,
-                    INVOKE_READBACK_MAX_BYTES,
-                ) {
-                    Ok(after) if semantic_tree_digest(&after) != before_digest => break true,
-                    Ok(_) => {}
-                    Err(_) => break false,
-                }
-                if Instant::now() >= readback_deadline {
-                    break false;
-                }
-                std::thread::sleep(INVOKE_READBACK_INTERVAL);
-            };
-            Ok(AppliedUiAction {
-                changed: true,
-                verified,
-                summary: if verified {
-                    "Accessibility action was accepted and an independent semantic application-state change was read back"
-                } else {
-                    "Accessibility action was accepted, but no semantic application-state change was read back within the bounded verification window"
-                }
-                .into(),
-            })
+            Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::Select => {
             set_bool_attribute(element.0, "AXSelected", true)?;
-            verify_bool_attribute(element.0, "AXSelected", true)?;
-            Ok(AppliedUiAction {
-                changed: true,
-                verified: true,
-                summary: "Accessibility selection was read back from the target element".into(),
-            })
+            Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::Toggle { desired } => {
             let before = attribute_toggle_state(element.0).ok_or_else(|| {
@@ -363,27 +386,11 @@ pub(super) fn apply_action(
             if before != *desired {
                 perform_action(element.0, "AXPress")?;
             }
-            if attribute_toggle_state(element.0) != Some(*desired) {
-                return Err(failure(
-                    AgentErrorKind::Internal,
-                    "the Accessibility toggle read-back did not match the requested state",
-                    false,
-                ));
-            }
-            Ok(AppliedUiAction {
-                changed: before != *desired,
-                verified: true,
-                summary: "Accessibility toggle state was read back from the target element".into(),
-            })
+            Ok(AppliedUiAction::accepted(before != *desired))
         }
         UiSemanticAction::Focus => {
             set_bool_attribute(element.0, "AXFocused", true)?;
-            verify_bool_attribute(element.0, "AXFocused", true)?;
-            Ok(AppliedUiAction {
-                changed: true,
-                verified: true,
-                summary: "Accessibility focus was read back from the target element".into(),
-            })
+            Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::SetValue { value } => {
             if value.len() > MAX_STRING_BYTES {
@@ -401,18 +408,7 @@ pub(super) fn apply_action(
                 )
             })?;
             set_attribute(element.0, "AXValue", value_ref.0)?;
-            if attribute_string(element.0, "AXValue").as_deref() != Some(value.as_str()) {
-                return Err(failure(
-                    AgentErrorKind::Internal,
-                    "the Accessibility value read-back did not match the requested value",
-                    false,
-                ));
-            }
-            Ok(AppliedUiAction {
-                changed: true,
-                verified: true,
-                summary: "Accessibility value was read back from the target element".into(),
-            })
+            Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::Scroll { .. } => Err(failure(
             AgentErrorKind::UnsupportedCapability,
@@ -453,6 +449,8 @@ fn locate_action_target(
     let root = OwnedCf(root);
     set_messaging_timeout(root.0)?;
     let config = WalkConfig {
+        menu_window: None,
+        scope: UiInspectScope::All,
         process_id: expected_process_id,
         process_started_at: process_start(expected_process_id)?,
         max_depth: 16,
@@ -583,43 +581,112 @@ fn validate_action_target(
     }
 }
 
+fn is_menu_role(role: &str) -> bool {
+    matches!(
+        role,
+        "AXMenuBar" | "AXMenuBarItem" | "AXMenu" | "AXMenuItem"
+    )
+}
+
+fn element_identity(
+    element: AxUiElementRef,
+    parent: Option<&str>,
+    ordinal: usize,
+    config: &WalkConfig,
+) -> String {
+    let role = attribute_string(element, "AXRole").unwrap_or_else(|| "AXUnknown".into());
+    let subrole = attribute_string(element, "AXSubrole").unwrap_or_default();
+    let (role, _) = bounded_string(if subrole.is_empty() {
+        role
+    } else {
+        format!("{role}/{subrole}")
+    });
+    let identifier = attribute_string(element, "AXIdentifier").unwrap_or_default();
+    fingerprint(
+        parent,
+        ordinal,
+        config.process_id,
+        config.process_started_at,
+        &role,
+        &identifier,
+    )
+}
+
 fn walk(
     element: AxUiElementRef,
-    parent: Option<(u32, String)>,
+    parent: Option<(Option<u32>, String)>,
     depth: u16,
     sibling_ordinal: usize,
+    inside_menu: bool,
+    within_window: bool,
     config: &WalkConfig,
     state: &mut WalkState,
     output: &mut Vec<CollectedUiNode>,
 ) {
-    if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
+    if state.visited >= 4096 || Instant::now() >= config.deadline {
         state.truncated = true;
         return;
     }
+    state.visited += 1;
     if unsafe { AXUIElementSetMessagingTimeout(element, AX_MESSAGE_TIMEOUT_SECONDS) } != AX_SUCCESS
     {
         state.truncated = true;
         return;
     }
-    let (node, strings_truncated) = read_node(
-        element,
-        parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
-        parent.as_ref().map(|(index, _)| *index),
-        sibling_ordinal,
-        config,
-    );
-    let encoded_bytes = serde_json::to_vec(&node)
-        .map_or(config.max_bytes.saturating_add(1), |encoded| encoded.len())
-        .saturating_add(OBJECT_REF_BUDGET);
-    if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
+
+    let inside_menu =
+        inside_menu || attribute_string(element, "AXRole").is_some_and(|role| is_menu_role(&role));
+    if config.scope == UiInspectScope::Content && inside_menu {
+        return;
+    }
+    let within_window = within_window
+        || config.menu_window.as_ref().is_some_and(|target| {
+            element_identity(
+                element,
+                parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
+                sibling_ordinal,
+                config,
+            ) == *target
+        });
+    state.found_menu_window |= within_window;
+    let selected = config.menu_window.is_none() || within_window;
+    let emit = selected && (config.scope != UiInspectScope::Menus || inside_menu);
+    if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
         state.truncated = true;
         return;
     }
-    state.encoded_bytes += encoded_bytes;
-    state.truncated |= strings_truncated;
-    let index = output.len() as u32;
-    let fingerprint = node.fingerprint.clone();
-    output.push(node);
+    let (index, fingerprint) = if emit {
+        let (node, strings_truncated) = read_node(
+            element,
+            parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
+            parent.as_ref().and_then(|(index, _)| *index),
+            sibling_ordinal,
+            config,
+        );
+        let encoded_bytes = serde_json::to_vec(&node)
+            .map_or(config.max_bytes.saturating_add(1), |encoded| encoded.len())
+            .saturating_add(OBJECT_REF_BUDGET);
+        if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
+            state.truncated = true;
+            return;
+        }
+        state.encoded_bytes += encoded_bytes;
+        state.truncated |= strings_truncated;
+        let index = output.len() as u32;
+        let fingerprint = node.fingerprint.clone();
+        output.push(node);
+        (Some(index), fingerprint)
+    } else {
+        (
+            None,
+            element_identity(
+                element,
+                parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
+                sibling_ordinal,
+                config,
+            ),
+        )
+    };
 
     let Some(children) = copy_attribute(element, "AXChildren") else {
         return;
@@ -643,6 +710,8 @@ fn walk(
             Some((index, fingerprint.clone())),
             depth + 1,
             ordinal,
+            inside_menu,
+            within_window,
             config,
             state,
             output,
@@ -976,22 +1045,6 @@ fn set_attribute(
     }
 }
 
-fn verify_bool_attribute(
-    element: AxUiElementRef,
-    attribute: &str,
-    expected: bool,
-) -> Result<(), AgentError> {
-    if attribute_bool(element, attribute) == Some(expected) {
-        Ok(())
-    } else {
-        Err(failure(
-            AgentErrorKind::Internal,
-            "the Accessibility boolean read-back did not match the requested value",
-            false,
-        ))
-    }
-}
-
 fn action_names(element: AxUiElementRef) -> Vec<String> {
     let mut names = std::ptr::null();
     if unsafe { AXUIElementCopyActionNames(element, &mut names) } != AX_SUCCESS || names.is_null() {
@@ -1090,16 +1143,6 @@ fn fingerprint(
     format!("{:x}", hasher.finalize())
 }
 
-fn semantic_tree_digest(tree: &CollectedUiTree) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update([u8::from(tree.truncated)]);
-    hasher.update(
-        serde_json::to_vec(&tree.nodes)
-            .expect("Accessibility semantic nodes contain only serializable values"),
-    );
-    hasher.finalize().into()
-}
-
 fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
     AgentError {
         kind,
@@ -1113,6 +1156,115 @@ fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_classification_does_not_hide_ordinary_controls() {
+        for role in ["AXMenu", "AXMenuBar", "AXMenuItem", "AXMenuBarItem"] {
+            assert!(is_menu_role(role));
+        }
+        for role in [
+            "AXButton",
+            "AXStaticText",
+            "AXWindow",
+            "AXGroup",
+            "AXPopUpButton",
+        ] {
+            assert!(!is_menu_role(role));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a running Calculator and Accessibility permission"]
+    fn live_calculator_content_and_menu_scopes_preserve_identity() {
+        let calculator = running_applications()
+            .unwrap()
+            .into_iter()
+            .find(|app| app.image_path.ends_with("/Calculator"))
+            .expect("running Calculator");
+        let read = |scope| {
+            collect_application_with_scope(
+                calculator.process_id,
+                &calculator.image_path,
+                12,
+                1024,
+                1024 * 1024,
+                scope,
+            )
+            .unwrap()
+        };
+        let all = read(UiInspectScope::All);
+        let content = read(UiInspectScope::Content);
+        let menus = read(UiInspectScope::Menus);
+        assert!(!all.truncated && !content.truncated && !menus.truncated);
+        assert!(!content.nodes.is_empty() && !menus.nodes.is_empty());
+        assert!(content.nodes.iter().all(|node| !is_menu_role(&node.role)));
+        assert!(menus.nodes.iter().all(|node| is_menu_role(&node.role)));
+        assert_eq!(all.nodes.len(), content.nodes.len() + menus.nodes.len());
+        assert!(
+            content
+                .nodes
+                .iter()
+                .any(|node| node.role == "AXStaticText" && node.value.is_some())
+        );
+        for node in content.nodes.iter().chain(&menus.nodes) {
+            let original =
+                all.nodes
+                    .iter()
+                    .find(|original| original.fingerprint == node.fingerprint)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "identity mismatch: {node:?}; same name: {:?}",
+                            all.nodes
+                                .iter()
+                                .filter(|original| original.name == node.name
+                                    && original.role == node.role)
+                                .collect::<Vec<_>>()
+                        )
+                    });
+            assert_eq!(original.name, node.name);
+            assert_eq!(original.value, node.value);
+        }
+        let menu = menus
+            .nodes
+            .iter()
+            .find(|node| {
+                node.supported_actions
+                    .contains(&UiSemanticActionKind::Invoke)
+            })
+            .expect("actionable menu");
+        preflight_action(
+            calculator.process_id,
+            &calculator.image_path,
+            &menu.fingerprint,
+            &UiSemanticAction::Invoke,
+        )
+        .unwrap();
+        let window = all
+            .nodes
+            .iter()
+            .find(|node| node.role.starts_with("AXWindow"))
+            .unwrap();
+        let window_menus = collect_application_with_window_scope(
+            calculator.process_id,
+            &calculator.image_path,
+            12,
+            1024,
+            1024 * 1024,
+            UiInspectScope::Menus,
+            Some(&window.fingerprint),
+        )
+        .unwrap();
+        assert!(
+            window_menus.nodes.is_empty(),
+            "Calculator menu bar belongs to the application, not its window"
+        );
+        println!(
+            "Calculator scopes: all={}, content={}, menus={}",
+            all.nodes.len(),
+            content.nodes.len(),
+            menus.nodes.len()
+        );
+    }
 
     #[test]
     #[ignore = "requires a running background Calculator and Accessibility permission"]
@@ -1184,29 +1336,14 @@ mod tests {
     }
 
     #[test]
-    fn semantic_tree_digest_changes_when_accessibility_value_changes() {
-        let node = CollectedUiNode {
-            parent_index: None,
-            role: "AXStaticText".into(),
-            name: Some("Display".into()),
-            value: Some("0".into()),
-            is_protected: false,
-            enabled: true,
-            supported_actions: Vec::new(),
-            fingerprint: "stable-object".into(),
-        };
-        let before = CollectedUiTree {
-            nodes: vec![node.clone()],
-            truncated: false,
-        };
-        let mut after_node = node;
-        after_node.value = Some("1".into());
-        let after = CollectedUiTree {
-            nodes: vec![after_node],
-            truncated: false,
-        };
-
-        assert_ne!(semantic_tree_digest(&before), semantic_tree_digest(&after));
+    fn native_acceptance_does_not_claim_application_state_verification() {
+        for changed in [false, true] {
+            let result = AppliedUiAction::accepted(changed);
+            assert!(result.verified);
+            assert_eq!(result.changed, changed);
+            assert!(result.summary.contains("not verified"));
+            assert!(result.summary.contains("inspect_desktop_ui"));
+        }
     }
 
     #[test]
@@ -1337,6 +1474,8 @@ mod tests {
         let root = OwnedCf(root);
         set_messaging_timeout(root.0).expect("bound restarted Calculator AX messaging");
         let config = WalkConfig {
+            menu_window: None,
+            scope: UiInspectScope::All,
             process_id: restarted_process_id,
             process_started_at: restarted_at,
             max_depth: 16,

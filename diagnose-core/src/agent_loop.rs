@@ -2917,7 +2917,7 @@ async fn run_inner(
                             };
                             match request {
                                 Ok(request) => {
-                                    if let Some(existing) = session
+                                    let existing = session
                                         .permission_requests
                                         .iter()
                                         .rev()
@@ -2926,8 +2926,19 @@ async fn run_inner(
                                                 existing, &request,
                                             )
                                         })
-                                        .cloned()
-                                    {
+                                        .cloned();
+                                    let existing = match existing {
+                                        Some(existing)
+                                            if existing.state == crate::dynamic_run::PermissionRequestState::Approved && deps
+                                                .session_seam
+                                                .permission_request_can_renew(session, &existing)
+                                                .await? =>
+                                        {
+                                            None
+                                        }
+                                        other => other,
+                                    };
+                                    if let Some(existing) = existing {
                                         let decision_state = match existing.state {
                                             crate::dynamic_run::PermissionRequestState::Pending => {
                                                 "pending"

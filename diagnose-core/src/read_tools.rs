@@ -192,7 +192,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_desktop_ui",
             Capability::DesktopUiInspect,
-            "Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. Application catalog nodes do not contain UI contents or authorize actions. Protected field values are never returned.",
+            "Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. scope=content (default) reads ordinary UI without menus; scope=menus returns only menu subtrees, useful after the window was already read; scope=all reads both. Choose an Application or null root for the application menu bar; a Window root searches only that window. Application catalog nodes do not contain UI contents or authorize actions. Protected field values are never returned.",
             json!({
                 "type": "object",
                 "properties": {
@@ -212,6 +212,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                             }
                         ]
                     },
+                    "scope": {"type": "string", "enum": ["content", "menus", "all"], "default": "content"},
                     "max_depth": {"type": "integer", "minimum": 1, "maximum": 12, "default": 6},
                     "max_nodes": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 300},
                     "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576, "default": 262144}
@@ -376,6 +377,8 @@ const fn default_true() -> bool {
 
 #[derive(Debug, Default, Deserialize)]
 struct DesktopUiToolArgs {
+    #[serde(default)]
+    scope: desk_agent_protocol::computer_use::UiInspectScope,
     #[serde(default)]
     root: Option<ObjectRef>,
     #[serde(default = "default_ui_depth")]
@@ -566,6 +569,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
         "inspect_desktop_ui" => {
             let args = parse_params::<DesktopUiToolArgs>(&call.arguments_json)?;
             ContextKind::DesktopUiInspect(UiInspectParams {
+                scope: args.scope,
                 root: args.root,
                 max_depth: args.max_depth,
                 max_nodes: args.max_nodes,
@@ -959,5 +963,47 @@ mod tests {
                 .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod menu_scope_tests {
+    use super::*;
+    use desk_agent_protocol::computer_use::UiInspectScope;
+
+    #[test]
+    fn ui_scope_defaults_to_content_and_supports_menus_without_other_ui() {
+        for (args, expected) in [
+            ("{}", UiInspectScope::Content),
+            (r#"{"scope":"menus"}"#, UiInspectScope::Menus),
+            (r#"{"scope":"all"}"#, UiInspectScope::All),
+        ] {
+            let call = ToolCall {
+                id: "scope-test".into(),
+                name: "inspect_desktop_ui".into(),
+                arguments_json: args.into(),
+            };
+            let (_, OperationInput::ReadContext(input)) = build_read_operation(&call).unwrap()
+            else {
+                panic!("read input")
+            };
+            let ContextKind::DesktopUiInspect(params) = input.kind else {
+                panic!("UI input")
+            };
+            assert_eq!(params.scope, expected);
+            let wire = serde_json::to_string(&params).unwrap();
+            assert_eq!(
+                serde_json::from_str::<UiInspectParams>(&wire)
+                    .unwrap()
+                    .scope,
+                expected
+            );
+        }
+        let call = ToolCall {
+            id: "bad".into(),
+            name: "inspect_desktop_ui".into(),
+            arguments_json: r#"{"scope":"unknown"}"#.into(),
+        };
+        assert!(build_read_operation(&call).is_err());
     }
 }

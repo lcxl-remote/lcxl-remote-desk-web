@@ -244,6 +244,7 @@ export function useDeviceAssistantObservation({
         if (root && (!Number.isFinite(Date.parse(root.expires_at)) || Date.parse(root.expires_at) <= Date.now())) return null;
         return invoke('desktop_ui_inspect', {
         root,
+        scope: 'content',
         max_depth: 6,
         max_nodes: 300,
         max_bytes: 262_144,

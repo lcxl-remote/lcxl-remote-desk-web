@@ -151,10 +151,35 @@ pub struct DesktopSessionInspectOutput {
     pub active_application: Option<ObjectRef>,
 }
 
+/// UI reading scope; menus are opt-in and can be requested independently.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UiInspectScope {
+    #[default]
+    Content,
+    Menus,
+    All,
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct UiInspectParams {
+    /// Select ordinary UI, menus only, or both.
+    #[serde(default)]
+    pub scope: UiInspectScope,
     pub root: Option<ObjectRef>,
     pub max_depth: u16,
     pub max_nodes: u32,

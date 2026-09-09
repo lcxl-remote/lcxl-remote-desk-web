@@ -1902,7 +1902,7 @@ impl WorkerSession {
                                                     ceiling,
                                                 )?;
                                                 // Human/browser input may arrive while the AX call is
-                                                // in flight. Never bless a read-back gathered after
+                                                // in flight. Retain the completion fence when
                                                 // the writer lease was preempted.
                                                 broker.require_writer_lease(&generation_for_call)?;
                                                 Ok(result)
@@ -1925,7 +1925,7 @@ impl WorkerSession {
                                                         summary: result.summary,
                                                     }],
                                                     Some(if result.verified {
-                                                        "semantic UI action completed with Accessibility read-back"
+                                                        "native UI API completed successfully; inspect_desktop_ui must verify the expected application state"
                                                             .to_string()
                                                     } else {
                                                         "semantic UI action may have changed the application without a generic verifier"

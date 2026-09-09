@@ -472,19 +472,8 @@ pub fn build_permission_grants(
         let expires_at_unix_ms = original_read.map_or(expires_at_unix_ms, |(_, expiry)| {
             expires_at_unix_ms.min(expiry)
         });
-        let grant_id = format!(
-            "grant-{:x}",
-            Sha256::digest(
-                format!(
-                    "{}:{}:{}:{}",
-                    session.conversation_id,
-                    request.request_id,
-                    requested.item_id,
-                    request.input_revision
-                )
-                .as_bytes()
-            )
-        );
+        let grant_id =
+            permission_item_grant_id(&session.conversation_id, request, &requested.item_id);
         let export_destinations = if exact_external_query {
             requested.export_destinations.iter()
             .filter(|destination| matches!(destination, DestinationIdentity::WebResearch { connector_id } if crate::web_research::search_connector_metadata(connector_id).is_some()))
@@ -614,3 +603,45 @@ fn internal(message: impl Into<String>) -> AgentError {
 
 #[cfg(test)]
 mod tests;
+
+/// Stable identity shared by grant issuance and renewal checks.
+fn permission_item_grant_id(
+    run_id: &str,
+    request: &crate::dynamic_run::PermissionRequest,
+    item_id: &str,
+) -> String {
+    format!(
+        "grant-{:x}",
+        Sha256::digest(
+            format!(
+                "{}:{}:{}:{}",
+                run_id, request.request_id, item_id, request.input_revision
+            )
+            .as_bytes()
+        )
+    )
+}
+
+/// Renewal is a new owner decision, never restoration of previous authority.
+pub fn permission_request_can_renew(
+    session: &PersistedAgentSession,
+    request: &crate::dynamic_run::PermissionRequest,
+    grants: &[desk_agent_protocol::capability_grant::CapabilityGrant],
+    now: u64,
+) -> bool {
+    request.state == crate::dynamic_run::PermissionRequestState::Approved
+        && request.input_revision == session.input_revision
+        && !request.items.is_empty()
+        && request.items.iter().all(|item| {
+            let id = permission_item_grant_id(&session.conversation_id, request, &item.item_id);
+            grants.iter().any(|grant| {
+                grant.grant_id == id
+                    && grant.run_id == session.conversation_id
+                    && grant.actor_id == session.actor_id
+                    && grant.target_device_id == session.device_id
+                    && grant.input_revision == session.input_revision
+                    && grant.revoked_at_unix_ms.is_none()
+                    && (grant.remaining_uses == 0 || grant.expires_at_unix_ms <= now)
+            })
+        })
+}

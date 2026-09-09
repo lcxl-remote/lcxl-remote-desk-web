@@ -855,6 +855,15 @@ pub trait SessionSeam {
         Ok(())
     }
 
+    /// Check current durable grant consumption; missing support fails closed.
+    async fn permission_request_can_renew(
+        &self,
+        _session: &PersistedAgentSession,
+        _request: &crate::dynamic_run::PermissionRequest,
+    ) -> Result<bool, AgentError> {
+        Ok(false)
+    }
+
     async fn save_permission_request(
         &self,
         session: &mut PersistedAgentSession,

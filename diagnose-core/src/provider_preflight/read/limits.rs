@@ -129,7 +129,7 @@ pub fn validate_output(
         return Err(unavailable());
     }
     let typed: OperationOutput =
-        serde_json::from_str(&output.content).map_err(|_| unavailable())?;
+        crate::ui_model_output::deserialize(&output.content).map_err(|_| unavailable())?;
     let OperationOutput::ReadContext(typed) = typed else {
         return Err(unavailable());
     };

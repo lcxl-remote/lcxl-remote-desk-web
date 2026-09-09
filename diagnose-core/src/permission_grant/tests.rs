@@ -445,3 +445,46 @@ fn readiness_browser_surface_can_back_only_browser_grants() {
         &surface,
     ));
 }
+
+#[test]
+fn renewal_requires_exhausted_or_expired_original_non_revoked_grants() {
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let (session, mut request, decisions) = decision_fixture();
+        let mut grants = compile(surface, &session, &request, &decisions, true).unwrap();
+        request.state = PermissionRequestState::Approved;
+        assert!(!permission_request_can_renew(
+            &session, &request, &grants, 2000
+        ));
+        grants[0].remaining_uses = 0;
+        assert!(permission_request_can_renew(
+            &session, &request, &grants, 2000
+        ));
+        grants[0].remaining_uses = 1;
+        assert!(permission_request_can_renew(
+            &session, &request, &grants, 61000
+        ));
+        grants[0].revoked_at_unix_ms = Some(3000);
+        assert!(!permission_request_can_renew(
+            &session, &request, &grants, 61000
+        ));
+        grants[0].revoked_at_unix_ms = None;
+        request.state = PermissionRequestState::Denied;
+        assert!(!permission_request_can_renew(
+            &session, &request, &grants, 61000
+        ));
+        request.state = PermissionRequestState::Approved;
+        assert!(!permission_request_can_renew(
+            &session,
+            &request,
+            &[],
+            61000
+        ));
+        grants[0].actor_id = "another-owner".into();
+        assert!(!permission_request_can_renew(
+            &session, &request, &grants, 61000
+        ));
+    }
+}

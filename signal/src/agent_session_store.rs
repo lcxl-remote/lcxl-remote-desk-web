@@ -1090,6 +1090,36 @@ async fn find_recovery_task(
 
 #[async_trait(?Send)]
 impl SessionSeam for SignalAgentSessionStore {
+    async fn permission_request_can_renew(
+        &self,
+        session: &PersistedAgentSession,
+        request: &desk_diagnose_core::dynamic_run::PermissionRequest,
+    ) -> Result<bool, AgentError> {
+        let grants =
+            crate::capability_grant_store::SignalCapabilityGrantStore::new(self.db.clone())
+                .list_for_subject(
+                    &session.conversation_id,
+                    &session.actor_id,
+                    &session.device_id,
+                )
+                .await
+                .map_err(|_| AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::Internal,
+                    message: "Could not read current permission grants".into(),
+                    retryable: true,
+                    safe_for_model: true,
+                    error_code: None,
+                })?;
+        Ok(
+            desk_diagnose_core::permission_grant::permission_request_can_renew(
+                session,
+                request,
+                &grants,
+                chrono::Utc::now().timestamp_millis().max(0) as u64,
+            ),
+        )
+    }
+
     async fn propose_schedule(
         &self,
         session: &mut PersistedAgentSession,

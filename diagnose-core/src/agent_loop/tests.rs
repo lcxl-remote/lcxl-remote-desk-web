@@ -122,6 +122,7 @@ fn selected_object_lineage_keeps_explicit_sources_without_later_context_expansio
 /// An in-memory session store: one session, claimed via the pure transition.
 #[derive(Default)]
 struct MemSession {
+    allow_permission_renewal: bool,
     inner: RefCell<Option<PersistedAgentSession>>,
     latest_revision: Rc<RefCell<Option<u64>>>,
     superseded_settles: Rc<RefCell<u32>>,
@@ -132,6 +133,14 @@ struct MemSession {
 }
 #[async_trait(?Send)]
 impl SessionSeam for MemSession {
+    async fn permission_request_can_renew(
+        &self,
+        _session: &PersistedAgentSession,
+        _request: &crate::dynamic_run::PermissionRequest,
+    ) -> Result<bool, AgentError> {
+        Ok(self.allow_permission_renewal)
+    }
+
     async fn propose_directory(
         &self,
         session: &mut PersistedAgentSession,
@@ -1952,6 +1961,109 @@ async fn permission_planning_reuses_settled_equivalent_request_without_new_pendi
             && message.text.contains("existing_permission_request")
             && message.text.contains("denied")
     }));
+}
+
+#[tokio::test]
+async fn exhausted_permission_renewal_creates_a_new_owner_decision_without_dispatch() {
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let prior_call = ToolCall {
+        id: "prior-call".into(),
+        name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+        arguments_json: r#"{"items":[{"item_id":"inspect-a","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"first wording"}]}"#.into(),
+    };
+    let mut prior = crate::permission_tools::build_permission_request(
+        &prior_call,
+        &providers,
+        "permission-prior".into(),
+        1,
+        "2026-06-20T00:00:00Z".into(),
+    )
+    .unwrap();
+    prior.state = crate::dynamic_run::PermissionRequestState::Approved;
+
+    let sess = MemSession {
+        allow_permission_renewal: true,
+        ..Default::default()
+    };
+    let mut initial = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    initial.latest_input_seq = 1;
+    initial.input_revision = 1;
+    initial.add_permission_request(prior).unwrap();
+    *sess.inner.borrow_mut() = Some(initial);
+
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args(
+                    "duplicate-permission-call",
+                    crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                    r#"{"items":[{"item_id":"inspect-b","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"reworded duplicate"}]}"#,
+                ),
+                answer("I will adapt to the recorded denial."),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "must not run".into(),
+    };
+    let mut registry = vec![
+        providers
+            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .unwrap()
+            .registered_tool(),
+    ];
+    registry.extend(crate::permission_tools::permission_planning_tool_registry());
+    let inventory = vec![crate::capability_availability::CapabilityAvailability {
+        provider_id: "desktop.session".into(),
+        capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
+        tool_name: "inspect_desktop_session".into(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.provider_registry = Some(&providers);
+    loop_deps.capability_inventory = Some(&inventory);
+
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "continue after the decision"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(outcome, LoopOutcome::PermissionRequested { .. }));
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.permission_requests.len(), 2);
+    assert_eq!(
+        stored.permission_requests[0].state,
+        crate::dynamic_run::PermissionRequestState::Approved
+    );
+    assert_eq!(
+        stored.permission_requests[1].state,
+        crate::dynamic_run::PermissionRequestState::Pending
+    );
+    assert_ne!(
+        stored.permission_requests[0].request_id,
+        stored.permission_requests[1].request_id
+    );
+    assert!(tools.calls.borrow().is_empty());
 }
 
 #[tokio::test]

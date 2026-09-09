@@ -2542,8 +2542,17 @@ impl ComputerUseBroker {
             }
         }
 
+        #[cfg(not(target_os = "macos"))]
+        let selected_window: Option<String> = None;
         let (collected, adapter_kind, adapter_version, adapter_name) =
-            collect_foreground_desktop_ui(application.process_id, &application.image_path, params)?;
+            collect_foreground_desktop_ui(
+                application.process_id,
+                &application.image_path,
+                params,
+                selected_window.as_deref().filter(|_| {
+                    params.scope == desk_agent_protocol::computer_use::UiInspectScope::Menus
+                }),
+            )?;
 
         #[cfg(target_os = "macos")]
         if super::macos_accessibility_observer::application_by_pid(application.process_id)?
@@ -2558,7 +2567,12 @@ impl ComputerUseBroker {
         }
         #[cfg(target_os = "macos")]
         let collected = match selected_window {
-            Some(fingerprint) => select_window_tree(collected, &fingerprint)?,
+            Some(fingerprint)
+                if params.scope != desk_agent_protocol::computer_use::UiInspectScope::Menus =>
+            {
+                select_window_tree(collected, &fingerprint)?
+            }
+            Some(_) => collected,
             None => collected,
         };
 
@@ -2894,13 +2908,6 @@ impl ComputerUseBroker {
         resolved: ResolvedObject,
     ) -> Result<ObjectRef, AgentError> {
         let token = uuid::Uuid::new_v4().to_string();
-        let expires_at = Utc::now() + Duration::seconds(OBJECT_REF_TTL_SECS);
-        let object_ref = ObjectRef {
-            token: token.clone(),
-            snapshot_id: snapshot_id.to_string(),
-            object_kind,
-            expires_at: expires_at.to_rfc3339(),
-        };
         let mut objects = self.objects.lock().map_err(|_| {
             error(
                 AgentErrorKind::Internal,
@@ -2909,6 +2916,19 @@ impl ComputerUseBroker {
             )
         })?;
         objects.retain(|_, object| object.expires_at > Utc::now());
+        // References from one snapshot share the earliest expiry; never extend a snapshot.
+        let expires_at = objects
+            .values()
+            .find(|object| object.snapshot_id == snapshot_id)
+            .map(|object| object.expires_at)
+            .unwrap_or_else(|| Utc::now() + Duration::seconds(OBJECT_REF_TTL_SECS));
+        let object_ref = ObjectRef {
+            token: token.clone(),
+            snapshot_id: snapshot_id.to_string(),
+            object_kind,
+            expires_at: expires_at.to_rfc3339(),
+        };
+
         if objects.len() >= MAX_OBJECT_REFS {
             return Err(error(
                 AgentErrorKind::OutputLimitExceeded,
@@ -3359,6 +3379,7 @@ fn collect_foreground_desktop_ui(
     process_id: u32,
     image_path: &str,
     params: &UiInspectParams,
+    menu_window: Option<&str>,
 ) -> Result<
     (
         CollectedUiTree,
@@ -3370,13 +3391,15 @@ fn collect_foreground_desktop_ui(
 > {
     #[cfg(windows)]
     {
+        let _ = menu_window;
         Ok((
-            super::windows_uia_observer::collect_foreground(
+            super::windows_uia_observer::collect_foreground_with_scope(
                 process_id,
                 image_path,
                 params.max_depth,
                 params.max_nodes,
                 params.max_bytes,
+                params.scope,
             )?,
             ComputerUseAdapterKind::WindowsUia,
             "a4-windows-uia-read/v1",
@@ -3387,12 +3410,14 @@ fn collect_foreground_desktop_ui(
     #[cfg(target_os = "macos")]
     {
         Ok((
-            super::macos_accessibility_observer::collect_application(
+            super::macos_accessibility_observer::collect_application_with_window_scope(
                 process_id,
                 image_path,
                 params.max_depth,
                 params.max_nodes,
                 params.max_bytes,
+                params.scope,
+                menu_window,
             )?,
             ComputerUseAdapterKind::MacosAccessibility,
             "macos-accessibility-read/v1",
@@ -3402,7 +3427,7 @@ fn collect_foreground_desktop_ui(
 
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        let _ = (process_id, image_path, params);
+        let _ = (process_id, image_path, params, menu_window);
         Err(error(
             AgentErrorKind::UnsupportedPlatform,
             "semantic desktop UI inspection is unavailable on this platform",
@@ -3606,6 +3631,7 @@ mod tests {
         let error = broker
             .inspect_desktop_ui(
                 &UiInspectParams {
+                    scope: Default::default(),
                     root: None,
                     max_depth: MAX_UI_INSPECT_DEPTH + 1,
                     max_nodes: 1,
@@ -3624,11 +3650,13 @@ mod tests {
             1,
             "/usr/bin/example",
             &UiInspectParams {
+                scope: Default::default(),
                 root: None,
                 max_depth: 1,
                 max_nodes: 1,
                 max_bytes: 1,
             },
+            None,
         )
         .err()
         .expect("unsupported platforms must not expose a desktop UI adapter");
@@ -3646,6 +3674,35 @@ mod tests {
             "/Applications/Calculator.app",
             "/applications/calculator.app"
         ));
+    }
+
+    #[test]
+    fn snapshot_references_share_expiry_without_extending_it() {
+        let broker = ComputerUseBroker::new();
+        let snapshot = broker.next_snapshot_id();
+        let first = broker
+            .issue_ref(
+                &snapshot,
+                "test-incarnation",
+                ObjectKind::DesktopSession,
+                ResolvedObject::DesktopSession { session_id: 1 },
+            )
+            .unwrap();
+        let second = broker
+            .issue_ref(
+                &snapshot,
+                "test-incarnation",
+                ObjectKind::DesktopSession,
+                ResolvedObject::DesktopSession { session_id: 1 },
+            )
+            .unwrap();
+        assert_eq!(first.expires_at, second.expires_at);
+        assert_ne!(first.token, second.token);
+        assert!(broker.resolve_ref(&first).is_ok());
+        assert!(broker.resolve_ref(&second).is_ok());
+        let mut tampered = second;
+        tampered.expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        assert!(broker.resolve_ref(&tampered).is_err());
     }
 
     #[test]
@@ -4520,6 +4577,7 @@ mod tests {
             )
             .unwrap();
         let mut params = UiInspectParams {
+            scope: Default::default(),
             root: Some(session.session),
             max_depth: 16,
             max_nodes: 300,
@@ -4615,6 +4673,7 @@ mod tests {
         let output = broker
             .inspect_desktop_ui(
                 &UiInspectParams {
+                    scope: Default::default(),
                     root: Some(application),
                     max_depth: 8,
                     max_nodes: 256,
