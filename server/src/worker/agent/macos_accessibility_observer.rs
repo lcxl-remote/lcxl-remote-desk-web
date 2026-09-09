@@ -26,6 +26,10 @@ const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 const AX_SUCCESS: i32 = 0;
 const HARD_DEADLINE: Duration = Duration::from_secs(2);
 const AX_MESSAGE_TIMEOUT_SECONDS: f32 = 0.1;
+// Traversal uses short per-node reads; actions may open a popover or run an
+// application handler. Reusing the traversal timeout can report an unknown
+// outcome after a successful click. Never retry a mutation on timeout.
+const AX_ACTION_TIMEOUT_SECONDS: f32 = 3.0;
 const MAX_STRING_BYTES: usize = 16 * 1024;
 const OBJECT_REF_BUDGET: usize = 320;
 const CF_NUMBER_SINT64_TYPE: i32 = 4;
@@ -1055,8 +1059,35 @@ fn perform_action(element: AxUiElementRef, action: &str) -> Result<(), AgentErro
             false,
         )
     })?;
-    let status = unsafe { AXUIElementPerformAction(element, action.0) };
-    accessibility_mutation_status(status, "AXUIElementPerformAction")
+    mutation_with_timeout(element, "AXUIElementPerformAction", || unsafe {
+        AXUIElementPerformAction(element, action.0)
+    })
+}
+
+fn mutation_with_timeout(
+    element: AxUiElementRef,
+    operation: &str,
+    mutate: impl FnOnce() -> i32,
+) -> Result<(), AgentError> {
+    if unsafe { AXUIElementSetMessagingTimeout(element, AX_ACTION_TIMEOUT_SECONDS) } != AX_SUCCESS {
+        return Err(failure(
+            AgentErrorKind::SessionUnavailable,
+            "cannot configure Accessibility action timeout; action was not invoked",
+            false,
+        ));
+    }
+    let started = Instant::now();
+    let status = mutate();
+    let elapsed_ms = started.elapsed().as_millis();
+    log::info!(
+        "[accessibility-action] operation={operation} status={status} elapsed_ms={elapsed_ms} timeout_seconds={AX_ACTION_TIMEOUT_SECONDS}"
+    );
+    accessibility_mutation_status(
+        status,
+        &format!(
+            "{operation} (elapsed_ms={elapsed_ms}, timeout_seconds={AX_ACTION_TIMEOUT_SECONDS})"
+        ),
+    )
 }
 
 // A nonzero native return is not proof that a mutation had no effect.
@@ -1122,8 +1153,9 @@ fn set_attribute(
             false,
         )
     })?;
-    let status = unsafe { AXUIElementSetAttributeValue(element, attribute.0, value) };
-    accessibility_mutation_status(status, "AXUIElementSetAttributeValue")
+    mutation_with_timeout(element, "AXUIElementSetAttributeValue", || unsafe {
+        AXUIElementSetAttributeValue(element, attribute.0, value)
+    })
 }
 
 fn action_names(element: AxUiElementRef) -> Vec<String> {

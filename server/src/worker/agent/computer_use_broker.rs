@@ -2841,7 +2841,10 @@ impl ComputerUseBroker {
                 // both relocate the fingerprint and validate the supported action.
                 // Writer leases are still preempted above on every human input.
                 #[cfg(target_os = "macos")]
-                if matches!(&object.resolved, ResolvedObject::UiElement { .. }) {
+                if matches!(
+                    &object.resolved,
+                    ResolvedObject::UiElement { .. } | ResolvedObject::Window { .. }
+                ) {
                     return true;
                 }
                 // macOS application/session selectors are read identities, not
@@ -4038,6 +4041,34 @@ mod tests {
             )
             .unwrap();
         broker.reset_worker_incarnation();
+        assert!(broker.resolve_ref(&reference).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn human_input_preserves_window_identity_until_expiry() {
+        let broker = ComputerUseBroker::new();
+        let reference = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "session",
+                ObjectKind::Window,
+                ResolvedObject::Window {
+                    process_id: 1,
+                    image_path: "app".into(),
+                    fingerprint: "window".into(),
+                },
+            )
+            .unwrap();
+        broker.note_external_input();
+        assert!(broker.resolve_ref(&reference).is_ok());
+        broker
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(&reference.token)
+            .unwrap()
+            .expires_at = Utc::now() - Duration::seconds(1);
         assert!(broker.resolve_ref(&reference).is_err());
     }
 

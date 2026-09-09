@@ -1614,6 +1614,18 @@ async fn run_inner(
                 !provider_tool || loaded.contains(tool.name()) || pins.contains(tool.name())
             });
         }
+        // Approval cannot override execution-state or scope restrictions. Keep
+        // recovery tools available if none of the approved tools can run.
+        let permission_continuation_blocked = permission_continuation_pending
+            && !deps.permission_continuation_exact_tools.is_empty()
+            && !exposed.iter().any(|tool| {
+                deps.permission_continuation_exact_tools
+                    .iter()
+                    .any(|name| name == tool.name())
+            });
+        if permission_continuation_blocked {
+            permission_continuation_pending = false;
+        }
         if permission_continuation_pending && !deps.permission_continuation_exact_tools.is_empty() {
             exposed.retain(|tool| {
                 deps.permission_continuation_exact_tools
@@ -1862,12 +1874,17 @@ async fn run_inner(
                 latest_user.message_id = projection_id;
                 messages.push(latest_user);
             }
-            if permission_continuation_pending {
+            if permission_continuation_pending || permission_continuation_blocked {
                 let marker_id = format!(
                     "runtime-permission-continuation-{turn_id}-{}",
                     session.input_revision
                 );
                 let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. Re-read CURRENT AUTHORIZED GRANTS. If a required tool has state=active with approved_exact_input, call that tool now with exactly approved_exact_input and no changed fields. Do not inspect again, create another preview, or request the same permission before that call, because doing so can replace the approved ephemeral object reference. If no matching active grant exists, adapt to the recorded decision or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
+                let marker_text = if permission_continuation_blocked {
+                    "PERMISSION CONTINUATION BLOCKED (server authoritative): the approved tool is not currently executable under the runtime state/scope. Approval does not override this restriction. Do not retry the mutation or request the same permission. Available read/discovery tools remain usable. If an earlier action has an unknown outcome, inspect the UI without repeating it and ask the owner to review and close that unresolved action record before further mutations. Explain the blocker instead of claiming the approved action ran."
+                } else {
+                    marker_text
+                };
                 let parent = session
                     .conversation
                     .iter()
@@ -2426,10 +2443,21 @@ async fn run_inner(
                             turn.provider_meta.data_envelope.as_ref(),
                             mint(),
                             &call.id,
-                            format!(
-                                "tool `{}` is not available in the current scope. Discover its capability, load its details, and request permission by tool_name if available. Do not infer that the device lacks this capability.",
-                                call.name
-                            ),
+                            if !session.execution_state.allows_new_mutation()
+                                && deps.registry.iter().any(|tool| {
+                                    tool.name() == call.name && tool.effect == ToolEffect::Mutating
+                                })
+                            {
+                                format!(
+                                    "tool `{}` cannot execute while an earlier action has an unresolved outcome. Permission approval does not remove this restriction. Use read-only inspection and ask the owner to review and close the unresolved action record; do not reload, request permission again, or repeat the action.",
+                                    call.name
+                                )
+                            } else {
+                                format!(
+                                    "tool `{}` is not available in the current scope. Discover its capability, load its details, and request permission by tool_name if available. Do not infer that the device lacks this capability.",
+                                    call.name
+                                )
+                            },
                             "unavailable_tool_call",
                         )?;
                         continue;
@@ -2943,6 +2971,15 @@ async fn run_inner(
                                     created_at.clone(),
                                 )
                             }).and_then(|mut request| {
+                                if !session.execution_state.allows_new_mutation() && request.items.iter().any(|item| deps.provider_registry.and_then(|registry| registry.capability_for_tool(&item.tool_name)).is_some_and(|capability| capability.registered_tool().effect == ToolEffect::Mutating)) {
+                                    return Err(AgentError {
+                                        kind: AgentErrorKind::InvalidInput,
+                                        message: "Cannot request a new mutation while an earlier action has an unresolved outcome. Read-only inspection remains available. Inspect the current UI, then ask the owner to review and close the unresolved action record before requesting another mutation. Approval would not unblock execution; do not repeat this request.".into(),
+                                        retryable: false,
+                                        safe_for_model: true,
+                                        error_code: None,
+                                    });
+                                }
                                 let loaded = session
                                     .capability_disclosure
                                     .loaded_tool_names

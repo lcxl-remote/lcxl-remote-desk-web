@@ -102,6 +102,10 @@ impl SessionSeam for MemSession {
     }
 }
 
+// Security acceptance tests need room for the full system contract, tool
+// schemas, and multi-step history. Tight budgets are tested in model_context.
+const ACCEPTANCE_MODEL_CONTEXT_BYTES: usize = crate::MIN_MODEL_CONTEXT_BYTES * 16;
+
 /// A model captured by an injection: it returns the queued turns in order while
 /// recording each request, so a test can inspect what the loop advertised to it.
 struct CapturedModel {
@@ -117,7 +121,7 @@ impl ModelSeam for CapturedModel {
         crate::model_context::PinnedContextPolicy::window(
             SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test"),
             1,
-            crate::MIN_MODEL_CONTEXT_BYTES,
+            ACCEPTANCE_MODEL_CONTEXT_BYTES,
         )
         .map_err(|error| AgentError {
             kind: desk_agent_protocol::AgentErrorKind::Internal,

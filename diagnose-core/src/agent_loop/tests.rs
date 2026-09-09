@@ -8030,3 +8030,155 @@ async fn reasoning_display_is_saved_for_tool_turns_and_final_answers() {
     );
     assert!(!sink.0.borrow().contains("Inspect the device first."));
 }
+
+#[tokio::test]
+async fn blocked_exact_permission_resume_restores_reads_without_forcing_mutation() {
+    use crate::session::{AgentSessionSurface, TriggerOrigin};
+    let sess = MemSession::default();
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use("read", "inspect"),
+                answer("Please review the unresolved action."),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let scripted = tools(vec![]);
+    let registry = vec![
+        mutating_tool("exact_action", Capability::ShellExecConfirmed),
+        read_tool("inspect", Capability::SystemInfo),
+    ];
+    let exact_tools = vec!["exact_action".to_string()];
+    let clock = || "2026-09-09T12:00:00Z".to_string();
+    let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
+    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    seeded.conversation.push(ChatMessage::text(
+        "owner",
+        ChatRole::User,
+        "create an event",
+    ));
+    seeded.execution_state = ExecutionState::OutcomeUnknown {
+        action: crate::session::ActionIdentity::agent_exec(57, "request", "execution"),
+        placeholder_message_id: "unknown".into(),
+        since: "2026-09-09T11:59:00Z".into(),
+    };
+    *sess.inner.borrow_mut() = Some(seeded);
+    let mut claim = exec_claim();
+    claim.trigger_origin = TriggerOrigin::PermissionDecision;
+    let mut deps = exec_deps(&sess, &model, &scripted, &registry, &clock);
+    deps.permission_continuation_exact_tools = &exact_tools;
+    let outcome = resume_agent_turn_after_permission(
+        &deps,
+        claim,
+        ChatMessage::text(
+            "decision",
+            ChatRole::User,
+            "trusted permission decision bridge",
+        ),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, LoopOutcome::Answered(_)));
+    assert!(scripted.exec_calls.borrow().is_empty());
+    assert_eq!(*scripted.reads.borrow(), vec!["inspect"]);
+    let captured = requests.borrow();
+    assert!(captured[0].tools.iter().any(|tool| tool.name == "inspect"));
+    assert!(
+        !captured[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "exact_action")
+    );
+}
+
+#[tokio::test]
+async fn unknown_outcome_rejects_mutation_permission_before_showing_approval() {
+    let sess = MemSession::default();
+    let mut initial = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    initial.latest_input_seq = 1;
+    initial.input_revision = 1;
+    initial.execution_state = ExecutionState::OutcomeUnknown {
+        action: crate::session::ActionIdentity::agent_exec(57, "request", "execution"),
+        placeholder_message_id: "unknown".into(),
+        since: "2026-06-20T00:00:00Z".into(),
+    };
+    *sess.inner.borrow_mut() = Some(initial);
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [tool_use_args(
+                "permission-call",
+                crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                r#"{"items":[{"item_id":"command","tool_name":"execute_confirmed_ui_action","exact_input":{"target":{"token":"original","snapshot_id":"snapshot","object_kind":"ui_element","expires_at":"2026-06-20T00:05:00Z"},"action":{"kind":"invoke"}},"suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Create event"}]}"#,
+            ), answer("Please review the unresolved action.")]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "must not run".into(),
+    };
+    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let mut registry = vec![
+        providers
+            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .unwrap()
+            .registered_tool(),
+    ];
+    registry.extend(crate::permission_tools::permission_planning_tool_registry());
+    let inventory = vec![crate::capability_availability::CapabilityAvailability {
+        provider_id: "desktop.session".into(),
+        capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
+        tool_name: "inspect_desktop_session".into(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
+    loop_deps.provider_registry = Some(&providers);
+    loop_deps.capability_inventory = Some(&inventory);
+
+    let outcome = run_agent_turn(
+        &loop_deps,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "inspect it"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(outcome, LoopOutcome::Answered(_)));
+    assert!(tools.calls.borrow().is_empty());
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert!(stored.permission_requests.is_empty());
+    assert!(
+        stored
+            .conversation
+            .iter()
+            .any(|m| m.text.contains("Cannot request a new mutation")),
+        "{:?}",
+        stored
+            .conversation
+            .iter()
+            .filter(|m| m.role == ChatRole::Tool)
+            .map(|m| &m.text)
+            .collect::<Vec<_>>()
+    );
+}

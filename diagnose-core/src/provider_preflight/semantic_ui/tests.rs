@@ -126,3 +126,20 @@ fn original_ui_reference_deadline_and_policy_are_checked_without_renewal() {
         );
     }
 }
+
+#[test]
+fn malformed_action_returns_the_required_shape_and_can_be_corrected() {
+    let mut input = call(UiSemanticAction::Invoke);
+    let mut value: serde_json::Value = serde_json::from_str(&input.arguments_json).unwrap();
+    value["action"] = json!({"kind":"set_value","value":"meeting"});
+    input.arguments_json = value.to_string();
+    let err = ui_action_from_call(&input).unwrap_err();
+    assert_eq!(err.kind, AgentErrorKind::InvalidInput);
+    assert!(err.message.contains(r#""params":{"value":"text"}"#));
+    assert!(err.message.contains("does not mean the target expired"));
+    value["action"] = json!({"kind":"set_value","params":{"value":"meeting"}});
+    input.arguments_json = value.to_string();
+    assert!(
+        matches!(ui_action_from_call(&input).unwrap().1, UiSemanticAction::SetValue { value } if value == "meeting")
+    );
+}

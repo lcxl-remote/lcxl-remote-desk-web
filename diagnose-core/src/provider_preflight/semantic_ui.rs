@@ -24,7 +24,14 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
     {
         return Err(unavailable());
     }
-    let input: Input = serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+    let input: Input = serde_json::from_str(&call.arguments_json).map_err(|_| {
+        error(
+            AgentErrorKind::InvalidInput,
+            r#"Invalid semantic UI input format. Required shape: {"target":{"token":"<copy from observation>","snapshot_id":"<copy from observation>","object_kind":"ui_element","expires_at":"<copy from observation>"},"action":{"kind":"set_value","params":{"value":"text"}}}. Actions: invoke/select/focus use {"kind":"invoke"} (replace kind); toggle uses {"kind":"toggle","params":{"desired":true}}. Put value/desired inside action.params, not directly inside action. Copy the complete original target unchanged. Fix the input format; this error does not mean the target expired and does not require another UI read. No permission request or action was executed."#,
+            false,
+            true,
+        )
+    })?;
     if input.target.object_kind != ObjectKind::UiElement
         || input.target.token.trim().is_empty()
         || input.target.snapshot_id.trim().is_empty()
