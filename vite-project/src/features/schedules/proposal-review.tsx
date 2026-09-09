@@ -45,6 +45,7 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
             if (current === epoch.current) setError(reason instanceof ScheduleRequestError && reason.reason === 'server' ? reason.message : t('schedules.requestFailed'));
         } finally { if (current === epoch.current) { pending.current = false; setBusy(false); } }
     };
+    if (approvalCard && task && !['draft', 'pending_review'].includes(task.status)) return null;
     return <div className="space-y-3">
         {(!approvalCard || !!error) && <Button variant="outline" disabled={!connected || busy} onClick={() => setRefresh(value => value + 1)}>{t('schedules.refresh')}</Button>}
         {!connected && <p role="status" className="text-xs text-muted-foreground">{t('schedules.connecting')}</p>}

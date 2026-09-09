@@ -28,6 +28,30 @@ mod command_tasks;
 pub(crate) mod recovery;
 pub use desk_signal_facade::controller::device_assistant_session::*;
 
+async fn read_action_permission_reasons(
+    db: &sea_orm::DatabaseConnection,
+    run: &str,
+    requests: &[desk_diagnose_core::dynamic_run::PermissionRequest],
+) -> Result<std::collections::BTreeMap<String, String>, DeskSignalError> {
+    use crate::entity::agent_grant_reservation as reservation;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let rows = reservation::Entity::find()
+        .filter(reservation::Column::RunId.eq(run))
+        .all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            desk_diagnose_core::permission_grant::permission_reason_for_grant(
+                run,
+                requests,
+                &row.grant_id,
+            )
+            .map(|reason| (row.work_id.to_string(), reason.to_owned()))
+        })
+        .collect())
+}
+
 async fn read_file_recovery_receipt(
     run: &str,
     actor: &str,
@@ -134,6 +158,12 @@ pub async fn get_device_assistant_session(
             let background_tasks = snapshot.background_tasks;
             let capability_grants = snapshot.capability_grants;
             let snapshot = snapshot.session;
+            let action_permission_reasons = read_action_permission_reasons(
+                crate::db::get_db(),
+                &session_id,
+                &snapshot.permission_requests,
+            )
+            .await?;
             let file_recovery_receipt = match &snapshot.unresolved_action {
                 Some(action) => {
                     read_file_recovery_receipt(&session_id, &actor_id, &target_audience, action)
@@ -164,6 +194,7 @@ pub async fn get_device_assistant_session(
             })?;
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
                 DeviceAssistantSessionSnapshotDto {
+                    action_permission_reasons,
                     file_scope: snapshot.file_scope.into(),
                     terminal_error: snapshot.terminal_error,
                     session_id: session_id.clone(),

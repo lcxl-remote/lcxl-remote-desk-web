@@ -69,7 +69,14 @@ say so plainly.
 - Cite the evidence your conclusions rely on.
 - If a prior command's outcome is reported as unknown, do not assume it \
 succeeded; gather read-only evidence to determine the actual state before \
-proposing anything further.";
+proposing anything further. Do not repeat a possibly completed mutation. \
+A read showing the expected result establishes the observed application state, \
+not a successful execution receipt. If the unknown-operation card remains, \
+explain that distinction and ask the owner to review and close that exact record \
+using its confirmation button; never claim you have cleared it. \
+After repeated identical stale-reference failures, stop repeating the same \
+read-approval-action cycle and explain the blocker. Prefer targeted UI queries \
+over repeatedly reading the complete application tree.";
 
 /// Append a language directive to the base agentic prompt so the model answers in
 /// the control-end UI locale. Only natural-language output is steered; tool names

@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import type { ContextUsageDto } from '@/services/types';
 
 export type AssistantContextUsage = ContextUsageDto;
@@ -22,7 +22,7 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
     const values = contextMeterValues(usage, draft);
     const bytes = (n: number) => t('pages.deviceAssistant.contextMeter.bytes', { value: new Intl.NumberFormat(i18n.language).format(n) });
     const label = t(values ? 'pages.deviceAssistant.contextMeter.percent' : 'pages.deviceAssistant.contextMeter.unknown', { percent: values?.percent });
-    return <TooltipProvider><Tooltip><TooltipTrigger asChild>
+    return <Popover><PopoverTrigger asChild>
         <button type="button" aria-label={label} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <svg viewBox="0 0 40 40" className="h-10 w-10" aria-hidden="true">
                 <circle cx="20" cy="20" r="17" fill="none" stroke="currentColor" strokeWidth="3" className="text-muted" />
@@ -32,7 +32,7 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
                 <text x="20" y="20" dy=".35em" textAnchor="middle" fill="currentColor" fontSize="10">{values ? `${values.percent}%` : '—'}</text>
             </svg>
         </button>
-    </TooltipTrigger><TooltipContent side="top" className="max-w-xs space-y-2 p-3">
+    </PopoverTrigger><PopoverContent side="top" className="max-w-xs space-y-2 p-3">
         <p className="font-medium">{t('pages.deviceAssistant.contextMeter.title')}</p>
         {values && usage ? <>
             <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1">
@@ -44,5 +44,5 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
             {values.draftBytes > values.remaining && <p>{t('pages.deviceAssistant.contextMeter.exceeds')}</p>}
             <p>{t('pages.deviceAssistant.contextMeter.hint')}</p>
         </> : <p>{t('pages.deviceAssistant.contextMeter.unknownHint')}</p>}
-    </TooltipContent></Tooltip></TooltipProvider>;
+    </PopoverContent></Popover>;
 }

@@ -504,6 +504,8 @@ fn stale_reason_name(reason: AttachmentStaleReason) -> &'static str {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAssistantSessionSnapshotDto {
+    /// Original permission request reasons, keyed by the server-bound work ID.
+    pub action_permission_reasons: std::collections::BTreeMap<String, String>,
     pub file_scope: FileScopeDto,
     /// Persisted owner-visible failure for the current terminal turn.
     pub terminal_error: Option<desk_agent_protocol::AgentError>,

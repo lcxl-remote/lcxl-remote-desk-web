@@ -1,3 +1,7 @@
+import { useFollowLatest } from '@/hooks/use-follow-latest';
+import './assistant-responsive.css';
+import { AssistantSchedules } from './assistant-schedules';
+import { AssistantUnknownOutcome } from './assistant-unknown-outcome';
 import { AssistantImages } from './assistant-images';
 import { AssistantReasoning } from './assistant-reasoning';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
@@ -16,7 +20,7 @@ import { capabilityDescriptionKey } from './assistant-capability-copy';
 import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, ArrowLeft, Check, Copy, Eye, LoaderCircle, Monitor, Puzzle, RefreshCw, Send, ShieldCheck, X } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, MessageSquarePlus, Check, Copy, Eye, LoaderCircle, Monitor, Puzzle, RefreshCw, Send, ShieldCheck, X } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -249,11 +253,13 @@ export function DeviceAssistantWorkspace({
     const [pairingCopied, setPairingCopied] = useState(false);
     const [question, setQuestion] = useState(rehearsal?.status === 'pending' ? rehearsal.prompt : '');
     const rehearsalCanStart = !rehearsal || (rehearsal.status === 'pending' && !chat.running && !chat.messages.some(message => message.role === 'user'));
+    const [schedulesOpen, setSchedulesOpen] = useState(false);
     const [taskPanelSession, setTaskPanelSession] = useState<string | null>(null);
     const [panel, setPanel] = useState<AssistantPanelId | null>(null);
     const [permissionHistorySession, setPermissionHistorySession] = useState<string | null>(null);
     const [directorySession, setDirectorySession] = useState<string | null>(null);
     const permissionHistoryKey = `${deskId}:${chat.conversationId}`;
+    const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(true, permissionHistoryKey);
     const pendingDirectoryKey = chat.fileScope.directories.filter(directory => directory.state === 'pending')
         .map(directory => directory.requestId).join(':');
     useEffect(() => {
@@ -442,6 +448,7 @@ export function DeviceAssistantWorkspace({
             {chat.tools.map((tool) => (
                 <details key={tool.callId} className="rounded-lg border p-3">
                     <summary className="cursor-pointer text-sm">{tool.name} · {t(`pages.deviceAssistant.workspace.toolState.${tool.status}`)}</summary>
+                    <p className="mt-2 text-sm">{tool.permissionReason && t('pages.deviceAssistant.permissionReasonLabel', { reason: tool.permissionReason })}</p>
                     <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{tool.argumentsJson}</pre>
                     {tool.output && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{tool.output}</pre>}
                 </details>
@@ -721,22 +728,16 @@ export function DeviceAssistantWorkspace({
                     </CardContent>
                 </Card>
             )}
-            <Card className="mx-auto w-full max-w-4xl border-0 shadow-none">
-                <CardHeader className="px-0">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                            <CardTitle className="flex items-center gap-2 text-base">
+            <Card className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col border-0 shadow-none">
+                <CardHeader className="assistant-header shrink-0 px-0 py-3">
+                    <div data-testid="assistant-title-row" className="flex items-center justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                            <CardTitle className="flex min-w-0 items-center gap-2 text-base">
                                 <AssistantConnectionIcon connected={isConnected} enabled={assistantEnabled} />
-                                <span title={chat.sessionTarget?.display_name}>{t('pages.deviceAssistant.chatTitle')}</span>
+                                <span title={chat.sessionTarget?.display_name} className="truncate">{t('pages.deviceAssistant.chatTitle')}</span>
                             </CardTitle>
-                            <CardDescription>
-                                {t('pages.deviceAssistant.providerBoundary', {
-                                    provider: providerConfig?.wire_protocol ?? t('pages.deviceAssistant.providerUnknown'),
-                                    model: providerConfig?.model ?? t('pages.deviceAssistant.providerUnknown'),
-                                })}
-                            </CardDescription>
                         </div>
-                        <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex shrink-0 items-center gap-1">
                             <AssistantHistory deskId={deskId} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || chat.outcomeDisposing || !!chat.grantRevoking}
                                 onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
                                 onSelect={(id) => {
@@ -745,14 +746,25 @@ export function DeviceAssistantWorkspace({
                                     setSelectedCapabilityIds([]);
                                     return true;
                                 }} />
-                            {!rehearsal && <Button variant="ghost" size="sm" disabled={!assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision} onClick={() => { if (!chat.conversationId || !chat.inputRevision) return; scheduleNavigate(`/schedules?${new URLSearchParams({ resume_conversation: chat.conversationId, resume_device: stableDeviceId, resume_revision: String(chat.inputRevision) })}`); }}>{t('schedules.createResume')}</Button>}
-                            <Button variant="ghost" size="sm" onClick={resetConversation} disabled={!!rehearsal || !assistantEnabled || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || chat.outcomeDisposing || !!chat.grantRevoking}>
-                                {t('pages.deviceAssistant.newConversation')}
+                            {!rehearsal && <Button variant="ghost" size="sm" className="assistant-action" aria-label={t('schedules.createResume')} title={t('schedules.createResume')} disabled={!assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision} onClick={() => { if (!chat.conversationId || !chat.inputRevision) return; scheduleNavigate(`/schedules?${new URLSearchParams({ resume_conversation: chat.conversationId, resume_device: stableDeviceId, resume_revision: String(chat.inputRevision) })}`); }}><CalendarClock className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('schedules.createResume')}</span></Button>}
+                            <Button variant="ghost" size="sm" className="assistant-action" aria-label={t('pages.deviceAssistant.newConversation')} title={t('pages.deviceAssistant.newConversation')} onClick={resetConversation} disabled={!!rehearsal || !assistantEnabled || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || chat.outcomeDisposing || !!chat.grantRevoking}>
+                                <MessageSquarePlus className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('pages.deviceAssistant.newConversation')}</span>
                             </Button>
                         </div>
                     </div>
+
+                    <CardDescription>
+                        {t('pages.deviceAssistant.providerBoundary', {
+                            provider: providerConfig?.wire_protocol ?? t('pages.deviceAssistant.providerUnknown'),
+                            model: providerConfig?.model ?? t('pages.deviceAssistant.providerUnknown'),
+                        })}
+                    </CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-4 px-0">
+                <CardContent className="flex min-h-0 flex-1 flex-col gap-3 p-0">
+                    <div className="relative min-h-0 flex-1">
+                    <div ref={scrollRef} onScroll={onScroll} data-testid="assistant-scroll-area"
+                        className="h-full overflow-y-auto overscroll-contain [overflow-wrap:anywhere]">
+                    <div ref={contentRef} className="space-y-4 pb-4">
                     <div data-testid="device-assistant-transcript" className="min-h-48 space-y-5 py-4">
                         {chat.hydrating && <Skeleton className="h-20 w-full" />}
                         {chat.hasMoreMessages && (
@@ -780,7 +792,7 @@ export function DeviceAssistantWorkspace({
                                         : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
                                 }`}
                             >
-                                {message.role === 'tool_result' ? <AssistantCommandResult text={message.text} /> : message.role === 'assistant'
+                                {message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.deviceAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} /></> : message.role === 'assistant'
                                     ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
                                     : <p className="whitespace-pre-wrap">{message.text}</p>}
                             </div>
@@ -796,29 +808,20 @@ export function DeviceAssistantWorkspace({
                     </div>
 
                     {chat.unresolvedOutcome && (
-                        <div data-testid="device-assistant-outcome-unknown" className="space-y-3 rounded-md border border-amber-500/50 bg-amber-500/5 p-3">
-                            <div>
-                                <p className="text-sm font-medium">{t('pages.deviceAssistant.outcomeUnknownTitle')}</p>
-                                <p className="text-xs text-muted-foreground">
-                                    {t('pages.deviceAssistant.outcomeUnknownDescription')}
-                                </p>
-                            </div>
-                            <p className="break-all text-xs text-muted-foreground">
-                                {chat.unresolvedOutcome.workKind} · work {chat.unresolvedOutcome.workId} · {chat.unresolvedOutcome.executionId}
-                            </p>
+                        <AssistantUnknownOutcome key={chat.unresolvedOutcome.executionId} outcome={chat.unresolvedOutcome}>
                             {chat.unresolvedOutcome.fileRecoveryReceipt && <AssistantCommandResult text={chat.unresolvedOutcome.fileRecoveryReceipt} />}
                             {featureProfile.unknown_outcome_disposition && (
                             <Button
                                 variant="outline"
                                 size="sm"
-                                disabled={chat.outcomeDisposing}
+                                disabled={chat.outcomeDisposing || chat.turnRunning}
                                 onClick={() => void chat.disposeUnknownOutcome()}
                             >
                                 {chat.outcomeDisposing && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
                                 {t('pages.deviceAssistant.outcomeUnknownDispose')}
                             </Button>
                             )}
-                        </div>
+                        </AssistantUnknownOutcome>
                     )}
                     {externalSendReceipts.length > 0 && (
                         <div data-testid="device-assistant-external-send-results" className="space-y-3">
@@ -891,7 +894,18 @@ export function DeviceAssistantWorkspace({
                         </Alert>
                     )}
                     {rehearsal && <Alert><AlertDescription>{t('schedules.rehearsal.executionNote')}</AlertDescription></Alert>}
-                    <form onSubmit={submit} className="sticky bottom-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm">
+                    </div>
+                    </div>
+                    {showJumpToLatest && (
+                        <Button type="button" variant="outline" size="icon" onClick={jumpToLatest}
+                            className="absolute bottom-3 right-3 rounded-full bg-background shadow-md"
+                            aria-label={t('pages.deviceAssistant.scrollToLatest')}
+                            title={t('pages.deviceAssistant.scrollToLatest')}>
+                            <ArrowDown className="h-4 w-4" />
+                        </Button>
+                    )}
+                    </div>
+                    <form onSubmit={submit} className="assistant-composer shrink-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm">
                         <div className="flex flex-wrap items-center gap-2">
                             <Button type="button" size="sm" variant="ghost" onClick={() => setPanel('context')}>
                                 {t('pages.deviceAssistant.workspace.addContext')}
@@ -907,9 +921,9 @@ export function DeviceAssistantWorkspace({
                             placeholder={t('pages.deviceAssistant.questionPlaceholder')}
                             maxLength={16_384}
                             disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}
-                            className="min-h-16 w-full resize-y rounded-md border-0 bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                            className="min-h-16 max-h-40 w-full resize-y rounded-md border-0 bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                         />
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
                             <AssistantComposerTools
                                 meter={<AssistantContextMeter usage={chat.contextUsage} draft={question} />}
                                 onTasks={() => setTaskPanelSession(permissionHistoryKey)}
@@ -917,20 +931,24 @@ export function DeviceAssistantWorkspace({
                                 onDetails={() => setPanel('details')}
                                 onPermissionHistory={() => setPermissionHistorySession(permissionHistoryKey)}
                                 onDirectories={() => setDirectorySession(permissionHistoryKey)}
+                                onSchedules={() => setSchedulesOpen(true)}
                             />
+                            <div className="ml-auto flex shrink-0 items-center gap-1">
                             {chat.turnRunning ? (
-                                <Button type="button" onClick={chat.stop} disabled={!chat.canStop || chat.stopping}>
-                                    <LoaderCircle aria-hidden="true" className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-                                    {t(chat.stopping ? 'pages.deviceAssistant.stopping' : 'pages.deviceAssistant.stop')}
+                                <Button type="button" className="assistant-action" aria-label={t(chat.stopping ? 'pages.deviceAssistant.stopping' : 'pages.deviceAssistant.stop')} onClick={chat.stop} disabled={!chat.canStop || chat.stopping}>
+                                    <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" />
+                                    <span className="assistant-action-label">{t(chat.stopping ? 'pages.deviceAssistant.stopping' : 'pages.deviceAssistant.stop')}</span>
                                 </Button>
                             ) : (
-                                <Button type="submit" disabled={!rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
-                                    <Send className="mr-2 h-4 w-4" />
-                                    {t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.deviceAssistant.send')}
+                                <Button type="submit" className="assistant-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.deviceAssistant.send')} disabled={!rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
+                                    <Send className="h-4 w-4 shrink-0" />
+                                    <span className="assistant-action-label">{t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.deviceAssistant.send')}</span>
                                 </Button>
                             )}
                         </div>
+                        </div>
                     </form>
+                    <AssistantSchedules key={permissionHistoryKey} sessionId={chat.sessionId ?? null} open={schedulesOpen} onOpenChange={setSchedulesOpen} deviceId={stableDeviceId} />
                 </CardContent>
             </Card>
         </>
@@ -990,8 +1008,8 @@ export default function DeviceAssistantPage({
     }
 
     return (
-        <div className="mx-auto max-w-6xl space-y-6 p-6">
-            <div className="flex items-center gap-4">
+        <div className="absolute inset-0 mx-auto flex max-w-6xl flex-col gap-3 overflow-hidden p-3 sm:p-6">
+            <div className="flex shrink-0 items-center gap-4">
                 <Button variant="outline" size="icon" onClick={() => navigate(`/desk/${deskId}`)}>
                     <ArrowLeft className="h-4 w-4" />
                 </Button>

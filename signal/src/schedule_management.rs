@@ -180,6 +180,7 @@ pub(crate) async fn manage(
             status,
             title,
             target_device_id,
+            source_conversation_id,
             attention_only,
         } => {
             let after = match after {
@@ -203,6 +204,7 @@ pub(crate) async fn manage(
                     status.as_ref().and_then(|value| value.as_str()),
                     title.as_deref(),
                     target_device_id.as_deref(),
+                    source_conversation_id.as_deref(),
                     attention_only,
                 )
                 .await?;

@@ -608,3 +608,29 @@ fn renewal_requires_exhausted_or_expired_original_non_revoked_grants() {
         ));
     }
 }
+
+#[test]
+fn execution_reason_uses_exact_grant_request_item_and_run() {
+    let (_, first, _) = decision_fixture();
+    let mut second = first.clone();
+    second.request_id = "permission-2".into();
+    second.items[0].reason = "second operation".into();
+    let grant = permission_item_grant_id("run-1", &first, &first.items[0].item_id);
+    let expected = first.items[0].reason.clone();
+    let requests = vec![second, first];
+    assert_eq!(
+        permission_reason_for_grant("run-1", &requests, &grant),
+        Some(expected.as_str())
+    );
+    assert_eq!(
+        permission_reason_for_grant("other-run", &requests, &grant),
+        None
+    );
+    assert_eq!(
+        permission_reason_for_grant("run-1", &requests, "unknown-grant"),
+        None
+    );
+    let mut renewed = requests.clone();
+    renewed[1].input_revision += 1;
+    assert_eq!(permission_reason_for_grant("run-1", &renewed, &grant), None);
+}

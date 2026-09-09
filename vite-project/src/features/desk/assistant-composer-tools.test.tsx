@@ -16,7 +16,8 @@ describe('assistant composer tools', () => {
         expect(Array.from(tools.children)).toEqual([screen.getByTestId('meter'), details, history]);
         for (const button of [details, history]) {
             expect(button.title).toBe(button.getAttribute('aria-label'));
-            expect(button.textContent).toBe('');
+            expect(button.querySelector('.assistant-action-label')?.textContent).toBe(button.getAttribute('aria-label'));
+            expect(button.querySelector('svg')).not.toBeNull();
             expect(button.getAttribute('aria-haspopup')).toBe('dialog');
             fireEvent.click(button);
         }
@@ -24,4 +25,17 @@ describe('assistant composer tools', () => {
         expect(onPermissionHistory).toHaveBeenCalledOnce();
         expect(onSubmit).not.toHaveBeenCalled();
     });
+});
+
+it('places scheduled tasks immediately after directories and opens them without submitting', () => {
+    const onSchedules = vi.fn();
+    const onSubmit = vi.fn();
+    render(<form onSubmit={onSubmit}><AssistantComposerTools meter={null} onDetails={() => {}}
+        onPermissionHistory={() => {}} onDirectories={() => {}} onSchedules={onSchedules} /></form>);
+    const directories = screen.getByRole('button', { name: 'pages.deviceAssistant.directories.title' });
+    const schedules = screen.getByRole('button', { name: 'pages.deviceAssistant.schedules.title' });
+    expect(directories.nextElementSibling).toBe(schedules);
+    fireEvent.click(schedules);
+    expect(onSchedules).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
 });

@@ -36,6 +36,7 @@ import {
 const PREVIEW_TOOL = 'preview_computer_action';
 
 export type DeviceAssistantMessage = {
+    permissionReason?: string;
     contextBoundaryIds?: string[];
     id: string;
     role: 'user' | 'assistant' | 'tool_result';
@@ -45,6 +46,7 @@ export type DeviceAssistantMessage = {
 };
 
 export type DeviceAssistantToolActivity = {
+    permissionReason?: string;
     callId: string;
     name: string;
     status: 'running' | 'ok' | 'failed';
@@ -161,6 +163,7 @@ export type DeviceAssistantTaskStatusProjection = {
 };
 
 export type DeviceAssistantUnknownOutcome = {
+    permissionReason?: string;
     fileRecoveryReceipt?: string | null;
     workId: number;
     actionRequestId: string;
@@ -179,6 +182,7 @@ type PersistedSnapshotMessage = {
 };
 
 type PersistedSnapshot = {
+    actionPermissionReasons?: Record<string, string>;
     requestId?: string;
     fileScope?: AssistantFileScopeView;
     terminalError?: { message: string } | null;
@@ -233,17 +237,25 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
         }
         if ((message.role === 'tool' || message.role === 'untrusted_output') && message.toolCallId) {
             const existing = tools.find((tool) => tool.callId === message.toolCallId);
+            let permissionReason: string | undefined;
+            let nativeFailed = false;
+            try {
+                const native = JSON.parse(message.text);
+                permissionReason = snapshot.actionPermissionReasons?.[String(native.work_id)];
+                nativeFailed = ['definitely_not_started', 'outcome_unknown', 'failed'].includes(native.result);
+            } catch { /* Non-native results have no work binding. */ }
             const backgroundRunning = /"status"\s*:\s*"background_running"/.test(message.text);
             tools = upsertTool(tools, {
                 callId: message.toolCallId,
+                permissionReason,
                 name: existing?.name ?? 'unknown',
                 status: backgroundRunning ? 'running'
-                    : /^(tool error:|not executed:|execution failed:|execution did not complete:)/i.test(message.text) ? 'failed' : 'ok',
+                    : nativeFailed || /^(tool error:|not executed:|execution failed:|execution did not complete:)/i.test(message.text) ? 'failed' : 'ok',
                 argumentsJson: existing?.argumentsJson ?? '{}',
                 output: message.text || null,
             });
-            if (!backgroundRunning && message.text && (existing?.name === 'execute_confirmed_command' || message.backgroundTaskId)) {
-                messages.push({ id: message.id, role: 'tool_result', text: message.text });
+            if (!backgroundRunning && message.text && (existing?.name === 'execute_confirmed_command' || message.backgroundTaskId || (nativeFailed && permissionReason))) {
+                messages.push({ id: message.id, role: 'tool_result', text: message.text, permissionReason });
             }
         }
     }
@@ -271,7 +283,9 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
         capabilityGrants: Array.isArray(snapshot.capabilityGrants)
             ? snapshot.capabilityGrants
             : [],
-        unresolvedOutcome: snapshot.unresolvedOutcome ?? null,
+        unresolvedOutcome: snapshot.unresolvedOutcome ? { ...snapshot.unresolvedOutcome,
+            permissionReason: snapshot.actionPermissionReasons?.[String(snapshot.unresolvedOutcome.workId)],
+        } : null,
         pendingInputCount: Math.max(
             0,
             (snapshot.latestInputSeq ?? 0) - (snapshot.handledInputSeq ?? 0),

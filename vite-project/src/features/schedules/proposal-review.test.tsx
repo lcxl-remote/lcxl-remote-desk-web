@@ -50,3 +50,10 @@ it('waits for explicit rejection and server acknowledgement in the approval card
     finish({ result: 'task', task: { ...task, status: 'deleted', revision: 8 } });
     await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
 });
+
+it('does not render completed timer approvals in the conversation', async () => {
+    const request = vi.fn(async () => ({ result: 'task', task: { schedule_id: 'task', kind: 'conversation_resume', status: 'completed', title: 'Completed timer' } }));
+    const { container } = render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" assistantPaths={{}} onChanged={() => {}} approvalCard />);
+    await waitFor(() => expect(request).toHaveBeenCalled());
+    await waitFor(() => expect(container.textContent).toBe(''));
+});

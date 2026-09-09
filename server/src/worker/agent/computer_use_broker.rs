@@ -2715,13 +2715,14 @@ impl ComputerUseBroker {
         }
     }
 
-    /// Browser or local-human input invalidates every UI/object snapshot before
+    /// Browser or local-human input preempts writers and invalidates snapshots before
     /// the input is injected. The read-only paired Office document identity is
     /// retained: an Office read resolves it and independently rechecks the current
     /// bridge document hash, while discarding it here creates a readiness-cache
     /// race immediately after the owner opens or uses the task pane. A later
-    /// mutation still cannot reuse a Worksheet, Range, or UI-element ObjectRef
-    /// observed before a human changed the UI. AI adapter input will use a
+    /// mutation still cannot reuse Worksheet, Range, or coordinate snapshots.
+    /// macOS semantic UI identities survive input but are relocated and checked
+    /// against the live Accessibility tree before each action. AI adapter input will use a
     /// separate marked path when mutation is implemented.
     pub fn note_browser_input(&self) {
         self.note_user_input(InputPreemptionSource::Browser);
@@ -2833,6 +2834,14 @@ impl ComputerUseBroker {
             let before = objects.len();
             objects.retain(|_, object| {
                 if matches!(&object.resolved, ResolvedObject::OfficeDocument { .. }) {
+                    return true;
+                }
+                // macOS semantic targets are process-bound identities, not coordinates.
+                // Approval clicks must not erase them. Native preflight and execution
+                // both relocate the fingerprint and validate the supported action.
+                // Writer leases are still preempted above on every human input.
+                #[cfg(target_os = "macos")]
+                if matches!(&object.resolved, ResolvedObject::UiElement { .. }) {
                     return true;
                 }
                 // macOS application/session selectors are read identities, not
@@ -3965,6 +3974,7 @@ mod tests {
         drop(monitor);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn human_input_invalidates_existing_references() {
         let broker = ComputerUseBroker::new();
@@ -3984,6 +3994,51 @@ mod tests {
         broker.note_browser_input();
         let error = broker.resolve_ref(&reference).unwrap_err();
         assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn approval_input_preserves_semantic_identity_but_not_expiry_or_incarnation() {
+        let broker = ComputerUseBroker::new();
+        let reference = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "session",
+                ObjectKind::UiElement,
+                ResolvedObject::UiElement {
+                    process_id: 1,
+                    image_path: "app".into(),
+                    fingerprint: "identity".into(),
+                },
+            )
+            .unwrap();
+        let epoch = broker.human_input_epoch();
+        broker.note_external_input();
+        broker.note_browser_input();
+        assert!(broker.human_input_epoch() > epoch);
+        assert!(broker.resolve_ref(&reference).is_ok());
+        broker
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(&reference.token)
+            .unwrap()
+            .expires_at = Utc::now() - Duration::seconds(1);
+        assert!(broker.resolve_ref(&reference).is_err());
+        let reference = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "session",
+                ObjectKind::UiElement,
+                ResolvedObject::UiElement {
+                    process_id: 1,
+                    image_path: "app".into(),
+                    fingerprint: "identity".into(),
+                },
+            )
+            .unwrap();
+        broker.reset_worker_incarnation();
+        assert!(broker.resolve_ref(&reference).is_err());
     }
 
     #[cfg(target_os = "macos")]

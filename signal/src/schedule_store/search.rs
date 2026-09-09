@@ -16,6 +16,7 @@ impl ScheduleStore {
         status: Option<&str>,
         title: Option<&str>,
         device: Option<&str>,
+        conversation: Option<&str>,
         attention: bool,
     ) -> Result<(Vec<entity::Model>, u64, u64), ScheduleStoreError> {
         if owner <= 0
@@ -23,6 +24,9 @@ impl ScheduleStore {
             || limit == 0
             || limit > 100
             || title.is_some_and(|value| value.len() > 256 || value.chars().any(char::is_control))
+            || conversation.is_some_and(|value| {
+                value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+            })
             || device.is_some_and(|value| value.is_empty() || value.len() > 256)
         {
             return Err(ScheduleStoreError::Invalid);
@@ -38,6 +42,9 @@ impl ScheduleStore {
         }
         if let Some(device) = device {
             query = query.filter(entity::Column::TargetDeviceId.eq(device));
+        }
+        if let Some(conversation) = conversation {
+            query = query.filter(entity::Column::SourceConversationId.eq(conversation));
         }
         if let Some(title) = title.filter(|value| !value.trim().is_empty()) {
             query = query.filter(entity::Column::Title.contains(title.trim()));

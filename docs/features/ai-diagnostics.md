@@ -259,3 +259,13 @@ The assistant can query current-conversation tasks with `list_conversation_sched
 After a service restart or interrupted execution, an expired execution lease no longer keeps the conversation marked as running. Refreshing the server snapshot clears a pending stop and allows a new conversation while retaining history. Background commands retain their independent lifecycle and are not cancelled by this recovery.
 
 You can create or switch conversations while another runs in the background. The conversation list shows a spinner for active conversations and sorts running conversations first, then by most recent activity within each group. Deletion requires confirmation, with an additional warning for a running conversation. It removes history and images, stops further AI processing and cancels associated conversation timers. Background commands receive best-effort cancellation; stopping is not guaranteed and completed actions are not undone.
+
+The composer stays at the bottom of the assistant page or remote desktop assistant panel. Messages scroll independently and follow new content by default. Scrolling up pauses following; use “Jump to latest message” or scroll to the bottom to resume. Switching conversations opens the latest messages.
+
+“Scheduled tasks” to the right of session directories opens timers for the current conversation, including completed tasks. Only pending approval cards remain in the conversation area. Tap the context usage ring for details; composer buttons and the conversation list, resume timer, and new conversation header buttons hide their labels when space is limited.
+
+On macOS, semantic UI actions relocate and validate the original process and element after approval. Human input preempts execution but approval clicks do not erase semantic target identities. Coordinate snapshots, expiry, and worker restarts retain their invalidation rules. When a native receipt is uncertain, inspect the application read-only; even if the expected result is visible, the owner confirms closing the unresolved record. This never retries the action or rewrites its original result.
+
+Unresolved operation cards show the operation category, receipt uncertainty, and checking steps. Request and execution identifiers remain in collapsed troubleshooting details. The card states when no specific error reason is available.
+
+Failed or unresolved actions show the original request reason associated with the grant actually reserved for that execution. The link uses server work and grant-use records, never timing or approximate input matching. A reason explains the intended operation, not its error cause, and grants no new authority.

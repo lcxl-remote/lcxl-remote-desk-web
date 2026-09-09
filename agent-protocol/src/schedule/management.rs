@@ -19,6 +19,7 @@ pub enum ScheduleManagementRequest {
         status: Option<ScheduledTaskStatus>,
         title: Option<String>,
         target_device_id: Option<String>,
+        source_conversation_id: Option<String>,
         attention_only: bool,
     },
     List {

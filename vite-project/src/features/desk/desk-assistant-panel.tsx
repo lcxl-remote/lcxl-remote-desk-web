@@ -82,7 +82,7 @@ export function DeskAssistantPanel({ open, onClose, onFocus, children }: {
                 <Button ref={closeRef} type="button" variant="ghost" size="icon" onClick={onClose}
                     aria-label={t('pages.deviceAssistant.hidePanel')}><X className="h-4 w-4" /></Button>
             </header>
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 [overflow-wrap:anywhere]">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 [overflow-wrap:anywhere]">
                 {children}
             </div>
             <div className="flex h-5 shrink-0 justify-end border-t">

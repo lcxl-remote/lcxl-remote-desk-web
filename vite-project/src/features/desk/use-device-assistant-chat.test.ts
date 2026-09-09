@@ -1479,6 +1479,7 @@ describe('useDeviceAssistantChat', () => {
                 json: async () => ({
                     data: {
                         sessionId: 'session-1',
+                        actionPermissionReasons: { '94': 'Create the approved calendar event' },
                         seq: unresolved ? 1 : 2,
                         active: false,
                         messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
@@ -1503,6 +1504,7 @@ describe('useDeviceAssistantChat', () => {
 
         await waitFor(() => expect(result.current.status).toBe('outcome_unknown'));
         expect(result.current.unresolvedOutcome?.workId).toBe(94);
+        expect(result.current.unresolvedOutcome?.permissionReason).toBe('Create the approved calendar event');
         expect(result.current.unresolvedOutcome?.fileRecoveryReceipt).toBe('persisted device recovery receipt');
         await act(async () => {
             expect(await result.current.disposeUnknownOutcome()).toBe(true);
@@ -1513,4 +1515,21 @@ describe('useDeviceAssistantChat', () => {
             expect.objectContaining({ method: 'POST' }),
         );
     });
+});
+
+it('projects a failed native action with the reason bound to its work record', async () => {
+    localStorage.setItem('device-assistant-conversation:reason-device', 'reason-conversation');
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        sessionId: 'server-session', seq: 1, active: false, actionPermissionReasons: { '44': 'Create the approved calendar event', '45': 'Unrelated reason' },
+        messages: [
+            { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'call', name: 'execute_confirmed_ui_action', argumentsJson: '{}' }] },
+            { id: 'result', role: 'tool', toolCallId: 'call', text: JSON.stringify({ work_id: '44', result: 'definitely_not_started', message: 'target missing' }) },
+        ],
+    } }) })));
+    const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'reason-device', subscribe: () => () => {}, sendMessage: () => 'request' }));
+    await waitFor(() => expect(result.current.messages.find(message => message.id === 'result')?.permissionReason).toBe('Create the approved calendar event'));
+    expect(result.current.tools[0]).toMatchObject({ status: 'failed', permissionReason: 'Create the approved calendar event' });
+    unmount();
+    localStorage.removeItem('device-assistant-conversation:reason-device');
+    vi.unstubAllGlobals();
 });

@@ -1,14 +1,14 @@
-import { act, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { AssistantContextMeter, contextMeterValues } from './assistant-context-meter';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string, args?: { percent?: number; value?: string }) => `${key}${args?.value ?? args?.percent ?? ''}` }) }));
 
 describe('compression headroom meter', () => {
-    it('reveals budget details on keyboard focus without sending a message', async () => {
+    it('reveals budget details on tap without sending a message', async () => {
         render(<AssistantContextMeter usage={{ usedBytes: 250, limitBytes: 1000, strategy: 'checkpoint_summary' }} draft="" />);
-        act(() => screen.getByRole('button').focus());
-        const tooltip = await screen.findByRole('tooltip');
+        fireEvent.click(screen.getByRole('button'));
+        const tooltip = await screen.findByRole('dialog');
         expect(tooltip.textContent).toContain('limit.checkpoint_summary');
         expect(tooltip.textContent).toContain('bytes1,000');
         expect(tooltip.textContent).toContain('bytes750');

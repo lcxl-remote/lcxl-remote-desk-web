@@ -1,7 +1,7 @@
 import { formatLocalTime } from '@/lib/local-time';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, Trash2 } from 'lucide-react';
+import { History, Loader2, Trash2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
@@ -50,8 +50,8 @@ export function AssistantHistory({ deskId, disabled, onSelect, onDeleted }: {
         return () => { abort.abort(); window.clearInterval(timer); };
     }, [open, deskId, revision]);
     return <>
-        <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)}>
-            {t('pages.deviceAssistant.history.title')}
+        <Button type="button" variant="outline" size="sm" className="assistant-action" aria-label={t('pages.deviceAssistant.history.title')} title={t('pages.deviceAssistant.history.title')} onClick={() => setOpen(true)}>
+            <History className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('pages.deviceAssistant.history.title')}</span>
         </Button>
         <Sheet open={open} onOpenChange={setOpen}>
             <SheetContent className="flex flex-col sm:max-w-md">

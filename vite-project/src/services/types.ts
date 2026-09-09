@@ -2729,6 +2729,13 @@ export type VisualEvidenceFrame = {
 
 export type DeviceAssistantSessionSnapshotDto = {
     /**
+     * @description Original permission request reasons, keyed by the server-bound work ID.
+     * @type object
+    */
+    actionPermissionReasons: {
+        [key: string]: string;
+    };
+    /**
      * @description Whether the persisted turn is still running or awaiting approval.
      * @type boolean
     */
@@ -5561,6 +5568,13 @@ export type RestResponseDeviceAssistantSessionSnapshotDto = {
     */
     data?: {
         /**
+         * @description Original permission request reasons, keyed by the server-bound work ID.
+         * @type object
+        */
+        actionPermissionReasons: {
+            [key: string]: string;
+        };
+        /**
          * @description Whether the persisted turn is still running or awaiting approval.
          * @type boolean
         */
@@ -8228,6 +8242,10 @@ export type ScheduleManagementRequest = ({
      * @type string
     */
     operation: ScheduleManagementRequestOperationEnum3Key;
+    /**
+     * @type string,null
+    */
+    source_conversation_id?: string | null;
     status?: (null | ScheduledTaskStatus);
     /**
      * @type string,null

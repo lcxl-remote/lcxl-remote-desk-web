@@ -447,7 +447,7 @@ async fn pending_requests_are_not_tasks_and_manual_creation_is_atomic() {
     assert!(store.list(1, 0, 100).await.unwrap().is_empty());
     assert_eq!(
         store
-            .search(1, 0, 100, None, None, None, None, false)
+            .search(1, 0, 100, None, None, None, None, None, false)
             .await
             .unwrap()
             .1,
@@ -478,4 +478,94 @@ async fn pending_requests_are_not_tasks_and_manual_creation_is_atomic() {
         .await
         .unwrap();
     assert_eq!(store.list(1, 0, 100).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn search_filters_conversation_before_pagination_and_counts() {
+    let (store, task, _, _) = fixture().await;
+    let mut row: entity::ActiveModel = task.clone().into();
+    row.status = Set("completed".into());
+    row.update(&store.db).await.unwrap();
+    let mut other: entity::ActiveModel = task.clone().into();
+    other.id = Default::default();
+    other.schedule_id = Set("another-schedule".into());
+    other.creation_identity = Set("another-create-key".into());
+    other.source_conversation_id = Set(Some("other-conversation".into()));
+    other.status = Set("active".into());
+    other.insert(&store.db).await.unwrap();
+    let (rows, total, attention) = store
+        .search(
+            1,
+            0,
+            1,
+            Some("conversation_resume"),
+            None,
+            None,
+            None,
+            Some("source"),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].schedule_id, task.schedule_id);
+    assert_eq!(rows[0].status, "completed");
+    assert_eq!(total, 1);
+    assert_eq!(attention, 0);
+    let (other_rows, other_total, _) = store
+        .search(
+            1,
+            0,
+            1,
+            None,
+            None,
+            None,
+            None,
+            Some("other-conversation"),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(other_rows[0].schedule_id, "another-schedule");
+    assert_eq!(other_total, 1);
+    assert!(
+        store
+            .search(1, 0, 10, None, None, None, None, Some("unknown"), false)
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    assert!(
+        store
+            .search(2, 0, 10, None, None, None, None, Some("source"), false)
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    assert!(
+        store
+            .search(
+                1,
+                0,
+                10,
+                None,
+                None,
+                None,
+                Some("other-device"),
+                Some("source"),
+                false
+            )
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    assert!(
+        store
+            .search(1, 0, 10, None, None, None, None, Some(""), false)
+            .await
+            .is_err()
+    );
 }

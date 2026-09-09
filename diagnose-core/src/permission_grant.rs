@@ -605,6 +605,20 @@ fn internal(message: impl Into<String>) -> AgentError {
 mod tests;
 
 /// Stable identity shared by grant issuance and renewal checks.
+/// Presentation-only lookup through the immutable grant issued for an exact request item.
+pub fn permission_reason_for_grant<'a>(
+    run_id: &str,
+    requests: &'a [crate::dynamic_run::PermissionRequest],
+    grant_id: &str,
+) -> Option<&'a str> {
+    requests.iter().find_map(|request| {
+        request.items.iter().find_map(|item| {
+            (permission_item_grant_id(run_id, request, &item.item_id) == grant_id)
+                .then_some(item.reason.as_str())
+        })
+    })
+}
+
 fn permission_item_grant_id(
     run_id: &str,
     request: &crate::dynamic_run::PermissionRequest,

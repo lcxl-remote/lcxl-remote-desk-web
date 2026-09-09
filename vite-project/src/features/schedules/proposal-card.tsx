@@ -39,9 +39,9 @@ export function ScheduleProposalCards({ tools, running = false, deviceId, connec
         if (!running && !review && queued.current.length) setReview(queued.current.shift()!);
     }, [tools, running, review]);
     return <>
-        {ids.map(id => <article key={id} className="space-y-2 rounded-md border border-amber-500/40 p-3">
-            <p className="text-sm font-medium">{t(decisions[id] === 'active' ? 'schedules.proposal.approved' : decisions[id] === 'deleted' ? 'schedules.proposal.rejected' : 'schedules.proposal.created')}</p>
-            <p className="text-xs text-muted-foreground">{t('schedules.proposal.note')}</p>
+        {ids.filter(id => !decisions[id] || ['draft', 'pending_review'].includes(decisions[id])).map(id => <article key={id} className="space-y-2 rounded-md border border-amber-500/40 p-3 empty:hidden">
+            {!waiting.current.has(id) && <><p className="text-sm font-medium">{t(decisions[id] === 'active' ? 'schedules.proposal.approved' : decisions[id] === 'deleted' ? 'schedules.proposal.rejected' : 'schedules.proposal.created')}</p>
+            <p className="text-xs text-muted-foreground">{t('schedules.proposal.note')}</p></>}
             {waiting.current.has(id) ? <ProposalReview client={client} scheduleId={id} connected={isConnected}
                 zone={Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'} assistantPaths={{}} approvalCard
                 onChanged={task => setDecisions(previous => ({ ...previous, [task.schedule_id]: task.status }))} />

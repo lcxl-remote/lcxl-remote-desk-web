@@ -1056,15 +1056,30 @@ fn perform_action(element: AxUiElementRef, action: &str) -> Result<(), AgentErro
         )
     })?;
     let status = unsafe { AXUIElementPerformAction(element, action.0) };
+    accessibility_mutation_status(status, "AXUIElementPerformAction")
+}
+
+// A nonzero native return is not proof that a mutation had no effect.
+fn accessibility_mutation_status(status: i32, operation: &str) -> Result<(), AgentError> {
     if status == AX_SUCCESS {
-        Ok(())
-    } else {
-        Err(failure(
-            AgentErrorKind::Internal,
-            "the Accessibility action was rejected by the target application",
-            false,
-        ))
+        return Ok(());
     }
+    let label = match status {
+        -25200 => "failure",
+        -25201 => "illegal_argument",
+        -25202 => "invalid_ui_element",
+        -25204 => "cannot_complete",
+        -25206 => "action_unsupported",
+        -25211 => "api_disabled",
+        _ => "native_error",
+    };
+    Err(failure(
+        AgentErrorKind::Internal,
+        &format!(
+            "{operation} returned AXError {status} ({label}); the operation may have taken effect. Do not retry automatically; inspect the current UI to verify the result."
+        ),
+        false,
+    ))
 }
 
 fn set_messaging_timeout(element: AxUiElementRef) -> Result<(), AgentError> {
@@ -1108,15 +1123,7 @@ fn set_attribute(
         )
     })?;
     let status = unsafe { AXUIElementSetAttributeValue(element, attribute.0, value) };
-    if status == AX_SUCCESS {
-        Ok(())
-    } else {
-        Err(failure(
-            AgentErrorKind::Internal,
-            "the Accessibility attribute update was rejected by the target application",
-            false,
-        ))
-    }
+    accessibility_mutation_status(status, "AXUIElementSetAttributeValue")
 }
 
 fn action_names(element: AxUiElementRef) -> Vec<String> {
@@ -1230,6 +1237,17 @@ fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_mutation_errors_preserve_code_without_claiming_no_effect() {
+        assert!(accessibility_mutation_status(0, "action").is_ok());
+        for status in [-25202, -25204, -25206, -999] {
+            let error = accessibility_mutation_status(status, "action").unwrap_err();
+            assert!(error.message.contains(&status.to_string()));
+            assert!(error.message.contains("may have taken effect"));
+            assert!(!error.retryable);
+        }
+    }
 
     #[test]
     #[ignore = "requires background Calculator, Accessibility and Screen Recording permissions"]

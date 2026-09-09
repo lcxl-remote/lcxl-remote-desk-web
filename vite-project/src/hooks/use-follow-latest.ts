@@ -13,8 +13,10 @@ const BOTTOM_THRESHOLD_PX = 24
  * Chat-style scrolling: follow appended content while the reader is at the
  * bottom, but preserve their position as soon as they scroll up.
  */
-export function useFollowLatest(enabled = true) {
+export function useFollowLatest(enabled = true, conversationKey?: string) {
     const scrollRef = useRef<HTMLDivElement>(null)
+    const contentRef = useRef<HTMLDivElement>(null)
+    const previousConversationRef = useRef(conversationKey)
     const followingRef = useRef(true)
     const previousEnabledRef = useRef(enabled)
     const previousScrollHeightRef = useRef(0)
@@ -63,6 +65,9 @@ export function useFollowLatest(enabled = true) {
     useLayoutEffect(() => {
         const element = scrollRef.current
         if (!element) return
+        const conversationChanged = previousConversationRef.current !== conversationKey
+        previousConversationRef.current = conversationKey
+        if (conversationChanged) followingRef.current = true
         const contentHeightChanged =
             element.scrollHeight !== previousScrollHeightRef.current
         previousScrollHeightRef.current = element.scrollHeight
@@ -79,7 +84,7 @@ export function useFollowLatest(enabled = true) {
         previousEnabledRef.current = true
 
         if (followingRef.current) {
-            if (contentHeightChanged || becameEnabled) scrollToLatest(element)
+            if (contentHeightChanged || becameEnabled || conversationChanged) scrollToLatest(element)
             setShowJumpToLatest(false)
         } else {
             const atBottom = isAtBottom(element)
@@ -108,11 +113,13 @@ export function useFollowLatest(enabled = true) {
             }
         })
         observer.observe(element)
+        if (contentRef.current) observer.observe(contentRef.current)
         return () => observer.disconnect()
     }, [enabled, isAtBottom, scrollToLatest])
 
     return {
         scrollRef,
+        contentRef,
         onScroll,
         showJumpToLatest,
         jumpToLatest,
