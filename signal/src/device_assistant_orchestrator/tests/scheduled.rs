@@ -199,7 +199,20 @@ async fn exercise_with_restart(
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(restored.state_json, row.state_json);
+        let restored_session = PersistedAgentSession::decode_json(&restored.state_json).unwrap();
+        assert_eq!(restored_session.input_revision, original.input_revision);
+        assert_eq!(
+            &restored_session.conversation[..original.conversation.len()],
+            &original.conversation
+        );
+        assert!(
+            restored_session
+                .conversation
+                .last()
+                .unwrap()
+                .text
+                .contains("scheduled_task_activated")
+        );
     }
     let store = ScheduleStore::new(db.clone());
     assert_eq!(store.read(1, &active.schedule_id).await.unwrap(), task);

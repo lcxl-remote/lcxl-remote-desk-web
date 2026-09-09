@@ -248,3 +248,8 @@ OSS / Tauri stores image files in `assistant-images/` under the local data direc
 Attachments follow the conversation lifetime. Deleting an image or its conversation immediately prevents subsequent image reads; background cleanup removes files or binary data. Individual deletion tombstones remain until the conversation is deleted so replay cannot restore deleted images. Compression and permission expiry do not delete attachments. Existing conversation retention settings still apply.
 
 To reduce context use, the assistant should prefer exact element references or `native_id` / `role` / `name` queries after its initial UI read. Permission proposals identify a tool name; the server derives its Provider and effect. Inactive grants are grouped by tool and state, while active exact action arguments remain available for verification. Permission expiry does not prematurely trim historical tool results.
+
+
+When AI proposes a scheduled task, the conversation opens a review dialog. Review the prompt and time, then click “Enable scheduled continuation”; replying “confirm” in chat does not activate it. The conversation keeps an entry to reopen a dismissed dialog. Changing the requirement or task can invalidate an old review, requiring a new proposal or refreshed review.
+
+Relative requests such as “in five minutes” count from successful server activation after confirmation. A draft retains the pending delay; activation stores an absolute UTC instant, displayed in the selected timezone. The activation receipt is preserved in the original conversation without creating new user input or granting tool permissions. Independent automations still require rehearsal, permission review and publication.

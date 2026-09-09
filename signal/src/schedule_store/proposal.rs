@@ -83,7 +83,7 @@ impl ScheduleStore {
         .map_err(|_| ScheduleStoreError::Invalid)?;
         let task = Self::create_draft_on(&txn, owner, &draft, now).await?;
         let content = serde_json::json!({"schedule_id":task.schedule_id,"kind":task.kind,"state":"draft",
-            "message":"Owner review is required. Scheduling is not enabled and no execution permission has been granted."}).to_string();
+            "message":"The application displays an owner review dialog. Ask the owner to click Confirm and enable there. A chat reply such as confirm does not activate this draft. Scheduling is not enabled and no execution permission has been granted."}).to_string();
         let envelope = desk_diagnose_core::model_message_labels::internal_tool_result_envelope(
             Some(parent),
             &call.id,

@@ -28,6 +28,7 @@ pub fn due_window(
     }
     let first = first.unwrap();
     let (latest, count) = match &normalized.rule {
+        ScheduleRule::AfterConfirmation { .. } => return Err(ScheduleError::InvalidTime),
         ScheduleRule::Once { .. } => (first, 1),
         ScheduleRule::Interval { every_seconds, .. } => {
             let step = i64::from(*every_seconds) * 1000;

@@ -720,7 +720,12 @@ async fn view(
     let target_device_id = public_target(db, owner, &row.target_device_id).await?;
     let spec = desk_diagnose_core::schedule::parse_json(&row.spec_json)
         .map_err(|_| ScheduleStoreError::Invalid)?;
-    let upcoming_runs = if matches!(row.status.as_str(), "deleted" | "completed") {
+    let upcoming_runs = if matches!(row.status.as_str(), "deleted" | "completed")
+        || (row.status == "draft"
+            && matches!(
+                spec.rule,
+                desk_agent_protocol::schedule::ScheduleRule::AfterConfirmation { .. }
+            )) {
         vec![]
     } else {
         desk_diagnose_core::schedule::timezone::upcoming_runs(
@@ -969,10 +974,7 @@ mod tests {
         .unwrap();
         let mut request = draft();
         request.kind = ScheduledTaskKind::ConversationResume;
-        request.spec.rule = ScheduleRule::Once {
-            at: (chrono::Utc::now() + chrono::Duration::hours(1))
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        };
+        request.spec.rule = ScheduleRule::AfterConfirmation { delay_seconds: 300 };
         request.source_conversation_id = Some("chat-1".into());
         request.requirement_revision = Some(1);
         let created = task(
@@ -986,6 +988,23 @@ mod tests {
             .await
             .unwrap(),
         );
+        assert!(created.upcoming_runs.is_empty());
+        assert!(matches!(
+            created.spec.rule,
+            ScheduleRule::AfterConfirmation { delay_seconds: 300 }
+        ));
+        let fetched = task(
+            manage(
+                &db,
+                1,
+                Request::Get {
+                    schedule_id: created.schedule_id.clone(),
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(fetched.spec, created.spec);
         assert!(
             manage(
                 &db,

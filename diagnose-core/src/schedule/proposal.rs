@@ -27,7 +27,7 @@ pub fn clock_prompt(session: &PersistedAgentSession, now_unix_ms: u64) -> String
         return String::new();
     };
     format!(
-        "\nSCHEDULE PROPOSAL TIME CONTEXT (server clock): current UTC time is {}. No user timezone has been supplied by this context. Do not derive a timezone from response language, device location, browser references, or provider output. If a user gives a local time without an explicit timezone or UTC offset in their instructions, ask them to specify it before proposing a schedule. For local date/time instructions, pass time_input to the server conversion; never compute UTC yourself. Use rule only when the user supplied an explicit UTC schedule or an absolute RFC3339 instant with an explicit offset; preserve that offset for server normalization. If their local date/time is ambiguous or nonexistent because of daylight saving, ask them to clarify the intended instant. Recurring rules are fixed UTC, so local display times may change when daylight saving changes. A proposal creates a draft only; do not claim it is active before owner confirmation.\n",
+        "\nSCHEDULE PROPOSAL TIME CONTEXT (server clock): current UTC time is {}. No user timezone has been supplied by this context. Do not derive a timezone from response language, device location, browser references, or provider output. If a user gives a local time without an explicit timezone or UTC offset in their instructions, ask them to specify it before proposing a schedule. For local date/time instructions, pass time_input to the server conversion; never compute UTC yourself. For absolute or recurring requests, use rule only when the user supplied an explicit UTC schedule or an absolute RFC3339 instant with an explicit offset; preserve that offset for server normalization. If their local date/time is ambiguous or nonexistent because of daylight saving, ask them to clarify the intended instant. Recurring rules are fixed UTC, so local display times may change when daylight saving changes. A proposal creates a draft only. The application opens a review dialog; direct the owner to its Confirm and enable button. A chat reply such as confirm does NOT activate the task. Never claim activation without a server activation receipt. For relative requests such as in 5 minutes, use rule kind after_confirmation with delay_seconds=300; the server counts from owner confirmation and no timezone is needed.\n",
         now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     )
 }
@@ -43,7 +43,7 @@ pub fn registry() -> Vec<crate::registry::RegisteredTool> {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: REQUEST_SCHEDULE.into(),
-        description: "Propose a scheduled task for the owner to review. This only creates a draft; it does not enable scheduling or grant any permissions. conversation_resume is a one-time continuation of this conversation. fresh_task starts a new context each time and requires owner-guided rehearsal and authorization before publication. For local times use time_input with the explicit user timezone and reference date; the server converts it. Use rule only for explicit UTC input or an absolute RFC3339 instant with an explicit offset; preserve the supplied offset. Supply exactly one of rule or time_input; never guess a timezone or compute UTC yourself. The server binds the current owner, device and conversation.".into(),
+        description: "Propose a scheduled task for the owner to review. This only creates a draft; it does not enable scheduling or grant any permissions. conversation_resume is a one-time continuation of this conversation. fresh_task starts a new context each time and requires owner-guided rehearsal and authorization before publication. For local times use time_input with the explicit user timezone and reference date; the server converts it. For relative conversation continuations use rule kind after_confirmation with delay_seconds; the server counts from confirmation. Ordinary chat confirmation does not activate a draft; the owner must confirm in the review dialog. Use other rule kinds only for explicit UTC input or an absolute RFC3339 instant with an explicit offset; preserve the supplied offset. Supply exactly one of rule or time_input; never guess a timezone or compute UTC yourself. The server binds the current owner, device and conversation.".into(),
         parameters_schema: json!({"type":"object","additionalProperties":false,"required":["kind","title","prompt"],"oneOf":[{"required":["rule"],"not":{"required":["time_input"]}},{"required":["time_input"],"not":{"required":["rule"]}}],
             "properties":{
                 "kind":{"type":"string","enum":["conversation_resume","fresh_task"]},
@@ -61,6 +61,7 @@ pub fn spec() -> ToolSpec {
                     ]}
                 }},
                 "rule":{"oneOf":[
+                    {"type":"object","additionalProperties":false,"required":["kind","delay_seconds"],"properties":{"kind":{"const":"after_confirmation"},"delay_seconds":{"type":"integer","minimum":1,"maximum":31536000}}},
                     {"type":"object","additionalProperties":false,"required":["kind","at"],"properties":{"kind":{"const":"once"},"at":{"type":"string","description":"RFC3339 absolute instant with Z or an explicit supplied offset"}}},
                     {"type":"object","additionalProperties":false,"required":["kind","every_seconds","anchor_at"],"properties":{"kind":{"const":"interval"},"every_seconds":{"type":"integer","minimum":60,"maximum":31536000},"anchor_at":{"type":"string","description":"RFC3339 absolute anchor with Z or an explicit supplied offset"}}},
                     {"type":"object","additionalProperties":false,"required":["kind","utc_time"],"properties":{"kind":{"const":"daily"},"utc_time":{"type":"string","description":"UTC time HH:mm:ss"}}},
@@ -115,7 +116,12 @@ pub fn draft(
     }
     let (spec, time_confirmation) = resolve_time(input.rule, input.time_input)?;
     let continuation = input.kind == ScheduledTaskKind::ConversationResume;
-    if continuation && !matches!(spec.rule, ScheduleRule::Once { .. }) {
+    if continuation
+        && !matches!(
+            spec.rule,
+            ScheduleRule::Once { .. } | ScheduleRule::AfterConfirmation { .. }
+        )
+    {
         return Err("conversation continuation must be one-time");
     }
     let identity = serde_json::to_vec(&(

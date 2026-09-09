@@ -1,4 +1,5 @@
 export default {
+    "schedules.proposal.afterConfirmation": "确认后 {{seconds}} 秒执行（从点击启用时开始计时）",
     "schedules.timePreview.utcDetails": "UTC 存储详情",
     "schedules.timePreview.upcoming": "未来执行时间（所选时区）",
     "schedules.timePreview.projection": "仅为规则预览。暂停任务需明确恢复后才会执行。",
@@ -59,7 +60,7 @@ export default {
     "schedules.attachments.max_total_bytes": "附件总计最多字节",
     "schedules.attachments.mediaTypes": "允许的媒体类型",
     "schedules.proposal.created": "已创建定时任务申请",
-    "schedules.proposal.note": "申请创建了待审核草稿。打开管理页查看当前状态；本消息不代表任务已经启用。",
+    "schedules.proposal.note": "请打开审核框核对内容，再点击启用。在聊天中回复“确认”不会启用任务。关闭审核框后可从此处重新打开。",
     "schedules.proposal.open": "查看并审核任务",
     "schedules.proposal.resumeNote": "确认后在指定时间继续原会话。执行时仍会检查会话版本及当前权限。",
 

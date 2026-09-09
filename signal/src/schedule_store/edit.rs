@@ -277,6 +277,15 @@ impl ScheduleStore {
                 && !matches!(
                     normalized.rule,
                     desk_agent_protocol::schedule::ScheduleRule::Once { .. }
+                        | desk_agent_protocol::schedule::ScheduleRule::AfterConfirmation { .. }
+                )
+            {
+                return Err(ScheduleStoreError::Invalid);
+            }
+            if row.kind != "conversation_resume"
+                && matches!(
+                    normalized.rule,
+                    desk_agent_protocol::schedule::ScheduleRule::AfterConfirmation { .. }
                 )
             {
                 return Err(ScheduleStoreError::Invalid);
@@ -286,6 +295,7 @@ impl ScheduleStore {
                 let normalized =
                     validate_publication(&normalized, now, row.kind == "conversation_resume")
                         .map_err(|_| ScheduleStoreError::Invalid)?;
+                patch.spec_json = Set(json(&normalized)?);
                 patch.next_run_at = Set(desk_diagnose_core::schedule::next_after(&normalized, now)
                     .map_err(|_| ScheduleStoreError::Invalid)?);
                 patch.status = Set("active".into());

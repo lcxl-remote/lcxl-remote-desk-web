@@ -55,6 +55,10 @@ pub struct ScheduleSpec {
 )]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScheduleRule {
+    /// Draft-only continuation delay. Activation replaces it with an absolute UTC once rule.
+    AfterConfirmation {
+        delay_seconds: u32,
+    },
     Once {
         at: String,
     },

@@ -9,7 +9,7 @@ export function formatTime(at: string, zone: string, locale: string): string {
 export function ruleTimes(spec: ScheduleSpec, zone: string, locale: string, reference = new Date()): string[] {
     const rule = spec.rule;
     if (rule.kind === 'once') return [formatTime(rule.at, zone, locale)];
-    if (rule.kind === 'interval') return [];
+    if (rule.kind === 'interval' || rule.kind === 'after_confirmation') return [];
     const formatter = new Intl.DateTimeFormat(locale, { timeZone: zone, weekday: rule.kind === 'weekly' ? 'short' : undefined, hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const base = new Date(reference.toISOString().slice(0, 10) + 'T' + rule.utc_time + 'Z');
     if (rule.kind === 'daily') return [formatter.format(base)];
@@ -19,7 +19,8 @@ export function ruleTimes(spec: ScheduleSpec, zone: string, locale: string, refe
 
 /** Display projection only. Unchanged forms retain the original UTC spec. */
 export function projectRule(spec: ScheduleSpec, zone: string, reference = new Date()) {
-    const rule = spec.rule;
+    const rule = spec.rule.kind === 'after_confirmation'
+        ? { kind: 'once' as const, at: new Date(reference.getTime() + spec.rule.delay_seconds * 1000).toISOString() } : spec.rule;
     const at = new Date(rule.kind === 'once' ? rule.at : rule.kind === 'interval' ? rule.anchor_at
         : reference.toISOString().slice(0, 10) + 'T' + rule.utc_time + 'Z');
     const parts = new Intl.DateTimeFormat('en-CA-u-ca-gregory-nu-latn', { timeZone: zone,

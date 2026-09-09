@@ -1,4 +1,5 @@
 export default {
+    "schedules.proposal.afterConfirmation": "Run {{seconds}} seconds after confirmation (counted from activation)",
     "schedules.timePreview.utcDetails": "UTC storage details",
     "schedules.timePreview.upcoming": "Upcoming times in the selected time zone",
     "schedules.timePreview.projection": "Preview only. Paused tasks do not execute until explicitly resumed.",
@@ -59,7 +60,7 @@ export default {
     "schedules.attachments.max_total_bytes": "Maximum total attachment bytes",
     "schedules.attachments.mediaTypes": "Allowed media types",
     "schedules.proposal.created": "Scheduled task proposed",
-    "schedules.proposal.note": "The proposal created a draft for review. Open management to see its current state; this message does not mean scheduling is enabled.",
+    "schedules.proposal.note": "Review the draft and click Enable in the dialog. Replying “confirm” in chat does not activate it. You can reopen a dismissed review here.",
     "schedules.proposal.open": "Review task",
     "schedules.proposal.resumeNote": "Confirm to continue the original conversation at the specified time. The conversation revision and current permissions are checked again at execution.",
 

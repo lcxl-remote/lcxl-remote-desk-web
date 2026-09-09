@@ -125,6 +125,7 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
+        record_activation_on(&txn, &result, now).await?;
         txn.commit().await?;
         Ok(result)
     }
@@ -192,6 +193,74 @@ pub(super) async fn lock_original_requirement(
         .exec(txn)
         .await?;
     if locked.rows_affected != 1 {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    Ok(())
+}
+
+/// Persist the authoritative activation receipt without creating a new user input.
+async fn record_activation_on(
+    txn: &sea_orm::DatabaseTransaction,
+    task: &entity::Model,
+    now: i64,
+) -> Result<(), ScheduleStoreError> {
+    let source = task
+        .source_conversation_id
+        .as_deref()
+        .ok_or(ScheduleStoreError::Invalid)?;
+    let row = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq(source))
+        .one(txn)
+        .await?
+        .ok_or(ScheduleStoreError::NotFound)?;
+    let mut session = PersistedAgentSession::decode_json(&row.state_json)
+        .map_err(|_| ScheduleStoreError::Invalid)?;
+    // The dialog waits for the proposing turn to settle. Never steal a live lease.
+    if session.turn_state.is_active() {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    let id = format!("schedule-activation:{}:{}", task.schedule_id, task.revision);
+    let text =
+        serde_json::json!({"event":"scheduled_task_activated","schedule_id":task.schedule_id,
+        "revision":task.revision,"state":"active","next_run_at_utc_ms":task.next_run_at,
+        "authority":"calendar_only_no_tool_permissions"})
+        .to_string();
+    let parent = session
+        .conversation
+        .iter()
+        .rev()
+        .find_map(|message| message.data_envelope.as_ref());
+    let mut message = desk_diagnose_core::chat::ChatMessage::system_event(&id, &text);
+    message.data_envelope =
+        desk_diagnose_core::model_message_labels::internal_tool_result_envelope(
+            parent,
+            &id,
+            &text,
+            "schedule_activation",
+        )
+        .map_err(|_| ScheduleStoreError::Invalid)?;
+    session.conversation.push(message);
+    session.version = row
+        .version
+        .checked_add(1)
+        .ok_or(ScheduleStoreError::Invalid)?;
+    let timestamp =
+        chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
+    session.updated_at = timestamp.to_rfc3339();
+    let changed = session_row::Entity::update_many()
+        .set(session_row::ActiveModel {
+            state_json: Set(session
+                .encode_json_for_storage()
+                .map_err(|_| ScheduleStoreError::Invalid)?),
+            version: Set(session.version),
+            updated_at: Set(timestamp),
+            ..Default::default()
+        })
+        .filter(session_row::Column::Id.eq(row.id))
+        .filter(session_row::Column::Version.eq(row.version))
+        .exec(txn)
+        .await?;
+    if changed.rows_affected != 1 {
         return Err(ScheduleStoreError::Conflict);
     }
     Ok(())

@@ -63,7 +63,7 @@ async fn fixture() -> (
 }
 
 #[tokio::test]
-async fn confirmation_enables_once_without_mutating_session_or_granting_authority() {
+async fn confirmation_enables_once_with_receipt_without_granting_authority() {
     let (store, task, row, _) = fixture().await;
     let active = store
         .activate_conversation_resume(1, &task.schedule_id, task.revision)
@@ -79,13 +79,24 @@ async fn confirmation_enables_once_without_mutating_session_or_granting_authorit
             && active.authorization_revision.is_none()
             && active.active_run_id.is_none()
     );
-    assert_eq!(
-        session_row::Entity::find_by_id(row.id)
-            .one(&store.db)
-            .await
+    let updated = session_row::Entity::find_by_id(row.id)
+        .one(&store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let before = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+    let after = PersistedAgentSession::decode_json(&updated.state_json).unwrap();
+    assert_eq!(after.input_revision, before.input_revision);
+    assert_eq!(after.latest_input_seq, before.latest_input_seq);
+    assert_eq!(after.scope_snapshot, before.scope_snapshot);
+    assert_eq!(after.conversation.len(), before.conversation.len() + 1);
+    assert!(
+        after
+            .conversation
+            .last()
             .unwrap()
-            .unwrap(),
-        row
+            .text
+            .contains("scheduled_task_activated")
     );
     assert!(matches!(
         store
@@ -169,5 +180,77 @@ async fn activation_does_not_bypass_task_kind_or_source_surface() {
             .await,
         Err(ScheduleStoreError::NotFound)
     ));
+    assert_eq!(store.read(1, &task.schedule_id).await.unwrap(), task);
+}
+
+#[tokio::test]
+async fn relative_activation_uses_confirmation_clock_and_preserves_requirement() {
+    let (store, task, row, before) = fixture().await;
+    entity::Entity::update_many().set(entity::ActiveModel {
+        spec_json: Set(serde_json::json!({"schema_version":1,"rule":{"kind":"after_confirmation","delay_seconds":300}}).to_string()),
+        ..Default::default()
+    }).filter(entity::Column::Id.eq(task.id)).exec(&store.db).await.unwrap();
+    let start = store.database_time().await.unwrap();
+    let active = store
+        .activate_conversation_resume(1, &task.schedule_id, task.revision)
+        .await
+        .unwrap();
+    let end = store.database_time().await.unwrap();
+    let at = active.next_run_at.unwrap();
+    assert!(at >= start + 300_000 && at <= end + 301_000);
+    let spec: desk_agent_protocol::schedule::ScheduleSpec =
+        serde_json::from_str(&active.spec_json).unwrap();
+    assert!(matches!(spec.rule, ScheduleRule::Once { .. }));
+    let updated = session_row::Entity::find_by_id(row.id)
+        .one(&store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let after = PersistedAgentSession::decode_json(&updated.state_json).unwrap();
+    assert_eq!(after.input_revision, before.input_revision);
+    assert_eq!(after.latest_input_seq, before.latest_input_seq);
+    assert!(
+        after
+            .conversation
+            .last()
+            .unwrap()
+            .text
+            .contains("scheduled_task_activated")
+    );
+    assert!(
+        store
+            .activate_conversation_resume(1, &task.schedule_id, task.revision)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        session_row::Entity::find_by_id(row.id)
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap(),
+        updated
+    );
+}
+
+#[tokio::test]
+async fn fresh_task_edit_rejects_confirmation_delay_without_changing_the_task() {
+    let (store, _, _, _) = fixture().await;
+    let mut draft = super::super::tests::draft();
+    draft.client_create_key = "fresh-delay-edit".into();
+    let task = store
+        .create_draft(1, &draft, store.database_time().await.unwrap())
+        .await
+        .unwrap();
+    let spec = desk_agent_protocol::schedule::ScheduleSpec {
+        schema_version: 1,
+        rule: ScheduleRule::AfterConfirmation { delay_seconds: 300 },
+    };
+    assert!(
+        store
+            .change_time(1, &task.schedule_id, task.revision, &spec)
+            .await
+            .is_err()
+    );
     assert_eq!(store.read(1, &task.schedule_id).await.unwrap(), task);
 }

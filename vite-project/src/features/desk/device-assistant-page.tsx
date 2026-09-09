@@ -768,7 +768,7 @@ export function DeviceAssistantWorkspace({
                                 </Button>
                             </div>
                         )}
-                        <ScheduleProposalCards tools={chat.tools} />
+                        <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running} deviceId={stableDeviceId} connectionId={deskId} />
                         {chat.messages.map((message) => (
                             <Fragment key={message.id}>
                             <div

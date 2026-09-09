@@ -7,9 +7,9 @@ import { ContractReview } from './contract-review';
 import { RehearsalDetails } from './rehearsal-details';
 import { formatTime, validTimezone } from './time';
 
-export function ProposalReview({ client, scheduleId, connected, zone, assistantPaths, onChanged }: {
+export function ProposalReview({ client, scheduleId, connected, zone, assistantPaths, onChanged, activationDisabled = false }: {
     client: ScheduleClient; scheduleId: string; connected: boolean; zone: string;
-    assistantPaths: Record<string, string>; onChanged: () => void;
+    activationDisabled?: boolean; assistantPaths: Record<string, string>; onChanged: () => void;
 }) {
     const { t, i18n } = useTranslation();
     const [task, setTask] = useState<ScheduleView | null>(null);
@@ -31,7 +31,7 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
         return () => { ++epoch.current; };
     }, [client, scheduleId, connected, refresh, t]);
     const activate = async () => {
-        if (!task || !connected || busy || pending.current || task.kind !== 'conversation_resume' || task.status !== 'draft') return;
+        if (activationDisabled || !task || !connected || busy || pending.current || task.kind !== 'conversation_resume' || task.status !== 'draft') return;
         const current = epoch.current;
         pending.current = true; setBusy(true); setError('');
         try {
@@ -53,9 +53,10 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
             <p className="whitespace-pre-wrap">{task.prompt}</p>
             <p>{t(`schedules.status.${task.status}`)}</p>
             {task.kind === 'conversation_resume' && <>
+                {task.spec.rule.kind === 'after_confirmation' && <p>{t('schedules.proposal.afterConfirmation', { seconds: task.spec.rule.delay_seconds })}</p>}
                 {task.spec.rule.kind === 'once' && <p>{formatTime(task.spec.rule.at, validTimezone(zone) ? zone : 'UTC', i18n.language)}</p>}
                 <p>{t('schedules.proposal.resumeNote')}</p>
-                {task.status === 'draft' && <Button disabled={!connected || busy} onClick={() => void activate()}>{t('schedules.activateResume')}</Button>}
+                {task.status === 'draft' && <Button disabled={!connected || busy || activationDisabled} onClick={() => void activate()}>{t('schedules.activateResume')}</Button>}
             </>}
             {task.kind === 'fresh_task' && <>
                 <div className="flex gap-2">

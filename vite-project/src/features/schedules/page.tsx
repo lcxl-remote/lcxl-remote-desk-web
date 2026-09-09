@@ -151,7 +151,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
                 <div className="flex flex-wrap justify-between gap-2"><h2 className="font-semibold">{task.title}</h2><span className="text-sm">{t(`schedules.status.${task.status}`)}</span></div>
                 <p className="whitespace-pre-wrap text-sm">{task.prompt}</p>
                 <p className="text-sm text-muted-foreground">{allDevices.find(d => d.id === task.target_device_id)?.name ?? t('schedules.targetUnavailable')}</p>
-                {validZone && <p className="text-sm">{task.spec.rule.kind === 'interval' ? t('schedules.everySeconds', { count: task.spec.rule.every_seconds }) : `${t(`schedules.rule.${task.spec.rule.kind}`)} · ${ruleTimes(task.spec, zone, i18n.language, task.next_run_at ? new Date(task.next_run_at) : undefined).join(' / ')}`}</p>}
+                {validZone && <p className="text-sm">{task.spec.rule.kind === 'after_confirmation' ? t('schedules.proposal.afterConfirmation', { seconds: task.spec.rule.delay_seconds }) : task.spec.rule.kind === 'interval' ? t('schedules.everySeconds', { count: task.spec.rule.every_seconds }) : `${t(`schedules.rule.${task.spec.rule.kind}`)} · ${ruleTimes(task.spec, zone, i18n.language, task.next_run_at ? new Date(task.next_run_at) : undefined).join(' / ')}`}</p>}
                 <p className="text-sm">{t('schedules.next')}: {validZone && task.next_run_at ? formatTime(task.next_run_at, zone, i18n.language) : t('schedules.notScheduled')}</p>
                 {validZone && task.upcoming_runs.length > 0 && <details className="text-sm"><summary>{t('schedules.timePreview.upcoming')}</summary>
                     <p>{t('schedules.timePreview.projection')}</p>

@@ -7417,30 +7417,46 @@ export type ScheduledTaskKindEnumKey = (typeof scheduledTaskKindEnum)[keyof type
 export type ScheduledTaskKind = ScheduledTaskKindEnumKey;
 
 export const scheduleRuleKindEnum = {
-    once: "once"
+    after_confirmation: "after_confirmation"
 } as const;
 
 export type ScheduleRuleKindEnumKey = (typeof scheduleRuleKindEnum)[keyof typeof scheduleRuleKindEnum];
 
 export const scheduleRuleKindEnum2 = {
-    interval: "interval"
+    once: "once"
 } as const;
 
 export type ScheduleRuleKindEnum2Key = (typeof scheduleRuleKindEnum2)[keyof typeof scheduleRuleKindEnum2];
 
 export const scheduleRuleKindEnum3 = {
-    daily: "daily"
+    interval: "interval"
 } as const;
 
 export type ScheduleRuleKindEnum3Key = (typeof scheduleRuleKindEnum3)[keyof typeof scheduleRuleKindEnum3];
 
 export const scheduleRuleKindEnum4 = {
-    weekly: "weekly"
+    daily: "daily"
 } as const;
 
 export type ScheduleRuleKindEnum4Key = (typeof scheduleRuleKindEnum4)[keyof typeof scheduleRuleKindEnum4];
 
+export const scheduleRuleKindEnum5 = {
+    weekly: "weekly"
+} as const;
+
+export type ScheduleRuleKindEnum5Key = (typeof scheduleRuleKindEnum5)[keyof typeof scheduleRuleKindEnum5];
+
 export type ScheduleRule = ({
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    delay_seconds: number;
+    /**
+     * @type string
+    */
+    kind: ScheduleRuleKindEnumKey;
+} | {
     /**
      * @type string
     */
@@ -7448,7 +7464,7 @@ export type ScheduleRule = ({
     /**
      * @type string
     */
-    kind: ScheduleRuleKindEnumKey;
+    kind: ScheduleRuleKindEnum2Key;
 } | {
     /**
      * @type string
@@ -7462,12 +7478,12 @@ export type ScheduleRule = ({
     /**
      * @type string
     */
-    kind: ScheduleRuleKindEnum2Key;
+    kind: ScheduleRuleKindEnum3Key;
 } | {
     /**
      * @type string
     */
-    kind: ScheduleRuleKindEnum3Key;
+    kind: ScheduleRuleKindEnum4Key;
     /**
      * @type string
     */
@@ -7476,7 +7492,7 @@ export type ScheduleRule = ({
     /**
      * @type string
     */
-    kind: ScheduleRuleKindEnum4Key;
+    kind: ScheduleRuleKindEnum5Key;
     /**
      * @type string
     */

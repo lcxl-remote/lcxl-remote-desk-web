@@ -76,11 +76,17 @@ pub fn normalize_draft(
                 || draft
                     .requirement_revision
                     .is_none_or(|r| r == 0 || r > i64::MAX as u64)
-                || !matches!(draft.spec.rule, ScheduleRule::Once { .. }) =>
+                || !matches!(
+                    draft.spec.rule,
+                    ScheduleRule::Once { .. } | ScheduleRule::AfterConfirmation { .. }
+                ) =>
         {
             return Err(ScheduleError::InvalidDraft);
         }
-        ScheduledTaskKind::FreshTask if draft.requirement_revision.is_some() => {
+        ScheduledTaskKind::FreshTask
+            if draft.requirement_revision.is_some()
+                || matches!(draft.spec.rule, ScheduleRule::AfterConfirmation { .. }) =>
+        {
             return Err(ScheduleError::InvalidDraft);
         }
         _ => {}
@@ -128,6 +134,11 @@ pub fn normalize(spec: &ScheduleSpec) -> Result<ScheduleSpec, ScheduleError> {
     }
     let mut spec = spec.clone();
     match &mut spec.rule {
+        ScheduleRule::AfterConfirmation { delay_seconds } => {
+            if !(1..=MAX_INTERVAL_SECONDS).contains(delay_seconds) {
+                return Err(ScheduleError::InvalidInterval);
+            }
+        }
         ScheduleRule::Once { at } => {
             *at = absolute(at)?.to_rfc3339_opts(SecondsFormat::Secs, true);
         }
@@ -195,7 +206,22 @@ pub fn validate_publication(
     now_ms: i64,
     conversation_resume: bool,
 ) -> Result<ScheduleSpec, ScheduleError> {
-    let normalized = normalize(spec)?;
+    let mut normalized = normalize(spec)?;
+    if let ScheduleRule::AfterConfirmation { delay_seconds } = normalized.rule {
+        if !conversation_resume {
+            return Err(ScheduleError::InvalidTime);
+        }
+        let at = now_ms
+            .checked_add(i64::from(delay_seconds) * 1000)
+            .and_then(|value| value.checked_add(999))
+            .map(|value| value / 1000 * 1000)
+            .and_then(DateTime::from_timestamp_millis)
+            .ok_or(ScheduleError::OutOfRange)?;
+        normalized.rule = ScheduleRule::Once {
+            at: at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        };
+        normalized = normalize(&normalized)?;
+    }
     if conversation_resume && !matches!(normalized.rule, ScheduleRule::Once { .. }) {
         return Err(ScheduleError::InvalidTime);
     }
@@ -214,6 +240,7 @@ pub fn next_after(spec: &ScheduleSpec, reference_ms: i64) -> Result<Option<i64>,
         return Err(ScheduleError::OutOfRange);
     }
     let result = match &spec.rule {
+        ScheduleRule::AfterConfirmation { .. } => return Err(ScheduleError::InvalidTime),
         ScheduleRule::Once { at } => {
             let at = absolute(at)?.timestamp_millis();
             (at > reference_ms).then_some(at)
@@ -270,3 +297,32 @@ mod tests;
 pub mod proposal;
 
 pub mod directory_recovery;
+
+#[cfg(test)]
+mod confirmation_delay_tests {
+    use super::*;
+    #[test]
+    fn delay_is_draft_only_and_resolves_from_each_confirmation_clock() {
+        let draft = ScheduleSpec {
+            schema_version: 1,
+            rule: ScheduleRule::AfterConfirmation { delay_seconds: 300 },
+        };
+        assert!(next_after(&draft, 1_000_000).is_err());
+        assert!(validate_publication(&draft, 1_000_000, false).is_err());
+        for now in [1_000_000, 9_000_123] {
+            let active = validate_publication(&draft, now, true).unwrap();
+            let at = next_after(&active, now).unwrap().unwrap();
+            assert!(at >= now + 300_000 && at < now + 301_000);
+            assert!(matches!(active.rule, ScheduleRule::Once { .. }));
+        }
+        for delay_seconds in [0, MAX_INTERVAL_SECONDS + 1] {
+            assert!(
+                normalize(&ScheduleSpec {
+                    schema_version: 1,
+                    rule: ScheduleRule::AfterConfirmation { delay_seconds }
+                })
+                .is_err()
+            );
+        }
+    }
+}
