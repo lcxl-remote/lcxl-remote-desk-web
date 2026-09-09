@@ -9,9 +9,9 @@ import { ContractReview } from './contract-review';
 import { RehearsalDetails } from './rehearsal-details';
 import { formatTime, validTimezone } from './time';
 
-export function ProposalReview({ client, scheduleId, connected, zone, assistantPaths, onChanged, activationDisabled = false, approvalDialog = false, dismissRequest = 0 }: {
+export function ProposalReview({ client, scheduleId, connected, zone, assistantPaths, onChanged, activationDisabled = false, approvalCard = false }: {
     client: ScheduleClient; scheduleId: string; connected: boolean; zone: string;
-    dismissRequest?: number; approvalDialog?: boolean; activationDisabled?: boolean; assistantPaths: Record<string, string>; onChanged: (task: ScheduleView) => void;
+    approvalCard?: boolean; activationDisabled?: boolean; assistantPaths: Record<string, string>; onChanged: (task: ScheduleView) => void;
 }) {
     const { t, i18n } = useTranslation();
     const [task, setTask] = useState<ScheduleView | null>(null);
@@ -21,7 +21,6 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
     const [refresh, setRefresh] = useState(0);
     const epoch = useRef(0);
     const pending = useRef(false);
-    const dismissed = useRef(0);
     useEffect(() => {
         const current = ++epoch.current;
         setTask(null); setError(''); setBusy(connected); pending.current = false;
@@ -46,18 +45,12 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
             if (current === epoch.current) setError(reason instanceof ScheduleRequestError && reason.reason === 'server' ? reason.message : t('schedules.requestFailed'));
         } finally { if (current === epoch.current) { pending.current = false; setBusy(false); } }
     };
-    useEffect(() => {
-        if (!dismissRequest || dismissed.current === dismissRequest || !task || busy || !connected) return;
-        dismissed.current = dismissRequest;
-        if (task.kind === 'conversation_resume' && task.status === 'pending_review') void decide(false);
-        else onChanged(task);
-    }, [dismissRequest, task, busy, connected]);
     return <div className="space-y-3">
-        {(!approvalDialog || !!error) && <Button variant="outline" disabled={!connected || busy} onClick={() => setRefresh(value => value + 1)}>{t('schedules.refresh')}</Button>}
+        {(!approvalCard || !!error) && <Button variant="outline" disabled={!connected || busy} onClick={() => setRefresh(value => value + 1)}>{t('schedules.refresh')}</Button>}
         {!connected && <p role="status" className="text-xs text-muted-foreground">{t('schedules.connecting')}</p>}
         {busy && <p role="status" className="text-xs text-muted-foreground">{t('schedules.loading')}</p>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        {task && <div className={approvalDialog ? 'min-w-0 space-y-3 rounded-md bg-muted/50 p-3' : 'space-y-3'}>
+        {task && <div className={approvalCard ? 'min-w-0 space-y-3 rounded-md bg-muted/50 p-3' : 'space-y-3'}>
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="min-w-0 break-words text-sm font-medium">{task.title}</h3>
                 <Badge variant={task.status === 'draft' ? 'default' : 'outline'}>{t(`schedules.status.${task.status}`)}</Badge>
@@ -76,7 +69,7 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
             {task.kind === 'conversation_resume' && <div className="space-y-2">
                 <p className="text-xs text-muted-foreground">{t('schedules.proposal.resumeNote')}</p>
                 {task.status === 'pending_review' && <div className="flex flex-wrap gap-2">
-                    <Button type="button" size="sm" disabled={!connected || busy || activationDisabled} onClick={() => void decide(true)}><Check className="mr-2 h-4 w-4" />{t(approvalDialog ? 'schedules.proposal.approve' : 'schedules.activateResume')}</Button>
+                    <Button type="button" size="sm" disabled={!connected || busy || activationDisabled} onClick={() => void decide(true)}><Check className="mr-2 h-4 w-4" />{t(approvalCard ? 'schedules.proposal.approve' : 'schedules.activateResume')}</Button>
                     <Button type="button" size="sm" variant="outline" disabled={!connected || busy || activationDisabled} onClick={() => void decide(false)}><X className="mr-2 h-4 w-4" />{t('schedules.proposal.reject')}</Button>
                 </div>}
             </div>}

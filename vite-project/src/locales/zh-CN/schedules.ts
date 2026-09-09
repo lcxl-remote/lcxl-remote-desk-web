@@ -61,7 +61,7 @@ export default {
     "schedules.attachments.mediaTypes": "允许的媒体类型",
     "schedules.proposal.created": "已创建定时任务申请",
     "schedules.proposal.note": "请核对任务内容与执行时间，然后选择通过或拒绝。通过后自动计时，无需再发送“确认了”；普通聊天不会取消任务。自动化任务还需完成录制和权限审核。",
-    "schedules.proposal.reviewHint": "请核对任务内容和执行时间，然后选择通过或拒绝。关闭窗口视为拒绝。",
+    "schedules.proposal.reviewHint": "请核对任务内容和执行时间，然后选择通过或拒绝。",
     "schedules.proposal.executionTime": "执行时间",
     "schedules.proposal.open": "查看并审核任务",
     "schedules.proposal.resumeNote": "确认后在指定时间继续原会话。执行时仍会检查会话版本及当前权限。",

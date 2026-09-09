@@ -727,7 +727,7 @@ async fn view(
     let spec = desk_diagnose_core::schedule::parse_json(&row.spec_json)
         .map_err(|_| ScheduleStoreError::Invalid)?;
     let upcoming_runs = if matches!(row.status.as_str(), "deleted" | "completed")
-        || (row.status == "draft"
+        || (row.status == "pending_review"
             && matches!(
                 spec.rule,
                 desk_agent_protocol::schedule::ScheduleRule::AfterConfirmation { .. }
@@ -984,6 +984,66 @@ mod tests {
         request.source_conversation_id = Some("chat-1".into());
         request.creation_source = ScheduleCreationSource::AiProposal;
         request.requirement_revision = Some(1);
+        // Model proposals must be readable before the owner decides; their delay
+        // has no absolute execution time until approval.
+        let mut proposal = resolve_draft(&db, 1, request.clone()).await.unwrap();
+        proposal.client_create_key = "pending-review-detail".into();
+        let store = ScheduleStore::new(db.clone());
+        let pending = store
+            .create_draft(1, &proposal, chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        let reviewed = task(
+            manage(
+                &db,
+                1,
+                Request::Get {
+                    schedule_id: pending.schedule_id.clone(),
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(reviewed.status, ScheduledTaskStatus::PendingReview);
+        assert!(reviewed.upcoming_runs.is_empty());
+        assert!(reviewed.next_run_at.is_none());
+        assert_eq!(
+            reviewed.spec.rule,
+            ScheduleRule::AfterConfirmation { delay_seconds: 300 }
+        );
+        let rejected = task(
+            manage(
+                &db,
+                1,
+                Request::Delete {
+                    schedule_id: pending.schedule_id,
+                    expected_revision: pending.revision,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(rejected.status, ScheduledTaskStatus::Deleted);
+        proposal.client_create_key = "pending-review-approved".into();
+        let pending = store
+            .create_draft(1, &proposal, chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        let approved = task(
+            manage(
+                &db,
+                1,
+                Request::ActivateConversationResume {
+                    schedule_id: pending.schedule_id,
+                    expected_revision: pending.revision,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(approved.status, ScheduledTaskStatus::Active);
+        assert!(approved.next_run_at.is_some());
+        assert!(!approved.upcoming_runs.is_empty());
         let created = task(
             manage(
                 &db,
@@ -1094,7 +1154,7 @@ mod tests {
             manage(&db, 1, Request::CreateDraft { draft: request }).await,
             Err(ScheduleStoreError::NotFound)
         ));
-        assert_eq!(row::Entity::find().count(&db).await.unwrap(), 1);
+        assert_eq!(row::Entity::find().count(&db).await.unwrap(), 3);
     }
 
     fn draft() -> ScheduleDraft {

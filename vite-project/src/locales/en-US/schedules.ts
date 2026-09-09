@@ -61,7 +61,7 @@ export default {
     "schedules.attachments.mediaTypes": "Allowed media types",
     "schedules.proposal.created": "Scheduled task proposed",
     "schedules.proposal.note": "Review the task and time, then approve or reject. Approval starts the timer; no chat confirmation is needed, and ordinary chat does not cancel it. Fresh tasks still require recording and permission review.",
-    "schedules.proposal.reviewHint": "Review the task and execution time, then approve or reject. Closing this window rejects a conversation timer request.",
+    "schedules.proposal.reviewHint": "Review the task and execution time, then approve or reject.",
     "schedules.proposal.executionTime": "Execution time",
     "schedules.proposal.open": "Review task",
     "schedules.proposal.resumeNote": "Confirm to continue the original conversation at the specified time. The conversation revision and current permissions are checked again at execution.",
