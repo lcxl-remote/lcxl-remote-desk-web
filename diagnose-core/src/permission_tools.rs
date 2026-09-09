@@ -503,7 +503,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-            description: "Ask the user for one bounded batch of tool permissions. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
+            description: "Ask the user for one bounded batch of tool permissions. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -991,6 +991,77 @@ pub fn build_permission_request(
     Ok(request)
 }
 
+/// Bundle observation with a desktop action as ordinary, independently reviewable
+/// permission items. This prepares consent only; it never issues implicit grants.
+pub fn include_desktop_action_reads(
+    request: &mut PermissionRequest,
+    registry: &ProviderRegistry,
+) -> Result<(), AgentError> {
+    let Some(ttl) = request
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.tool_name.as_str(),
+                "execute_confirmed_ui_action" | "execute_confirmed_raw_input"
+            )
+        })
+        .map(|item| item.suggested_ttl_seconds)
+        .max()
+    else {
+        return Ok(());
+    };
+    let mut additions = Vec::new();
+    for name in ["inspect_desktop_session", "inspect_desktop_ui"] {
+        if request.items.iter().any(|item| item.tool_name == name) {
+            continue;
+        }
+        let capability = registry
+            .capability_for_tool(name)
+            .ok_or_else(|| invalid("desktop observation is unavailable"))?;
+        let provider = registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .ok_or_else(|| invalid("desktop observation Provider is unavailable"))?;
+        let item_id = format!("included-{name}");
+        if request.items.iter().any(|item| item.item_id == item_id) {
+            return Err(invalid(
+                "permission item id conflicts with included desktop observation",
+            ));
+        }
+        additions.push(serde_json::json!({
+            "item_id": item_id,
+            "provider_id": provider.wire.provider_id,
+            "tool_name": name,
+            "expected_effect": capability.wire.effect,
+            "suggested_ttl_seconds": ttl,
+            "suggested_max_uses": MAX_REQUEST_USES,
+            "reason": "Read the current device UI to locate and verify the approved desktop action. This excludes screenshots."
+        }));
+    }
+    if additions.is_empty() {
+        return Ok(());
+    }
+    if request.items.len() + additions.len() > MAX_PERMISSION_REQUEST_ITEMS {
+        return Err(invalid(
+            "desktop actions need space for two included read permissions; request at most 14 actions per batch",
+        ));
+    }
+    let reads = build_permission_request(
+        &ToolCall {
+            id: "included-desktop-reads".into(),
+            name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+            arguments_json: serde_json::json!({"items": additions}).to_string(),
+        },
+        registry,
+        request.request_id.clone(),
+        request.input_revision,
+        request.created_at.clone(),
+    )?;
+    request.items.extend(reads.items);
+    request.validate().map_err(invalid)?;
+    Ok(())
+}
+
 /// Compare only the server-normalized authority and limits of two requests.
 /// Model-chosen item ids and explanatory prose are deliberately excluded so a
 /// denied/approved batch cannot be recreated by merely rewording its reason.
@@ -1437,6 +1508,40 @@ mod tests {
                 .iter()
                 .any(|scope| scope == "model:chosen")
         );
+
+        let mut bundled = request.clone();
+        include_desktop_action_reads(&mut bundled, &registry).unwrap();
+        assert_eq!(bundled.items.len(), 3);
+        assert_eq!(bundled.items[0], request.items[0]);
+        for read in &bundled.items[1..] {
+            assert_eq!(read.expected_effect, CapabilityEffect::ReadDevice);
+            assert_eq!(read.resource_scope, vec!["target:current_device"]);
+            assert_eq!(read.operation_scope, vec!["observe"]);
+            assert_eq!(read.suggested_ttl_seconds, 60);
+            assert_eq!(read.suggested_max_uses, MAX_REQUEST_USES);
+            assert!(read.canonical_input_json.is_none());
+            assert!(read.export_destinations.is_empty());
+        }
+        let before = bundled.clone();
+        include_desktop_action_reads(&mut bundled, &registry).unwrap();
+        assert_eq!(before, bundled);
+        // Explicitly requested narrower read limits are never widened.
+        bundled.items[1].suggested_ttl_seconds = 10;
+        bundled.items[1].suggested_max_uses = 1;
+        include_desktop_action_reads(&mut bundled, &registry).unwrap();
+        assert_eq!(bundled.items[1].suggested_ttl_seconds, 10);
+        assert_eq!(bundled.items[1].suggested_max_uses, 1);
+        let mut crowded = request.clone();
+        crowded.items = (0..15)
+            .map(|i| {
+                let mut item = request.items[0].clone();
+                item.item_id = format!("action-{i}");
+                item
+            })
+            .collect();
+        let original = crowded.clone();
+        assert!(include_desktop_action_reads(&mut crowded, &registry).is_err());
+        assert_eq!(crowded, original);
 
         let toggle = exact.replace(
             r#"{"kind":"set_value","params":{"value":"Ready"}}"#,

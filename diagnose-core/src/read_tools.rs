@@ -161,11 +161,12 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_current_screen",
             Capability::ScreenCaptureCurrent,
-            "Capture the device's current screen for visual diagnosis.",
+            "Capture the current display, or pass an exact Window object_ref returned by inspect_desktop_ui to capture that macOS window independently even when covered. Requires screen capture permission; do not activate a background window just for capture. Minimized windows must be restored with separate action approval.",
             json!({
                 "type": "object",
                 "properties": {
-                    "display": {"type": "string"}
+                    "display": {"type": "string"},
+                    "window": object_ref_schema()
                 }
             }),
         ),
@@ -192,7 +193,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_desktop_ui",
             Capability::DesktopUiInspect,
-            "Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. scope=content (default) reads ordinary UI without menus; scope=menus returns only menu subtrees, useful after the window was already read; scope=all reads both. Choose an Application or null root for the application menu bar; a Window root searches only that window. Application catalog nodes do not contain UI contents or authorize actions. Protected field values are never returned.",
+            "Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. scope=content (default) reads ordinary UI without menus; scope=menus returns only menu subtrees, useful after the window was already read; scope=all reads both. Choose an Application or null root for the application menu bar; a Window root searches only that window. Pass an existing UI element reference as root with element_only=true to refresh only its current value; otherwise read its subtree. query searches exact native_id, role and/or name within the selected root and returns matching nodes only (fields combine with AND). Use max_depth=12 for result text; do not reduce depth to reduce output, use query or element_only instead. Application catalog nodes do not contain UI contents or authorize actions. Protected field values are never returned.",
             json!({
                 "type": "object",
                 "properties": {
@@ -212,8 +213,14 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                             }
                         ]
                     },
+                    "element_only": {"type":"boolean", "default":false},
+                    "query": {"type":"object", "additionalProperties":false, "properties": {
+                        "native_id":{"type":"string","maxLength":512},
+                        "role":{"type":"string","maxLength":512},
+                        "name":{"type":"string","maxLength":512}
+                    }},
                     "scope": {"type": "string", "enum": ["content", "menus", "all"], "default": "content"},
-                    "max_depth": {"type": "integer", "minimum": 1, "maximum": 12, "default": 6},
+                    "max_depth": {"type": "integer", "minimum": 1, "maximum": 12, "default": 12},
                     "max_nodes": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 300},
                     "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576, "default": 262144}
                 },
@@ -346,11 +353,12 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_current_screen",
             Capability::ScreenCaptureCurrent,
-            "Capture the device's current screen once for this turn. The image is sensitive, is sent only to the selected visual model, and is never stored in the conversation.",
+            "Capture the current display once, or pass an exact Window object_ref returned by inspect_desktop_ui to capture a macOS window independently even when covered. Requires capture permission. A minimized window must first be restored with separate action approval. The image is sensitive, sent only to the selected visual model, and not stored in conversation history.",
             json!({
                 "type": "object",
                 "properties": {
-                    "display": {"type": "string"}
+                    "display": {"type": "string"},
+                    "window": object_ref_schema()
                 },
                 "additionalProperties": false
             }),
@@ -368,6 +376,8 @@ struct DesktopSessionToolArgs {
 #[serde(deny_unknown_fields)]
 struct CurrentScreenToolArgs {
     #[serde(default)]
+    window: Option<ObjectRef>,
+    #[serde(default)]
     display: Option<String>,
 }
 
@@ -376,7 +386,12 @@ const fn default_true() -> bool {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DesktopUiToolArgs {
+    #[serde(default)]
+    query: Option<desk_agent_protocol::computer_use::UiInspectQuery>,
+    #[serde(default)]
+    element_only: bool,
     #[serde(default)]
     scope: desk_agent_protocol::computer_use::UiInspectScope,
     #[serde(default)]
@@ -467,7 +482,7 @@ impl Default for OfficeSelectionToolArgs {
 }
 
 const fn default_ui_depth() -> u16 {
-    6
+    12
 }
 
 const fn default_ui_nodes() -> u32 {
@@ -557,7 +572,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             let args = parse_params::<CurrentScreenToolArgs>(&call.arguments_json)?;
             ContextKind::ScreenCaptureCurrent(ScreenCaptureParams {
                 display: args.display,
-                window: None,
+                window: args.window,
             })
         }
         "inspect_desktop_session" => {
@@ -569,6 +584,8 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
         "inspect_desktop_ui" => {
             let args = parse_params::<DesktopUiToolArgs>(&call.arguments_json)?;
             ContextKind::DesktopUiInspect(UiInspectParams {
+                query: args.query,
+                element_only: args.element_only,
                 scope: args.scope,
                 root: args.root,
                 max_depth: args.max_depth,
@@ -972,6 +989,41 @@ mod menu_scope_tests {
     use desk_agent_protocol::computer_use::UiInspectScope;
 
     #[test]
+    fn precise_ui_and_window_capture_arguments_preserve_exact_references() {
+        let reference = json!({"token":"opaque", "snapshot_id":"snapshot", "object_kind":"window", "expires_at":"2030-01-01T00:00:00Z"});
+        let call = ToolCall {
+            id: "capture".into(),
+            name: "read_current_screen".into(),
+            arguments_json: json!({"window":reference}).to_string(),
+        };
+        let (_, OperationInput::ReadContext(input)) = build_read_operation(&call).unwrap() else {
+            panic!()
+        };
+        let ContextKind::ScreenCaptureCurrent(params) = input.kind else {
+            panic!()
+        };
+        assert_eq!(
+            serde_json::to_value(params.window.unwrap()).unwrap(),
+            reference
+        );
+        let call = ToolCall { id:"find".into(), name:"inspect_desktop_ui".into(), arguments_json:json!({"root":reference,"query":{"native_id":"result", "role":"AXStaticText"},"element_only":true}).to_string() };
+        let (_, OperationInput::ReadContext(input)) = build_read_operation(&call).unwrap() else {
+            panic!()
+        };
+        let ContextKind::DesktopUiInspect(params) = input.kind else {
+            panic!()
+        };
+        assert_eq!(params.max_depth, 12);
+        assert!(params.element_only);
+        assert_eq!(params.query.unwrap().native_id.as_deref(), Some("result"));
+        let call = ToolCall {
+            arguments_json: r#"{"query":{"id":"typo"}}"#.into(),
+            ..call
+        };
+        assert!(build_read_operation(&call).is_err());
+    }
+
+    #[test]
     fn ui_scope_defaults_to_content_and_supports_menus_without_other_ui() {
         for (args, expected) in [
             ("{}", UiInspectScope::Content),
@@ -1006,4 +1058,10 @@ mod menu_scope_tests {
         };
         assert!(build_read_operation(&call).is_err());
     }
+}
+
+fn object_ref_schema() -> serde_json::Value {
+    json!({"type":"object","additionalProperties":false,"required":["token","snapshot_id","object_kind","expires_at"],"properties":{
+        "token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"type":"string","enum":["window"]},"expires_at":{"type":"string"}
+    }})
 }

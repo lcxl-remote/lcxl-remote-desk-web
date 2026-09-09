@@ -262,7 +262,7 @@ impl ComputerUseBroker {
     ) -> Result<ScreenCapturePermit, AgentError> {
         validate_screen_selection(params, selected_display)?;
         ensure_screen_capture_safe()?;
-        let window_region = if let Some(window) = params.window.as_ref() {
+        let window_target = if let Some(window) = params.window.as_ref() {
             if window.object_kind != ObjectKind::Window {
                 return Err(error(
                     AgentErrorKind::InvalidInput,
@@ -285,7 +285,7 @@ impl ComputerUseBroker {
             #[cfg(target_os = "macos")]
             {
                 Some(
-                    super::macos_accessibility_observer::resolve_window_capture_region(
+                    super::macos_accessibility_observer::resolve_window_capture_target(
                         process_id,
                         &image_path,
                         &fingerprint,
@@ -316,7 +316,8 @@ impl ComputerUseBroker {
         drop(gate);
         Ok(ScreenCapturePermit {
             broker: Arc::clone(self),
-            window_region,
+            window_target,
+            window_ref: params.window.clone(),
         })
     }
 
@@ -2396,6 +2397,7 @@ impl ComputerUseBroker {
                 },
             )?;
             output.nodes.push(UiNodeProjection {
+                native_id: None,
                 object_ref,
                 parent_index: None,
                 role: "application".into(),
@@ -2446,6 +2448,18 @@ impl ComputerUseBroker {
         params: &UiInspectParams,
         ceiling: &ComputerUseSettings,
     ) -> Result<UiInspectOutput, AgentError> {
+        if params.query.as_ref().is_some_and(|q| {
+            [q.native_id.as_ref(), q.role.as_ref(), q.name.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|v| v.is_empty() || v.len() > 512)
+        }) {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "UI query values must contain 1 to 512 bytes",
+                false,
+            ));
+        }
         ensure_observation_enabled(ceiling)?;
         if params.max_depth == 0
             || params.max_depth > MAX_UI_INSPECT_DEPTH
@@ -2462,7 +2476,10 @@ impl ComputerUseBroker {
         }
         let resolved_root = if let Some(root) = params.root.as_ref() {
             match root.object_kind {
-                ObjectKind::DesktopSession | ObjectKind::Application | ObjectKind::Window => {}
+                ObjectKind::DesktopSession
+                | ObjectKind::Application
+                | ObjectKind::Window
+                | ObjectKind::UiElement => {}
                 _ => {
                     return Err(error(
                         AgentErrorKind::InvalidInput,
@@ -2481,12 +2498,20 @@ impl ComputerUseBroker {
         if let Some(ResolvedObject::DesktopSession { session_id }) = &resolved_root
             && *session_id == observed.session_id
         {
+            if params.query.is_some() || params.element_only {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "select an Application or UI root before searching controls",
+                    false,
+                ));
+            }
             return self.inspect_application_catalog(*session_id, params, ceiling);
         }
         #[cfg(target_os = "macos")]
         let selected_application = match &resolved_root {
             Some(ResolvedObject::Application { process_id, .. })
-            | Some(ResolvedObject::Window { process_id, .. }) => Some(
+            | Some(ResolvedObject::Window { process_id, .. })
+            | Some(ResolvedObject::UiElement { process_id, .. }) => Some(
                 super::macos_accessibility_observer::application_by_pid(*process_id)?,
             ),
             _ => None,
@@ -2509,9 +2534,9 @@ impl ComputerUseBroker {
                 false,
             ));
         }
-        #[cfg(target_os = "macos")]
         let selected_window = match &resolved_root {
-            Some(ResolvedObject::Window { fingerprint, .. }) => Some(fingerprint.clone()),
+            Some(ResolvedObject::Window { fingerprint, .. })
+            | Some(ResolvedObject::UiElement { fingerprint, .. }) => Some(fingerprint.clone()),
             _ => None,
         };
         match resolved_root {
@@ -2530,6 +2555,11 @@ impl ComputerUseBroker {
                 process_id,
                 image_path,
                 ..
+            })
+            | Some(ResolvedObject::UiElement {
+                process_id,
+                image_path,
+                ..
             }) if process_id == application.process_id
                 && path_eq(&image_path, &application.image_path) => {}
             None => {}
@@ -2542,16 +2572,12 @@ impl ComputerUseBroker {
             }
         }
 
-        #[cfg(not(target_os = "macos"))]
-        let selected_window: Option<String> = None;
         let (collected, adapter_kind, adapter_version, adapter_name) =
             collect_foreground_desktop_ui(
                 application.process_id,
                 &application.image_path,
                 params,
-                selected_window.as_deref().filter(|_| {
-                    params.scope == desk_agent_protocol::computer_use::UiInspectScope::Menus
-                }),
+                selected_window.as_deref(),
             )?;
 
         #[cfg(target_os = "macos")]
@@ -2565,17 +2591,6 @@ impl ComputerUseBroker {
                 true,
             ));
         }
-        #[cfg(target_os = "macos")]
-        let collected = match selected_window {
-            Some(fingerprint)
-                if params.scope != desk_agent_protocol::computer_use::UiInspectScope::Menus =>
-            {
-                select_window_tree(collected, &fingerprint)?
-            }
-            Some(_) => collected,
-            None => collected,
-        };
-
         let snapshot_id = self.next_snapshot_id();
         let incarnation = format!(
             "{}:{}",
@@ -2620,6 +2635,7 @@ impl ComputerUseBroker {
                 },
             )?;
             let projection = UiNodeProjection {
+                native_id: node.native_id,
                 object_ref,
                 parent_index: node.parent_index,
                 role: node.role,
@@ -2996,15 +3012,51 @@ impl ComputerUseBroker {
 }
 
 pub(crate) struct ScreenCapturePermit {
+    window_ref: Option<ObjectRef>,
     broker: Arc<ComputerUseBroker>,
-    window_region: Option<super::collectors::screen_capture::WindowCaptureRegion>,
+    window_target: Option<super::collectors::screen_capture::WindowCaptureTarget>,
 }
 
 impl ScreenCapturePermit {
-    pub(crate) fn window_region(
+    pub(crate) fn validate_window_after_capture(&self) -> Result<(), AgentError> {
+        if let Some(reference) = &self.window_ref {
+            let ResolvedObject::Window {
+                process_id,
+                image_path,
+                fingerprint,
+            } = self.broker.resolve_ref(reference)?
+            else {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "window capture target changed",
+                    false,
+                ));
+            };
+            #[cfg(target_os = "macos")]
+            if Some(
+                super::macos_accessibility_observer::resolve_window_capture_target(
+                    process_id,
+                    &image_path,
+                    &fingerprint,
+                )?,
+            ) != self.window_target
+            {
+                return Err(error(
+                    AgentErrorKind::SessionUnavailable,
+                    "window changed during capture; refresh and retry",
+                    true,
+                ));
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (process_id, image_path, fingerprint);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn window_target(
         &self,
-    ) -> Option<super::collectors::screen_capture::WindowCaptureRegion> {
-        self.window_region
+    ) -> Option<super::collectors::screen_capture::WindowCaptureTarget> {
+        self.window_target.clone()
     }
 }
 
@@ -3328,6 +3380,7 @@ pub(super) struct ObservedApplication {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub(super) struct CollectedUiNode {
+    pub native_id: Option<String>,
     pub(super) parent_index: Option<u32>,
     pub(super) role: String,
     pub(super) name: Option<String>,
@@ -3341,38 +3394,6 @@ pub(super) struct CollectedUiNode {
 pub(super) struct CollectedUiTree {
     pub(super) nodes: Vec<CollectedUiNode>,
     pub(super) truncated: bool,
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn select_window_tree(
-    tree: CollectedUiTree,
-    fingerprint: &str,
-) -> Result<CollectedUiTree, AgentError> {
-    let mut remap = std::collections::HashMap::new();
-    let mut nodes = Vec::new();
-    for (index, mut node) in tree.nodes.into_iter().enumerate() {
-        let is_root = node.fingerprint == fingerprint
-            && (node.role == "AXWindow" || node.role.starts_with("AXWindow/"));
-        let parent = node
-            .parent_index
-            .and_then(|parent| remap.get(&parent).copied());
-        if is_root || parent.is_some() {
-            node.parent_index = parent;
-            remap.insert(index as u32, nodes.len() as u32);
-            nodes.push(node);
-        }
-    }
-    if nodes.is_empty() {
-        return Err(error(
-            AgentErrorKind::InvalidInput,
-            "the selected window is stale or outside the bounded observation",
-            true,
-        ));
-    }
-    Ok(CollectedUiTree {
-        nodes,
-        truncated: tree.truncated,
-    })
 }
 
 fn collect_foreground_desktop_ui(
@@ -3391,15 +3412,17 @@ fn collect_foreground_desktop_ui(
 > {
     #[cfg(windows)]
     {
-        let _ = menu_window;
         Ok((
-            super::windows_uia_observer::collect_foreground_with_scope(
+            super::windows_uia_observer::collect_foreground_selection(
                 process_id,
                 image_path,
                 params.max_depth,
                 params.max_nodes,
                 params.max_bytes,
                 params.scope,
+                menu_window,
+                params.query.as_ref(),
+                params.element_only,
             )?,
             ComputerUseAdapterKind::WindowsUia,
             "a4-windows-uia-read/v1",
@@ -3410,7 +3433,7 @@ fn collect_foreground_desktop_ui(
     #[cfg(target_os = "macos")]
     {
         Ok((
-            super::macos_accessibility_observer::collect_application_with_window_scope(
+            super::macos_accessibility_observer::collect_application_selection(
                 process_id,
                 image_path,
                 params.max_depth,
@@ -3418,6 +3441,8 @@ fn collect_foreground_desktop_ui(
                 params.max_bytes,
                 params.scope,
                 menu_window,
+                params.query.as_ref(),
+                params.element_only,
             )?,
             ComputerUseAdapterKind::MacosAccessibility,
             "macos-accessibility-read/v1",
@@ -3563,36 +3588,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn select_window_tree_keeps_exact_subtree_and_original_fingerprints() {
-        let node = |role: &str, fingerprint: &str, parent| CollectedUiNode {
-            parent_index: parent,
-            role: role.into(),
-            name: None,
-            value: None,
+    fn exact_ui_query_requires_all_fields_and_never_matches_a_missing_id() {
+        use desk_agent_protocol::computer_use::UiInspectQuery;
+        let node = CollectedUiNode {
+            native_id: Some("result".into()),
+            parent_index: None,
+            role: "AXStaticText".into(),
+            name: Some("Display".into()),
+            value: Some("16".into()),
             is_protected: false,
             enabled: true,
             supported_actions: vec![],
-            fingerprint: fingerprint.into(),
+            fingerprint: "opaque".into(),
         };
-        let tree = || CollectedUiTree {
-            nodes: vec![
-                node("AXApplication", "app", None),
-                node("AXWindow", "first", Some(0)),
-                node("AXButton", "first-button", Some(1)),
-                node("AXWindow/AXStandardWindow", "selected", Some(0)),
-                node("AXGroup", "group", Some(3)),
-                node("AXButton", "selected-button", Some(4)),
-            ],
-            truncated: false,
+        let mut query = UiInspectQuery {
+            native_id: Some("result".into()),
+            role: Some("AXStaticText".into()),
+            name: Some("Display".into()),
         };
-        let selected = select_window_tree(tree(), "selected").unwrap();
-        assert_eq!(selected.nodes.len(), 3);
-        assert_eq!(selected.nodes[0].parent_index, None);
-        assert_eq!(selected.nodes[1].parent_index, Some(0));
-        assert_eq!(selected.nodes[2].parent_index, Some(1));
-        assert_eq!(selected.nodes[2].fingerprint, "selected-button");
-        assert!(select_window_tree(tree(), "first-button").is_err());
-        assert!(select_window_tree(tree(), "gone-window").is_err());
+        assert!(ui_query_matches(Some(&query), &node));
+        query.name = Some("display".into());
+        assert!(!ui_query_matches(Some(&query), &node));
+        query.name = None;
+        let missing = CollectedUiNode {
+            native_id: None,
+            ..node
+        };
+        assert!(!ui_query_matches(Some(&query), &missing));
     }
 
     #[test]
@@ -3631,6 +3653,8 @@ mod tests {
         let error = broker
             .inspect_desktop_ui(
                 &UiInspectParams {
+                    query: None,
+                    element_only: false,
                     scope: Default::default(),
                     root: None,
                     max_depth: MAX_UI_INSPECT_DEPTH + 1,
@@ -3650,6 +3674,8 @@ mod tests {
             1,
             "/usr/bin/example",
             &UiInspectParams {
+                query: None,
+                element_only: false,
                 scope: Default::default(),
                 root: None,
                 max_depth: 1,
@@ -4548,7 +4574,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "requires background Calculator and Accessibility permission"]
+    #[ignore = "requires background Calculator, Accessibility and Screen Recording permissions"]
     fn live_background_application_catalog_selection_and_window_scope() {
         let calculator = super::super::macos_accessibility_observer::running_applications()
             .unwrap()
@@ -4567,7 +4593,7 @@ mod tests {
             allowed_application_paths: vec![calculator.image_path.clone()],
             ..Default::default()
         };
-        let broker = ComputerUseBroker::new();
+        let broker = Arc::new(ComputerUseBroker::new());
         let session = broker
             .inspect_desktop_session(
                 &DesktopSessionInspectParams {
@@ -4577,6 +4603,8 @@ mod tests {
             )
             .unwrap();
         let mut params = UiInspectParams {
+            query: None,
+            element_only: false,
             scope: Default::default(),
             root: Some(session.session),
             max_depth: 16,
@@ -4599,10 +4627,44 @@ mod tests {
         assert!(!tree.nodes.is_empty());
         assert!(!tree.owner_selectable_windows.is_empty());
         let window = tree.owner_selectable_windows[0].object_ref.clone();
-        params.root = Some(window);
+        params.root = Some(window.clone());
         let window_tree = broker.inspect_desktop_ui(&params, &ceiling).unwrap();
         assert!(window_tree.nodes[0].role.starts_with("AXWindow"));
         assert_eq!(window_tree.nodes[0].parent_index, None);
+        let display = window_tree
+            .nodes
+            .iter()
+            .find(|node| node.role == "AXStaticText" && node.value.is_some())
+            .unwrap();
+        let mut precise = params.clone();
+        precise.root = Some(display.object_ref.clone());
+        precise.element_only = true;
+        precise.max_nodes = 1;
+        let result = broker.inspect_desktop_ui(&precise, &ceiling).unwrap();
+        assert_eq!(result.nodes.len(), 1);
+        assert!(!result.truncated);
+        assert_eq!(result.nodes[0].value, display.value);
+        let settings = desk_signal_facade::model::desk_settings::DeskSettings {
+            video_device_name: core_graphics::display::CGDisplay::main().id.to_string(),
+            ..Default::default()
+        };
+        let capture_params = ScreenCaptureParams {
+            window: Some(window.clone()),
+            display: None,
+        };
+        let permit = broker
+            .acquire_screen_capture_permit(&capture_params, &settings.video_device_name)
+            .unwrap();
+        let shot = super::super::collectors::screen_capture::collect(
+            &capture_params,
+            &settings,
+            permit.window_target(),
+        )
+        .unwrap();
+        permit.validate_window_after_capture().unwrap();
+        assert_eq!(shot.window, Some(window));
+        assert_eq!(&shot.image[..4], &[0x89, b'P', b'N', b'G']);
+        drop(permit);
         let restricted = ComputerUseSettings {
             allowed_application_paths: vec!["/no-such-application".into()],
             ..ceiling.clone()
@@ -4673,6 +4735,8 @@ mod tests {
         let output = broker
             .inspect_desktop_ui(
                 &UiInspectParams {
+                    query: None,
+                    element_only: false,
                     scope: Default::default(),
                     root: Some(application),
                     max_depth: 8,
@@ -4697,4 +4761,20 @@ mod tests {
             "fixture must expose at least one protected control to prove redaction"
         );
     }
+}
+
+/// Exact selectors never infer missing names or native identifiers.
+pub(super) fn ui_query_matches(
+    query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
+    node: &CollectedUiNode,
+) -> bool {
+    query.is_none_or(|q| {
+        q.native_id
+            .as_ref()
+            .is_none_or(|v| node.native_id.as_ref() == Some(v))
+            && q.role.as_ref().is_none_or(|v| &node.role == v)
+            && q.name
+                .as_ref()
+                .is_none_or(|v| node.name.as_ref() == Some(v))
+    })
 }

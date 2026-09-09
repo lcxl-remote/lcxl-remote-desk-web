@@ -176,8 +176,13 @@ fn authorize_inputs(
     if inputs.is_empty() {
         return Err(SinkAuthorizationError::EmptyProjection);
     }
-    if inputs.len() > MAX_SINK_ITEMS {
+    // Historical model inputs are bounded by their aggregate payload budget.
+    // Fresh exports retain the separate small-batch contract.
+    if enforce_deadline && inputs.len() > MAX_SINK_ITEMS {
         return Err(SinkAuthorizationError::TooManyItems);
+    }
+    if !enforce_deadline && inputs.len() > byte_cap {
+        return Err(SinkAuthorizationError::ByteCapExceeded);
     }
     if byte_cap == 0 || byte_cap > MAX_SINK_BYTES {
         return Err(SinkAuthorizationError::InvalidByteCap);

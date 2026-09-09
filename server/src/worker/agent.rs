@@ -349,11 +349,12 @@ async fn dispatch_read_context(
             let desk_settings = settings.read().await.desk.clone();
             let capture_permit = computer_use_broker
                 .acquire_screen_capture_permit(&params, &desk_settings.video_device_name)?;
-            let window_region = capture_permit.window_region();
+            let window_target = capture_permit.window_target();
             let output = run_blocking(move || {
-                collectors::screen_capture::collect(&params, &desk_settings, window_region)
+                collectors::screen_capture::collect(&params, &desk_settings, window_target)
             })
             .await??;
+            capture_permit.validate_window_after_capture()?;
             Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ScreenCaptureCurrent(output),
             ))

@@ -988,7 +988,7 @@ async fn capability_discovery_replaces_working_set_without_persisting_schema() {
                 tool_use_args(
                     "load-1",
                     crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME,
-                    r#"{"tool_names":["read_system_info"]}"#,
+                    r#"{"tool_names":["read_system_info"],"replace":true}"#,
                 ),
                 answer("ready"),
             ]

@@ -36,7 +36,7 @@ pub enum ToolEffect {
     /// Creates a bounded user-facing permission request. It cannot mint grants,
     /// reserve uses, or dispatch tools; approval is a separate trusted action.
     PermissionPlanning,
-    /// Replaces the bounded capability working set for the current input
+    /// Updates the bounded capability working set for the current input
     /// revision. It performs no Provider call and grants no authority.
     CapabilityDiscovery,
     /// Loads a bounded, re-authorized page of older user-visible messages from

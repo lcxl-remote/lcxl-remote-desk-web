@@ -146,13 +146,69 @@ pub fn recovered_result_text(
 }
 
 fn remove_image(message: &mut ChatMessage) {
-    if message.image_data_url.take().is_some()
-        && !message.text.contains(IMAGE_NOT_RETAINED_PLACEHOLDER)
-    {
+    use desk_agent_protocol::data_lineage::ContentRef;
+    use sha2::{Digest, Sha256};
+    if message.image_data_url.is_none() {
+        return;
+    }
+    // Derive only from a receipt whose original payload is still verifiable.
+    // Invalid receipts keep their old binding and fail closed at model egress.
+    let source = message
+        .data_envelope
+        .as_ref()
+        .filter(|source| {
+            let size = match &source.content {
+                ContentRef::ImmutableBlob { size_bytes, .. }
+                | ContentRef::EphemeralObservation { size_bytes, .. }
+                | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
+            };
+            source.validate().is_ok()
+                && crate::model_egress::message_content_bytes(message).is_ok_and(|bytes| {
+                    bytes.len() as u64 == size
+                        && format!("{:x}", Sha256::digest(&bytes)) == source.digest_sha256
+                })
+        })
+        .cloned();
+    message.image_data_url = None;
+    if !message.text.contains(IMAGE_NOT_RETAINED_PLACEHOLDER) {
         if !message.text.is_empty() {
             message.text.push('\n');
         }
         message.text.push_str(IMAGE_NOT_RETAINED_PLACEHOLDER);
+    }
+    if let Some(mut envelope) = source {
+        let Ok(bytes) = crate::model_egress::message_content_bytes(message) else {
+            return;
+        };
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let source_id = envelope.envelope_id.clone();
+        envelope.envelope_id = format!(
+            "image-history-{:x}",
+            Sha256::digest(format!("{source_id}:{digest}"))
+        );
+        // Keep a content-level expiry as well as the envelope retention bound.
+        envelope.retention.expires_at_unix_ms = match envelope.content {
+            ContentRef::EphemeralObservation {
+                expires_at_unix_ms, ..
+            } => Some(
+                envelope
+                    .retention
+                    .expires_at_unix_ms
+                    .map_or(expires_at_unix_ms, |old| old.min(expires_at_unix_ms)),
+            ),
+            _ => envelope.retention.expires_at_unix_ms,
+        };
+        envelope.content = ContentRef::ImmutableBlob {
+            blob_id: format!("image-history-{digest}"),
+            sha256: digest.clone(),
+            size_bytes: bytes.len() as u64,
+            media_type: "text/plain;charset=utf-8".into(),
+        };
+        envelope.digest_sha256 = digest;
+        if !envelope.provenance.source_envelope_ids.contains(&source_id) {
+            envelope.provenance.source_envelope_ids.push(source_id);
+        }
+        message.data_envelope = Some(envelope);
     }
 }
 
@@ -199,6 +255,100 @@ mod tests {
             "data:image/jpeg;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(bytes)
         )
+    }
+
+    #[test]
+    fn image_history_rebinds_only_verified_receipts_without_expanding_authority() {
+        use desk_agent_protocol::data_lineage::*;
+        use sha2::{Digest, Sha256};
+        let mut message = ChatMessage::tool_result("shot", "call", "capture metadata")
+            .with_image(data_url(&[1, 2, 3]));
+        let bytes = crate::model_egress::message_content_bytes(&message).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        message.data_envelope = Some(DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: "original-image".into(),
+            content: ContentRef::ImmutableBlob {
+                blob_id: "pixels".into(),
+                sha256: digest.clone(),
+                size_bytes: bytes.len() as u64,
+                media_type: "application/octet-stream".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: "screen.current".into(),
+                source_tool_name: "read_current_screen".into(),
+                source_object_id: None,
+                source_envelope_ids: vec![],
+            },
+            digest_sha256: digest,
+            sensitivity: Sensitivity::Sensitive,
+            allowed_destinations: vec![DestinationIdentity::Model {
+                connection_id: "model".into(),
+                connection_revision: 1,
+                model_id: "visual".into(),
+                profile_revision: 1,
+            }],
+            retention: RetentionBoundary {
+                expires_at_unix_ms: Some(123456),
+                delete_with_run: true,
+            },
+        });
+        let original = message.data_envelope.clone().unwrap();
+        let mut tampered = message.clone();
+        tampered.text.push_str("tampered");
+        strip_session_images(std::slice::from_mut(&mut tampered));
+        assert_eq!(tampered.data_envelope, Some(original.clone()));
+        strip_session_images(std::slice::from_mut(&mut message));
+        let projected = message.data_envelope.as_ref().unwrap();
+        assert_ne!(projected.envelope_id, original.envelope_id);
+        assert_eq!(
+            projected.allowed_destinations,
+            original.allowed_destinations
+        );
+        assert_eq!(projected.sensitivity, original.sensitivity);
+        assert_eq!(projected.retention, original.retention);
+        assert!(
+            projected
+                .provenance
+                .source_envelope_ids
+                .contains(&original.envelope_id)
+        );
+        let bytes = crate::model_egress::message_content_bytes(&message).unwrap();
+        assert_eq!(
+            projected.digest_sha256,
+            format!("{:x}", Sha256::digest(&bytes))
+        );
+        assert!(
+            matches!(projected.content, ContentRef::ImmutableBlob {size_bytes, ..} if size_bytes == bytes.len() as u64)
+        );
+        projected.validate().unwrap();
+        crate::sink_authorizer::authorize_model_history(
+            &projected.allowed_destinations[0],
+            &[crate::sink_authorizer::SinkInput {
+                envelope: projected,
+                bytes: &bytes,
+            }],
+            1,
+            crate::sink_authorizer::MAX_SINK_BYTES,
+        )
+        .unwrap();
+        let corrupted_bytes = crate::model_egress::message_content_bytes(&tampered).unwrap();
+        assert!(
+            crate::sink_authorizer::authorize_model_history(
+                &original.allowed_destinations[0],
+                &[crate::sink_authorizer::SinkInput {
+                    envelope: tampered.data_envelope.as_ref().unwrap(),
+                    bytes: &corrupted_bytes
+                }],
+                1,
+                crate::sink_authorizer::MAX_SINK_BYTES
+            )
+            .is_err()
+        );
+
+        let once = message.clone();
+        strip_session_images(std::slice::from_mut(&mut message));
+        assert_eq!(message, once);
     }
 
     #[test]

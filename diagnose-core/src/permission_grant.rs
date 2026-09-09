@@ -641,7 +641,12 @@ pub fn permission_request_can_renew(
                     && grant.target_device_id == session.device_id
                     && grant.input_revision == session.input_revision
                     && grant.revoked_at_unix_ms.is_none()
-                    && (grant.remaining_uses == 0 || grant.expires_at_unix_ms <= now)
+                    && (grant.remaining_uses == 0 || grant.expires_at_unix_ms <= now
+                        // Included observation can outlive a consumed one-shot action.
+                        // A renewed action still requires a new owner decision.
+                        || (item.item_id == format!("included-{}", item.tool_name)
+                            && matches!(item.tool_name.as_str(), "inspect_desktop_session" | "inspect_desktop_ui")
+                            && request.items.iter().any(|item| matches!(item.tool_name.as_str(), "execute_confirmed_ui_action" | "execute_confirmed_raw_input"))))
             })
         })
 }

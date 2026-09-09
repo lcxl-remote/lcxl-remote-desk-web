@@ -173,10 +173,26 @@ pub enum UiInspectScope {
     All,
 }
 
+/// Exact, case-sensitive native UI search; supplied fields are combined with AND.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct UiInspectQuery {
+    pub native_id: Option<String>,
+    pub role: Option<String>,
+    pub name: Option<String>,
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct UiInspectParams {
+    #[serde(default)]
+    pub query: Option<UiInspectQuery>,
+    /// Return only the selected element when true; otherwise inspect its subtree.
+    #[serde(default)]
+    pub element_only: bool,
     /// Select ordinary UI, menus only, or both.
     #[serde(default)]
     pub scope: UiInspectScope,
@@ -190,6 +206,8 @@ pub struct UiInspectParams {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct UiNodeProjection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
     pub object_ref: ObjectRef,
     pub parent_index: Option<u32>,
     pub role: String,

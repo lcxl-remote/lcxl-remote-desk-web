@@ -176,7 +176,12 @@ impl ObjectReadBinding<'_> {
                 params.max_bytes = params.max_bytes.min(bytes);
             }
             ("read_current_screen", ContextKind::ScreenCaptureCurrent(params)) => {
-                if refs[0].object_kind != ObjectKind::Window {
+                if refs[0].object_kind != ObjectKind::Window
+                    || params
+                        .window
+                        .as_ref()
+                        .is_some_and(|window| window != &refs[0])
+                {
                     return Err(denied());
                 }
                 params.window = Some(refs[0].clone());

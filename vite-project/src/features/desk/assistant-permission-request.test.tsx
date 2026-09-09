@@ -27,6 +27,22 @@ describe('shared permission review', () => {
             { itemId: 'command', decision: 'deny' }, { itemId: 'file', decision: 'deny' }, { itemId: 'send', decision: 'deny' },
         ]);
     });
+    it('discloses and selects action reads while allowing explicit read denial', () => {
+        const onDecide = vi.fn().mockResolvedValue(true);
+        const value = request([
+            item({ itemId: 'action', toolName: 'execute_confirmed_ui_action', expectedEffect: 'mutate_application', suggestedMaxUses: 1 }),
+            item({ itemId: 'included-inspect_desktop_session', toolName: 'inspect_desktop_session', suggestedMaxUses: 16 }),
+            item({ itemId: 'included-inspect_desktop_ui', toolName: 'inspect_desktop_ui', suggestedMaxUses: 16 }),
+        ]);
+        render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
+        expect(screen.getByText('pages.deviceAssistant.permissionIncludedDesktopReads')).toBeInTheDocument();
+        fireEvent.click(submit());
+        expect(onDecide.mock.calls[0][1].map((entry: { decision: string }) => entry.decision)).toEqual(['approve', 'approve', 'approve']);
+        const toggles = screen.getAllByRole('checkbox', { name: 'pages.deviceAssistant.permissionItemToggle' });
+        fireEvent.click(toggles[2]);
+        fireEvent.click(submit());
+        expect(onDecide.mock.calls[1][1][2]).toEqual({ itemId: 'included-inspect_desktop_ui', decision: 'deny' });
+    });
     it('shows the exact external message and limits its approval to one use', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         const value = request([item({ itemId: 'send', expectedEffect: 'send_external',

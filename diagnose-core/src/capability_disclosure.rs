@@ -27,6 +27,8 @@ pub const MAX_CAPABILITY_INDEX_BYTES: usize = 8 * 1024;
 /// Eight p95 descriptors fit; twelve do not. Actual serialized bytes remain the
 /// final authority, so an unusually large set is rejected as a whole.
 pub const MAX_LOADED_CAPABILITY_COUNT: usize = 8;
+/// Reserve half the working set for explicit task-specific discovery.
+pub const MAX_PRELOADED_CAPABILITY_COUNT: usize = 4;
 pub const MAX_LOADED_CAPABILITY_DETAIL_BYTES: usize = 32 * 1024;
 pub const MAX_REQUIRED_CAPABILITY_PIN_COUNT: usize = 16;
 pub const MAX_ADVERTISED_PROVIDER_TOOL_BYTES: usize = 128 * 1024;
@@ -213,7 +215,7 @@ pub fn capability_name_index_prompt(
         "unavailable_now": unavailable_now,
     });
     let prompt = format!(
-        "This server-authored capability index contains names only. Tools already advertised by the model API are omitted. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names to replace the current working set before planning a capability that is not already advertised. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
+        "This server-authored capability index contains names only. Tools already advertised by the model API are omitted. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names to add to the current working set before planning a capability that is not already advertised. Use replace=true with the complete desired set only when the working set budget requires it. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
         serde_json::to_string(&index).expect("name index is serializable")
     );
     if prompt.len() > MAX_CAPABILITY_INDEX_BYTES {
@@ -380,16 +382,19 @@ pub fn project_capability_disclosure(
 #[serde(deny_unknown_fields)]
 struct LoadCapabilityDetailsInput {
     tool_names: Vec<String>,
+    #[serde(default)]
+    replace: bool,
 }
 
 pub fn capability_discovery_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-            description: "Replace the current focus epoch's bounded Provider capability working set with exact tool names from the server-authored capability index. This reveals current details on the next model step but grants no permission and executes nothing.".into(),
+            description: "Add exact tool names from the server-authored capability index to the current focus epoch's bounded working set. Existing names remain loaded. Use replace=true to explicitly replace the set when its count or byte budget is full. This reveals current details on the next model step but grants no permission and executes nothing.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
+                    "replace": {"type": "boolean", "default": false},
                     "tool_names": {
                         "type": "array",
                         "minItems": 1,
@@ -436,7 +441,7 @@ pub fn deterministic_preload_names(
 
     let mut names = callable;
     names.extend(requestable);
-    names.truncate(MAX_LOADED_CAPABILITY_COUNT);
+    names.truncate(MAX_PRELOADED_CAPABILITY_COUNT);
     // Durable state is canonical regardless of the priority used to select it.
     names.sort();
     names
@@ -448,6 +453,37 @@ pub struct CapabilityLoadContext<'a> {
     pub max_context_bytes: usize,
     pub callable_tools: &'a [RegisteredTool],
     pub permission_candidates: &'a [RegisteredTool],
+}
+
+fn load_error(
+    error: CapabilityDisclosureError,
+    state: &CapabilityDisclosureState,
+    input_revision: u64,
+) -> AgentError {
+    let capacity_error = matches!(
+        error,
+        CapabilityDisclosureError::TooManyNames { .. }
+            | CapabilityDisclosureError::DetailTooLarge { .. }
+            | CapabilityDisclosureError::AdvertisedToolsTooLarge { .. }
+    );
+    let mut result = invalid(error);
+    if capacity_error {
+        let current = if state.focus_input_revision == input_revision {
+            state.loaded_tool_names.as_slice()
+        } else {
+            &[]
+        };
+        let recovery = json!({
+            "current_loaded_tools": current,
+            "current_count": current.len(),
+            "maximum_count": MAX_LOADED_CAPABILITY_COUNT,
+            "working_set_changed": false,
+            "recovery": "Do not repeat the unchanged request. Call load_capability_details with replace=true and tool_names containing the complete set you want to retain, at most 8 names. Preserve tools still needed for this task. For a byte-limit error, choose fewer tools or smaller descriptors. Replacement changes disclosure only and grants no permission."
+        });
+        result.message.push_str("; ");
+        result.message.push_str(&recovery.to_string());
+    }
+    result
 }
 
 pub fn apply_load_call(
@@ -473,13 +509,17 @@ pub fn apply_load_call(
             maximum: MAX_LOADED_CAPABILITY_COUNT,
         }));
     }
+    let mut requested = input.tool_names;
+    if !input.replace && state.focus_input_revision == input_revision {
+        requested.extend(state.loaded_tool_names.iter().cloned());
+    }
     let names = canonical_names(
-        input.tool_names,
+        requested,
         context.registry,
         context.inventory,
         MAX_LOADED_CAPABILITY_COUNT,
     )
-    .map_err(invalid)?;
+    .map_err(|error| load_error(error, state, input_revision))?;
     let candidate = CapabilityDisclosureState {
         schema_version: CAPABILITY_DISCLOSURE_SCHEMA_VERSION,
         focus_input_revision: input_revision,
@@ -495,7 +535,7 @@ pub fn apply_load_call(
         &candidate,
         context.max_context_bytes,
     )
-    .map_err(invalid)?;
+    .map_err(|error| load_error(error, state, input_revision))?;
     *state = candidate;
     Ok(serde_json::to_string(&json!({"loaded": names})).expect("load receipt is serializable"))
 }
@@ -585,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn load_replaces_deduplicates_and_rejects_unknown_names() {
+    fn load_deduplicates_and_rejects_unknown_names() {
         let (registry, inventory, callable) = all_ready();
         let name = callable[0].name().to_string();
         let mut state = CapabilityDisclosureState::default();
@@ -628,6 +668,143 @@ mod tests {
                     callable_tools: &callable,
                     permission_candidates: &[],
                 },
+            )
+            .is_err()
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn full_working_set_error_explains_append_and_recovers_by_explicit_replacement() {
+        let (registry, inventory, callable) = every_capability_ready();
+        let context = CapabilityLoadContext {
+            registry: &registry,
+            inventory: &inventory,
+            max_context_bytes: 262_144,
+            callable_tools: &callable,
+            permission_candidates: &[],
+        };
+        let mut names = callable
+            .iter()
+            .filter(|tool| tool.name() != "inspect_desktop_session")
+            .take(MAX_LOADED_CAPABILITY_COUNT)
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        let mut state = CapabilityDisclosureState {
+            loaded_tool_names: names.clone(),
+            focus_input_revision: 1,
+            updated_input_revision: 1,
+            ..Default::default()
+        };
+        let before = state.clone();
+        let mut call = ToolCall {
+            id: "load".into(),
+            name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+            arguments_json: json!({"tool_names": ["inspect_desktop_session"]}).to_string(),
+        };
+        let error = apply_load_call(&call, &mut state, 1, &context).unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("too many capability names (9 > 8)")
+        );
+        let recovery: serde_json::Value =
+            serde_json::from_str(error.message.split_once("; ").unwrap().1).unwrap();
+        assert_eq!(recovery["current_loaded_tools"], json!(names));
+        assert_eq!(recovery["current_count"], 8);
+        assert_eq!(recovery["maximum_count"], 8);
+        assert_eq!(recovery["working_set_changed"], false);
+        assert!(
+            recovery["recovery"]
+                .as_str()
+                .unwrap()
+                .contains("replace=true")
+        );
+        assert_eq!(state, before);
+        call.arguments_json =
+            json!({"replace": true, "tool_names": ["inspect_desktop_session"]}).to_string();
+        apply_load_call(&call, &mut state, 1, &context).unwrap();
+        assert_eq!(state.loaded_tool_names, vec!["inspect_desktop_session"]);
+        let byte_error = load_error(
+            CapabilityDisclosureError::DetailTooLarge {
+                actual: 40_000,
+                maximum: 32_768,
+            },
+            &state,
+            1,
+        );
+        assert!(byte_error.message.contains("40000 > 32768 bytes"));
+        assert!(byte_error.message.contains("choose fewer tools"));
+        let stale = load_error(
+            CapabilityDisclosureError::TooManyNames {
+                actual: 9,
+                maximum: 8,
+            },
+            &state,
+            2,
+        );
+        assert!(stale.message.contains("\"current_loaded_tools\":[]"));
+    }
+
+    #[test]
+    fn loading_an_action_preserves_reads_until_explicit_replacement() {
+        let (registry, inventory, callable) = every_capability_ready();
+        let context = CapabilityLoadContext {
+            registry: &registry,
+            inventory: &inventory,
+            max_context_bytes: 262_144,
+            callable_tools: &callable,
+            permission_candidates: &[],
+        };
+        let mut state = CapabilityDisclosureState::default();
+        for name in ["inspect_desktop_ui", "execute_confirmed_ui_action"] {
+            apply_load_call(
+                &ToolCall {
+                    id: "load".into(),
+                    name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+                    arguments_json: json!({"tool_names": [name]}).to_string(),
+                },
+                &mut state,
+                1,
+                &context,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            state.loaded_tool_names,
+            vec!["execute_confirmed_ui_action", "inspect_desktop_ui"]
+        );
+        apply_load_call(
+            &ToolCall {
+                id: "replace".into(),
+                name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+                arguments_json: json!({"tool_names": ["inspect_desktop_session"], "replace": true})
+                    .to_string(),
+            },
+            &mut state,
+            1,
+            &context,
+        )
+        .unwrap();
+        assert_eq!(state.loaded_tool_names, vec!["inspect_desktop_session"]);
+        let before = state.clone();
+        let names = callable
+            .iter()
+            .filter(|tool| tool.name() != "inspect_desktop_session")
+            .take(MAX_LOADED_CAPABILITY_COUNT)
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        assert!(
+            apply_load_call(
+                &ToolCall {
+                    id: "overflow".into(),
+                    name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+                    arguments_json: json!({"tool_names": names}).to_string()
+                },
+                &mut state,
+                1,
+                &context
             )
             .is_err()
         );
@@ -722,7 +899,8 @@ mod tests {
         let preload =
             deterministic_preload_names(&registry, std::slice::from_ref(&authorized), &candidates);
 
-        assert_eq!(preload.len(), MAX_LOADED_CAPABILITY_COUNT);
+        assert_eq!(preload.len(), MAX_PRELOADED_CAPABILITY_COUNT);
+        assert_eq!(MAX_LOADED_CAPABILITY_COUNT - preload.len(), 4);
         assert!(preload.iter().any(|name| name == authorized.name()));
     }
 

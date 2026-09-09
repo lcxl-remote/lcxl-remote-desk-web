@@ -13,6 +13,8 @@ use wincode::{SchemaRead, SchemaWrite};
 pub const DATA_ENVELOPE_SCHEMA_VERSION: u16 = 1;
 pub const MAX_LINEAGE_ID_BYTES: usize = 256;
 pub const MAX_LINEAGE_ITEMS: usize = 256;
+/// Bound historical source metadata by bytes rather than conversation length.
+pub const MAX_SOURCE_LINEAGE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(
     Debug,
@@ -234,7 +236,7 @@ impl DataProvenance {
         if let Some(value) = &self.source_object_id {
             validate_id("source_object_id", value)?;
         }
-        validate_unique_ids("source_envelope_ids", &self.source_envelope_ids)
+        validate_source_ids(&self.source_envelope_ids)
     }
 }
 
@@ -380,6 +382,25 @@ fn validate_id(field: &'static str, value: &str) -> Result<(), DataLineageError>
     }
 }
 
+fn validate_source_ids(values: &[String]) -> Result<(), DataLineageError> {
+    let field = "source_envelope_ids";
+    // Include one separator per id, including empty invalid ids, to bound work.
+    let size = values.iter().try_fold(0usize, |total, id| {
+        total.checked_add(id.len())?.checked_add(1)
+    });
+    if size.is_none_or(|size| size > MAX_SOURCE_LINEAGE_BYTES) {
+        return Err(DataLineageError::OversizedField(field));
+    }
+    let mut seen = BTreeSet::new();
+    for value in values {
+        validate_id(field, value)?;
+        if !seen.insert(value) {
+            return Err(DataLineageError::DuplicateItem(field));
+        }
+    }
+    Ok(())
+}
+
 fn validate_unique_ids(field: &'static str, values: &[String]) -> Result<(), DataLineageError> {
     if values.len() > MAX_LINEAGE_ITEMS {
         return Err(DataLineageError::TooManyItems(field));
@@ -420,6 +441,26 @@ mod tests {
 
     fn digest() -> String {
         "a".repeat(64)
+    }
+
+    #[test]
+    fn source_history_uses_byte_budget_without_expanding_other_lists() {
+        let mut ids = (0..300).map(|i| format!("source-{i}")).collect::<Vec<_>>();
+        assert!(validate_source_ids(&ids).is_ok());
+        assert!(validate_unique_ids("input_envelope_ids", &ids).is_err());
+        ids.push(ids[0].clone());
+        assert!(matches!(
+            validate_source_ids(&ids),
+            Err(DataLineageError::DuplicateItem(_))
+        ));
+        let oversized = vec![
+            "x".repeat(MAX_LINEAGE_ID_BYTES);
+            MAX_SOURCE_LINEAGE_BYTES / MAX_LINEAGE_ID_BYTES + 1
+        ];
+        assert!(matches!(
+            validate_source_ids(&oversized),
+            Err(DataLineageError::OversizedField(_))
+        ));
     }
 
     #[test]

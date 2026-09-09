@@ -1054,6 +1054,8 @@ export default {
   'pages.deviceAssistant.permissionDescription': 'AI 只能提出由服务端校验过的权限批次。批准项会签发有边界的授权；这个决定本身不执行工具，后续实际调用仍需重新匹配最新范围与状态。',
   'pages.deviceAssistant.permissionApprove': '同意所列权限',
   'pages.deviceAssistant.permissionItemToggle': '选择权限：{{reason}}',
+  'pages.deviceAssistant.permissionIncludedDesktopReadReason': '读取当前设备的桌面会话或 UI，用于定位操作目标和检查结果。',
+  'pages.deviceAssistant.permissionIncludedDesktopReads': '桌面操作默认同时申请当前设备的桌面会话和 UI 读取，用于定位目标和检查结果，不包含截图。读取权限单独列出并默认勾选；可以取消或缩小范围，取消后可能需要再次申请读取。',
   'pages.deviceAssistant.permissionSelectionDescription': '勾选同意的项目；未勾选项目会在同一批次中明确拒绝。',
   'pages.deviceAssistant.permissionSubmitSelection': '提交所选权限',
   'pages.deviceAssistant.permissionResourceScope': '资源范围（只能缩小）',

@@ -112,6 +112,8 @@ struct WalkState {
 }
 
 struct WalkConfig {
+    query: Option<desk_agent_protocol::computer_use::UiInspectQuery>,
+    element_only: bool,
     menu_window: Option<String>,
     scope: UiInspectScope,
     process_id: u32,
@@ -205,6 +207,30 @@ pub(super) fn collect_application_with_window_scope(
     scope: UiInspectScope,
     menu_window: Option<&str>,
 ) -> Result<CollectedUiTree, AgentError> {
+    collect_application_selection(
+        expected_process_id,
+        expected_image_path,
+        max_depth,
+        max_nodes,
+        max_bytes,
+        scope,
+        menu_window,
+        None,
+        false,
+    )
+}
+
+pub(super) fn collect_application_selection(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    max_depth: u16,
+    max_nodes: u32,
+    max_bytes: u32,
+    scope: UiInspectScope,
+    menu_window: Option<&str>,
+    query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
+    element_only: bool,
+) -> Result<CollectedUiTree, AgentError> {
     if !crate::macos_permissions::probe().accessibility {
         return Err(failure(
             AgentErrorKind::PermissionDenied,
@@ -231,6 +257,8 @@ pub(super) fn collect_application_with_window_scope(
     let root = OwnedCf(root);
     set_messaging_timeout(root.0)?;
     let config = WalkConfig {
+        query: query.cloned(),
+        element_only,
         menu_window: menu_window.map(str::to_owned),
         scope,
         process_id: expected_process_id,
@@ -248,7 +276,7 @@ pub(super) fn collect_application_with_window_scope(
     if menu_window.is_some() && !state.found_menu_window {
         return Err(failure(
             AgentErrorKind::SessionUnavailable,
-            "the selected window was not found within the bounded menu search",
+            "the selected UI root was not found within the bounded search",
             true,
         ));
     }
@@ -290,11 +318,29 @@ pub(super) fn preflight_action(
     validate_action_target(element.0, action)
 }
 
-pub(super) fn resolve_window_capture_region(
+pub(super) fn resolve_window_capture_target(
     expected_process_id: u32,
     expected_image_path: &str,
     target_fingerprint: &str,
-) -> Result<super::collectors::screen_capture::WindowCaptureRegion, AgentError> {
+) -> Result<super::collectors::screen_capture::WindowCaptureTarget, AgentError> {
+    let inspected = collect_application_selection(
+        expected_process_id,
+        expected_image_path,
+        16,
+        1024,
+        1024 * 1024,
+        UiInspectScope::All,
+        Some(target_fingerprint),
+        None,
+        false,
+    )?;
+    if inspected.truncated || inspected.nodes.iter().any(|node| node.is_protected) {
+        return Err(failure(
+            AgentErrorKind::PermissionDenied,
+            "window capture cannot establish that the selected window has no protected fields",
+            false,
+        ));
+    }
     let element =
         locate_action_target(expected_process_id, expected_image_path, target_fingerprint)?;
     let role = attribute_string(element.0, "AXRole").unwrap_or_default();
@@ -305,6 +351,14 @@ pub(super) fn resolve_window_capture_region(
             false,
         ));
     }
+    if attribute_bool(element.0, "AXMinimized").unwrap_or(false) {
+        return Err(failure(
+            AgentErrorKind::SessionUnavailable,
+            "the selected window is minimized; restore it before requesting a fresh screenshot",
+            true,
+        ));
+    }
+    let title = attribute_string(element.0, "AXTitle").unwrap_or_default();
     let position = attribute_point(element.0, "AXPosition").ok_or_else(|| {
         failure(
             AgentErrorKind::SessionUnavailable,
@@ -332,7 +386,9 @@ pub(super) fn resolve_window_capture_region(
             true,
         ));
     }
-    Ok(super::collectors::screen_capture::WindowCaptureRegion {
+    Ok(super::collectors::screen_capture::WindowCaptureTarget {
+        process_id: expected_process_id,
+        title,
         x: position.x,
         y: position.y,
         width: size.width,
@@ -449,6 +505,8 @@ fn locate_action_target(
     let root = OwnedCf(root);
     set_messaging_timeout(root.0)?;
     let config = WalkConfig {
+        query: None,
+        element_only: false,
         menu_window: None,
         scope: UiInspectScope::All,
         process_id: expected_process_id,
@@ -623,6 +681,9 @@ fn walk(
     state: &mut WalkState,
     output: &mut Vec<CollectedUiNode>,
 ) {
+    if config.element_only && state.found_menu_window {
+        return;
+    }
     if state.visited >= 4096 || Instant::now() >= config.deadline {
         state.truncated = true;
         return;
@@ -663,19 +724,24 @@ fn walk(
             sibling_ordinal,
             config,
         );
-        let encoded_bytes = serde_json::to_vec(&node)
-            .map_or(config.max_bytes.saturating_add(1), |encoded| encoded.len())
-            .saturating_add(OBJECT_REF_BUDGET);
-        if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
-            state.truncated = true;
-            return;
+        let matches = super::computer_use_broker::ui_query_matches(config.query.as_ref(), &node);
+        if !matches {
+            (None, node.fingerprint)
+        } else {
+            let encoded_bytes = serde_json::to_vec(&node)
+                .map_or(config.max_bytes.saturating_add(1), |encoded| encoded.len())
+                .saturating_add(OBJECT_REF_BUDGET);
+            if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
+                state.truncated = true;
+                return;
+            }
+            state.encoded_bytes += encoded_bytes;
+            state.truncated |= strings_truncated;
+            let index = output.len() as u32;
+            let fingerprint = node.fingerprint.clone();
+            output.push(node);
+            (Some(index), fingerprint)
         }
-        state.encoded_bytes += encoded_bytes;
-        state.truncated |= strings_truncated;
-        let index = output.len() as u32;
-        let fingerprint = node.fingerprint.clone();
-        output.push(node);
-        (Some(index), fingerprint)
     } else {
         (
             None,
@@ -688,6 +754,9 @@ fn walk(
         )
     };
 
+    if selected && config.element_only {
+        return;
+    }
     let Some(children) = copy_attribute(element, "AXChildren") else {
         return;
     };
@@ -697,6 +766,9 @@ fn walk(
         return;
     }
     for ordinal in 0..count {
+        if config.element_only && state.found_menu_window {
+            return;
+        }
         if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
             state.truncated = true;
             return;
@@ -785,6 +857,8 @@ fn read_node(
     );
     (
         CollectedUiNode {
+            native_id: (!is_protected && !identifier.is_empty() && identifier.len() <= 512)
+                .then(|| identifier.clone()),
             parent_index,
             role,
             name,
@@ -1158,6 +1232,159 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires background Calculator, Accessibility and Screen Recording permissions"]
+    fn live_calculator_precise_read_and_independent_capture() {
+        use desk_agent_protocol::computer_use::UiInspectQuery;
+        let app = running_applications()
+            .unwrap()
+            .into_iter()
+            .find(|app| app.image_path.ends_with("/Calculator"))
+            .expect("running Calculator");
+        assert_ne!(
+            frontmost_application().unwrap().process_id,
+            app.process_id,
+            "Calculator must remain in background"
+        );
+        let all = collect_application(app.process_id, &app.image_path, 12, 300, 262144).unwrap();
+        let query = UiInspectQuery {
+            role: Some("AXStaticText".into()),
+            ..Default::default()
+        };
+        let found = collect_application_selection(
+            app.process_id,
+            &app.image_path,
+            12,
+            300,
+            262144,
+            UiInspectScope::Content,
+            None,
+            Some(&query),
+            false,
+        )
+        .unwrap();
+        assert!(!found.truncated);
+        assert!(!found.nodes.is_empty());
+        assert!(found.nodes.iter().all(|node| node.role == "AXStaticText"));
+        let display = found
+            .nodes
+            .iter()
+            .find(|node| node.value.is_some())
+            .unwrap();
+        let single = collect_application_selection(
+            app.process_id,
+            &app.image_path,
+            12,
+            300,
+            262144,
+            UiInspectScope::Content,
+            Some(&display.fingerprint),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(single.nodes.len(), 1);
+        assert_eq!(single.nodes[0].value, display.value);
+        assert_eq!(single.nodes[0].fingerprint, display.fingerprint);
+        let identified = all
+            .nodes
+            .iter()
+            .find(|node| node.native_id.is_some())
+            .expect("a native identifier");
+        let query = UiInspectQuery {
+            native_id: identified.native_id.clone(),
+            ..Default::default()
+        };
+        let by_id = collect_application_selection(
+            app.process_id,
+            &app.image_path,
+            12,
+            300,
+            262144,
+            UiInspectScope::Content,
+            None,
+            Some(&query),
+            false,
+        )
+        .unwrap();
+        assert!(
+            by_id
+                .nodes
+                .iter()
+                .any(|node| node.fingerprint == identified.fingerprint)
+        );
+        let query = UiInspectQuery {
+            name: Some("nonexistent-precise-query".into()),
+            ..Default::default()
+        };
+        assert!(
+            collect_application_selection(
+                app.process_id,
+                &app.image_path,
+                12,
+                300,
+                262144,
+                UiInspectScope::Content,
+                None,
+                Some(&query),
+                false
+            )
+            .unwrap()
+            .nodes
+            .is_empty()
+        );
+        assert!(
+            collect_application_selection(
+                app.process_id,
+                &app.image_path,
+                12,
+                300,
+                262144,
+                UiInspectScope::Content,
+                Some("stale-fingerprint"),
+                None,
+                true
+            )
+            .is_err()
+        );
+        let window = all
+            .nodes
+            .iter()
+            .find(|node| node.role.starts_with("AXWindow"))
+            .unwrap();
+        let target =
+            resolve_window_capture_target(app.process_id, &app.image_path, &window.fingerprint)
+                .unwrap();
+        let settings = desk_signal_facade::model::desk_settings::DeskSettings {
+            video_device_name: core_graphics::display::CGDisplay::main().id.to_string(),
+            ..Default::default()
+        };
+        let shot = super::super::collectors::screen_capture::collect(
+            &desk_agent_protocol::ScreenCaptureParams::default(),
+            &settings,
+            Some(target),
+        )
+        .unwrap();
+        assert!(shot.width > 0 && shot.height > 0);
+        assert_eq!(&shot.image[..4], &[0x89, b'P', b'N', b'G']);
+        if let Ok(path) = std::env::var("LRDM_WINDOW_CAPTURE_TEST_OUTPUT") {
+            std::fs::write(path, &shot.image).unwrap();
+        }
+        assert_ne!(
+            frontmost_application().unwrap().process_id,
+            app.process_id,
+            "capture must not activate Calculator"
+        );
+        println!(
+            "Precise UI: all={}, text={}, element={}; background PNG={}x{}",
+            all.nodes.len(),
+            found.nodes.len(),
+            single.nodes.len(),
+            shot.width,
+            shot.height
+        );
+    }
+
+    #[test]
     fn menu_classification_does_not_hide_ordinary_controls() {
         for role in ["AXMenu", "AXMenuBar", "AXMenuItem", "AXMenuBarItem"] {
             assert!(is_menu_role(role));
@@ -1474,6 +1701,8 @@ mod tests {
         let root = OwnedCf(root);
         set_messaging_timeout(root.0).expect("bound restarted Calculator AX messaging");
         let config = WalkConfig {
+            query: None,
+            element_only: false,
             menu_window: None,
             scope: UiInspectScope::All,
             process_id: restarted_process_id,

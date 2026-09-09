@@ -245,7 +245,7 @@ export function useDeviceAssistantObservation({
         return invoke('desktop_ui_inspect', {
         root,
         scope: 'content',
-        max_depth: 6,
+        max_depth: 12,
         max_nodes: 300,
         max_bytes: 262_144,
     }); }, [invoke]);

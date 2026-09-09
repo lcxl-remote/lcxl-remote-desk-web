@@ -95,8 +95,15 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     {t(`pages.deviceAssistant.permissionState.${request.state}`)}
                 </Badge>
             </div>
+            {request.items.some((item) => ['execute_confirmed_ui_action', 'execute_confirmed_raw_input'].includes(item.toolName))
+                && ['inspect_desktop_session', 'inspect_desktop_ui'].every((name) => request.items.some((item) => item.toolName === name)) && (
+                <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.permissionIncludedDesktopReads')}</p>
+            )}
             <div className="space-y-2">
                 {request.items.map((item) => {
+                    const reason = item.itemId === `included-${item.toolName}`
+                        && ['inspect_desktop_session', 'inspect_desktop_ui'].includes(item.toolName)
+                        ? t('pages.deviceAssistant.permissionIncludedDesktopReadReason') : item.reason;
                     const defaultItemIds = request.items
                         .filter((entry) => (entry.expectedEffect !== 'send_external'
                             || Boolean(entry.externalSendConfirmation))
@@ -127,7 +134,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                     className="mt-0.5"
                                     checked={approved}
                                     disabled={approvalBlocked}
-                                    aria-label={t('pages.deviceAssistant.permissionItemToggle', { reason: item.reason })}
+                                    aria-label={t('pages.deviceAssistant.permissionItemToggle', { reason })}
                                     onCheckedChange={() => togglePermissionItem(
                                         request.requestId,
                                         defaultItemIds,
@@ -136,7 +143,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 />
                             )}
                             <div>
-                                <p className="text-sm font-medium">{item.reason}</p>
+                                <p className="text-sm font-medium">{reason}</p>
                                 <p className="mt-1 break-all text-xs text-muted-foreground">
                                     {item.providerId} · {item.toolName} · {item.expectedEffect}
                                 </p>

@@ -786,7 +786,7 @@ pub struct ContainerLogsParams {
 pub struct ScreenCaptureParams {
     /// Display name to capture; `None` captures the primary / current target.
     pub display: Option<String>,
-    /// Exact owner-attached, edge-issued window reference. Model-authored
+    /// Exact edge-issued window reference selected under capture authorization. Model-authored
     /// window handles, titles, process ids and coordinates are never accepted.
     #[serde(default)]
     pub window: Option<computer_use::ObjectRef>,
@@ -1436,6 +1436,8 @@ mod tests {
             ),
             (
                 ContextKind::DesktopUiInspect(computer_use::UiInspectParams {
+                    query: None,
+                    element_only: false,
                     scope: Default::default(),
                     root: None,
                     max_depth: 8,

@@ -74,6 +74,9 @@ impl Drop for ComGuard {
 }
 
 struct WalkConfig<'a> {
+    selection: Option<&'a str>,
+    query: Option<&'a desk_agent_protocol::computer_use::UiInspectQuery>,
+    element_only: bool,
     scope: UiInspectScope,
     walker: &'a IUIAutomationTreeWalker,
     process_id: u32,
@@ -85,6 +88,7 @@ struct WalkConfig<'a> {
 
 #[derive(Default)]
 struct WalkState {
+    found_selection: bool,
     visited: usize,
     encoded_bytes: usize,
     truncated: bool,
@@ -274,6 +278,30 @@ pub(super) fn collect_foreground_with_scope(
     max_bytes: u32,
     scope: UiInspectScope,
 ) -> Result<CollectedUiTree, AgentError> {
+    collect_foreground_selection(
+        expected_process_id,
+        expected_image_path,
+        max_depth,
+        max_nodes,
+        max_bytes,
+        scope,
+        None,
+        None,
+        false,
+    )
+}
+
+pub(super) fn collect_foreground_selection(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    max_depth: u16,
+    max_nodes: u32,
+    max_bytes: u32,
+    scope: UiInspectScope,
+    selection: Option<&str>,
+    query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
+    element_only: bool,
+) -> Result<CollectedUiTree, AgentError> {
     let _com = ComGuard::initialize()?;
     let foreground = resolve_foreground_application()?;
     if foreground.process_id != expected_process_id
@@ -312,6 +340,9 @@ pub(super) fn collect_foreground_with_scope(
         )
     })?;
     let config = WalkConfig {
+        selection,
+        query,
+        element_only,
         scope,
         walker: &walker,
         process_id: expected_process_id,
@@ -322,7 +353,15 @@ pub(super) fn collect_foreground_with_scope(
     };
     let mut state = WalkState::default();
     let mut nodes = Vec::new();
-    walk(root, None, 0, 0, false, &config, &mut state, &mut nodes);
+    walk(
+        root, None, 0, 0, false, false, &config, &mut state, &mut nodes,
+    );
+    if selection.is_some() && !state.found_selection {
+        return Err(failure(
+            "selected UI root was not found within the bounded search",
+            true,
+        ));
+    }
     Ok(CollectedUiTree {
         nodes,
         truncated: state.truncated,
@@ -724,10 +763,14 @@ fn walk(
     depth: u16,
     sibling_ordinal: usize,
     inside_menu: bool,
+    within_selection: bool,
     config: &WalkConfig<'_>,
     state: &mut WalkState,
     output: &mut Vec<CollectedUiNode>,
 ) {
+    if config.element_only && state.found_selection {
+        return;
+    }
     if state.visited >= 4096 || Instant::now() >= config.deadline {
         state.truncated = true;
         return;
@@ -738,7 +781,17 @@ fn walk(
     if config.scope == UiInspectScope::Content && inside_menu {
         return;
     }
-    let emit = config.scope != UiInspectScope::Menus || inside_menu;
+    let within_selection = within_selection
+        || config.selection.is_some_and(|target| {
+            element_identity(
+                &element,
+                parent.as_ref().map(|(_, fp)| fp.as_str()),
+                sibling_ordinal,
+            ) == target
+        });
+    state.found_selection |= within_selection;
+    let selected = config.selection.is_none() || within_selection;
+    let emit = selected && (config.scope != UiInspectScope::Menus || inside_menu);
     if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
         state.truncated = true;
         return;
@@ -757,19 +810,23 @@ fn walk(
             parent.as_ref().and_then(|(index, _)| *index),
             sibling_ordinal,
         );
-        let encoded_bytes = serde_json::to_vec(&node)
-            .map_or(config.max_bytes.saturating_add(1), |encoded| encoded.len())
-            .saturating_add(OBJECT_REF_BUDGET);
-        if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
-            state.truncated = true;
-            return;
+        if !super::computer_use_broker::ui_query_matches(config.query, &node) {
+            (None, node.fingerprint)
+        } else {
+            let encoded_bytes = serde_json::to_vec(&node)
+                .map_or(config.max_bytes.saturating_add(1), |encoded| encoded.len())
+                .saturating_add(OBJECT_REF_BUDGET);
+            if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
+                state.truncated = true;
+                return;
+            }
+            state.encoded_bytes += encoded_bytes;
+            state.truncated |= strings_truncated;
+            let index = output.len() as u32;
+            let fingerprint = node.fingerprint.clone();
+            output.push(node);
+            (Some(index), fingerprint)
         }
-        state.encoded_bytes += encoded_bytes;
-        state.truncated |= strings_truncated;
-        let index = output.len() as u32;
-        let fingerprint = node.fingerprint.clone();
-        output.push(node);
-        (Some(index), fingerprint)
     } else {
         (
             None,
@@ -781,6 +838,9 @@ fn walk(
         )
     };
 
+    if selected && config.element_only {
+        return;
+    }
     if depth >= config.max_depth {
         if unsafe { config.walker.GetFirstChildElement(&element) }.is_ok() {
             state.truncated = true;
@@ -798,10 +858,14 @@ fn walk(
             depth + 1,
             ordinal,
             inside_menu,
+            within_selection,
             config,
             state,
             output,
         );
+        if config.element_only && state.found_selection {
+            return;
+        }
         if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
             state.truncated = true;
             return;
@@ -923,6 +987,10 @@ fn read_node(
         );
         (
             CollectedUiNode {
+                native_id: (!is_protected
+                    && !automation_id.is_empty()
+                    && automation_id.len() <= 512)
+                    .then(|| automation_id.clone()),
                 parent_index,
                 role,
                 name,

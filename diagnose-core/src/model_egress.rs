@@ -620,6 +620,44 @@ pub enum ModelEgressError {
     Sink(SinkAuthorizationError),
 }
 
+impl ModelEgressError {
+    /// Expose a closed error category without disclosing envelope metadata.
+    pub fn agent_error(&self) -> desk_agent_protocol::AgentError {
+        use desk_agent_protocol::AgentErrorKind;
+        let (kind, message) = match self {
+            Self::Sink(
+                SinkAuthorizationError::ByteCapExceeded | SinkAuthorizationError::TooManyItems,
+            ) => (
+                AgentErrorKind::OutputLimitExceeded,
+                "The AI model context exceeds the audit capacity limit.",
+            ),
+            Self::ExportNotSelected { .. }
+            | Self::DerivedDestinationLost
+            | Self::Sink(
+                SinkAuthorizationError::DestinationNotAllowed
+                | SinkAuthorizationError::SecretExternalEgressDenied
+                | SinkAuthorizationError::ExpiredEnvelope
+                | SinkAuthorizationError::ExportSourceNotAuthorized
+                | SinkAuthorizationError::ExportSensitivityExceeded,
+            ) => (
+                AgentErrorKind::PermissionDenied,
+                "The selected context is not authorized for the current AI model.",
+            ),
+            _ => (
+                AgentErrorKind::Internal,
+                "The AI model context could not be audited safely.",
+            ),
+        };
+        desk_agent_protocol::AgentError {
+            kind,
+            message: message.into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        }
+    }
+}
+
 impl std::fmt::Display for ModelEgressError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -737,6 +775,128 @@ mod tests {
             byte_cap: MAX_SINK_BYTES,
             permission_resume: false,
         }
+    }
+
+    #[test]
+    fn long_history_round_trips_audit_and_response_without_dropping_messages() {
+        let policy = policy(&[]);
+        let messages = (0..300)
+            .map(|i| {
+                let id = format!("history-{i}");
+                message(
+                    &id,
+                    ChatRole::User,
+                    "calculator",
+                    Some(envelope(
+                        &id,
+                        "user-input",
+                        b"calculator",
+                        Sensitivity::UserContent,
+                        vec![destination()],
+                    )),
+                )
+            })
+            .collect::<Vec<_>>();
+        let request = ModelRequest::text_only(messages.clone(), ResponseFormatSpec::None);
+        let authorized = policy.authorize_request(request).unwrap();
+        assert_eq!(authorized.request.messages.len(), 300);
+        // Ordinary fresh sink exports keep their small-batch restriction.
+        let bytes = b"calculator";
+        let inputs = authorized
+            .input_envelopes
+            .iter()
+            .map(|envelope| crate::sink_authorizer::SinkInput { envelope, bytes })
+            .collect::<Vec<_>>();
+        use crate::sink_authorizer::SinkAuthorizer;
+        assert!(matches!(
+            crate::sink_authorizer::DefaultSinkAuthorizer.authorize(
+                &destination(),
+                &inputs,
+                100,
+                MAX_SINK_BYTES
+            ),
+            Err(SinkAuthorizationError::TooManyItems)
+        ));
+        let lineage =
+            project_model_input_lineage(&authorized.audit, &authorized.input_envelopes).unwrap();
+        validate_model_input_lineage(&authorized.audit, &lineage).unwrap();
+        let turn = ModelTurn {
+            text: "469".into(),
+            stop_reason: StopReason::EndTurn,
+            ..Default::default()
+        };
+        let receipt = policy
+            .derive_model_output_envelope(&turn, &authorized.input_envelopes)
+            .unwrap();
+        assert_eq!(receipt.provenance.source_envelope_ids.len(), 300);
+        let mut next = authorized.request.messages;
+        next.push(message("answer", ChatRole::Assistant, "469", Some(receipt)));
+        assert_eq!(
+            policy
+                .authorize_request(ModelRequest::text_only(next, ResponseFormatSpec::None))
+                .unwrap()
+                .request
+                .messages
+                .len(),
+            301
+        );
+
+        let mut damaged = messages.clone();
+        damaged[299].text = "tampered!".into();
+        assert!(
+            policy
+                .authorize_request(ModelRequest::text_only(damaged, ResponseFormatSpec::None))
+                .is_err()
+        );
+        let mut wrong_destination = messages.clone();
+        wrong_destination[299]
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .allowed_destinations
+            .clear();
+        assert!(
+            policy
+                .authorize_request(ModelRequest::text_only(
+                    wrong_destination,
+                    ResponseFormatSpec::None
+                ))
+                .is_err()
+        );
+        let limited = ModelEgressPolicy {
+            byte_cap: 1000,
+            ..policy
+        };
+        let error = limited
+            .authorize_request(ModelRequest::text_only(messages, ResponseFormatSpec::None))
+            .unwrap_err();
+        assert_eq!(
+            error.agent_error().kind,
+            desk_agent_protocol::AgentErrorKind::OutputLimitExceeded
+        );
+    }
+
+    #[test]
+    fn model_egress_errors_distinguish_capacity_integrity_and_permission() {
+        use desk_agent_protocol::AgentErrorKind;
+        assert_eq!(
+            ModelEgressError::Sink(SinkAuthorizationError::TooManyItems)
+                .agent_error()
+                .kind,
+            AgentErrorKind::OutputLimitExceeded
+        );
+        assert_eq!(
+            ModelEgressError::Sink(SinkAuthorizationError::DigestMismatch)
+                .agent_error()
+                .kind,
+            AgentErrorKind::Internal
+        );
+        assert_eq!(
+            ModelEgressError::Sink(SinkAuthorizationError::DestinationNotAllowed)
+                .agent_error()
+                .kind,
+            AgentErrorKind::PermissionDenied
+        );
     }
 
     #[test]

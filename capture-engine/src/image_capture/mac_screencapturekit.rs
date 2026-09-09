@@ -1120,3 +1120,156 @@ mod tests {
         );
     }
 }
+
+/// Trusted AX window identity resolved inside the worker, never model input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacWindowCaptureTarget {
+    pub process_id: u32,
+    pub title: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Capture an independent window surface, including when another app covers it.
+/// Ambiguous identities and windows without a fresh frame fail closed.
+pub fn capture_independent_window(
+    target: &MacWindowCaptureTarget,
+) -> Result<Box<dyn ImageInfo + Send + Sync>, CaptureError> {
+    let fail = |text: &str| CaptureError::new_custom_error(DeskErrorCode::ACTION_NEED_RETRY, text);
+    if ![target.x, target.y, target.width, target.height]
+        .iter()
+        .all(|x| x.is_finite())
+        || target.width <= 0.0
+        || target.height <= 0.0
+        || target.width > 8192.0
+        || target.height > 8192.0
+        || target.width * target.height > 16_777_216.0
+    {
+        return Err(fail("Invalid or oversized independent window bounds"));
+    }
+    let content = SCShareableContent::get().map_err(|e| fail(&e.to_string()))?;
+    let matches: Vec<_> = content
+        .windows()
+        .into_iter()
+        .filter(|window| {
+            let rect = window.frame();
+            window
+                .owning_application()
+                .is_some_and(|app| app.process_id() == target.process_id as i32)
+                && window.title().unwrap_or_default() == target.title
+                && [
+                    rect.origin.x - target.x,
+                    rect.origin.y - target.y,
+                    rect.size.width - target.width,
+                    rect.size.height - target.height,
+                ]
+                .iter()
+                .all(|delta| delta.abs() < 1.0)
+        })
+        .collect();
+    let [window] = matches.as_slice() else {
+        return Err(fail(
+            "Selected AX window does not match exactly one capture surface; refresh the window reference",
+        ));
+    };
+    let filter = SCContentFilter::create().with_window(window).build();
+    let config = stream_configuration(target.width.ceil() as u32, target.height.ceil() as u32);
+    let shared = Arc::new(CaptureState {
+        inner: Mutex::new(SharedInner {
+            frame: None,
+            error: None,
+        }),
+        cond: Condvar::new(),
+        generation: AtomicU64::new(1),
+    });
+    let mut stream = SCStream::new_with_delegate(
+        &filter,
+        &config,
+        StreamDelegate {
+            shared: shared.clone(),
+            generation: 1,
+        },
+    );
+    stream
+        .add_output_handler(
+            WindowFrameReceiver(FrameReceiver {
+                shared: shared.clone(),
+                generation: 1,
+            }),
+            SCStreamOutputType::Screen,
+        )
+        .ok_or_else(|| fail("Cannot register window capture output"))?;
+    stream.start_capture().map_err(|e| fail(&e.to_string()))?;
+    let inner = shared.inner.lock().unwrap();
+    let (mut inner, _) = shared
+        .cond
+        .wait_timeout_while(inner, Duration::from_secs(3), |state| {
+            state.frame.is_none() && state.error.is_none()
+        })
+        .unwrap();
+    let frame = inner.frame.take();
+    let error = inner.error.take();
+    drop(inner);
+    shared.generation.store(2, Ordering::Release);
+    let _ = stream.stop_capture();
+    if let Some(error) = error {
+        return Err(fail(&error.message));
+    }
+    frame
+        .map(|frame| Box::new(frame) as Box<dyn ImageInfo + Send + Sync>)
+        .ok_or_else(|| fail("No fresh window frame; the window may be minimized or unavailable"))
+}
+
+struct WindowFrameReceiver(FrameReceiver);
+impl SCStreamOutputTrait for WindowFrameReceiver {
+    fn did_output_sample_buffer(&self, sample: CMSampleBuffer, kind: SCStreamOutputType) {
+        if window_frame_has_content(&sample) {
+            self.0.did_output_sample_buffer(sample, kind);
+        }
+    }
+}
+
+/// Frame status is an NSNumber in the sample attachment dictionary. Read its
+/// integer value instead of relying on a Swift enum cast across the FFI bridge.
+fn window_frame_has_content(sample: &CMSampleBuffer) -> bool {
+    use std::ffi::c_void;
+    #[link(name = "ScreenCaptureKit", kind = "framework")]
+    unsafe extern "C" {
+        static SCStreamFrameInfoStatus: *const c_void;
+    }
+    #[link(name = "CoreMedia", kind = "framework")]
+    unsafe extern "C" {
+        fn CMSampleBufferGetSampleAttachmentsArray(
+            buffer: *mut c_void,
+            create: bool,
+        ) -> *const c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+        fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
+        fn CFGetTypeID(value: *const c_void) -> usize;
+        fn CFDictionaryGetTypeID() -> usize;
+        fn CFNumberGetTypeID() -> usize;
+        fn CFNumberGetValue(number: *const c_void, kind: isize, value: *mut c_void) -> bool;
+    }
+    unsafe {
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(sample.as_ptr(), false);
+        if attachments.is_null() || CFArrayGetCount(attachments) == 0 {
+            return false;
+        }
+        let dictionary = CFArrayGetValueAtIndex(attachments, 0);
+        if dictionary.is_null() || CFGetTypeID(dictionary) != CFDictionaryGetTypeID() {
+            return false;
+        }
+        let status = CFDictionaryGetValue(dictionary, SCStreamFrameInfoStatus);
+        if status.is_null() || CFGetTypeID(status) != CFNumberGetTypeID() {
+            return false;
+        }
+        let mut value: i32 = -1;
+        CFNumberGetValue(status, 3, &mut value as *mut i32 as *mut c_void) && matches!(value, 0 | 4)
+    }
+}

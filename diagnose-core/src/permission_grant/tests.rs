@@ -70,6 +70,126 @@ fn decision_fixture() -> (
 }
 
 #[test]
+fn desktop_action_bundle_issues_only_owner_selected_bounded_reads_on_both_surfaces() {
+    let (mut session, _, _) = decision_fixture();
+    session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
+    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let call = crate::chat::ToolCall { id: "click-request".into(),
+        name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+        arguments_json: serde_json::json!({"items":[{
+            "item_id":"click", "provider_id":"desktop.ui.action", "tool_name":"execute_confirmed_ui_action",
+            "expected_effect":"mutate_application", "suggested_ttl_seconds":300, "suggested_max_uses":1,
+            "reason":"Click the selected button", "exact_input":{
+                "target":{"token":"button-token","snapshot_id":"snapshot","object_kind":"ui_element","expires_at":"2026-09-10T00:00:00Z"},
+                "action":{"kind":"invoke"}
+            }
+        }]}).to_string() };
+    let mut request = crate::permission_tools::build_permission_request(
+        &call,
+        &registry,
+        "click-permission".into(),
+        session.input_revision,
+        "2026-09-09T00:00:00Z".into(),
+    )
+    .unwrap();
+    crate::permission_tools::include_desktop_action_reads(&mut request, &registry).unwrap();
+    let inventory = request
+        .items
+        .iter()
+        .map(|item| CapabilityAvailability {
+            provider_id: item.provider_id.clone(),
+            capability_id: registry
+                .capability_for_tool(&item.tool_name)
+                .unwrap()
+                .wire
+                .capability_id
+                .clone(),
+            tool_name: item.tool_name.clone(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        })
+        .collect::<Vec<_>>();
+    let mut decisions = request
+        .items
+        .iter()
+        .map(|item| PermissionDecisionItem {
+            item_id: item.item_id.clone(),
+            decision: PermissionItemDecision::Approve {
+                resource_scope: item.resource_scope.clone(),
+                operation_scope: item.operation_scope.clone(),
+                export_destinations: item.export_destinations.clone(),
+                ttl_seconds: 120,
+                max_uses: item.suggested_max_uses,
+            },
+        })
+        .collect::<Vec<_>>();
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let context = PermissionGrantIssuanceContext {
+            surface,
+            registry: &registry,
+            inventory: &inventory,
+            readiness_revision: 7,
+            now_unix_ms: 1000,
+            implicit_fresh_object_refs: &[],
+        };
+        let grants =
+            build_permission_grants(&session, &request, &decisions, &context, None).unwrap();
+        assert_eq!(grants.len(), 3);
+        assert_eq!(grants[0].remaining_uses, 1);
+        for grant in &grants[1..] {
+            assert_eq!(grant.remaining_uses, 16);
+            assert_eq!(grant.expires_at_unix_ms, 121000);
+            assert_eq!(grant.target_device_id, session.device_id);
+            assert_eq!(grant.run_id, session.conversation_id);
+            assert_eq!(grant.input_revision, session.input_revision);
+            assert_eq!(grant.resource_scope, vec!["target:current_device"]);
+            assert_eq!(grant.effect, CapabilityEffect::ReadDevice);
+        }
+        let mut approved = request.clone();
+        approved.state = PermissionRequestState::Approved;
+        assert!(!permission_request_can_renew(
+            &session, &approved, &grants, 2000
+        ));
+        let mut consumed = grants.clone();
+        consumed[0].remaining_uses = 0;
+        assert!(permission_request_can_renew(
+            &session, &approved, &consumed, 2000
+        ));
+        consumed[0].revoked_at_unix_ms = Some(1500);
+        assert!(!permission_request_can_renew(
+            &session, &approved, &consumed, 2000
+        ));
+        let saved = decisions[2].clone();
+        decisions[2].decision = PermissionItemDecision::Deny;
+        let narrowed =
+            build_permission_grants(&session, &request, &decisions, &context, None).unwrap();
+        assert_eq!(narrowed.len(), 2);
+        assert!(
+            !narrowed
+                .iter()
+                .any(|grant| grant.tool_name == "inspect_desktop_ui")
+        );
+        decisions[2] = saved;
+        let mut unavailable = inventory.clone();
+        unavailable[2].ready = false;
+        let unavailable_context = PermissionGrantIssuanceContext {
+            inventory: &unavailable,
+            ..context
+        };
+        assert!(
+            build_permission_grants(&session, &request, &decisions, &unavailable_context, None)
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn owner_freeform_approval_is_exact_one_shot_and_rechecks_the_frozen_policy() {
     let (mut session, mut request, mut decisions) = decision_fixture();
     session.actor_id = "1".into();

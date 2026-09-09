@@ -111,13 +111,7 @@ impl ModelSeam for MeteredModel {
         })?;
         let authorized = policy.authorize_request(request).map_err(|error| {
             log::warn!("[device-assistant] model egress denied: {error}");
-            AgentError {
-                kind: AgentErrorKind::PermissionDenied,
-                message: "The selected context is not authorized for the current AI model.".into(),
-                retryable: false,
-                safe_for_model: true,
-                error_code: None,
-            }
+            error.agent_error()
         })?;
         let model_call_ordinal = self
             .model_call_ordinal

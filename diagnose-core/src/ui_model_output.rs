@@ -84,6 +84,7 @@ mod tests {
     fn compact_receipt_preserves_exact_references_and_non_default_states() {
         let nodes = (0..100)
             .map(|i| UiNodeProjection {
+                native_id: None,
                 object_ref: ObjectRef {
                     token: format!("opaque-token-{i}"),
                     snapshot_id: "snapshot".into(),

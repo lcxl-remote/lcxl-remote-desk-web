@@ -1056,6 +1056,8 @@ export default {
   'pages.deviceAssistant.permissionDescription': 'The AI can only propose a server-validated permission batch. Approved items mint bounded grants; the decision itself executes nothing, and every later invocation must re-match current scope and readiness.',
   'pages.deviceAssistant.permissionApprove': 'Approve listed permissions',
   'pages.deviceAssistant.permissionItemToggle': 'Select permission: {{reason}}',
+  'pages.deviceAssistant.permissionIncludedDesktopReadReason': 'Read the current device desktop session or UI to locate the action target and check the result.',
+  'pages.deviceAssistant.permissionIncludedDesktopReads': 'Desktop actions also request desktop session and UI reads on the current device to locate targets and check results, excluding screenshots. These reads are listed separately and selected by default. You can deselect or narrow them; further reading may then require another approval.',
   'pages.deviceAssistant.permissionSelectionDescription': 'Select the items to approve. Unselected items are explicitly denied in the same batch.',
   'pages.deviceAssistant.permissionSubmitSelection': 'Submit selected permissions',
   'pages.deviceAssistant.permissionResourceScope': 'Resource scope (narrow only)',

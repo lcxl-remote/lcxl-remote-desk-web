@@ -99,7 +99,7 @@ pub fn validate_model_input_lineage(
         || audit.total_bytes == 0
         || audit.total_bytes > MAX_SINK_BYTES
         || entries.is_empty()
-        || entries.len() > crate::sink_authorizer::MAX_SINK_ITEMS
+        || entries.len() > MAX_SINK_BYTES
         || entries.len() != audit.envelope_ids.len()
         || entries.len() != audit.digests_sha256.len()
     {

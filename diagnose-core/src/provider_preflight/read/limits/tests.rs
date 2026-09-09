@@ -123,6 +123,7 @@ fn desktop_ui_limits_narrow_request_and_count_returned_nodes() {
     assert_eq!((params.max_bytes, params.max_nodes), (512, 1));
 
     let node = UiNodeProjection {
+        native_id: None,
         object_ref: ObjectRef {
             object_kind: ObjectKind::UiElement,
             ..reference()

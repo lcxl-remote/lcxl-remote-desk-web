@@ -2856,7 +2856,7 @@ async fn run_inner(
                                     session.input_revision,
                                     created_at.clone(),
                                 )
-                            }).and_then(|request| {
+                            }).and_then(|mut request| {
                                 let loaded = session
                                     .capability_disclosure
                                     .loaded_tool_names
@@ -2886,6 +2886,7 @@ async fn run_inner(
                                     safe_for_model: false,
                                     error_code: None,
                                 })?;
+                                crate::permission_tools::include_desktop_action_reads(&mut request, providers)?;
                                 validate_permission_request_availability(
                                     &session.conversation,
                                     &request,
