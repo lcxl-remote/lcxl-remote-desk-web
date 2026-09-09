@@ -28,6 +28,7 @@ export type { UpdateContextManagementMutationKey } from "./contextManagementAdmi
 export type { CancelDeviceAssistantBackgroundTaskMutationKey } from "./deviceAssistantSessionController/useCancelDeviceAssistantBackgroundTask.ts";
 export type { DecideDeviceAssistantPermissionMutationKey } from "./deviceAssistantSessionController/useDecideDeviceAssistantPermission.ts";
 export type { DeleteAssistantImageMutationKey } from "./deviceAssistantSessionController/useDeleteAssistantImage.ts";
+export type { DeleteDeviceAssistantSessionMutationKey } from "./deviceAssistantSessionController/useDeleteDeviceAssistantSession.ts";
 export type { DisposeDeviceAssistantUnknownOutcomeMutationKey } from "./deviceAssistantSessionController/useDisposeDeviceAssistantUnknownOutcome.ts";
 export type { GetAssistantImageQueryKey } from "./deviceAssistantSessionController/useGetAssistantImage.ts";
 export type { GetAssistantImageSuspenseQueryKey } from "./deviceAssistantSessionController/useGetAssistantImageSuspense.ts";
@@ -219,6 +220,9 @@ export { useDecideDeviceAssistantPermission } from "./deviceAssistantSessionCont
 export { deleteAssistantImageMutationKey } from "./deviceAssistantSessionController/useDeleteAssistantImage.ts";
 export { deleteAssistantImageMutationOptions } from "./deviceAssistantSessionController/useDeleteAssistantImage.ts";
 export { useDeleteAssistantImage } from "./deviceAssistantSessionController/useDeleteAssistantImage.ts";
+export { deleteDeviceAssistantSessionMutationKey } from "./deviceAssistantSessionController/useDeleteDeviceAssistantSession.ts";
+export { deleteDeviceAssistantSessionMutationOptions } from "./deviceAssistantSessionController/useDeleteDeviceAssistantSession.ts";
+export { useDeleteDeviceAssistantSession } from "./deviceAssistantSessionController/useDeleteDeviceAssistantSession.ts";
 export { disposeDeviceAssistantUnknownOutcomeMutationKey } from "./deviceAssistantSessionController/useDisposeDeviceAssistantUnknownOutcome.ts";
 export { disposeDeviceAssistantUnknownOutcomeMutationOptions } from "./deviceAssistantSessionController/useDisposeDeviceAssistantUnknownOutcome.ts";
 export { useDisposeDeviceAssistantUnknownOutcome } from "./deviceAssistantSessionController/useDisposeDeviceAssistantUnknownOutcome.ts";

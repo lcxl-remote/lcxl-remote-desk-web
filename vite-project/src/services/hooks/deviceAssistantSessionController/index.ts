@@ -1,6 +1,7 @@
 export type { CancelDeviceAssistantBackgroundTaskMutationKey } from "./useCancelDeviceAssistantBackgroundTask.ts";
 export type { DecideDeviceAssistantPermissionMutationKey } from "./useDecideDeviceAssistantPermission.ts";
 export type { DeleteAssistantImageMutationKey } from "./useDeleteAssistantImage.ts";
+export type { DeleteDeviceAssistantSessionMutationKey } from "./useDeleteDeviceAssistantSession.ts";
 export type { DisposeDeviceAssistantUnknownOutcomeMutationKey } from "./useDisposeDeviceAssistantUnknownOutcome.ts";
 export type { GetAssistantImageQueryKey } from "./useGetAssistantImage.ts";
 export type { GetAssistantImageSuspenseQueryKey } from "./useGetAssistantImageSuspense.ts";
@@ -20,6 +21,9 @@ export { useDecideDeviceAssistantPermission } from "./useDecideDeviceAssistantPe
 export { deleteAssistantImageMutationKey } from "./useDeleteAssistantImage.ts";
 export { deleteAssistantImageMutationOptions } from "./useDeleteAssistantImage.ts";
 export { useDeleteAssistantImage } from "./useDeleteAssistantImage.ts";
+export { deleteDeviceAssistantSessionMutationKey } from "./useDeleteDeviceAssistantSession.ts";
+export { deleteDeviceAssistantSessionMutationOptions } from "./useDeleteDeviceAssistantSession.ts";
+export { useDeleteDeviceAssistantSession } from "./useDeleteDeviceAssistantSession.ts";
 export { disposeDeviceAssistantUnknownOutcomeMutationKey } from "./useDisposeDeviceAssistantUnknownOutcome.ts";
 export { disposeDeviceAssistantUnknownOutcomeMutationOptions } from "./useDisposeDeviceAssistantUnknownOutcome.ts";
 export { useDisposeDeviceAssistantUnknownOutcome } from "./useDisposeDeviceAssistantUnknownOutcome.ts";

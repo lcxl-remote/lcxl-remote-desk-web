@@ -737,7 +737,8 @@ export function DeviceAssistantWorkspace({
                             </CardDescription>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
-                            <AssistantHistory deskId={deskId} disabled={!!rehearsal || chat.running || chat.hydrating || !!chat.grantRevoking}
+                            <AssistantHistory deskId={deskId} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || chat.outcomeDisposing || !!chat.grantRevoking}
+                                onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
                                     setQuestion('');
@@ -745,7 +746,7 @@ export function DeviceAssistantWorkspace({
                                     return true;
                                 }} />
                             {!rehearsal && <Button variant="ghost" size="sm" disabled={!assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision} onClick={() => { if (!chat.conversationId || !chat.inputRevision) return; scheduleNavigate(`/schedules?${new URLSearchParams({ resume_conversation: chat.conversationId, resume_device: stableDeviceId, resume_revision: String(chat.inputRevision) })}`); }}>{t('schedules.createResume')}</Button>}
-                            <Button variant="ghost" size="sm" onClick={resetConversation} disabled={!!rehearsal || !assistantEnabled || chat.running || chat.hydrating}>
+                            <Button variant="ghost" size="sm" onClick={resetConversation} disabled={!!rehearsal || !assistantEnabled || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || chat.outcomeDisposing || !!chat.grantRevoking}>
                                 {t('pages.deviceAssistant.newConversation')}
                             </Button>
                         </div>

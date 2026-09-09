@@ -1,0 +1,1 @@
+{"type":"object","required":["deleted"],"properties":{"deleted":{"type":"boolean"}},"x-readme-ref-name":"DeleteDeviceAssistantSessionResponse"}

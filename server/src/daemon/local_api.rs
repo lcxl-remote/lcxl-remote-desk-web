@@ -8,7 +8,7 @@ use crate::{
 use actix_files;
 use actix_service::fn_service;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
-use actix_web::{App, HttpServer, cookie::Key, dev::ServiceResponse, middleware::Logger, web};
+use actix_web::{App, HttpServer, dev::ServiceResponse, middleware::Logger, web};
 use desk_signal::model::SharedConnectionMap;
 use desk_signal_facade::service::NodeTokenValidator;
 use log::{error, info};
@@ -44,11 +44,7 @@ pub async fn run_local_api(
     info!("ServiceDaemon HTTP server starting on 0.0.0.0:{SERVICE_API_PORT}");
 
     // Stable cookie-signing key derived from persisted secret (survives daemon restarts)
-    let session_key_material = {
-        let s = settings.read().await;
-        s.system.session_secret_key.clone().unwrap_or_default()
-    };
-    let secret_key = Key::derive_from(session_key_material.as_bytes());
+    let secret_key = settings.read().await.session_cookie_key();
 
     // Static file path: <exe_dir>/static
     let static_file_path = std::env::current_exe()

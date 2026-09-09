@@ -1,3 +1,5 @@
+#[cfg(test)]
+use actix_web::cookie::Key;
 pub mod agent_adapter;
 pub mod controller;
 pub mod daemon;
@@ -77,7 +79,6 @@ use actix_service::fn_service;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
 use actix_web::{
     App, HttpResponse, HttpServer,
-    cookie::Key,
     dev::Service as _,
     dev::{ServiceRequest, ServiceResponse},
     error::InternalError,
@@ -91,7 +92,8 @@ use desk_signal::{
         connection::list_connections,
         device_assistant_session::{
             cancel_device_assistant_background_task, decide_device_assistant_permission,
-            delete_assistant_image, dispose_device_assistant_unknown_outcome, get_assistant_image,
+            delete_assistant_image, delete_device_assistant_session,
+            dispose_device_assistant_unknown_outcome, get_assistant_image,
             get_device_assistant_session, list_assistant_images, list_device_assistant_sessions,
             revoke_device_assistant_capability_grant,
         },
@@ -263,7 +265,8 @@ pub fn configure_api_surface(
                         .service(decide_device_assistant_permission)
                         .service(revoke_device_assistant_capability_grant)
                         .service(cancel_device_assistant_background_task)
-                        .service(list_device_assistant_sessions);
+                        .service(list_device_assistant_sessions)
+                        .service(delete_device_assistant_session);
                 }
             })
             .service(
@@ -617,7 +620,7 @@ pub async fn run_with_hub(
     static_file_path.pop();
     static_file_path.push("static");
     info!("Server static file path: {:?}", static_file_path);
-    let secret_key = Key::generate();
+    let secret_key = settings.session_cookie_key();
     let shared_settings_data = web::Data::from(shared_settings.clone());
     let settings_coordinator_data = web::Data::from(settings_coordinator.clone());
 
@@ -1415,6 +1418,7 @@ mod tests {
             "/api/my/device-assistant-session/permission-decision",
             "/api/my/device-assistant-session/background-task/cancel",
             "/api/my/device-assistant-sessions",
+            "/api/my/device-assistant-session/delete",
             "/api/turn/info",
         ] {
             assert!(

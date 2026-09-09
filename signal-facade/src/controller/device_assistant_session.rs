@@ -60,6 +60,17 @@ pub struct DeviceAssistantSessionListQuery {
 }
 
 #[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct DeleteDeviceAssistantSessionBody {
+    pub connection: String,
+    pub session: String,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DeleteDeviceAssistantSessionResponse {
+    pub deleted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionDecisionBody {
     pub connection: String,

@@ -429,7 +429,12 @@ export function useDeviceAssistantChat({
                 inputRevision: snapshot.inputRevision,
             };
             snapshotActiveRequest.current = snapshot.active ? snapshot.requestId ?? null : null;
-            if (!snapshot.active) clearStopping();
+            if (!snapshot.active) {
+                clearStopping();
+                // An expired server lease also settles a locally bound request
+                // whose terminal event was lost during a disconnect or restart.
+                if (activeRequest.current === snapshot.requestId) activeRequest.current = null;
+            }
             setContextUsage(snapshot.contextUsage ?? null);
             setContextNotices([...new Map((snapshot.contextNotices ?? []).map(notice => [notice.id, notice])).values()]);
             const projected = projectPersistedSnapshot(snapshot);
@@ -1145,14 +1150,6 @@ export function useDeviceAssistantChat({
 
     const reset = useCallback(() => {
         if (rehearsal) return;
-        if (activeRequest.current) {
-            sendMessage(
-                SIGNALING_TYPE_CODE_CANCEL_DEVICE_ASSISTANT,
-                null,
-                deskId,
-                activeRequest.current,
-            );
-        }
         activeRequest.current = null;
         snapshotActiveRequest.current = null;
         clearStopping();
@@ -1197,10 +1194,16 @@ export function useDeviceAssistantChat({
         }
     }, [conversationStorageScope, deskId, sendMessage, rehearsal]);
 
+    const forgetConversation = useCallback((id: string | null) => {
+        if (!id || conversationId.current !== id) return false;
+        reset();
+        return true;
+    }, [reset]);
+
     const selectConversation = useCallback((id: string) => {
         if (rehearsal) return false;
         // Navigation must never cancel a turn or race an in-flight decision.
-        if (!id || activeRequest.current || remoteActive || contextUpdating || permissionUpdating
+        if (!id || contextUpdating || permissionUpdating
             || outcomeDisposing || grantRevoking || hydrating) return false;
         reset();
         conversationId.current = id;
@@ -1217,6 +1220,7 @@ export function useDeviceAssistantChat({
         sessionId: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.sessionId : undefined,
         inputRevision: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.inputRevision : undefined,
         selectConversation,
+        forgetConversation,
         contextUsage,
         contextNotices,
         messages,

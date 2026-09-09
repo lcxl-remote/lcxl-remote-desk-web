@@ -129,6 +129,26 @@ describe('useDeviceAssistantChat', () => {
         expect(sendMessage).not.toHaveBeenCalled();
     });
 
+    it('switches and creates conversations while a previous turn keeps running', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'other', requestId: 'remote-turn', seq: 1, active: true, messages: [],
+        } }) }));
+        const sendMessage = vi.fn().mockReturnValue('original-turn');
+        const { result } = renderHook(() => useDeviceAssistantChat({ deskId: 'parallel', subscribe: () => () => undefined, sendMessage }));
+        act(() => { result.current.start('original question'); });
+        act(() => { expect(result.current.selectConversation('other')).toBe(true); });
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(result.current.turnRunning).toBe(true);
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        act(() => { result.current.reset(); });
+        expect(result.current.turnRunning).toBe(false);
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        act(() => { result.current.start('new question'); });
+        expect(sendMessage).toHaveBeenCalledTimes(2);
+        act(() => { result.current.forgetConversation('other'); });
+        expect(result.current.messages[0].text).toBe('new question');
+    });
+
     beforeEach(() => localStorage.clear());
     afterEach(() => {
         vi.useRealTimers();
@@ -1166,6 +1186,27 @@ describe('useDeviceAssistantChat', () => {
         expect(result.current.stopping).toBe(false);
         expect(result.current.turnRunning).toBe(false);
         expect(result.current.messages[0].text).toBe('keep this question');
+    });
+
+    it('clears a local stopping turn when the server lease expires without a terminal event', async () => {
+        vi.useFakeTimers();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'expired-session', requestId: 'expired-request', seq: 10, active: false,
+            messages: [{ id: 'user-1', role: 'user', text: 'keep this question' }],
+        } }) }));
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'expired-local',
+            subscribe: () => () => undefined, sendMessage: vi.fn().mockReturnValue('expired-request') }));
+        act(() => { result.current.start('keep this question'); });
+        act(() => { result.current.stop(); });
+        expect(result.current.stopping).toBe(true);
+        await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+        expect(result.current.stopping).toBe(false);
+        expect(result.current.turnRunning).toBe(false);
+        expect(result.current.messages[0].text).toBe('keep this question');
+        act(() => { result.current.reset(); });
+        expect(result.current.messages).toEqual([]);
+        unmount();
+        vi.useRealTimers();
     });
 
     it('stops a restored active turn using its server request id', async () => {

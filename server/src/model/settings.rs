@@ -473,3 +473,41 @@ communication_handoff = true
         assert_eq!(crate::locale::current_locale(), "en-US");
     }
 }
+
+impl Settings {
+    /// Reuse the persisted host secret so restarting does not invalidate logins.
+    pub(crate) fn session_cookie_key(&self) -> actix_web::cookie::Key {
+        self.system
+            .session_secret_key
+            .as_deref()
+            .filter(|secret| secret.len() >= 32)
+            .map(|secret| actix_web::cookie::Key::derive_from(secret.as_bytes()))
+            .unwrap_or_else(actix_web::cookie::Key::generate)
+    }
+}
+
+#[cfg(test)]
+mod session_cookie_tests {
+    use super::*;
+
+    #[test]
+    fn session_cookie_key_survives_reload_and_is_host_specific() {
+        let mut settings = Settings::default();
+        settings.system.session_secret_key = Some("a".repeat(64));
+        let reloaded = settings.clone();
+        assert_eq!(
+            settings.session_cookie_key().master(),
+            reloaded.session_cookie_key().master()
+        );
+        settings.system.session_secret_key = Some("b".repeat(64));
+        assert_ne!(
+            settings.session_cookie_key().master(),
+            reloaded.session_cookie_key().master()
+        );
+        settings.system.session_secret_key = None;
+        assert_ne!(
+            settings.session_cookie_key().master(),
+            settings.session_cookie_key().master()
+        );
+    }
+}

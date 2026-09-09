@@ -1,6 +1,7 @@
 //! SQLite-backed agent sessions for the single-node OSS signal central brain.
 
 mod assistant_snapshot;
+mod deletion;
 mod file_scope;
 mod live_context;
 mod object_context;
@@ -163,7 +164,10 @@ impl SignalAgentSessionStore {
                 .and_then(|basis| basis.usage(&session.conversation)),
             client_conversation_id: session.client_conversation_id,
             seq: row.version,
-            active: session.turn_state.is_active(),
+            active: session.turn_state.is_active()
+                && row
+                    .lease_deadline
+                    .is_some_and(|deadline| deadline > Utc::now()),
             request_id: session.current_request_id,
             active_execution_generation,
             unresolved_action,
@@ -446,16 +450,23 @@ impl SignalAgentSessionStore {
         device_id: &str,
         limit: u64,
     ) -> Result<Vec<SessionSummary>, AgentError> {
+        use sea_orm::ExprTrait;
+        let now = Utc::now();
+        let running_order: Expr =
+            Expr::case(Expr::col(agent_session::Column::LeaseDeadline).gt(now), 1)
+                .finally(0)
+                .into();
         let rows = agent_session::Entity::find()
             .filter(agent_session::Column::ActorId.eq(actor_id))
             .filter(agent_session::Column::DeviceId.eq(device_id))
+            .order_by(running_order, sea_orm::Order::Desc)
             .order_by_desc(agent_session::Column::UpdatedAt)
-            .limit(limit.saturating_mul(4).max(limit))
+            .limit(limit.saturating_mul(4))
             .all(&self.db)
             .await
             .map_err(|e| internal(format!("list agent sessions: {e}")))?;
 
-        Ok(rows
+        let mut summaries: Vec<SessionSummary> = rows
             .into_iter()
             .filter_map(|row| {
                 let session = match PersistedAgentSession::decode_json(&row.state_json) {
@@ -487,7 +498,8 @@ impl SignalAgentSessionStore {
                     first_question,
                     created_at: row.created_at.to_rfc3339(),
                     updated_at: row.updated_at.to_rfc3339(),
-                    active: session.turn_state.is_active(),
+                    active: session.turn_state.is_active()
+                        && row.lease_deadline.is_some_and(|deadline| deadline > now),
                     message_count: session
                         .conversation
                         .iter()
@@ -499,8 +511,16 @@ impl SignalAgentSessionStore {
                         .count(),
                 })
             })
-            .take(limit as usize)
-            .collect())
+            .collect();
+        summaries.sort_by(|left, right| {
+            right
+                .active
+                .cmp(&left.active)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        summaries.truncate(limit as usize);
+        Ok(summaries)
     }
 
     /// Recover one active session whose lease has expired without claiming a new
@@ -1007,7 +1027,10 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
             .and_then(|basis| basis.usage(&session.conversation)),
         client_conversation_id: session.client_conversation_id,
         seq: row.version,
-        active: session.turn_state.is_active(),
+        active: session.turn_state.is_active()
+            && row
+                .lease_deadline
+                .is_some_and(|deadline| deadline > Utc::now()),
         request_id: session.current_request_id,
         active_execution_generation,
         unresolved_action,
@@ -1965,6 +1988,183 @@ fn superseded_tool_result(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn conversation_list_prioritizes_running_before_recency_and_limit() {
+        let store = store().await;
+        for (id, active, age) in [
+            ("idle-new", false, 1),
+            ("running-old", true, 4),
+            ("idle-old", false, 3),
+            ("running-new", true, 2),
+        ] {
+            let mut params = claim(id);
+            params.conversation_id = id.into();
+            let mut session = store.claim_turn(params).await.unwrap();
+            session.surface = AgentSessionSurface::DeviceAssistant;
+            if !active {
+                session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+            }
+            store.save(&mut session).await.unwrap();
+            agent_session::Entity::update_many()
+                .col_expr(
+                    agent_session::Column::UpdatedAt,
+                    Expr::value(Utc::now() - Duration::days(age)),
+                )
+                .filter(agent_session::Column::ConversationId.eq(id))
+                .exec(&store.db)
+                .await
+                .unwrap();
+        }
+        let rows = store
+            .list_device_assistant_sessions("1", "device-1", 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["running-new", "running-old", "idle-new", "idle-old"]
+        );
+        // Recent idle rows must not push older active sessions beyond the scan cap.
+        for index in 0..8 {
+            let id = format!("recent-idle-{index}");
+            let mut params = claim(&id);
+            params.conversation_id = id;
+            let mut session = store.claim_turn(params).await.unwrap();
+            session.surface = AgentSessionSurface::DeviceAssistant;
+            session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+            store.save(&mut session).await.unwrap();
+        }
+        assert_eq!(
+            store
+                .list_device_assistant_sessions("1", "device-1", 1)
+                .await
+                .unwrap()[0]
+                .session_id,
+            "running-new"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_history_checks_subject_and_fences_running_writes() {
+        let store = store().await.with_client_metadata(
+            Some("delete-client".into()),
+            AgentSessionSurface::DeviceAssistant,
+        );
+        let schema = sea_orm::Schema::new(store.db.get_database_backend());
+        store
+            .db
+            .execute(
+                &schema
+                    .create_table_from_entity(crate::entity::agent_schedule::Entity)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+        store
+            .db
+            .execute(
+                &schema
+                    .create_table_from_entity(crate::entity::agent_image_attachment::Entity)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+        store
+            .db
+            .execute(
+                &schema
+                    .create_table_from_entity(crate::entity::agent_grant_reservation::Entity)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+        let mut session = store.claim_turn(claim("delete-turn")).await.unwrap();
+        store.save(&mut session).await.unwrap();
+        assert!(
+            store
+                .delete_for_subject("conversation-1", "other", "device-1")
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .read_snapshot("conversation-1")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .delete_for_subject("conversation-1", "1", "device-1")
+                .await
+                .unwrap(),
+            session.current_request_id
+        );
+        assert!(
+            store
+                .read_snapshot("conversation-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.save(&mut session).await.is_err());
+        assert!(
+            store
+                .list_device_assistant_sessions("1", "device-1", 30)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_lease_snapshot_does_not_keep_the_conversation_running() {
+        let store = store().await;
+        let mut session = store.claim_turn(claim("expired-snapshot")).await.unwrap();
+        session.pending_schedule_review = Some("pending-timer".into());
+        store.save(&mut session).await.unwrap();
+        assert!(
+            store
+                .read_snapshot("conversation-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        for deadline in [Some(Utc::now() - Duration::seconds(1)), None] {
+            agent_session::Entity::update_many()
+                .col_expr(agent_session::Column::LeaseDeadline, Expr::value(deadline))
+                .filter(agent_session::Column::ConversationId.eq("conversation-1"))
+                .exec(&store.db)
+                .await
+                .unwrap();
+            let snapshot = store
+                .read_snapshot("conversation-1")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!snapshot.active);
+            assert_eq!(snapshot.request_id, session.current_request_id);
+            let row = agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq("conversation-1"))
+                .one(&store.db)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!snapshot_from_row(row.clone()).unwrap().active);
+            let stored = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+            assert_eq!(
+                stored.pending_schedule_review,
+                session.pending_schedule_review
+            );
+            assert_eq!(stored.conversation, session.conversation);
+        }
+    }
+
     use super::*;
     mod permission_receipts;
     use desk_agent_protocol::capability_grant::{CapabilityGrant, CapabilityGrantUsePolicy};

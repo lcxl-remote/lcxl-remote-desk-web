@@ -351,6 +351,47 @@ fn outcome_content(outcome: &AgentOutcome) -> String {
     }
 }
 
+/// Best-effort delivery for commands whose owning conversation was deleted.
+pub(crate) async fn cancel_conversation_commands(
+    connections: &SharedConnectionMap,
+    db: &DatabaseConnection,
+    run: &str,
+    target_id: &str,
+    actor: &str,
+) {
+    use crate::entity::agent_exec_task as task;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let Ok(tasks) = task::Entity::find()
+        .filter(task::Column::ConversationId.eq(run))
+        .filter(task::Column::Status.is_in(["dispatching", "running", "unknown"]))
+        .all(db)
+        .await
+    else {
+        return;
+    };
+    let target = { connections.read().await.get(target_id).cloned() };
+    let Some(target) = target else {
+        return;
+    };
+    for task in tasks {
+        let payload = ExecControlPayload {
+            execution_generation: task.execution_generation.clone(),
+            action: ExecControlAction::Cancel {
+                requested_by: actor.to_owned(),
+            },
+        };
+        let frame = SignalingModel::new(
+            &task.execution_generation,
+            SignalingType::ControlExecution,
+            None,
+            Some(target_id.to_owned()),
+            serde_json::to_value(payload).ok(),
+            None,
+        );
+        let _ = send_frame(&target, &frame).await;
+    }
+}
+
 async fn send_frame(target: &ConnectionState, frame: &SignalingModel) -> Result<(), AgentError> {
     let text = serde_json::to_string(frame).map_err(|e| {
         safe(

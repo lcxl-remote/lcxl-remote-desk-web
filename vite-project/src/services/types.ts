@@ -1493,6 +1493,24 @@ export type CurrentUserDto = {
     user_id?: number | null;
 };
 
+export type DeleteDeviceAssistantSessionBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string
+    */
+    session: string;
+};
+
+export type DeleteDeviceAssistantSessionResponse = {
+    /**
+     * @type boolean
+    */
+    deleted: boolean;
+};
+
 export const deskErrorCodeEnum = {
     SUCCESS: 0,
     SYSTEM_ERROR: 1,
@@ -5474,6 +5492,30 @@ export type RestResponseCurrentUserDto = {
          * @type integer,null, int32
         */
         user_id?: number | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseDeleteDeviceAssistantSessionResponse = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        deleted: boolean;
     };
     /**
      * @type string,null
@@ -11245,6 +11287,18 @@ export type RevokeDeviceAssistantCapabilityGrantMutationResponse = RevokeDeviceA
 export type RevokeDeviceAssistantCapabilityGrantMutation = {
     Response: RevokeDeviceAssistantCapabilityGrant200;
     Request: RevokeDeviceAssistantCapabilityGrantMutationRequest;
+    Errors: any;
+};
+
+export type DeleteDeviceAssistantSession200 = RestResponseDeleteDeviceAssistantSessionResponse;
+
+export type DeleteDeviceAssistantSessionMutationRequest = DeleteDeviceAssistantSessionBody;
+
+export type DeleteDeviceAssistantSessionMutationResponse = DeleteDeviceAssistantSession200;
+
+export type DeleteDeviceAssistantSessionMutation = {
+    Response: DeleteDeviceAssistantSession200;
+    Request: DeleteDeviceAssistantSessionMutationRequest;
     Errors: any;
 };
 

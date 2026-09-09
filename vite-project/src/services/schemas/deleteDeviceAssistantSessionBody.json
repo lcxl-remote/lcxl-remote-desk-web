@@ -1,0 +1,1 @@
+{"type":"object","required":["connection","session"],"properties":{"connection":{"type":"string"},"session":{"type":"string"}},"x-readme-ref-name":"DeleteDeviceAssistantSessionBody"}

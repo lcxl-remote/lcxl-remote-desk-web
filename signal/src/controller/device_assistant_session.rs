@@ -759,6 +759,64 @@ pub async fn list_device_assistant_sessions(
     )))
 }
 
+#[utoipa::path(tag = TAG, summary = "Delete a Device Assistant conversation and stop its AI turn",
+    request_body = DeleteDeviceAssistantSessionBody,
+    responses((status = 200, body = RestResponse<DeleteDeviceAssistantSessionResponse>)))]
+#[post("/my/device-assistant-session/delete")]
+pub async fn delete_device_assistant_session(
+    connection_map: web::Data<SharedConnectionMap>,
+    query: web::Json<DeleteDeviceAssistantSessionBody>,
+) -> Result<HttpResponse, DeskSignalError> {
+    let target_audience = {
+        let map = connection_map.read().await;
+        let Some(target) = map.get(&query.connection) else {
+            return Ok(not_accessible());
+        };
+        if target.auth_context.auth_kind != AuthKind::TokenAuth
+            || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
+        {
+            return Ok(not_accessible());
+        }
+        match target.model.version_info.client_id.as_deref() {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => return Ok(not_accessible()),
+        }
+    };
+    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let deleted = SignalAgentSessionStore::new(crate::db::get_db().clone())
+        .delete_for_subject(&query.session, &actor_id, &target_audience)
+        .await;
+    let request = match deleted {
+        Ok(request) => request,
+        Err(_) => return Ok(not_accessible()),
+    };
+    if let Some(request) = request {
+        crate::device_assistant_orchestrator::cancellation::cancel(
+            SINGLE_ACCOUNT_USER_ID,
+            &request,
+        );
+    }
+    let cancel_connections = connection_map.clone();
+    let cancel_session = query.session.clone();
+    let cancel_target = query.connection.clone();
+    actix_web::rt::spawn(async move {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::agent_exec::cancel_conversation_commands(
+                &cancel_connections,
+                crate::db::get_db(),
+                &cancel_session,
+                &cancel_target,
+                &actor_id,
+            ),
+        )
+        .await;
+    });
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+        DeleteDeviceAssistantSessionResponse { deleted: true },
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
