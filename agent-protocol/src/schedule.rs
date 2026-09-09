@@ -141,6 +141,7 @@ pub enum ScheduledTaskKind {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduledTaskStatus {
+    PendingReview,
     Draft,
     Rehearsing,
     AwaitingAuthorization,

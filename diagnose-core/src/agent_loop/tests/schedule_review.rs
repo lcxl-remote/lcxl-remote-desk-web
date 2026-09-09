@@ -29,13 +29,24 @@ impl SessionSeam for ReviewStore<'_> {
         session: &mut PersistedAgentSession,
         call: &ToolCall,
     ) -> Result<String, AgentError> {
-        let parent = session.conversation.last().unwrap().data_envelope.clone();
+        let parent = crate::model_message_labels::model_bound_user_message(
+            "model-input".into(),
+            "timer".into(),
+            desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap()
+        .data_envelope;
         append_internal_tool_result(
             session,
             parent.as_ref(),
             "draft".into(),
             &call.id,
-            r#"{"schedule_id":"timer","state":"draft","awaiting_confirmation":true}"#.into(),
+            r#"{"schedule_id":"timer","state":"pending_review","kind":"conversation_resume","awaiting_confirmation":true}"#.into(),
             "schedule_proposal",
         )?;
         session.pending_schedule_review = Some("timer".into());
@@ -63,7 +74,7 @@ impl SessionSeam for ReviewStore<'_> {
         if count < 3 {
             return Ok(false);
         }
-        let text = serde_json::json!({"event": self.decision, "schedule_id": id}).to_string();
+        let text = serde_json::json!({"event": self.decision, "schedule_id": id, "state": if self.decision == "scheduled_task_activated" { "active" } else { "deleted" }, "owner_decision": if self.decision == "scheduled_task_activated" { "approved" } else { "rejected" }}).to_string();
         let mut message = ChatMessage::system_event("decision", &text);
         message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
             session.conversation.last().unwrap().data_envelope.as_ref(),
@@ -140,6 +151,26 @@ async fn model_waits_for_explicit_schedule_decision_and_stop_interrupts_wait() {
             assert!(matches!(result.unwrap(), LoopOutcome::Answered(_)));
             assert_eq!(store.polls.get(), 3);
             assert_eq!(requests.borrow().len(), 2);
+            let projected_requests = requests.borrow();
+            let result = projected_requests[1]
+                .messages
+                .iter()
+                .find(|m| m.tool_call_id.as_deref() == Some("create"))
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&result.text).unwrap()["review_complete"],
+                true
+            );
+            assert!(
+                mem.inner
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .conversation
+                    .iter()
+                    .any(|m| m.role == ChatRole::Tool && m.text.contains("pending_review"))
+            );
+            drop(projected_requests);
             assert!(
                 requests.borrow()[1]
                     .messages

@@ -9,9 +9,9 @@ import { ContractReview } from './contract-review';
 import { RehearsalDetails } from './rehearsal-details';
 import { formatTime, validTimezone } from './time';
 
-export function ProposalReview({ client, scheduleId, connected, zone, assistantPaths, onChanged, activationDisabled = false, approvalDialog = false }: {
+export function ProposalReview({ client, scheduleId, connected, zone, assistantPaths, onChanged, activationDisabled = false, approvalDialog = false, dismissRequest = 0 }: {
     client: ScheduleClient; scheduleId: string; connected: boolean; zone: string;
-    approvalDialog?: boolean; activationDisabled?: boolean; assistantPaths: Record<string, string>; onChanged: (task: ScheduleView) => void;
+    dismissRequest?: number; approvalDialog?: boolean; activationDisabled?: boolean; assistantPaths: Record<string, string>; onChanged: (task: ScheduleView) => void;
 }) {
     const { t, i18n } = useTranslation();
     const [task, setTask] = useState<ScheduleView | null>(null);
@@ -21,6 +21,7 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
     const [refresh, setRefresh] = useState(0);
     const epoch = useRef(0);
     const pending = useRef(false);
+    const dismissed = useRef(0);
     useEffect(() => {
         const current = ++epoch.current;
         setTask(null); setError(''); setBusy(connected); pending.current = false;
@@ -33,7 +34,7 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
         return () => { ++epoch.current; };
     }, [client, scheduleId, connected, refresh, t]);
     const decide = async (approve: boolean) => {
-        if (activationDisabled || !task || !connected || busy || pending.current || (approve && task.kind !== 'conversation_resume') || task.status !== 'draft') return;
+        if (activationDisabled || !task || !connected || busy || pending.current || (approve && task.kind !== 'conversation_resume') || task.status !== (task.kind === 'conversation_resume' ? 'pending_review' : 'draft')) return;
         const current = epoch.current;
         pending.current = true; setBusy(true); setError('');
         try {
@@ -45,6 +46,12 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
             if (current === epoch.current) setError(reason instanceof ScheduleRequestError && reason.reason === 'server' ? reason.message : t('schedules.requestFailed'));
         } finally { if (current === epoch.current) { pending.current = false; setBusy(false); } }
     };
+    useEffect(() => {
+        if (!dismissRequest || dismissed.current === dismissRequest || !task || busy || !connected) return;
+        dismissed.current = dismissRequest;
+        if (task.kind === 'conversation_resume' && task.status === 'pending_review') void decide(false);
+        else onChanged(task);
+    }, [dismissRequest, task, busy, connected]);
     return <div className="space-y-3">
         {(!approvalDialog || !!error) && <Button variant="outline" disabled={!connected || busy} onClick={() => setRefresh(value => value + 1)}>{t('schedules.refresh')}</Button>}
         {!connected && <p role="status" className="text-xs text-muted-foreground">{t('schedules.connecting')}</p>}
@@ -68,7 +75,7 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
             </div>
             {task.kind === 'conversation_resume' && <div className="space-y-2">
                 <p className="text-xs text-muted-foreground">{t('schedules.proposal.resumeNote')}</p>
-                {task.status === 'draft' && <div className="flex flex-wrap gap-2">
+                {task.status === 'pending_review' && <div className="flex flex-wrap gap-2">
                     <Button type="button" size="sm" disabled={!connected || busy || activationDisabled} onClick={() => void decide(true)}><Check className="mr-2 h-4 w-4" />{t(approvalDialog ? 'schedules.proposal.approve' : 'schedules.activateResume')}</Button>
                     <Button type="button" size="sm" variant="outline" disabled={!connected || busy || activationDisabled} onClick={() => void decide(false)}><X className="mr-2 h-4 w-4" />{t('schedules.proposal.reject')}</Button>
                 </div>}

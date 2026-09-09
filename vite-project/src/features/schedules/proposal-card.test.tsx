@@ -6,12 +6,12 @@ const transport = vi.hoisted(() => ({ isConnected: true, subscribe: vi.fn(() => 
 vi.mock('@/features/desk/use-desk-signaling', () => ({ useDeskSignaling: () => transport }));
 vi.mock('./proposal-review', () => ({ ProposalReview: ({ scheduleId, activationDisabled }: { scheduleId: string; activationDisabled: boolean }) => <div data-testid="review">{scheduleId}<button disabled={activationDisabled}>enable</button></div> }));
 afterEach(cleanup);
-const tool = { callId: 'call', name: 'request_scheduled_task', status: 'ok' as const, argumentsJson: '{}', output: JSON.stringify({ state: 'draft', kind: 'conversation_resume', schedule_id: '12345678-1234-1234-1234-123456789abc' }) };
+const tool = { callId: 'call', name: 'request_scheduled_task', status: 'ok' as const, argumentsJson: '{}', output: JSON.stringify({ state: 'pending_review', kind: 'conversation_resume', schedule_id: '12345678-1234-1234-1234-123456789abc' }) };
 const base = { deviceId: 'device', connectionId: 'connection' };
 it('opens review after settlement, keeps the entry after a follow-up and respects dismissal', async () => {
-    const { rerender } = render(<ScheduleProposalCards {...base} tools={[tool]} running />);
+    const { rerender } = render(<ScheduleProposalCards {...base} tools={[{ ...tool, output: JSON.stringify({ state: 'draft', kind: 'fresh_task', schedule_id: JSON.parse(tool.output).schedule_id }) }]} running />);
     expect(screen.queryByRole('dialog')).toBeNull();
-    rerender(<ScheduleProposalCards {...base} tools={[tool]} running={false} />);
+    rerender(<ScheduleProposalCards {...base} tools={[{ ...tool, output: JSON.stringify({ state: 'draft', kind: 'fresh_task', schedule_id: JSON.parse(tool.output).schedule_id }) }]} running={false} />);
     await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy());
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());

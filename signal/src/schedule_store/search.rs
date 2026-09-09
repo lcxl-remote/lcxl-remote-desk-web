@@ -29,7 +29,7 @@ impl ScheduleStore {
         }
         let mut query = entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
-            .filter(entity::Column::Status.ne("deleted"));
+            .filter(entity::Column::Status.is_not_in(["deleted", "pending_review"]));
         if let Some(kind) = kind {
             query = query.filter(entity::Column::Kind.eq(kind));
         }

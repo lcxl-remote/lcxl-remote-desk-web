@@ -58,12 +58,12 @@ describe('scheduled task management page', () => {
         expect(operations()).toEqual(kind === 'conversation_resume' ? ['search', 'search'] : ['search']);
     });
 
-    it('creates a same-conversation draft and enables it only after explicit confirmation', async () => {
+    it('creates an enabled conversation timer with one submission', async () => {
         storedTasks = [];
         transport.send.mockImplementation((request: SendTrackedOptions) => {
             if (request.data.operation === 'search') queueMicrotask(() => respond(request, { result: 'search_results', tasks: storedTasks, next_cursor: null }));
             if (request.data.operation === 'convert_time') queueMicrotask(() => respond(request, { result: 'converted_time', upcoming_runs: ['2027-01-01T22:00:00Z'], conversion: { conversion_version: '1', offset_seconds: -28800, spec: { schema_version: 1, rule: { kind: 'once', at: '2027-01-01T22:00:00Z' } } } }));
-            if (request.data.operation === 'create_draft') queueMicrotask(() => respond(request, { result: 'task', task: { ...task, kind: 'conversation_resume', title: 'Continue report', revision: 3 } }));
+            if (request.data.operation === 'create_draft') queueMicrotask(() => respond(request, { result: 'task', task: { ...task, kind: 'conversation_resume', title: 'Continue report', status: 'active', revision: 3 } }));
             if (request.data.operation === 'activate_conversation_resume') queueMicrotask(() => respond(request, { result: 'task', task: { ...task, kind: 'conversation_resume', title: 'Continue report', status: 'active', revision: 4 } }));
             return { requestId: request.requestId!, disposition: 'sent' };
         });
@@ -78,12 +78,9 @@ describe('scheduled task management page', () => {
         await waitFor(() => expect(screen.getByRole('button', { name: 'Preview time' })).toBeEnabled());
         fireEvent.click(screen.getByRole('button', { name: 'Preview time' }));
         fireEvent.click(await screen.findByRole('button', { name: 'Confirm time and save' }));
-        await screen.findByRole('button', { name: 'Enable scheduled continuation' });
+        await waitFor(() => expect(operations()).toContain('create_draft'));
         expect(operations().filter(operation => operation !== 'search')).toEqual(['convert_time', 'convert_time', 'create_draft']);
         expect(transport.send.mock.calls.find(([request]) => request.data.operation === 'create_draft')![0].data.draft).toMatchObject({ kind: 'conversation_resume', target_device_id: 'device-1', source_conversation_id: 'chat-1', requirement_revision: 7, spec: { rule: { kind: 'once' } } });
-        fireEvent.click(screen.getByRole('button', { name: 'Enable scheduled continuation' }));
-        await waitFor(() => expect(operations().filter(operation => operation !== 'search')).toEqual(['convert_time', 'convert_time', 'create_draft', 'activate_conversation_resume']));
-        expect(transport.send.mock.calls.find(([request]) => request.data.operation === 'activate_conversation_resume')![0].data).toEqual({ operation: 'activate_conversation_resume', schedule_id: 'task-1', expected_revision: 3 });
         await waitFor(() => expect(screen.queryByRole('button', { name: 'Enable scheduled continuation' })).not.toBeInTheDocument());
     });
 

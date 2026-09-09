@@ -118,7 +118,7 @@ pub fn proposed_ids(session: &PersistedAgentSession) -> Vec<String> {
                 return None;
             }
             let value: serde_json::Value = serde_json::from_str(&message.text).ok()?;
-            if value["state"] != "draft" {
+            if !matches!(value["state"].as_str(), Some("draft" | "pending_review")) {
                 return None;
             }
             value["schedule_id"].as_str().map(str::to_owned)

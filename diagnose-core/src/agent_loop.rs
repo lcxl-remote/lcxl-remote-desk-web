@@ -1752,7 +1752,7 @@ async fn run_inner(
             .clone()
             .with_request_overhead_bytes(request_overhead_bytes)
             .map_err(model_context_error)?;
-        let context_view = prepare_model_context(
+        let mut context_view = prepare_model_context(
             deps,
             session,
             turn_id,
@@ -1761,6 +1761,7 @@ async fn run_inner(
             sink,
         )
         .await?;
+        crate::schedule::review_result::project(&mut context_view.messages)?;
         // Completion-only projections do not replace the regular conversation's
         // occupancy baseline. New results/replies still count via usage().
         if deps.model.command_completion_event_id().is_none() {

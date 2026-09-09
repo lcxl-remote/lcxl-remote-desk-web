@@ -23,6 +23,7 @@ fn scope(owner: i32, session: &PersistedAgentSession) -> Condition {
         );
     }
     Condition::all()
+        .add(entity::Column::Status.ne("pending_review"))
         .add(entity::Column::OwnerUserId.eq(owner))
         .add(entity::Column::TargetDeviceId.eq(&session.device_id))
         .add(origin)

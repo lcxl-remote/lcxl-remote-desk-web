@@ -67,7 +67,10 @@ impl ScheduleStore {
             .ok_or(ScheduleStoreError::NotFound)?;
         if task.revision != expected
             || task.active_run_id.is_some()
-            || matches!(task.status.as_str(), "deleted" | "completed")
+            || matches!(
+                task.status.as_str(),
+                "deleted" | "completed" | "pending_review"
+            )
         {
             return Err(ScheduleStoreError::Conflict);
         }
@@ -131,7 +134,7 @@ impl ScheduleStore {
             .filter(entity::Column::OwnerUserId.eq(owner))
             .filter(entity::Column::ScheduleId.eq(id))
             .filter(entity::Column::Revision.eq(expected))
-            .filter(entity::Column::Status.ne("deleted"))
+            .filter(entity::Column::Status.is_not_in(["deleted", "pending_review"]))
             .exec(&self.db)
             .await?;
         if changed.rows_affected != 1 {
@@ -204,7 +207,7 @@ impl ScheduleStore {
             }
             return Err(ScheduleStoreError::Conflict);
         }
-        if row.status == "completed" && !delete {
+        if matches!(row.status.as_str(), "completed" | "pending_review") && !delete {
             return Err(ScheduleStoreError::Conflict);
         }
         if prompt == Some(row.prompt.as_str()) {
@@ -263,11 +266,27 @@ impl ScheduleStore {
             patch.status = Set(
                 if row.kind == "conversation_resume" && !failures.pause_reasons.is_empty() {
                     "paused".into()
+                } else if row.kind == "conversation_resume" {
+                    "active".into()
                 } else {
                     "draft".into()
                 },
             );
-            patch.next_run_at = Set(None);
+            patch.next_run_at = Set(
+                if row.kind == "conversation_resume" && failures.pause_reasons.is_empty() {
+                    Some(
+                        desk_diagnose_core::schedule::next_after(
+                            &desk_diagnose_core::schedule::parse_json(&row.spec_json)
+                                .map_err(|_| ScheduleStoreError::Invalid)?,
+                            now,
+                        )
+                        .map_err(|_| ScheduleStoreError::Invalid)?
+                        .ok_or(ScheduleStoreError::Invalid)?,
+                    )
+                } else {
+                    None
+                },
+            );
             patch.contract_revision = Set(None);
             patch.authorization_revision = Set(None);
         }
@@ -321,7 +340,7 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        if delete && row.status == "draft" && result.source_conversation_id.is_some() {
+        if delete && row.status == "pending_review" && result.source_conversation_id.is_some() {
             super::resume_activation::record_decision_on(&txn, &result, now).await?;
         }
         txn.commit().await?;

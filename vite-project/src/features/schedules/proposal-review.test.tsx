@@ -8,7 +8,7 @@ vi.mock('./contract-review', () => ({ ContractReview: () => null }));
 vi.mock('./rehearsal-details', () => ({ RehearsalDetails: () => null }));
 afterEach(cleanup);
 it('reviews server data and activates only the reviewed task revision after a click', async () => {
-    const task = { schedule_id: 'task', revision: 7, kind: 'conversation_resume', status: 'draft', title: 'Hello later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 300 } } };
+    const task = { schedule_id: 'task', revision: 7, kind: 'conversation_resume', status: 'pending_review', title: 'Hello later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 300 } } };
     const request = vi.fn(async (input: { operation: string }) => ({ result: 'task', task: input.operation === 'get' ? task : { ...task, revision: 8, status: 'active', spec: { schema_version: 1, rule: { kind: 'once', at: '2026-09-10T12:00:00Z' } } } }));
     const changed = vi.fn();
     render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" assistantPaths={{}} onChanged={changed} />);
@@ -22,7 +22,7 @@ it('reviews server data and activates only the reviewed task revision after a cl
 });
 
 it('rejects the exact reviewed draft and exposes explicit approval choices', async () => {
-    const task = { schedule_id: 'task', revision: 7, kind: 'conversation_resume', status: 'draft', title: 'Hello later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 60 } } };
+    const task = { schedule_id: 'task', revision: 7, kind: 'conversation_resume', status: 'pending_review', title: 'Hello later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 60 } } };
     const request = vi.fn(async (input: { operation: string }) => ({ result: 'task', task: input.operation === 'get' ? task : { ...task, revision: 8, status: 'deleted' } }));
     const changed = vi.fn();
     render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" assistantPaths={{}} onChanged={changed} approvalDialog />);
@@ -31,4 +31,19 @@ it('rejects the exact reviewed draft and exposes explicit approval choices', asy
     await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
     expect(request.mock.calls[1]).toEqual([{ operation: 'delete', schedule_id: 'task', expected_revision: 7 }]);
     expect(screen.queryByRole('button', { name: 'schedules.proposal.approve' })).toBeNull();
+});
+
+it('treats closing a conversation approval dialog as rejection and waits for acknowledgement', async () => {
+    const task = { schedule_id: 'task', revision: 7, kind: 'conversation_resume', status: 'pending_review', title: 'Later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 60 } } };
+    let finish!: (value: unknown) => void;
+    const request = vi.fn((input: { operation: string }) => input.operation === 'get' ? Promise.resolve({ result: 'task', task }) : new Promise(resolve => { finish = resolve; }));
+    const changed = vi.fn();
+    const props = { client: { request } as unknown as ScheduleClient, scheduleId: 'task', connected: true, zone: 'UTC', assistantPaths: {}, onChanged: changed, approvalDialog: true };
+    const { rerender } = render(<ProposalReview {...props} />);
+    await screen.findByRole('button', { name: 'schedules.proposal.approve' });
+    rerender(<ProposalReview {...props} dismissRequest={1} />);
+    await waitFor(() => expect(request).toHaveBeenCalledWith({ operation: 'delete', schedule_id: 'task', expected_revision: 7 }));
+    expect(changed).not.toHaveBeenCalled();
+    finish({ result: 'task', task: { ...task, status: 'deleted', revision: 8 } });
+    await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
 });

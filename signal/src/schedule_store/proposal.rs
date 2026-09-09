@@ -91,7 +91,7 @@ impl ScheduleStore {
                 if task.kind == "conversation_resume" {
                     awaiting_review = Some(task.schedule_id.clone());
                 }
-                (serde_json::json!({"schedule_id":task.schedule_id,"kind":task.kind,"state":"draft","awaiting_confirmation":awaiting_review.is_some(),
+                (serde_json::json!({"schedule_id":task.schedule_id,"kind":task.kind,"state":task.status,"awaiting_confirmation":awaiting_review.is_some(),
                     "message":"The application displays an owner review dialog. For a conversation timer, this model turn waits until the owner approves or rejects. Do not report success before the final owner decision. No extra chat confirmation is needed. No tool permission is granted."}).to_string(), "schedule_proposal")
             }
             Action::List { after, limit } => (

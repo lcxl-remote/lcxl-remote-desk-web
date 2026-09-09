@@ -161,7 +161,6 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
                 {task.pause_reasons.map(reason => <p key={reason} className="text-sm">{t(`schedules.pause.${reason}`)}</p>)}
                 <div className="flex flex-wrap gap-2">
                     <Button variant="outline" disabled={!available} onClick={() => openHistory(task.schedule_id)}>{t('schedules.history.title')}</Button>
-                    {task.kind === 'conversation_resume' && task.status === 'draft' && <Button disabled={!available} onClick={() => void mutate({ operation: 'activate_conversation_resume', schedule_id: task.schedule_id, expected_revision: task.revision }).catch(() => {})}>{t('schedules.activateResume')}</Button>}
                     {task.kind === 'fresh_task' && <Button variant="outline" disabled={!available} onClick={() => setContractTask(task.schedule_id)}>{t('schedules.contract.title')}</Button>}
                     {task.kind === 'fresh_task' && ['active', 'triggered', 'paused', 'completed'].includes(task.status)
                         && !task.pause_reasons.includes('authorization_invalid') && <Button variant="outline" disabled={!available}

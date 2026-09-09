@@ -364,7 +364,7 @@ async fn live_review_delivers_approval_or_rejection_to_the_same_turn() {
         let id = session.pending_schedule_review.clone().unwrap();
         assert_eq!(proposal["schedule_id"], id);
         let task = store.read(1, &id).await.unwrap();
-        assert_eq!(task.status, "draft");
+        assert_eq!(task.status, "pending_review");
         PersistedAgentSession::decode_json(&session.encode_json_for_storage().unwrap()).unwrap();
         assert!(
             !store
@@ -439,4 +439,43 @@ async fn live_review_cannot_adopt_new_input_or_a_changed_lease() {
         ));
         assert_eq!(session, before);
     }
+}
+
+#[tokio::test]
+async fn pending_requests_are_not_tasks_and_manual_creation_is_atomic() {
+    let (store, pending, _, _) = fixture().await;
+    assert!(store.list(1, 0, 100).await.unwrap().is_empty());
+    assert_eq!(
+        store
+            .search(1, 0, 100, None, None, None, None, false)
+            .await
+            .unwrap()
+            .1,
+        0
+    );
+    let mut draft = super::super::tests::draft();
+    draft.kind = ScheduledTaskKind::ConversationResume;
+    draft.source_conversation_id = Some("source".into());
+    draft.requirement_revision = Some(1);
+    draft.client_create_key = "manual-live".into();
+    draft.spec.rule = ScheduleRule::AfterConfirmation { delay_seconds: 60 };
+    draft.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::Manual;
+    let active = store.create_conversation_task(1, &draft).await.unwrap();
+    assert_eq!(active.status, "active");
+    assert!(active.next_run_at.is_some());
+    assert_eq!(
+        store.create_conversation_task(1, &draft).await.unwrap(),
+        active
+    );
+    assert_eq!(store.list(1, 0, 100).await.unwrap().len(), 1);
+    draft.client_create_key = "invalid-source".into();
+    draft.requirement_revision = Some(2);
+    assert!(store.create_conversation_task(1, &draft).await.is_err());
+    use sea_orm::PaginatorTrait;
+    assert_eq!(entity::Entity::find().count(&store.db).await.unwrap(), 2);
+    store
+        .delete(1, &pending.schedule_id, pending.revision)
+        .await
+        .unwrap();
+    assert_eq!(store.list(1, 0, 100).await.unwrap().len(), 1);
 }

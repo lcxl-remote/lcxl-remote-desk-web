@@ -11,6 +11,38 @@ use desk_diagnose_core::{
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
+    /// Manual creation is one atomic operation: no reviewable draft is exposed.
+    pub async fn create_conversation_task(
+        &self,
+        owner: i32,
+        request: &desk_agent_protocol::schedule::ScheduleDraft,
+    ) -> Result<entity::Model, ScheduleStoreError> {
+        if request.kind != desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume
+            || request.creation_source
+                != desk_agent_protocol::schedule::ScheduleCreationSource::Manual
+        {
+            return Err(ScheduleStoreError::Invalid);
+        }
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
+        let now = super::authority::authority_now(&txn).await?;
+        let task = Self::create_draft_on(&txn, owner, request, now).await?;
+        let result = if task.status == "pending_review" {
+            self.enable_conversation_resume_on(
+                &txn,
+                owner,
+                &task.schedule_id,
+                task.revision,
+                false,
+                None,
+            )
+            .await?
+        } else {
+            task
+        };
+        txn.commit().await?;
+        Ok(result)
+    }
+
     /// Called for an explicit owner confirmation, never merely an AI proposal.
     /// This enables the calendar only; it grants no tool or device permissions.
     /// The executor must recheck this input binding under its session claim.
@@ -45,16 +77,39 @@ impl ScheduleStore {
         verifier: Option<&dyn super::TaskPublicationVerifier>,
     ) -> Result<entity::Model, ScheduleStoreError> {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
+        let result = self
+            .enable_conversation_resume_on(
+                &txn,
+                owner,
+                schedule_id,
+                expected_revision,
+                resume,
+                verifier,
+            )
+            .await?;
+        txn.commit().await?;
+        Ok(result)
+    }
+
+    async fn enable_conversation_resume_on(
+        &self,
+        txn: &sea_orm::DatabaseTransaction,
+        owner: i32,
+        schedule_id: &str,
+        expected_revision: i64,
+        resume: bool,
+        verifier: Option<&dyn super::TaskPublicationVerifier>,
+    ) -> Result<entity::Model, ScheduleStoreError> {
         let task = entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
             .filter(entity::Column::ScheduleId.eq(schedule_id))
-            .one(&txn)
+            .one(txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
         if owner <= 0
             || task.revision != expected_revision
             || task.kind != "conversation_resume"
-            || task.status != if resume { "paused" } else { "draft" }
+            || task.status != if resume { "paused" } else { "pending_review" }
             || task.active_run_id.is_some()
             || task.contract_revision.is_some()
             || task.authorization_revision.is_some()
@@ -69,7 +124,7 @@ impl ScheduleStore {
             // lock. This enables the calendar only, never restores consumed grants.
             verifier
                 .ok_or(ScheduleStoreError::Conflict)?
-                .lock_subject(&txn, &task)
+                .lock_subject(txn, &task)
                 .await?;
             failures
                 .pause_reasons
@@ -92,15 +147,15 @@ impl ScheduleStore {
             })
             .filter(entity::Column::Id.eq(task.id))
             .filter(entity::Column::Revision.eq(expected_revision))
-            .exec(&txn)
+            .exec(txn)
             .await?;
         if locked.rows_affected != 1 {
             return Err(ScheduleStoreError::Conflict);
         }
-        lock_original_requirement(&txn, owner, &task).await?;
+        lock_original_requirement(txn, owner, &task).await?;
         // PostgreSQL CURRENT_TIMESTAMP is the transaction start time. Use the
         // actual database clock after both locks, so an elapsed deadline rejects.
-        let now = super::authority::authority_now(&txn).await?;
+        let now = super::authority::authority_now(txn).await?;
         let spec = parse_json(&task.spec_json).map_err(|_| ScheduleStoreError::Invalid)?;
         let spec =
             validate_publication(&spec, now, true).map_err(|_| ScheduleStoreError::Invalid)?;
@@ -116,17 +171,16 @@ impl ScheduleStore {
             })
             .filter(entity::Column::Id.eq(task.id))
             .filter(entity::Column::Revision.eq(revision))
-            .exec(&txn)
+            .exec(txn)
             .await?;
         if changed.rows_affected != 1 {
             return Err(ScheduleStoreError::Conflict);
         }
         let result = entity::Entity::find_by_id(task.id)
-            .one(&txn)
+            .one(txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        record_decision_on(&txn, &result, now).await?;
-        txn.commit().await?;
+        record_decision_on(txn, &result, now).await?;
         Ok(result)
     }
 }

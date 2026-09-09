@@ -7609,6 +7609,7 @@ export type ScheduleDraft = {
 };
 
 export const scheduledTaskStatusEnum = {
+    pending_review: "pending_review",
     draft: "draft",
     rehearsing: "rehearsing",
     awaiting_authorization: "awaiting_authorization",

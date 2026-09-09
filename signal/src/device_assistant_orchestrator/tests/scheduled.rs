@@ -178,19 +178,8 @@ async fn exercise_with_restart(
     else {
         panic!("expected draft")
     };
-    assert_eq!(draft_task.status, ScheduledTaskStatus::Draft);
-    let Response::Task { task: active } = crate::schedule_management::manage(
-        &db,
-        1,
-        Request::ActivateConversationResume {
-            schedule_id: draft_task.schedule_id,
-            expected_revision: draft_task.revision,
-        },
-    )
-    .await
-    .unwrap() else {
-        panic!("expected active task")
-    };
+    assert_eq!(draft_task.status, ScheduledTaskStatus::Active);
+    let active = draft_task;
     let task = store.read(1, &active.schedule_id).await.unwrap();
     drop(store);
     if restart {

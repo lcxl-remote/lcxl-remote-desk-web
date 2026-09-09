@@ -220,7 +220,14 @@ impl ScheduleStore {
             owner_user_id: Set(owner),
             target_device_id: Set(request.target_device_id),
             kind: Set(json(&request.kind)?.trim_matches('"').to_string()),
-            status: Set("draft".into()),
+            status: Set(if request.kind
+                == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume
+            {
+                "pending_review"
+            } else {
+                "draft"
+            }
+            .into()),
             title: Set(request.title),
             prompt: Set(request.prompt),
             locale: Set(request.locale),
@@ -293,7 +300,7 @@ impl ScheduleStore {
         Ok(entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
             .filter(entity::Column::Id.gt(after_id))
-            .filter(entity::Column::Status.ne("deleted"))
+            .filter(entity::Column::Status.is_not_in(["deleted", "pending_review"]))
             .order_by_asc(entity::Column::Id)
             .limit(limit)
             .all(&self.db)

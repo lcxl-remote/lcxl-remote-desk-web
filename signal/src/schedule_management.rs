@@ -401,9 +401,13 @@ pub(crate) async fn manage(
             // Only the model proposal transaction can stamp AI origin.
             draft.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::Manual;
             let draft = resolve_draft(db, owner, draft).await?;
-            store
-                .create_draft(owner, &draft, store.database_time().await?)
-                .await?
+            if draft.kind == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume {
+                store.create_conversation_task(owner, &draft).await?
+            } else {
+                store
+                    .create_draft(owner, &draft, store.database_time().await?)
+                    .await?
+            }
         }
         Request::ActivateConversationResume {
             schedule_id,
@@ -991,11 +995,8 @@ mod tests {
             .await
             .unwrap(),
         );
-        assert!(created.upcoming_runs.is_empty());
-        assert!(matches!(
-            created.spec.rule,
-            ScheduleRule::AfterConfirmation { delay_seconds: 300 }
-        ));
+        assert!(!created.upcoming_runs.is_empty());
+        assert!(matches!(created.spec.rule, ScheduleRule::Once { .. }));
         let fetched = task(
             manage(
                 &db,
@@ -1020,18 +1021,7 @@ mod tests {
             .await
             .is_err()
         );
-        let activated = task(
-            manage(
-                &db,
-                1,
-                Request::ActivateConversationResume {
-                    schedule_id: created.schedule_id.clone(),
-                    expected_revision: created.revision,
-                },
-            )
-            .await
-            .unwrap(),
-        );
+        let activated = created.clone();
         assert_eq!(
             activated.status,
             desk_agent_protocol::schedule::ScheduledTaskStatus::Active
@@ -1055,7 +1045,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored.source_conversation_id.as_deref(), Some(key.as_str()));
         assert_eq!(stored.creation_source, "manual");
-        assert_eq!(created.status, ScheduledTaskStatus::Draft);
+        assert_eq!(created.status, ScheduledTaskStatus::Active);
         let mut stale = request.clone();
         stale.requirement_revision = Some(2);
         assert!(matches!(
