@@ -321,6 +321,9 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
+        if delete && row.status == "draft" && result.source_conversation_id.is_some() {
+            super::resume_activation::record_decision_on(&txn, &result, now).await?;
+        }
         txn.commit().await?;
         Ok(result)
     }

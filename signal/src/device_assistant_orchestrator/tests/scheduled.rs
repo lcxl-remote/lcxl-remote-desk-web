@@ -74,6 +74,10 @@ async fn exercise_with_restart(
     let address = listener.local_addr().unwrap();
     let gateway = actix_web::rt::spawn(async move {
         let first = capture_one_openai_request_with_sse(listener.clone(), ANSWER).await;
+        if newer_input {
+            let chat = capture_one_openai_request_with_sse(listener.clone(), ANSWER).await;
+            assert!(String::from_utf8_lossy(&chat).contains("SYNTHETIC_REPLACEMENT_REQUIREMENT"));
+        }
         let second = capture_one_openai_request_with_sse(
             listener,
             if fail_model {
@@ -150,7 +154,7 @@ async fn exercise_with_restart(
         kind: ScheduledTaskKind::ConversationResume,
         target_device_id: "device".into(),
         title: "Continue".into(),
-        prompt: "Continue".into(),
+        prompt: "APPROVED_TASK_SEND_HELLO".into(),
         locale: None,
         model_id: None,
         spec: ScheduleSpec {
@@ -241,32 +245,6 @@ async fn exercise_with_restart(
             None,
         )
         .await;
-        let executor = crate::schedule_executor::SignalScheduleExecutor::new(
-            db.clone(),
-            connections.clone(),
-            std::sync::Arc::new(crate::device_assistant_gate::DeviceAssistantGate::new(
-                desk_agent_protocol::device_assistant::DeviceAssistantSettings {
-                    enabled: true,
-                    revision: 1,
-                },
-            )),
-        );
-        assert_eq!(executor.scan_once(0).await.unwrap().settled, 1);
-        let work = crate::entity::agent_schedule_run::Entity::find()
-            .filter(crate::entity::agent_schedule_run::Column::RunId.eq(&run.run_id))
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(work.status, "superseded");
-        assert_eq!(work.attempt, 0);
-        assert!(work.started_at.is_none());
-        assert_eq!(executor.scan_once(0).await.unwrap().scanned, 0);
-        let (_, replacement) = gateway.await.unwrap();
-        assert!(
-            String::from_utf8_lossy(&replacement).contains("SYNTHETIC_REPLACEMENT_REQUIREMENT")
-        );
-        return;
     }
     if dispatch {
         let host = format!("schedule-dispatch-{}", uuid::Uuid::new_v4());
@@ -384,13 +362,31 @@ async fn exercise_with_restart(
             .unwrap()
             .unwrap();
         let after = PersistedAgentSession::decode_json(&row.state_json).unwrap();
-        assert_eq!(after.input_revision, original.input_revision);
-        assert_eq!(after.latest_input_seq, original.latest_input_seq);
+        assert_eq!(
+            after.input_revision,
+            original.input_revision + u64::from(newer_input)
+        );
+        assert_eq!(
+            after.latest_input_seq,
+            original.latest_input_seq + u64::from(newer_input)
+        );
         let (_, body) = tokio::time::timeout(std::time::Duration::from_secs(5), gateway)
             .await
             .unwrap()
             .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("SYNTHETIC_SCHEDULED_ORIGINAL"));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            body["messages"].as_array().unwrap().iter().any(|message| {
+                message["role"] == "user"
+                    && message["content"].as_str().is_some_and(|text| {
+                        text.contains("APPROVED_TASK_SEND_HELLO")
+                            && text.contains("AUTOMATIC SERVER CONTROL EVENT")
+                    })
+            }),
+            "messages={}",
+            body["messages"]
+        );
         cache.remove_connection(&host);
         connections.write().await.clear();
         return;
@@ -967,8 +963,8 @@ async fn scheduled_executor_reopens_durable_schedule_and_conversation_after_rest
 }
 
 #[actix_web::test]
-async fn scheduled_executor_supersedes_old_timer_after_real_new_user_input() {
-    exercise_with_restart(false, false, false, false, false, false, true).await;
+async fn scheduled_executor_preserves_approved_timer_after_real_new_user_input() {
+    exercise_with_restart(false, false, false, false, true, false, true).await;
 }
 
 mod process_restart;

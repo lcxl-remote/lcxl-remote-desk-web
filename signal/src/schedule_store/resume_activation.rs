@@ -125,7 +125,7 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        record_activation_on(&txn, &result, now).await?;
+        record_decision_on(&txn, &result, now).await?;
         txn.commit().await?;
         Ok(result)
     }
@@ -178,7 +178,7 @@ pub(super) async fn lock_original_requirement(
     }
     // Lock the exact source envelope without advancing its input or version.
     // All input writers update this row. A racing write either wins this CAS
-    // or waits until activation commits; a later input still fences execution.
+    // or waits until activation commits. Later chat does not cancel approval.
     let locked = session_row::Entity::update_many()
         .set(session_row::ActiveModel {
             version: Set(row.version),
@@ -199,11 +199,12 @@ pub(super) async fn lock_original_requirement(
 }
 
 /// Persist the authoritative activation receipt without creating a new user input.
-async fn record_activation_on(
+pub(super) async fn record_decision_on(
     txn: &sea_orm::DatabaseTransaction,
     task: &entity::Model,
     now: i64,
 ) -> Result<(), ScheduleStoreError> {
+    let rejected = task.status == "deleted";
     let source = task
         .source_conversation_id
         .as_deref()
@@ -211,19 +212,39 @@ async fn record_activation_on(
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(source))
         .one(txn)
-        .await?
-        .ok_or(ScheduleStoreError::NotFound)?;
+        .await?;
+    let Some(row) = row else {
+        // Deleting an orphan draft must remain possible. The deleted task row
+        // is the durable decision even when its transcript no longer exists.
+        return if rejected {
+            Ok(())
+        } else {
+            Err(ScheduleStoreError::NotFound)
+        };
+    };
     let mut session = PersistedAgentSession::decode_json(&row.state_json)
         .map_err(|_| ScheduleStoreError::Invalid)?;
-    // The dialog waits for the proposing turn to settle. Never steal a live lease.
-    if session.turn_state.is_active() {
-        return Err(ScheduleStoreError::Conflict);
+    // Only a matching schedule review may write a receipt into a live turn.
+    let waiting = session.pending_schedule_review.as_deref() == Some(task.schedule_id.as_str())
+        && session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::User
+        && row
+            .lease_deadline
+            .is_some_and(|deadline| deadline.timestamp_millis() > now);
+    if session.turn_state.is_active() && !waiting {
+        // Do not steal an interactive turn just to backfill a deletion notice.
+        return if rejected {
+            Ok(())
+        } else {
+            Err(ScheduleStoreError::Conflict)
+        };
     }
     let id = format!("schedule-activation:{}:{}", task.schedule_id, task.revision);
     let text =
-        serde_json::json!({"event":"scheduled_task_activated","schedule_id":task.schedule_id,
-        "revision":task.revision,"state":"active","next_run_at_utc_ms":task.next_run_at,
-        "authority":"calendar_only_no_tool_permissions"})
+        serde_json::json!({"event":if rejected { "scheduled_task_rejected" } else { "scheduled_task_activated" },"schedule_id":task.schedule_id,
+        "revision":task.revision,"state":task.status,"next_run_at_utc_ms":task.next_run_at,
+        "authority":"calendar_only_no_tool_permissions",
+        "owner_decision":if rejected { "rejected" } else { "approved" },
+        "instruction":"This server receipt supersedes the earlier draft tool result. Do not request another chat confirmation. Ordinary chat does not cancel an approved task."})
         .to_string();
     let parent = session
         .conversation

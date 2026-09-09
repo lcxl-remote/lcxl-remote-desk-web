@@ -27,23 +27,26 @@ pub fn clock_prompt(session: &PersistedAgentSession, now_unix_ms: u64) -> String
         return String::new();
     };
     format!(
-        "\nSCHEDULE PROPOSAL TIME CONTEXT (server clock): current UTC time is {}. No user timezone has been supplied by this context. Do not derive a timezone from response language, device location, browser references, or provider output. If a user gives a local time without an explicit timezone or UTC offset in their instructions, ask them to specify it before proposing a schedule. For local date/time instructions, pass time_input to the server conversion; never compute UTC yourself. For absolute or recurring requests, use rule only when the user supplied an explicit UTC schedule or an absolute RFC3339 instant with an explicit offset; preserve that offset for server normalization. If their local date/time is ambiguous or nonexistent because of daylight saving, ask them to clarify the intended instant. Recurring rules are fixed UTC, so local display times may change when daylight saving changes. A proposal creates a draft only. The application opens a review dialog; direct the owner to its Confirm and enable button. A chat reply such as confirm does NOT activate the task. Never claim activation without a server activation receipt. For relative requests such as in 5 minutes, use rule kind after_confirmation with delay_seconds=300; the server counts from owner confirmation and no timezone is needed.\n",
+        "\nSCHEDULE PROPOSAL TIME CONTEXT (server clock): current UTC time is {}. No user timezone has been supplied by this context. Do not derive a timezone from response language, device location, browser references, or provider output. If a user gives a local time without an explicit timezone or UTC offset in their instructions, ask them to specify it before proposing a schedule. For local date/time instructions, pass time_input to the server conversion; never compute UTC yourself. For absolute or recurring requests, use rule only when the user supplied an explicit UTC schedule or an absolute RFC3339 instant with an explicit offset; preserve that offset for server normalization. If their local date/time is ambiguous or nonexistent because of daylight saving, ask them to clarify the intended instant. Recurring rules are fixed UTC, so local display times may change when daylight saving changes. A proposal creates a draft only. For conversation_resume the tool waits for the owner to Approve or Reject in the application review dialog before the model continues; use the returned server decision. Do not ask the owner to confirm again in chat. Fresh automation proposals still require rehearsal and contract approval. A chat reply such as confirm does NOT activate the task. Never claim activation without a current server query result or server activation receipt. For relative requests, use rule kind after_confirmation and convert the actual requested duration to delay_seconds: seconds unchanged, minutes multiplied by 60, hours multiplied by 3600. One minute is 60 seconds, not 300. Never copy an example duration; title, prompt and delay must agree. The server counts from owner approval and no timezone is needed. A scheduled_task_activated system event is the authoritative approval receipt and supersedes the earlier draft tool result. Never ask the user to send a chat confirmation after approving. Use list_conversation_scheduled_tasks to verify current state instead of guessing from receipts. You may cancel only AI-created tasks with cancel_conversation_scheduled_task, without additional approval; manual tasks are read-only. Approved tasks survive subsequent ordinary chat; only explicit task pause or cancellation stops them.\n",
         now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     )
 }
 
 pub fn registry() -> Vec<crate::registry::RegisteredTool> {
-    vec![crate::registry::RegisteredTool {
-        spec: spec(),
-        required_capability: desk_agent_protocol::Capability::SystemInfo,
-        effect: crate::registry::ToolEffect::SchedulePlanning,
-    }]
+    std::iter::once(spec())
+        .chain(super::management_tools::specs())
+        .map(|spec| crate::registry::RegisteredTool {
+            spec,
+            required_capability: desk_agent_protocol::Capability::SystemInfo,
+            effect: crate::registry::ToolEffect::SchedulePlanning,
+        })
+        .collect()
 }
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: REQUEST_SCHEDULE.into(),
-        description: "Propose a scheduled task for the owner to review. This only creates a draft; it does not enable scheduling or grant any permissions. conversation_resume is a one-time continuation of this conversation. fresh_task starts a new context each time and requires owner-guided rehearsal and authorization before publication. For local times use time_input with the explicit user timezone and reference date; the server converts it. For relative conversation continuations use rule kind after_confirmation with delay_seconds; the server counts from confirmation. Ordinary chat confirmation does not activate a draft; the owner must confirm in the review dialog. Use other rule kinds only for explicit UTC input or an absolute RFC3339 instant with an explicit offset; preserve the supplied offset. Supply exactly one of rule or time_input; never guess a timezone or compute UTC yourself. The server binds the current owner, device and conversation.".into(),
+        description: "Propose a scheduled task for the owner to review. The AI proposal creates a draft without granting permissions. conversation_resume is a one-time continuation of this conversation: this call waits for the owner review decision, and the server approval or rejection receipt is returned before you continue. Owner approval enables the timer; rejection leaves it disabled. fresh_task starts a new context each time and requires owner-guided rehearsal and authorization before publication. For local times use time_input with the explicit user timezone and reference date; the server converts it. For relative conversation continuations use rule kind after_confirmation with delay_seconds; the server counts from confirmation. Ordinary chat confirmation does not activate a draft; the owner must confirm in the review dialog. Use other rule kinds only for explicit UTC input or an absolute RFC3339 instant with an explicit offset; preserve the supplied offset. Supply exactly one of rule or time_input; never guess a timezone or compute UTC yourself. The server binds the current owner, device and conversation.".into(),
         parameters_schema: json!({"type":"object","additionalProperties":false,"required":["kind","title","prompt"],"oneOf":[{"required":["rule"],"not":{"required":["time_input"]}},{"required":["time_input"],"not":{"required":["rule"]}}],
             "properties":{
                 "kind":{"type":"string","enum":["conversation_resume","fresh_task"]},
@@ -152,7 +155,7 @@ pub fn unavailable() -> desk_agent_protocol::AgentError {
     desk_agent_protocol::AgentError {
         kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
         message:
-            "The schedule proposal could not be saved under the current conversation authority."
+            "The schedule operation could not be completed under the current conversation authority. Query the task again; do not claim it was changed."
                 .into(),
         retryable: false,
         safe_for_model: true,

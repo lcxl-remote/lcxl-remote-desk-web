@@ -294,6 +294,7 @@ pub fn next_after(spec: &ScheduleSpec, reference_ms: i64) -> Result<Option<i64>,
 #[cfg(test)]
 mod tests;
 
+pub mod management_tools;
 pub mod proposal;
 
 pub mod directory_recovery;

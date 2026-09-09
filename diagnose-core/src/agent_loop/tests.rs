@@ -1,3 +1,4 @@
+mod schedule_review;
 mod scheduled_continuation;
 use super::*;
 use crate::chat::{ChatRole, ModelTurn, StopReason, ToolCall, ToolCallRef, ToolSpec};

@@ -156,6 +156,19 @@ async fn exercise_preclaimed(permission: bool) {
     deps.session_seam = &store;
     deps.heartbeat = Some(&heartbeat);
     let mut session = claimed();
+    if !permission {
+        let original = &session.conversation[0];
+        let mut input =
+            ChatMessage::system_event("scheduled-task-input:scheduled-run", "Send hello now.");
+        input.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            original.data_envelope.as_ref(),
+            &input.message_id,
+            &input.text,
+            "scheduled_task_input",
+        )
+        .unwrap();
+        session.conversation.push(input);
+    }
     if permission {
         session.permission_requests.push(serde_json::from_value(serde_json::json!({
             "schema_version":1, "request_id":"decision", "input_revision":1,
@@ -244,6 +257,9 @@ async fn exercise_preclaimed(permission: bool) {
         .filter(|message| crate::permission_resume::is_resume_control_message(message))
         .collect();
     assert_eq!(bridges.len(), 1);
+    if !permission {
+        assert!(bridges[0].text.contains("Send hello now."));
+    }
     assert_eq!(
         crate::permission_resume::is_permission_resume_message(bridges[0]),
         permission

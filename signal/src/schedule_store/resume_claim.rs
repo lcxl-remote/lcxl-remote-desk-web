@@ -126,7 +126,7 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        let snapshot: entity::Model = serde_json::from_str(&work.task_snapshot_json)
+        let mut snapshot: entity::Model = serde_json::from_str(&work.task_snapshot_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let failure: FailureState = serde_json::from_str(&task.failure_state_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
@@ -198,7 +198,9 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::NotFound);
         }
-        if session.input_revision != task.requirement_revision.unwrap() as u64
+        if (permission.is_some()
+            && session.input_revision != task.requirement_revision.unwrap() as u64)
+            || session.input_revision < task.requirement_revision.unwrap() as u64
             || !session.turn_state.can_claim()
             || session.latest_input_seq != session.handled_input_seq
             || session.execution_state != ExecutionState::None
@@ -270,6 +272,35 @@ impl ScheduleStore {
         } else {
             work.turn_id.clone()
         };
+        if permission.is_none() {
+            // Freeze the approved task text separately from later chat. It is
+            // context, not a new user input or a tool permission grant.
+            let id = format!("scheduled-task-input:{}", work.run_id);
+            let parent = session
+                .conversation
+                .iter()
+                .rev()
+                .filter(|message| message.role == desk_diagnose_core::chat::ChatRole::SystemEvent)
+                .find(|message| {
+                    serde_json::from_str::<serde_json::Value>(&message.text).is_ok_and(|value| {
+                        value["event"] == "scheduled_task_activated"
+                            && value["schedule_id"].as_str() == Some(task.schedule_id.as_str())
+                    })
+                })
+                .and_then(|message| message.data_envelope.as_ref());
+            let mut message =
+                desk_diagnose_core::chat::ChatMessage::system_event(&id, &task.prompt);
+            message.data_envelope =
+                desk_diagnose_core::model_message_labels::internal_tool_result_envelope(
+                    parent,
+                    &id,
+                    &task.prompt,
+                    "scheduled_task_input",
+                )
+                .map_err(|_| ScheduleStoreError::Invalid)?;
+            message.turn_id = Some(turn_id.clone());
+            session.conversation.push(message);
+        }
         session
             .begin_turn(
                 &turn_id,
@@ -303,12 +334,20 @@ impl ScheduleStore {
         if changed.rows_affected != 1 {
             return Err(ScheduleStoreError::Conflict);
         }
+        // Approval persists across ordinary chat. Bind only the first dispatch to
+        // the latest settled input; permission resumes retain that exact fence.
+        if permission.is_none() {
+            snapshot.requirement_revision = Some(
+                i64::try_from(session.input_revision).map_err(|_| ScheduleStoreError::Invalid)?,
+            );
+        }
         let epoch = work
             .lease_epoch
             .checked_add(1)
             .ok_or(ScheduleStoreError::Invalid)?;
         let changed = run::Entity::update_many()
             .set(run::ActiveModel {
+                task_snapshot_json: Set(super::json(&snapshot)?),
                 status: Set("running".into()),
                 lease_owner: Set(Some(input.node_id.into())),
                 lease_epoch: Set(epoch),
@@ -338,6 +377,7 @@ impl ScheduleStore {
         entity::Entity::update_many()
             .set(entity::ActiveModel {
                 updated_at: Set(now),
+                requirement_revision: Set(snapshot.requirement_revision),
                 ..Default::default()
             })
             .filter(entity::Column::Id.eq(task.id))

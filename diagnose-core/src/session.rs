@@ -570,6 +570,9 @@ pub struct PersistedAgentSession {
     /// Exact permission pause returned by this turn, never an authorization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_permission_request_id: Option<String>,
+    /// Schedule review awaited by the current turn; not a permission grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_schedule_review: Option<String>,
     pub execution_state: ExecutionState,
     /// The most recent manual disposition. It is not execution authority and is
     /// retained separately from the provider outcome and model-visible transcript.
@@ -940,6 +943,7 @@ impl PersistedAgentSession {
             turn_state: TurnState::Idle,
             terminal_error: None,
             terminal_permission_request_id: None,
+            pending_schedule_review: None,
             execution_state: ExecutionState::None,
             manual_outcome_disposition: None,
             pending_auto_triggers: Vec::new(),
@@ -1267,6 +1271,7 @@ impl PersistedAgentSession {
         self.turn_state = TurnState::Running;
         self.terminal_error = None;
         self.terminal_permission_request_id = None;
+        self.pending_schedule_review = None;
         self.current_turn_id = Some(turn_id.into());
         self.current_request_id = request_id;
         self.active_control_connection_id = connection_id;
@@ -1371,6 +1376,7 @@ impl PersistedAgentSession {
         self.turn_state = terminal;
         self.terminal_error = None;
         self.terminal_permission_request_id = None;
+        self.pending_schedule_review = None;
         self.updated_at = now.into();
     }
 

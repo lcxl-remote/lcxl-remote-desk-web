@@ -1165,13 +1165,24 @@ impl SessionSeam for SignalAgentSessionStore {
         )
     }
 
-    async fn propose_schedule(
+    async fn manage_schedule_tool(
         &self,
         session: &mut PersistedAgentSession,
         call: &desk_diagnose_core::chat::ToolCall,
     ) -> Result<String, AgentError> {
         crate::schedule_store::ScheduleStore::new(self.db.clone())
-            .propose_from_session(session, call)
+            .manage_from_session(session, call)
+            .await
+            .map_err(|_| desk_diagnose_core::schedule::proposal::unavailable())
+    }
+
+    async fn poll_schedule_review(
+        &self,
+        session: &mut PersistedAgentSession,
+        schedule_id: &str,
+    ) -> Result<bool, AgentError> {
+        crate::schedule_store::ScheduleStore::new(self.db.clone())
+            .poll_review_decision(session, schedule_id)
             .await
             .map_err(|_| desk_diagnose_core::schedule::proposal::unavailable())
     }

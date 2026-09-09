@@ -160,14 +160,6 @@ impl SignalScheduleExecutor {
         {
             return self.process_fresh(candidate).await;
         }
-        match ScheduleStore::new(self.db.clone())
-            .supersede_stale_continuation(candidate.owner_user_id, &candidate.run_id)
-            .await
-        {
-            Ok(true) => return DispatchResult::Settled,
-            Ok(false) => {}
-            Err(_) => return DispatchResult::Deferred,
-        }
         if !self.gate.is_enabled()
             || candidate.owner_user_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID
         {

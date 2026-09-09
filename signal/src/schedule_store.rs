@@ -12,7 +12,9 @@ use sha2::{Digest, Sha256};
 
 mod authority;
 mod history;
+mod model_management;
 mod proposal;
+mod review_wait;
 mod search;
 pub use history::RunHistoryPage;
 mod fresh_admission;

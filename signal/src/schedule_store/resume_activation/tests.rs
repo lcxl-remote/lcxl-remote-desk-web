@@ -254,3 +254,189 @@ async fn fresh_task_edit_rejects_confirmation_delay_without_changing_the_task() 
     );
     assert_eq!(store.read(1, &task.schedule_id).await.unwrap(), task);
 }
+
+#[tokio::test]
+async fn rejection_records_a_durable_decision_and_cannot_activate() {
+    let (store, task, row, before) = fixture().await;
+    let rejected = store
+        .delete(1, &task.schedule_id, task.revision)
+        .await
+        .unwrap();
+    assert_eq!(rejected.status, "deleted");
+    assert!(rejected.next_run_at.is_none());
+    let row = session_row::Entity::find_by_id(row.id)
+        .one(&store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let after = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+    assert_eq!(after.input_revision, before.input_revision);
+    assert_eq!(after.scope_snapshot, before.scope_snapshot);
+    let event: serde_json::Value =
+        serde_json::from_str(&after.conversation.last().unwrap().text).unwrap();
+    assert_eq!(event["event"], "scheduled_task_rejected");
+    assert_eq!(event["owner_decision"], "rejected");
+    assert!(
+        store
+            .activate_conversation_resume(1, &task.schedule_id, rejected.revision)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn orphan_draft_can_still_be_rejected() {
+    let (store, task, row, _) = fixture().await;
+    session_row::Entity::delete_by_id(row.id)
+        .exec(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .delete(1, &task.schedule_id, task.revision)
+            .await
+            .unwrap()
+            .status,
+        "deleted"
+    );
+}
+
+#[tokio::test]
+async fn live_review_delivers_approval_or_rejection_to_the_same_turn() {
+    for approve in [true, false] {
+        let (store, _, row, mut session) = fixture().await;
+        session
+            .begin_turn(
+                "review-turn",
+                None,
+                None,
+                1,
+                session.scope_snapshot.clone(),
+                "2026-09-09T00:00:00Z",
+            )
+            .unwrap();
+        let call = desk_diagnose_core::chat::ToolCall {
+            id: "review-call".into(),
+            name: desk_diagnose_core::schedule::proposal::REQUEST_SCHEDULE.into(),
+            arguments_json: serde_json::json!({"kind":"conversation_resume","title":"Later","prompt":"Say hello","rule":{"kind":"after_confirmation","delay_seconds":60}}).to_string(),
+        };
+        let mut parent = desk_diagnose_core::model_message_labels::model_bound_user_message(
+            "assistant".into(),
+            "Schedule hello".into(),
+            desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap();
+        parent.role = desk_diagnose_core::chat::ChatRole::Assistant;
+        parent.replay_disposition =
+            Some(desk_diagnose_core::replay::ReplayDisposition::NotRequired {
+                source_context_key: desk_diagnose_core::replay::SourceContextKey::derive(
+                    desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+                    "test",
+                    "test",
+                    "test",
+                ),
+            });
+        parent
+            .tool_calls
+            .push(desk_diagnose_core::chat::ToolCallRef {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments_json: call.arguments_json.clone(),
+            });
+        session.conversation.push(parent);
+        let mut changed: session_row::ActiveModel = row.into();
+        changed.state_json = Set(session.encode_json_for_storage().unwrap());
+        changed.lease_token = Set(session.lease_token as i64);
+        changed.lease_deadline = Set(Some(chrono::Utc::now() + chrono::Duration::minutes(5)));
+        changed.update(&store.db).await.unwrap();
+        store
+            .manage_from_session(&mut session, &call)
+            .await
+            .unwrap();
+        let proposal: serde_json::Value =
+            serde_json::from_str(&session.conversation.last().unwrap().text).unwrap();
+        assert_eq!(proposal["awaiting_confirmation"], true);
+        let id = session.pending_schedule_review.clone().unwrap();
+        assert_eq!(proposal["schedule_id"], id);
+        let task = store.read(1, &id).await.unwrap();
+        assert_eq!(task.status, "draft");
+        PersistedAgentSession::decode_json(&session.encode_json_for_storage().unwrap()).unwrap();
+        assert!(
+            !store
+                .poll_review_decision(&mut session, &task.schedule_id)
+                .await
+                .unwrap()
+        );
+        let before = session.clone();
+        if approve {
+            store
+                .activate_conversation_resume(1, &task.schedule_id, task.revision)
+                .await
+                .unwrap();
+        } else {
+            store
+                .delete(1, &task.schedule_id, task.revision)
+                .await
+                .unwrap();
+        }
+        assert!(
+            store
+                .poll_review_decision(&mut session, &task.schedule_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(session.current_turn_id, before.current_turn_id);
+        assert_eq!(session.lease_token, before.lease_token);
+        assert_eq!(session.scope_snapshot, before.scope_snapshot);
+        assert!(session.turn_state.is_active());
+        let receipt: serde_json::Value =
+            serde_json::from_str(&session.conversation.last().unwrap().text).unwrap();
+        assert_eq!(
+            receipt["owner_decision"],
+            if approve { "approved" } else { "rejected" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn live_review_cannot_adopt_new_input_or_a_changed_lease() {
+    for change_lease in [true, false] {
+        let (store, task, row, mut session) = fixture().await;
+        session
+            .begin_turn(
+                "review-turn",
+                None,
+                None,
+                1,
+                session.scope_snapshot.clone(),
+                "2026-09-09T00:00:00Z",
+            )
+            .unwrap();
+        session.pending_schedule_review = Some(task.schedule_id.clone());
+        let before = session.clone();
+        let mut updated = session.clone();
+        if change_lease {
+            updated.lease_token += 1;
+        } else {
+            updated.begin_focus_epoch(2, Vec::<String>::new()).unwrap();
+            updated.input_revision = 2;
+        }
+        let mut changed: session_row::ActiveModel = row.into();
+        changed.state_json = Set(updated.encode_json_for_storage().unwrap());
+        changed.lease_token = Set(updated.lease_token as i64);
+        changed.lease_deadline = Set(Some(chrono::Utc::now() + chrono::Duration::minutes(5)));
+        changed.update(&store.db).await.unwrap();
+        assert!(matches!(
+            store
+                .poll_review_decision(&mut session, &task.schedule_id)
+                .await,
+            Err(ScheduleStoreError::Conflict)
+        ));
+        assert_eq!(session, before);
+    }
+}

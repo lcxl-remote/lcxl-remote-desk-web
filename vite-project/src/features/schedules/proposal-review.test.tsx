@@ -20,3 +20,15 @@ it('reviews server data and activates only the reviewed task revision after a cl
     expect(screen.getByText('schedules.status.active')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'schedules.activateResume' })).toBeNull();
 });
+
+it('rejects the exact reviewed draft and exposes explicit approval choices', async () => {
+    const task = { schedule_id: 'task', revision: 7, kind: 'conversation_resume', status: 'draft', title: 'Hello later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 60 } } };
+    const request = vi.fn(async (input: { operation: string }) => ({ result: 'task', task: input.operation === 'get' ? task : { ...task, revision: 8, status: 'deleted' } }));
+    const changed = vi.fn();
+    render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" assistantPaths={{}} onChanged={changed} approvalDialog />);
+    await screen.findByRole('button', { name: 'schedules.proposal.approve' });
+    fireEvent.click(screen.getByRole('button', { name: 'schedules.proposal.reject' }));
+    await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    expect(request.mock.calls[1]).toEqual([{ operation: 'delete', schedule_id: 'task', expected_revision: 7 }]);
+    expect(screen.queryByRole('button', { name: 'schedules.proposal.approve' })).toBeNull();
+});

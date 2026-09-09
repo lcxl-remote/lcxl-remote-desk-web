@@ -27,3 +27,20 @@ it('ignores malformed and unsuccessful tool results', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.queryByText('schedules.proposal.created')).toBeNull();
 });
+
+it('opens synchronous conversation review before the active turn settles', async () => {
+    const pending = { ...tool, output: JSON.stringify({ ...JSON.parse(tool.output), awaiting_confirmation: true }) };
+    render(<ScheduleProposalCards {...base} tools={[pending]} running />);
+    await screen.findByRole('dialog');
+    expect((screen.getByRole('button', { name: 'enable' }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('does not let an earlier automation draft block a synchronous conversation review', async () => {
+    const freshId = 'aaaaaaaa-1234-1234-1234-123456789abc';
+    const fresh = { ...tool, callId: 'fresh', output: JSON.stringify({ state: 'draft', kind: 'fresh_task', schedule_id: freshId }) };
+    const pending = { ...tool, output: JSON.stringify({ ...JSON.parse(tool.output), awaiting_confirmation: true }) };
+    render(<ScheduleProposalCards {...base} tools={[fresh, pending]} running />);
+    await screen.findByRole('dialog');
+    expect(screen.getByTestId('review').textContent).toContain(JSON.parse(tool.output).schedule_id);
+    expect(screen.getByTestId('review').textContent).not.toContain(freshId);
+});

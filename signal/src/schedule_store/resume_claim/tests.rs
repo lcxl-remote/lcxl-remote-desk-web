@@ -132,7 +132,14 @@ async fn occurrence_and_session_are_claimed_once_without_new_user_input() {
     );
     assert_eq!(claimed.session.input_revision, prior.input_revision);
     assert_eq!(claimed.session.chain_id, prior.chain_id);
-    assert_eq!(claimed.session.conversation, prior.conversation);
+    assert_eq!(
+        &claimed.session.conversation[..prior.conversation.len()],
+        &prior.conversation
+    );
+    assert_eq!(
+        claimed.session.conversation.last().unwrap().text,
+        store.read(1, &queued.schedule_id).await.unwrap().prompt
+    );
     assert_eq!(claimed.session.policy_revision, 7);
     assert_eq!(claimed.session.version, original.version + 1);
     assert!(claimed.session.active_control_connection_id.is_none());
@@ -155,72 +162,53 @@ async fn occurrence_and_session_are_claimed_once_without_new_user_input() {
     ));
 }
 #[tokio::test]
-async fn superseded_input_and_busy_session_do_not_consume_the_occurrence() {
+async fn later_chat_is_preserved_and_bound_only_when_idle() {
     for busy in [false, true] {
         let (store, queued, original, mut session) = fixture().await;
-        let task = store.read(1, &queued.schedule_id).await.unwrap();
+        session.begin_focus_epoch(2, Vec::<String>::new()).unwrap();
+        session.input_revision = 2;
         if busy {
             session
                 .begin_turn(
                     "interactive",
-                    None,
+                    Some("input".into()),
                     Some("browser".into()),
                     1,
                     claim(&queued).scope,
                     "2026-09-06T00:00:00Z",
                 )
                 .unwrap();
-        } else {
-            session.begin_focus_epoch(2, Vec::<String>::new()).unwrap();
-            session.input_revision = 2;
         }
         let mut changed: session_row::ActiveModel = original.into();
         changed.state_json = Set(session.encode_json_for_storage().unwrap());
         changed.lease_token = Set(session.lease_token as i64);
-        let source = changed.update(&store.db).await.unwrap();
-        assert!(matches!(
-            store.claim_conversation_resume(claim(&queued)).await,
-            Err(ScheduleStoreError::Conflict)
-        ));
-        assert_eq!(
-            run::Entity::find_by_id(queued.id)
-                .one(&store.db)
-                .await
-                .unwrap()
-                .unwrap(),
-            queued
-        );
-        assert_eq!(
-            session_row::Entity::find_by_id(source.id)
-                .one(&store.db)
-                .await
-                .unwrap()
-                .unwrap(),
-            source
-        );
-        assert_eq!(store.read(1, &queued.schedule_id).await.unwrap(), task);
-        assert_eq!(
-            store
-                .supersede_stale_continuation(1, &queued.run_id)
-                .await
-                .unwrap(),
-            !busy
-        );
-        let after = run::Entity::find_by_id(queued.id)
-            .one(&store.db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(after.attempt, 0);
-        assert_eq!(after.status, if busy { "queued" } else { "superseded" });
-        assert_eq!(
-            session_row::Entity::find_by_id(source.id)
-                .one(&store.db)
-                .await
-                .unwrap()
-                .unwrap(),
-            source
-        );
+        changed.update(&store.db).await.unwrap();
+        let result = store.claim_conversation_resume(claim(&queued)).await;
+        if busy {
+            assert!(matches!(result, Err(ScheduleStoreError::Conflict)));
+            assert_eq!(
+                run::Entity::find_by_id(queued.id)
+                    .one(&store.db)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                queued
+            );
+        } else {
+            let claimed = result.unwrap();
+            assert_eq!(claimed.session.input_revision, 2);
+            let task = store.read(1, &queued.schedule_id).await.unwrap();
+            let snapshot: entity::Model =
+                serde_json::from_str(&claimed.run.task_snapshot_json).unwrap();
+            assert_eq!(task.requirement_revision, Some(2));
+            assert_eq!(snapshot.requirement_revision, Some(2));
+            assert_eq!(
+                claimed.session.conversation.last().unwrap().text,
+                task.prompt
+            );
+            assert_eq!(claimed.run.attempt, 1);
+            assert_eq!(claimed.run.status, "running");
+        }
     }
 }
 #[tokio::test]

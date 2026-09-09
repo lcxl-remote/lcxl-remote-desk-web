@@ -397,7 +397,9 @@ pub(crate) async fn manage(
             let task = store.read(owner, &contract.schedule_id).await?;
             return contract_response(db, owner, task).await;
         }
-        Request::CreateDraft { draft } => {
+        Request::CreateDraft { mut draft } => {
+            // Only the model proposal transaction can stamp AI origin.
+            draft.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::Manual;
             let draft = resolve_draft(db, owner, draft).await?;
             store
                 .create_draft(owner, &draft, store.database_time().await?)
@@ -976,6 +978,7 @@ mod tests {
         request.kind = ScheduledTaskKind::ConversationResume;
         request.spec.rule = ScheduleRule::AfterConfirmation { delay_seconds: 300 };
         request.source_conversation_id = Some("chat-1".into());
+        request.creation_source = ScheduleCreationSource::AiProposal;
         request.requirement_revision = Some(1);
         let created = task(
             manage(
@@ -1051,6 +1054,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.source_conversation_id.as_deref(), Some(key.as_str()));
+        assert_eq!(stored.creation_source, "manual");
         assert_eq!(created.status, ScheduledTaskStatus::Draft);
         let mut stale = request.clone();
         stale.requirement_revision = Some(2);

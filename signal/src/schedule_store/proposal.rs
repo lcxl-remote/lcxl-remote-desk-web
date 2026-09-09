@@ -7,7 +7,7 @@ use desk_diagnose_core::{
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 impl ScheduleStore {
-    pub(crate) async fn propose_from_session(
+    pub(crate) async fn manage_from_session(
         &self,
         session: &mut PersistedAgentSession,
         call: &ToolCall,
@@ -16,12 +16,13 @@ impl ScheduleStore {
             .actor_id
             .parse()
             .map_err(|_| ScheduleStoreError::Invalid)?;
-        let draft = desk_diagnose_core::schedule::proposal::draft(session, call)
+        let action = desk_diagnose_core::schedule::management_tools::parse(session, call)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         if owner != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID {
             return Err(ScheduleStoreError::NotFound);
         }
+        let target = super::model_management::lock_target(&txn, owner, session, &action).await?;
         let locked =
             agent_session::Entity::update_many()
                 .col_expr(
@@ -75,23 +76,44 @@ impl ScheduleStore {
             .data_envelope
             .as_ref()
             .ok_or(ScheduleStoreError::Invalid)?;
-        desk_diagnose_core::schedule::validate_publication(
-            &draft.spec,
-            now,
-            draft.kind == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume,
-        )
-        .map_err(|_| ScheduleStoreError::Invalid)?;
-        let task = Self::create_draft_on(&txn, owner, &draft, now).await?;
-        let content = serde_json::json!({"schedule_id":task.schedule_id,"kind":task.kind,"state":"draft",
-            "message":"The application displays an owner review dialog. Ask the owner to click Confirm and enable there. A chat reply such as confirm does not activate this draft. Scheduling is not enabled and no execution permission has been granted."}).to_string();
+        use desk_diagnose_core::schedule::management_tools::Action;
+        let mut awaiting_review = None;
+        let (content, source) = match action {
+            Action::Create(draft) => {
+                desk_diagnose_core::schedule::validate_publication(
+                    &draft.spec,
+                    now,
+                    draft.kind
+                        == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume,
+                )
+                .map_err(|_| ScheduleStoreError::Invalid)?;
+                let task = Self::create_draft_on(&txn, owner, &draft, now).await?;
+                if task.kind == "conversation_resume" {
+                    awaiting_review = Some(task.schedule_id.clone());
+                }
+                (serde_json::json!({"schedule_id":task.schedule_id,"kind":task.kind,"state":"draft","awaiting_confirmation":awaiting_review.is_some(),
+                    "message":"The application displays an owner review dialog. For a conversation timer, this model turn waits until the owner approves or rejects. Do not report success before the final owner decision. No extra chat confirmation is needed. No tool permission is granted."}).to_string(), "schedule_proposal")
+            }
+            Action::List { after, limit } => (
+                super::model_management::list(&txn, owner, session, after, limit, now).await?,
+                "schedule_query",
+            ),
+            Action::Cancel {
+                expected_revision, ..
+            } => (
+                super::model_management::cancel(&txn, target, expected_revision, now).await?,
+                "schedule_cancellation",
+            ),
+        };
         let envelope = desk_diagnose_core::model_message_labels::internal_tool_result_envelope(
             Some(parent),
             &call.id,
             &content,
-            "schedule_proposal",
+            source,
         )
         .map_err(|_| ScheduleStoreError::Invalid)?;
         let mut next = session.clone();
+        next.pending_schedule_review = awaiting_review;
         let mut message =
             ChatMessage::tool_result(format!("schedule-proposal:{}", call.id), &call.id, content);
         message.turn_id = next.current_turn_id.clone();
@@ -123,6 +145,6 @@ impl ScheduleStore {
         }
         txn.commit().await?;
         *session = next;
-        Ok(task.schedule_id)
+        Ok(format!("schedule-proposal:{}", call.id))
     }
 }

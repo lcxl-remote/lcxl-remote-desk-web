@@ -460,7 +460,22 @@ async fn resume_claimed_scheduled(
         return Err(denied());
     }
     let policy = deps.model.model_egress_policy()?.ok_or_else(denied)?;
-    let original = crate::permission_resume::latest_user_requirement(&session.conversation)
+    let task_input = session
+        .conversation
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == ChatRole::SystemEvent
+                && message.message_id == format!("scheduled-task-input:{scheduled_run_id}")
+        })
+        .map(|message| {
+            let mut message = message.clone();
+            message.role = ChatRole::User;
+            message
+        });
+    let original = task_input
+        .as_ref()
+        .or_else(|| crate::permission_resume::latest_user_requirement(&session.conversation))
         .ok_or_else(denied)?;
     let bridge = if permission_request_id.is_some() {
         crate::permission_resume::authorized_permission_resume_message(
@@ -2774,7 +2789,7 @@ async fn run_inner(
                             // compares the exact version and lease and records its result.
                             deps.session_seam.save(session).await?;
                             if let Err(error) =
-                                deps.session_seam.propose_schedule(session, call).await
+                                deps.session_seam.manage_schedule_tool(session, call).await
                             {
                                 append_internal_tool_result(
                                     session,
@@ -2787,9 +2802,27 @@ async fn run_inner(
                                 deps.session_seam.save(session).await?;
                                 finish_tool(session, &call.id, false, sink);
                             } else {
-                                // The proposal transaction already stored a labelled
+                                // The schedule transaction already stored a labelled
                                 // result. Do not append a second success message.
                                 finish_tool(session, &call.id, true, sink);
+                                if let Some(schedule_id) = session.pending_schedule_review.clone() {
+                                    loop {
+                                        ensure_lease_healthy(deps).await?;
+                                        if deps
+                                            .session_seam
+                                            .poll_schedule_review(session, &schedule_id)
+                                            .await?
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    ensure_lease_healthy(deps).await?;
+                                    session.pending_schedule_review = None;
+                                    deps.session_seam.save(session).await?;
+                                    if let Some(receipt) = session.conversation.last() {
+                                        sink.on_tool_finished(&call.id, true, &receipt.text, None);
+                                    }
+                                }
                             }
                         }
                         ToolEffect::DirectoryPlanning => {

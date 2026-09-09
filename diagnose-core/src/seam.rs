@@ -810,12 +810,22 @@ pub trait SessionSeam {
         ))
     }
 
-    /// Commit an owner-review-only schedule draft and this call's result together.
-    async fn propose_schedule(
+    /// Commit a scoped schedule operation and its labelled result under the current turn fence.
+    async fn manage_schedule_tool(
         &self,
         _session: &mut PersistedAgentSession,
         _call: &crate::chat::ToolCall,
     ) -> Result<String, AgentError> {
+        Err(crate::schedule::proposal::unavailable())
+    }
+
+    /// Poll one bounded review tick. Runtimes must not hold a transaction while
+    /// waiting; a matching owner receipt is the only permitted snapshot update.
+    async fn poll_schedule_review(
+        &self,
+        _session: &mut PersistedAgentSession,
+        _schedule_id: &str,
+    ) -> Result<bool, AgentError> {
         Err(crate::schedule::proposal::unavailable())
     }
 
