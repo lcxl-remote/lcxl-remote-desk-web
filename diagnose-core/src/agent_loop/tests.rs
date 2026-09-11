@@ -1864,7 +1864,11 @@ async fn permission_planning_rejects_a_candidate_not_loaded_in_the_current_focus
     let stored = stored.as_ref().unwrap();
     assert!(stored.permission_requests.is_empty());
     assert!(stored.conversation.iter().any(|message| {
-        message.role == ChatRole::Tool && message.text.contains("not loaded in the current focus")
+        message.role == ChatRole::Tool
+            && message
+                .text
+                .contains("No request or approval card was created")
+            && message.text.contains("load_capability_details")
     }));
 }
 
@@ -8114,13 +8118,23 @@ async fn unknown_outcome_allows_requesting_a_new_authorized_mutation() {
         placeholder_message_id: "unknown".into(),
         since: "2026-06-20T00:00:00Z".into(),
     };
+    initial.conversation.push(ChatMessage::assistant_tool_calls(
+        "observation-call",
+        "",
+        vec![crate::chat::ToolCallRef {
+            id: "inspect".into(),
+            name: "inspect_desktop_session".into(),
+            arguments_json: "{}".into(),
+        }],
+    ));
+    initial.conversation.push(ChatMessage::tool_result("observed", "inspect", r#"{"ReadContext":{"DesktopSessionInspect":{"session":{"token":"session","snapshot_id":"snapshot","object_kind":"desktop_session","expires_at":"2026-06-20T00:05:00Z"},"os":"macos","interactive_session_incarnation":"session","active_application":{"token":"original","snapshot_id":"snapshot","object_kind":"application","expires_at":"2026-06-20T00:05:00Z"},"active_application_name":"Calendar"}}}"#));
     *sess.inner.borrow_mut() = Some(initial);
     let model = ScriptModel {
         turns: RefCell::new(
             [tool_use_args(
                 "permission-call",
                 crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                r#"{"items":[{"item_id":"command","tool_name":"execute_confirmed_ui_action","exact_input":{"target":{"token":"original","snapshot_id":"snapshot","object_kind":"ui_element","expires_at":"2026-06-20T00:05:00Z"},"action":{"kind":"invoke"}},"suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Create event"}]}"#,
+                r#"{"items":[{"item_id":"command","tool_name":"execute_confirmed_ui_action","application_scope":{"application":{"token":"original","snapshot_id":"snapshot","object_kind":"application","expires_at":"2026-06-20T00:05:00Z"},"actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Create event"}]}"#,
             ), answer("Please review the unresolved action.")]
             .into(),
         ),

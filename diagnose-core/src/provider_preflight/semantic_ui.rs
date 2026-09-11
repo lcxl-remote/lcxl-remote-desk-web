@@ -1,4 +1,4 @@
-//! Closed semantic UI input and exact authority shared by both orchestrators.
+//! Closed semantic UI input and application authority shared by both orchestrators.
 
 use super::*;
 use desk_agent_protocol::computer_use::UiSemanticAction;
@@ -18,8 +18,7 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
     struct Input {
         target: ObjectRef,
         action: UiSemanticAction,
-        #[serde(default)]
-        application: Option<ObjectRef>,
+        application: ObjectRef,
     }
     if call.name != crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
         || call.arguments_json.len() > 64 * 1024
@@ -29,7 +28,7 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
     let input: Input = serde_json::from_str(&call.arguments_json).map_err(|_| {
         error(
             AgentErrorKind::InvalidInput,
-            r#"Invalid semantic UI input format. Required shape: {"target":{"token":"<copy from observation>","snapshot_id":"<copy from observation>","object_kind":"ui_element","expires_at":"<copy from observation>"},"action":{"kind":"set_value","params":{"value":"text"}}}. Actions: invoke/select/focus use {"kind":"invoke"} (replace kind); toggle uses {"kind":"toggle","params":{"desired":true}}. Put value/desired inside action.params, not directly inside action. Copy the complete original target unchanged. Fix the input format; this error does not mean the target expired and does not require another UI read. No permission request or action was executed."#,
+            r#"Invalid semantic UI input format. Required shape: {"application":{"token":"<approved application token>","snapshot_id":"<approved application snapshot>","object_kind":"application","expires_at":"<approved application expiry>"},"target":{"token":"<copy from observation>","snapshot_id":"<copy from observation>","object_kind":"ui_element","expires_at":"<copy from observation>"},"action":{"kind":"set_value","params":{"value":"text"}}}. Actions: invoke/select/focus use {"kind":"invoke"} (replace kind); toggle uses {"kind":"toggle","params":{"desired":true}}. Put value/desired inside action.params, not directly inside action. Copy the complete original target unchanged. Fix the input format; this error does not mean the target expired and does not require another UI read. No permission request or action was executed."#,
             false,
             true,
         )
@@ -41,9 +40,7 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
     {
         return Err(unavailable());
     }
-    if let Some(application) = &input.application {
-        validate_application(application)?;
-    }
+    validate_application(&input.application)?;
     match &input.action {
         UiSemanticAction::Invoke
         | UiSemanticAction::Select
@@ -66,15 +63,11 @@ fn validate_application(application: &ObjectRef) -> Result<(), AgentError> {
     Ok(())
 }
 
-pub fn ui_application_from_call(call: &ToolCall) -> Result<Option<ObjectRef>, AgentError> {
+pub fn ui_application_from_call(call: &ToolCall) -> Result<ObjectRef, AgentError> {
     ui_action_from_call(call)?;
     let value: serde_json::Value =
         serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-    value
-        .get("application")
-        .filter(|v| !v.is_null())
-        .map(|value| serde_json::from_value(value.clone()).map_err(|_| unavailable()))
-        .transpose()
+    serde_json::from_value(value["application"].clone()).map_err(|_| unavailable())
 }
 
 /// Parsing does not establish native object ownership. The original edge must
@@ -82,7 +75,7 @@ pub fn ui_application_from_call(call: &ToolCall) -> Result<Option<ObjectRef>, Ag
 pub struct UiCallPreflight {
     target: ObjectRef,
     action: UiSemanticAction,
-    application: Option<ObjectRef>,
+    application: ObjectRef,
     capability: CapabilityDescriptor,
     provider_id: String,
     surface: ProductSurface,
@@ -125,16 +118,12 @@ impl UiCallPreflight {
             .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
             .filter(|expiry| now_unix_ms > 0 && *expiry > now_unix_ms)
             .ok_or_else(unavailable)?;
-        let expiry = if let Some(app) = &application {
-            let app_expiry = chrono::DateTime::parse_from_rfc3339(&app.expires_at)
-                .ok()
-                .and_then(|v| u64::try_from(v.timestamp_millis()).ok())
-                .filter(|v| *v > now_unix_ms)
-                .ok_or_else(unavailable)?;
-            expiry.min(app_expiry)
-        } else {
-            expiry
-        };
+        let app_expiry = chrono::DateTime::parse_from_rfc3339(&application.expires_at)
+            .ok()
+            .and_then(|v| u64::try_from(v.timestamp_millis()).ok())
+            .filter(|v| *v > now_unix_ms)
+            .ok_or_else(unavailable)?;
+        let expiry = expiry.min(app_expiry);
         let canonical_input_json = canonical_tool_permission_input_json(
             &call.name,
             serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,
@@ -142,21 +131,9 @@ impl UiCallPreflight {
         .map_err(|_| unavailable())?;
         let canonical_input_digest_sha256 =
             format!("{:x}", Sha256::digest(canonical_input_json.as_bytes()));
-        let operation_scope = if application.is_some() {
-            vec![crate::application_ui::operation(&action)]
-        } else {
-            canonical_compiled_scope(
-                &capability.wire.authorization_hint.resources,
-                capability.wire.effect,
-            )
-            .ok_or_else(unavailable)?
-            .operations
-        };
+        let operation_scope = vec![crate::application_ui::operation(&action)];
         Ok(Self {
-            resource_scope: application
-                .as_ref()
-                .map(crate::application_ui::resource)
-                .unwrap_or_else(|| fresh_object_resource_scope(std::slice::from_ref(&target))),
+            resource_scope: crate::application_ui::resource(&application),
             application,
             target,
             action,
@@ -172,14 +149,9 @@ impl UiCallPreflight {
     }
 
     pub fn computer_action(&self) -> desk_agent_protocol::computer_use::ComputerActionKind {
-        match &self.application {
-            Some(application) => {
-                desk_agent_protocol::computer_use::ComputerActionKind::UiInApplication {
-                    application: application.clone(),
-                    action: self.action.clone(),
-                }
-            }
-            None => desk_agent_protocol::computer_use::ComputerActionKind::Ui(self.action.clone()),
+        desk_agent_protocol::computer_use::ComputerActionKind::UiInApplication {
+            application: self.application.clone(),
+            action: self.action.clone(),
         }
     }
     pub fn resource_scope(&self) -> &[String] {

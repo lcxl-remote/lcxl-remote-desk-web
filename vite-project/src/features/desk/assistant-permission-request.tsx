@@ -108,6 +108,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                         .filter((entry) => (entry.expectedEffect !== 'send_external'
                             || Boolean(entry.externalSendConfirmation))
                             && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
+                            && (entry.toolName !== 'execute_confirmed_ui_action' || Boolean(entry.applicationScope))
                             && !fileApprovalBlocked(entry))
                         .map((entry) => entry.itemId);
                     const selected = permissionSelections[request.requestId]
@@ -117,7 +118,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     const sendConfirmation = item.externalSendConfirmation;
                     const commandConfirmation = item.commandConfirmation;
                     const commandBlocked = item.toolName === 'execute_confirmed_command' && !validCommandReview(commandConfirmation);
-                    const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || fileApprovalBlocked(item);
+                    const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || (item.toolName === 'execute_confirmed_ui_action' && !item.applicationScope) || fileApprovalBlocked(item);
                     const edit = permissionEdits[request.requestId]?.[item.itemId]
                         ?? {};
                     const resourceScope = edit.resourceScope
@@ -197,7 +198,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 )}
                                 {approvalBlocked && (
                                     <p className="mt-2 text-xs font-medium text-red-700 dark:text-red-300">
-                                        {t(fileApprovalBlocked(item) ? 'pages.deviceAssistant.fileConfirmMissing'
+                                        {t(item.toolName === 'execute_confirmed_ui_action' && !item.applicationScope ? 'pages.deviceAssistant.applicationUiScopeMissing' : fileApprovalBlocked(item) ? 'pages.deviceAssistant.fileConfirmMissing'
                                             : commandBlocked ? 'pages.deviceAssistant.commandSummaryMissing' : 'pages.deviceAssistant.externalSendSummaryMissing')}
                                     </p>
                                 )}
@@ -352,13 +353,14 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                         .filter((entry) => (entry.expectedEffect !== 'send_external'
                                             || Boolean(entry.externalSendConfirmation))
                                             && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
+                                            && (entry.toolName !== 'execute_confirmed_ui_action' || Boolean(entry.applicationScope))
                                             && !fileApprovalBlocked(entry))
                                         .map((entry) => entry.itemId);
                                 if (!selected.includes(item.itemId)
                                     || (item.expectedEffect === 'send_external'
                                         && !item.externalSendConfirmation)
                                     || (item.toolName === 'execute_confirmed_command' && !validCommandReview(item.commandConfirmation))
-                                    || fileApprovalBlocked(item)) {
+                                    || fileApprovalBlocked(item) || (item.toolName === 'execute_confirmed_ui_action' && !item.applicationScope)) {
                                     return {
                                         itemId: item.itemId,
                                         decision: 'deny' as const,

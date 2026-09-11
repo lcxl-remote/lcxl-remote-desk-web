@@ -79,9 +79,9 @@ fn desktop_action_bundle_issues_only_owner_selected_bounded_reads_on_both_surfac
         arguments_json: serde_json::json!({"items":[{
             "item_id":"click", "provider_id":"desktop.ui.action", "tool_name":"execute_confirmed_ui_action",
             "expected_effect":"mutate_application", "suggested_ttl_seconds":300, "suggested_max_uses":1,
-            "reason":"Click the selected button", "exact_input":{
-                "target":{"token":"button-token","snapshot_id":"snapshot","object_kind":"ui_element","expires_at":"2026-09-10T00:00:00Z"},
-                "action":{"kind":"invoke"}
+            "reason":"Click in the selected application", "application_scope":{
+                "application":{"token":"app-token","snapshot_id":"snapshot","object_kind":"application","expires_at":"2026-09-10T00:00:00Z"},
+                "actions":["invoke"]
             }
         }]}).to_string() };
     let mut request = crate::permission_tools::build_permission_request(
@@ -701,6 +701,29 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
         assert_eq!(grant.remaining_uses, 8);
         assert_eq!(grant.expires_at_unix_ms, now + 60_000);
         assert!(grant.canonical_input_digest_sha256.is_none());
+        // A persisted exact UI grant cannot be re-advertised by a later turn.
+        let mut old_grant = grant.clone();
+        old_grant.canonical_input_digest_sha256 = item.canonical_input_digest_sha256.clone();
+        let mut approved = request.clone();
+        approved.state = crate::dynamic_run::PermissionRequestState::Approved;
+        let prompt = crate::permission_tools::capability_authorization_prompt(
+            &[old_grant.clone()],
+            &[approved.clone()],
+            now,
+            session.input_revision,
+            7,
+        );
+        assert!(prompt.text.contains("schema_incompatible"));
+        assert!(
+            crate::permission_tools::active_exact_authorized_tool_names(
+                &[old_grant],
+                &[approved],
+                now,
+                session.input_revision,
+                7
+            )
+            .is_empty()
+        );
         let mut input = serde_json::json!({"application":app,"target":{"token":"date-control","snapshot_id":"ui","object_kind":"ui_element","expires_at":"2026-09-11T03:10:00Z"},"action":{"kind":"set_value","params":{"value":"09:00"}}});
         let call = |input: &serde_json::Value| crate::chat::ToolCall {
             id: "call".into(),

@@ -1159,7 +1159,6 @@ impl FilePatchAction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
 #[serde(tag = "adapter", content = "action", rename_all = "snake_case")]
 pub enum ComputerActionKind {
-    Ui(UiSemanticAction),
     RawInput(RawInputAction),
     Excel(ExcelPatchAction),
     PowerPoint(PowerPointPatchAction),
@@ -1179,13 +1178,12 @@ pub enum ComputerActionKind {
 }
 
 impl ComputerActionKind {
-    pub fn semantic_ui(&self) -> Option<(&UiSemanticAction, Option<&ObjectRef>)> {
+    pub fn semantic_ui(&self) -> Option<(&UiSemanticAction, &ObjectRef)> {
         match self {
-            Self::Ui(action) => Some((action, None)),
             Self::UiInApplication {
                 application,
                 action,
-            } => Some((action, Some(application))),
+            } => Some((action, application)),
             _ => None,
         }
     }
@@ -1193,7 +1191,7 @@ impl ComputerActionKind {
     #[must_use]
     pub const fn required_capability(&self) -> Capability {
         match self {
-            Self::Ui(_) | Self::UiInApplication { .. } => Capability::DesktopUiActionConfirmed,
+            Self::UiInApplication { .. } => Capability::DesktopUiActionConfirmed,
             Self::RawInput(_) => Capability::DesktopInputFallbackConfirmed,
             Self::Excel(_) => Capability::OfficeExcelPatchConfirmed,
             Self::PowerPoint(_) => Capability::OfficePowerPointPatchConfirmed,
@@ -1461,7 +1459,7 @@ fn validate_actions(
             (&adapter.kind, &step.action),
             (
                 ComputerUseAdapterKind::WindowsUia | ComputerUseAdapterKind::MacosAccessibility,
-                ComputerActionKind::Ui(_) | ComputerActionKind::UiInApplication { .. }
+                ComputerActionKind::UiInApplication { .. }
             ) | (
                 ComputerUseAdapterKind::WindowsRawInput,
                 ComputerActionKind::RawInput(_)
@@ -1499,7 +1497,7 @@ fn validate_actions(
         let target_matches = matches!(
             (&step.action, step.target.object_kind),
             (
-                ComputerActionKind::Ui(_) | ComputerActionKind::UiInApplication { .. },
+                ComputerActionKind::UiInApplication { .. },
                 ObjectKind::UiElement
             ) | (ComputerActionKind::RawInput(_), ObjectKind::Application)
                 | (ComputerActionKind::Excel(_), ObjectKind::Range)
@@ -1545,6 +1543,18 @@ fn validate_actions(
         );
         if !target_matches {
             return Err(ComputerUseValidationError::IncompatibleActionTarget);
+        }
+        if let ComputerActionKind::UiInApplication { application, .. } = &step.action {
+            if application.object_kind != ObjectKind::Application {
+                return Err(ComputerUseValidationError::IncompatibleActionTarget);
+            }
+            for (field, value) in [
+                ("application.token", application.token.as_str()),
+                ("application.snapshot_id", application.snapshot_id.as_str()),
+                ("application.expires_at", application.expires_at.as_str()),
+            ] {
+                require_non_empty(field, value)?;
+            }
         }
         if let ComputerActionKind::RawInput(action) = &step.action {
             validate_raw_input_action(action)?;
@@ -2234,7 +2244,13 @@ mod tests {
     fn step(token: &str) -> ComputerActionStep {
         ComputerActionStep {
             target: object(token),
-            action: ComputerActionKind::Ui(UiSemanticAction::Invoke),
+            action: ComputerActionKind::UiInApplication {
+                application: ObjectRef {
+                    object_kind: ObjectKind::Application,
+                    ..object("app")
+                },
+                action: UiSemanticAction::Invoke,
+            },
             before_summary: "button is idle".to_string(),
             after_intent: "invoke the button".to_string(),
             verification: "button state changes".to_string(),
@@ -2497,7 +2513,14 @@ mod tests {
     #[test]
     fn mutation_capability_is_derived_from_the_typed_action() {
         assert_eq!(
-            ComputerActionKind::Ui(UiSemanticAction::Focus).required_capability(),
+            ComputerActionKind::UiInApplication {
+                application: ObjectRef {
+                    object_kind: ObjectKind::Application,
+                    ..object("app")
+                },
+                action: UiSemanticAction::Focus
+            }
+            .required_capability(),
             Capability::DesktopUiActionConfirmed
         );
         assert_eq!(

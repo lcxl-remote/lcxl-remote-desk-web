@@ -2299,7 +2299,13 @@ fn sample_computer_action_plan() -> desk_agent_protocol::computer_use::SealedCom
         timeout_ms: 10_000,
         actions: vec![ComputerActionStep {
             target: sample_object_ref(),
-            action: ComputerActionKind::Ui(UiSemanticAction::Invoke),
+            action: ComputerActionKind::UiInApplication {
+                application: ObjectRef {
+                    object_kind: ObjectKind::Application,
+                    ..sample_object_ref()
+                },
+                action: UiSemanticAction::Invoke,
+            },
             before_summary: "idle".to_string(),
             after_intent: "invoke".to_string(),
             verification: "state changed".to_string(),
@@ -2477,7 +2483,10 @@ fn invoke_agent_capability_cannot_decode_an_exec_envelope() {
         max_stdout_bytes: 65_536,
         max_stderr_bytes: 65_536,
     });
-    let config: WincodeUnbounded = Configuration::new();
+    // Deliberately decoding bytes as a different schema may turn payload bytes
+    // into an arbitrary collection length. Bound this negative test's decoder;
+    // ordinary IPC round trips above still exercise the production config.
+    let config = Configuration::<true, 4_194_304>::new();
     let bytes = wincode::config::serialize(&mutation, config).expect("encode legacy envelope");
     let decoded: Result<desk_agent_protocol::ReadonlyAgentEnvelope, _> =
         wincode::config::deserialize(&bytes, config);

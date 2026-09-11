@@ -28,6 +28,13 @@ describe('shared permission review', () => {
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', resource_scope: ['ui_application:sha256:opaque'], operation_scope: ['ui:set_value'], max_uses: 8 });
     });
+    it('rejects native UI approval without an application scope', () => {
+        const onDecide = vi.fn().mockResolvedValue(true);
+        render(<AssistantPermissionRequest request={request([item({ toolName: 'execute_confirmed_ui_action', expectedEffect: 'mutate_application' })])} canDecide onDecide={onDecide} />);
+        expect(screen.getByText('pages.deviceAssistant.applicationUiScopeMissing')).toBeInTheDocument();
+        fireEvent.click(submit());
+        expect(onDecide.mock.calls[0][1][0].decision).toBe('deny');
+    });
     it('submits narrowed scope and explicit denial for missing action reviews', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         const value = request([item(), item({ itemId: 'command', toolName: 'execute_confirmed_command' }),
@@ -43,7 +50,7 @@ describe('shared permission review', () => {
     it('discloses and selects action reads while allowing explicit read denial', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         const value = request([
-            item({ itemId: 'action', toolName: 'execute_confirmed_ui_action', expectedEffect: 'mutate_application', suggestedMaxUses: 1 }),
+            item({ itemId: 'action', toolName: 'execute_confirmed_ui_action', expectedEffect: 'mutate_application', suggestedMaxUses: 1, applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Calendar', actions: ['invoke'] } }),
             item({ itemId: 'included-inspect_desktop_session', toolName: 'inspect_desktop_session', suggestedMaxUses: 16 }),
             item({ itemId: 'included-inspect_desktop_ui', toolName: 'inspect_desktop_ui', suggestedMaxUses: 16 }),
         ]);

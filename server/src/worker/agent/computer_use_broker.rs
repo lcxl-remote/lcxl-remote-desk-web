@@ -4137,6 +4137,21 @@ mod tests {
         params.allow_unfiltered = true;
         let error = broker.inspect_desktop_ui(&params, &disabled).unwrap_err();
         assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
+        // Application-less reads pass input validation with either explicit
+        // enumeration or search. They still require observation permission.
+        params.allow_unfiltered = false;
+        params.query = Some(desk_agent_protocol::computer_use::UiInspectQuery {
+            any: vec!["Calendar".into()],
+            ..Default::default()
+        });
+        assert!(params.root.is_none());
+        assert_eq!(
+            broker
+                .inspect_desktop_ui(&params, &disabled)
+                .unwrap_err()
+                .kind,
+            AgentErrorKind::PermissionDenied
+        );
     }
 
     #[test]

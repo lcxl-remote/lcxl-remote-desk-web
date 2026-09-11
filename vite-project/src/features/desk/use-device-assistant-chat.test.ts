@@ -410,6 +410,80 @@ describe('useDeviceAssistantChat', () => {
         expect(result.current.hasMoreMessages).toBe(false);
     });
 
+    it('keeps expanded history and its cursor across live snapshot refreshes', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
+        const response = (seq: number, ids: string[], hasMore: boolean, cursor?: string) => ({
+            ok: true,
+            json: async () => ({ data: {
+                sessionId: 'session-1', seq, active: false,
+                messages: ids.map(id => ({ id, role: 'assistant', text: `${id} at ${seq}` })),
+                messagePage: { hasMore, nextBeforeMessageId: cursor },
+            } }),
+        });
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response(7, ['m3', 'm4'], true, 'm3'))
+            .mockResolvedValueOnce(response(7, ['m2', 'm3'], true, 'm2'))
+            .mockResolvedValueOnce(response(8, ['m4', 'm5'], true, 'm4'))
+            .mockResolvedValueOnce(response(8, ['m1', 'm2'], false))
+            .mockResolvedValue(response(9, ['m4', 'm5'], true, 'm4'));
+        vi.stubGlobal('fetch', fetchMock);
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
+        }));
+        await act(async () => { await Promise.resolve(); });
+        await act(async () => { await result.current.loadOlderMessages(); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        expect(result.current.messages.map(message => message.id)).toEqual(['m2', 'm3', 'm4', 'm5']);
+        expect(result.current.messages.find(message => message.id === 'm4')?.text).toBe('m4 at 8');
+        await act(async () => { await result.current.loadOlderMessages(); });
+        expect(fetchMock.mock.calls[3]?.[0]).toContain('message_before=m2');
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        expect(result.current.messages.map(message => message.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5']);
+        expect(result.current.hasMoreMessages).toBe(false);
+        unmount();
+    });
+
+    it.each([false, true])('handles a pending history page when conversation changes: %s', async (switchConversation) => {
+        vi.useFakeTimers();
+        localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
+        const response = (sessionId: string, seq: number, ids: string[]) => ({
+            ok: true,
+            json: async () => ({ data: {
+                sessionId, seq, active: false,
+                messages: ids.map(id => ({ id, role: 'assistant', text: `${id} at ${seq}` })),
+                messagePage: { hasMore: true, nextBeforeMessageId: ids[0] },
+            } }),
+        });
+        let resolveOlder!: (value: ReturnType<typeof response>) => void;
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response('session-1', 7, ['m2']))
+            .mockImplementationOnce(() => new Promise(resolve => { resolveOlder = resolve; }))
+            .mockResolvedValue(response(switchConversation ? 'session-2' : 'session-1', 8, ['m2', 'm3']));
+        vi.stubGlobal('fetch', fetchMock);
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
+        }));
+        await act(async () => { await Promise.resolve(); });
+        let loading!: Promise<void>;
+        act(() => { loading = result.current.loadOlderMessages(); });
+        if (switchConversation) {
+            await act(async () => { expect(result.current.selectConversation('conversation-2')).toBe(true); });
+        } else {
+            await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        }
+        await act(async () => {
+            resolveOlder(response('session-1', 7, ['m1', 'm2']));
+            await loading;
+        });
+        expect(result.current.messages.map(message => message.id)).toEqual(
+            switchConversation ? ['m2', 'm3'] : ['m1', 'm2', 'm3'],
+        );
+        expect(result.current.messages.find(message => message.id === 'm2')?.text).toBe('m2 at 8');
+        expect(result.current.loadingOlderMessages).toBe(false);
+        unmount();
+    });
+
     it('ignores an older durable snapshot that resolves after a newer one', async () => {
         vi.useFakeTimers();
         localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');

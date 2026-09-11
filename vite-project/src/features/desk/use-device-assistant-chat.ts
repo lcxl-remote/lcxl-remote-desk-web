@@ -280,6 +280,14 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
     };
 }
 
+function mergePersistedMessages(
+    earlier: DeviceAssistantMessage[], latest: DeviceAssistantMessage[],
+): DeviceAssistantMessage[] {
+    const messages = new Map(earlier.map((message) => [message.id, message]));
+    for (const message of latest) messages.set(message.id, message);
+    return [...messages.values()];
+}
+
 export function useDeviceAssistantChat({
     rehearsal,
     deskId,
@@ -348,6 +356,17 @@ export function useDeviceAssistantChat({
         requestOrder: number;
         inputRevision?: number;
     } | null>(null);
+    // Retain only durable snapshots, not optimistic/streaming messages. Once
+    // history is expanded, tail polling must not collapse the loaded window.
+    const historyWindow = useRef<{
+        conversationId: string;
+        sessionId: string;
+        expanded: boolean;
+        messages: DeviceAssistantMessage[];
+        tools: DeviceAssistantToolActivity[];
+        page: { hasMore: boolean; nextBeforeMessageId: string | null };
+    } | null>(null);
+    const olderRequest = useRef<object | null>(null);
     const lastSeq = useRef(-1);
     const previewArgs = useRef(new Map<string, string>());
     const sessionTargetRequest = useRef<string | null>(null);
@@ -437,6 +456,22 @@ export function useDeviceAssistantChat({
             setContextUsage(snapshot.contextUsage ?? null);
             setContextNotices([...new Map((snapshot.contextNotices ?? []).map(notice => [notice.id, notice])).values()]);
             const projected = projectPersistedSnapshot(snapshot);
+            const previous = historyWindow.current;
+            const expanded = previous?.conversationId === expectedConversationId
+                && previous.sessionId === snapshot.sessionId && previous.expanded;
+            const windowMessages = expanded
+                ? mergePersistedMessages(previous.messages, projected.messages) : projected.messages;
+            const windowTools = expanded
+                ? projected.tools.reduce((items, tool) => upsertTool(items, tool), previous.tools) : projected.tools;
+            const page = expanded ? previous.page : {
+                hasMore: Boolean(snapshot.messagePage?.hasMore),
+                nextBeforeMessageId: snapshot.messagePage?.nextBeforeMessageId ?? null,
+            };
+            historyWindow.current = {
+                conversationId: expectedConversationId, sessionId: snapshot.sessionId,
+                expanded: Boolean(expanded), messages: windowMessages, tools: windowTools, page,
+            };
+
             setAttachments(projected.attachments);
             setFileScope(snapshot.fileScope ?? { revision: 0, directories: [] });
             setTaskStatusProjection(projected.taskStatusProjection);
@@ -445,10 +480,7 @@ export function useDeviceAssistantChat({
             setCommandTasks(snapshot.commandTasks ?? []);
             setCapabilityGrants(projected.capabilityGrants);
             setPendingInputCount(projected.pendingInputCount);
-            setMessagePage({
-                hasMore: Boolean(snapshot.messagePage?.hasMore),
-                nextBeforeMessageId: snapshot.messagePage?.nextBeforeMessageId ?? null,
-            });
+            setMessagePage(page);
             setVisualEvidence((current) => (snapshot.visualEvidence ?? []).reduce(
                 (items, next) => upsertVisualEvidence(items, next),
                 [] as DeviceAssistantVisualEvidence[],
@@ -460,8 +492,8 @@ export function useDeviceAssistantChat({
             }));
             setRemoteActive(Boolean(snapshot.active));
             if (!activeRequest.current) {
-                setMessages(projected.messages);
-                setTools(projected.tools);
+                setMessages(windowMessages);
+                setTools(windowTools);
                 setDraft(projected.draft);
                 setPartial('');
                 const last = projected.messages.at(-1);
@@ -515,9 +547,12 @@ export function useDeviceAssistantChat({
         const cursor = messagePage.nextBeforeMessageId;
         const expectedConversationId = conversationId.current;
         const watermark = snapshotWatermark.current;
-        if (!messagePage.hasMore || !cursor || !expectedConversationId || !watermark || loadingOlderMessages) {
+        if (!messagePage.hasMore || !cursor || !expectedConversationId || !watermark || olderRequest.current) {
             return;
         }
+        const expectedEpoch = snapshotEpoch.current;
+        const request = {};
+        olderRequest.current = request;
         setLoadingOlderMessages(true);
         try {
             const response = await fetch(
@@ -530,29 +565,37 @@ export function useDeviceAssistantChat({
             const snapshot = body?.data as PersistedSnapshot | undefined;
             if (
                 !snapshot
+                || snapshotEpoch.current !== expectedEpoch
+                || olderRequest.current !== request
+                || snapshotWatermark.current?.sessionId !== watermark.sessionId
                 || conversationId.current !== expectedConversationId
                 || snapshot.sessionId !== watermark.sessionId
-                || snapshot.seq !== watermark.seq
+                || !Number.isSafeInteger(snapshot.seq) || snapshot.seq < watermark.seq
                 || !Array.isArray(snapshot.messages)
             ) return;
             const projected = projectPersistedSnapshot(snapshot);
-            setMessages((current) => {
-                const olderIds = new Set(projected.messages.map((message) => message.id));
-                return [...projected.messages, ...current.filter((message) => !olderIds.has(message.id))];
-            });
-            setTools((current) => {
-                let merged = projected.tools;
-                for (const tool of current) merged = upsertTool(merged, tool);
-                return merged;
-            });
-            setMessagePage({
+            const current = historyWindow.current;
+            if (!current || current.conversationId !== expectedConversationId
+                || current.sessionId !== snapshot.sessionId) return;
+            const page = {
                 hasMore: Boolean(snapshot.messagePage?.hasMore),
                 nextBeforeMessageId: snapshot.messagePage?.nextBeforeMessageId ?? null,
-            });
+            };
+            historyWindow.current = {
+                ...current, expanded: true, page,
+                messages: mergePersistedMessages(projected.messages, current.messages),
+                tools: current.tools.reduce((items, tool) => upsertTool(items, tool), projected.tools),
+            };
+            setMessages((messages) => mergePersistedMessages(projected.messages, messages));
+            setTools((tools) => tools.reduce((items, tool) => upsertTool(items, tool), projected.tools));
+            setMessagePage(page);
         } finally {
-            setLoadingOlderMessages(false);
+            if (olderRequest.current === request) {
+                olderRequest.current = null;
+                setLoadingOlderMessages(false);
+            }
         }
-    }, [deskId, loadingOlderMessages, messagePage]);
+    }, [deskId, messagePage]);
 
     useEffect(() => {
         let stored: string | null = null;
@@ -563,6 +606,8 @@ export function useDeviceAssistantChat({
         }
         snapshotEpoch.current += 1;
         snapshotWatermark.current = null;
+        historyWindow.current = null;
+        olderRequest.current = null;
         conversationId.current = stored;
         rehearsalSent.current = false;
         setMessages([]);
@@ -636,6 +681,10 @@ export function useDeviceAssistantChat({
             setPendingInputCount(0);
             snapshotEpoch.current += 1;
             snapshotWatermark.current = null;
+            historyWindow.current = null;
+            olderRequest.current = null;
+            setMessagePage({ hasMore: false, nextBeforeMessageId: null });
+            setLoadingOlderMessages(false);
             conversationId.current = event.newValue;
             lastSeq.current = -1;
             previewArgs.current.clear();
@@ -807,6 +856,8 @@ export function useDeviceAssistantChat({
         if (!conversationId.current) {
             snapshotEpoch.current += 1;
             snapshotWatermark.current = null;
+            historyWindow.current = null;
+            olderRequest.current = null;
             conversationId.current = v4();
             try {
                 localStorage.setItem(
@@ -1121,6 +1172,8 @@ export function useDeviceAssistantChat({
         contextTimer.current = null;
         snapshotEpoch.current += 1;
         snapshotWatermark.current = null;
+        historyWindow.current = null;
+        olderRequest.current = null;
         conversationId.current = null;
         lastSeq.current = -1;
         previewArgs.current.clear();

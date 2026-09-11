@@ -2968,7 +2968,7 @@ async fn run_inner(
                                 if disclosure_enabled && request.items.iter().any(|item| !loaded.contains(item.tool_name.as_str())) {
                                     return Err(AgentError {
                                         kind: AgentErrorKind::InvalidInput,
-                                        message: "permission request contains a capability that is not loaded in the current focus".into(),
+                                        message: "No request or approval card was created: the batch contains a capability whose details are not loaded. Call load_capability_details with the requested tool_names, then retry request_capability_grants. Do not report submission before receiving a successful request_id and pending_user_decision result".into(),
                                         retryable: false,
                                         safe_for_model: true,
                                         error_code: None,

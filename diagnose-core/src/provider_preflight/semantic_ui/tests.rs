@@ -7,13 +7,13 @@ fn now() -> u64 {
 }
 fn call(action: UiSemanticAction) -> ToolCall {
     ToolCall { id: "call".into(), name: EXECUTE_CONFIRMED_UI_ACTION_TOOL.into(),
-        arguments_json: json!({"target":{"token":"edge-only-reference","snapshot_id":"snapshot",
+        arguments_json: json!({"application":{"token":"app","snapshot_id":"apps","object_kind":"application","expires_at":chrono::DateTime::from_timestamp_millis((now()+60_000) as i64).unwrap().to_rfc3339()},"target":{"token":"edge-only-reference","snapshot_id":"snapshot",
             "object_kind":"ui_element","expires_at":chrono::DateTime::from_timestamp_millis((now()+60_000) as i64).unwrap().to_rfc3339()},
             "action":action}).to_string() }
 }
 
 #[test]
-fn both_orchestrators_derive_exact_ui_authority_for_the_same_bounded_actions() {
+fn both_orchestrators_derive_application_ui_authority_for_the_same_bounded_actions() {
     let registry = device_assistant_provider_registry();
     for action in [
         UiSemanticAction::Invoke,
@@ -45,9 +45,12 @@ fn both_orchestrators_derive_exact_ui_authority_for_the_same_bounded_actions() {
             assert_eq!(authority.risk_tier, CapabilityRiskTier::R2);
             assert_eq!(
                 authority.resource_scope,
-                fresh_object_resource_scope(std::slice::from_ref(input.target()))
+                crate::application_ui::resource(&input.application)
             );
-            assert_eq!(authority.operation_scope, ["use_selected_object"]);
+            assert_eq!(
+                authority.operation_scope,
+                [crate::application_ui::operation(&action)]
+            );
             assert!(authority.export_destinations.is_empty());
             assert_eq!(
                 authority.canonical_input_digest_sha256,
@@ -62,7 +65,7 @@ fn both_orchestrators_derive_exact_ui_authority_for_the_same_bounded_actions() {
 
 #[test]
 fn ui_decoder_rejects_non_ui_targets_extra_authority_and_unbounded_actions() {
-    for case in 0..9 {
+    for case in 0..12 {
         let mut call = call(UiSemanticAction::Invoke);
         let mut value: serde_json::Value = serde_json::from_str(&call.arguments_json).unwrap();
         match case {
@@ -77,7 +80,12 @@ fn ui_decoder_rejects_non_ui_targets_extra_authority_and_unbounded_actions() {
             }
             6 => call.name = "browser_open_page".into(),
             7 => value["target"]["snapshot_id"] = json!(""),
-            _ => value["scope"] = json!(["arbitrary"]),
+            8 => value["scope"] = json!(["arbitrary"]),
+            9 => {
+                value.as_object_mut().unwrap().remove("application");
+            }
+            10 => value["application"] = json!(null),
+            _ => value["application"]["object_kind"] = json!("ui_element"),
         }
         call.arguments_json = value.to_string();
         assert!(ui_action_from_call(&call).is_err(), "case {case}");

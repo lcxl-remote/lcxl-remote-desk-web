@@ -254,12 +254,16 @@ pub fn build_permission_grants(
             &requested.tool_name,
             requested.canonical_input_json.as_deref(),
         );
-        let exact_ui_action = application_scope.is_none()
-            && matches!(
-                capability.required_capability,
-                desk_agent_protocol::Capability::DesktopUiActionConfirmed
-                    | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
-            );
+        if capability.required_capability
+            == desk_agent_protocol::Capability::DesktopUiActionConfirmed
+            && application_scope.is_none()
+        {
+            return Err(internal(
+                "native UI approval requires application_scope; exact target/action approvals are not supported",
+            ));
+        }
+        let exact_raw_input = capability.required_capability
+            == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed;
         let text_mutation = crate::provider_preflight::text_file::TextMutationPreflight::supports(
             &requested.tool_name,
         );
@@ -306,7 +310,7 @@ pub fn build_permission_grants(
                 })
                 .cloned()
                 .collect()
-        } else if exact_ui_action {
+        } else if exact_raw_input {
             #[derive(serde::Deserialize)]
             struct DesktopActionTarget {
                 target: ObjectRef,
@@ -314,11 +318,10 @@ pub fn build_permission_grants(
             let canonical = requested
                 .canonical_input_json
                 .as_deref()
-                .ok_or_else(|| internal("approved semantic UI action has no exact input"))?;
+                .ok_or_else(|| internal("approved raw input action has no exact input"))?;
             let input: DesktopActionTarget = serde_json::from_str(canonical)
                 .map_err(|_| internal("approved desktop action input is invalid"))?;
             let expected_kind = match capability.required_capability {
-                desk_agent_protocol::Capability::DesktopUiActionConfirmed => ObjectKind::UiElement,
                 desk_agent_protocol::Capability::DesktopInputFallbackConfirmed => {
                     ObjectKind::Application
                 }
@@ -326,15 +329,6 @@ pub fn build_permission_grants(
             };
             if input.target.object_kind != expected_kind {
                 return Err(internal("approved desktop action target kind is invalid"));
-            }
-            if capability.required_capability
-                == desk_agent_protocol::Capability::DesktopUiActionConfirmed
-            {
-                crate::provider_preflight::ui_action_from_call(&crate::chat::ToolCall {
-                    id: requested.item_id.clone(),
-                    name: capability.wire.tool_name.clone(),
-                    arguments_json: canonical.into(),
-                })?;
             }
             if capability.required_capability
                 == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
@@ -470,7 +464,7 @@ pub fn build_permission_grants(
         let (use_policy, canonical_input_digest_sha256) = if application_scope.is_some() {
             (CapabilityGrantUsePolicy::Reusable, None)
         } else if risk_tier == desk_agent_protocol::capability_grant::CapabilityRiskTier::R3
-            || exact_ui_action
+            || exact_raw_input
         {
             if *max_uses != 1 || requested.canonical_input_json.is_none() {
                 return Err(internal(
@@ -510,7 +504,7 @@ pub fn build_permission_grants(
             .filter(|destination| export_destinations.contains(destination))
             .cloned()
             .collect()
-        } else if exact_ui_action {
+        } else if exact_raw_input {
             requested
                 .export_destinations
                 .iter()

@@ -183,8 +183,8 @@ mod tests {
             "2026-09-11T03:09:00Z".into(),
         )
         .unwrap_err();
-        assert!(error.message.contains("omit application from exact_input"));
-        assert!(error.message.contains("application_scope="));
+        assert!(error.message.contains("requires application_scope"));
+        assert!(error.message.contains("never exact_input"));
         assert!(
             error
                 .message

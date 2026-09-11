@@ -781,9 +781,7 @@ fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind
         {
             Some(ObjectKind::File)
         }
-        ComputerActionKind::Ui(_) | ComputerActionKind::UiInApplication { .. } => {
-            Some(ObjectKind::UiElement)
-        }
+        ComputerActionKind::UiInApplication { .. } => Some(ObjectKind::UiElement),
         ComputerActionKind::RawInput(_) => Some(ObjectKind::Application),
         ComputerActionKind::SpreadsheetLive(_) => Some(ObjectKind::Range),
         ComputerActionKind::DocumentLive(_) => Some(ObjectKind::Document),
@@ -2593,7 +2591,7 @@ impl SignalDeviceAssistantTools {
                 .ok_or_else(|| {
                     error(
                         AgentErrorKind::PermissionDenied,
-                        "semantic UI action requires an active approved exact input or application scope matching the target and action",
+                        "semantic UI action requires an active approved application scope matching the target and action",
                         false,
                         true,
                     )

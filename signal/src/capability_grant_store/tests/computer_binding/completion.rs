@@ -448,8 +448,13 @@ async fn semantic_projection_preserves_idempotent_success_and_unknown_effects() 
     let mut plan = f.plan.clone();
     plan.adapter.kind = ComputerUseAdapterKind::MacosAccessibility;
     plan.actions[0].target.object_kind = ObjectKind::UiElement;
-    plan.actions[0].action =
-        ComputerActionKind::Ui(desk_agent_protocol::computer_use::UiSemanticAction::Invoke);
+    plan.actions[0].action = ComputerActionKind::UiInApplication {
+        application: ObjectRef {
+            object_kind: ObjectKind::Application,
+            ..plan.actions[0].target.clone()
+        },
+        action: desk_agent_protocol::computer_use::UiSemanticAction::Invoke,
+    };
     let mut native = failed(&plan);
     native.result = ComputerActionResultClass::Verified;
     native.facts = vec![ComputerActionStepFact {

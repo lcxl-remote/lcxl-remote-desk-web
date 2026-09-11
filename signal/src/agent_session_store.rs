@@ -2823,7 +2823,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semantic_ui_grant_is_one_shot_and_server_binds_exact_authority() {
+    async fn semantic_ui_grant_requires_application_scope_and_rejects_exact_authority() {
         let store = store().await;
         let mut session = store.claim_turn(claim("ui-action-turn")).await.unwrap();
         session.input_revision = 1;
@@ -2831,18 +2831,16 @@ mod tests {
         let target = ObjectRef {
             token: "signed-ui-element-token".into(),
             snapshot_id: "snapshot-1".into(),
-            object_kind: ObjectKind::UiElement,
+            object_kind: ObjectKind::Application,
             expires_at: "2026-08-26T00:05:00Z".into(),
         };
         let canonical_input_json = serde_json::json!({
-            "target": target,
-            "action": {"kind": "focus"},
+            "application_scope": {"application": target,"actions":["focus"]},
         })
         .to_string();
         let canonical_input_digest_sha256 =
             format!("{:x}", Sha256::digest(canonical_input_json.as_bytes()));
-        let exact_resource_scope =
-            desk_diagnose_core::capability_grant::fresh_object_resource_scope(&[target]);
+        let exact_resource_scope = desk_diagnose_core::application_ui::resource(&target);
         let request = PermissionRequest {
             schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
             request_id: "permission-ui-action".into(),
@@ -2857,7 +2855,7 @@ mod tests {
                     .into(),
                 expected_effect: CapabilityEffect::MutateApplication,
                 resource_scope: exact_resource_scope.clone(),
-                operation_scope: vec!["use_selected_object".into()],
+                operation_scope: vec!["ui:focus".into()],
                 export_destinations: Vec::new(),
                 canonical_input_json: Some(canonical_input_json),
                 canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
@@ -2915,14 +2913,17 @@ mod tests {
         assert_eq!(grants.len(), 1);
         let grant = &grants[0];
         assert_eq!(grant.resource_scope, exact_resource_scope);
-        assert_eq!(grant.operation_scope, vec!["use_selected_object"]);
+        assert_eq!(grant.operation_scope, vec!["ui:focus"]);
         assert!(grant.export_destinations.is_empty());
         assert_eq!(grant.remaining_uses, 1);
         assert_eq!(grant.limits.max_calls, 1);
-        assert_eq!(grant.use_policy, CapabilityGrantUsePolicy::OneShotExact);
-        assert_eq!(
-            grant.canonical_input_digest_sha256.as_deref(),
-            Some(canonical_input_digest_sha256.as_str())
+        assert_eq!(grant.use_policy, CapabilityGrantUsePolicy::Reusable);
+        assert!(grant.canonical_input_digest_sha256.is_none());
+        let mut exact_request = request.clone();
+        exact_request.items[0].canonical_input_json =
+            Some(serde_json::json!({"target":target,"action":{"kind":"focus"}}).to_string());
+        assert!(
+            build_permission_grants(&session, &exact_request, &decisions, &context, None).is_err()
         );
         decisions[0].decision = PermissionItemDecision::Approve {
             resource_scope: Vec::new(),
@@ -2931,10 +2932,7 @@ mod tests {
             ttl_seconds: 120,
             max_uses: 1,
         };
-        let narrowed =
-            build_permission_grants(&session, &request, &decisions, &context, None).unwrap();
-        assert!(narrowed[0].resource_scope.is_empty());
-        assert!(narrowed[0].operation_scope.is_empty());
+        assert!(build_permission_grants(&session, &request, &decisions, &context, None).is_err());
     }
 
     #[tokio::test]

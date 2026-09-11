@@ -170,7 +170,7 @@ pub fn capability_authorization_prompt(
     }
     CapabilityAuthorizationPrompt {
         text: format!(
-            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, copy its application reference into the optional application field of execute_confirmed_ui_action, use the current observed target and an approved action; do not request another exact permission for each control within that scope. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
+            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, copy its application reference into the required application field of execute_confirmed_ui_action, use the current observed target and an approved action; do not request another exact permission for each control within that scope. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
             serde_json::to_string(&entries).expect("authorization projection is serializable")
         ),
         approved_exact_input_expires_at_unix_ms,
@@ -251,6 +251,7 @@ fn exact_input_matches_current_contract(tool_name: &str, value: &serde_json::Val
     }
 
     match tool_name {
+        crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL => false,
         "browser_open_page" => serde_json::from_value::<BrowserOpenInput>(value.clone())
             .is_ok_and(|input| input.target.validate().is_ok()),
         "browser_navigate_page" => serde_json::from_value::<BrowserNavigateInput>(value.clone())
@@ -488,7 +489,7 @@ fn invalid(detail: impl std::fmt::Display) -> AgentError {
     AgentError {
         kind: AgentErrorKind::InvalidInput,
         message: format!(
-            "invalid request_capability_grants arguments: {detail}. The entire batch was rejected: no request or approval card was created, including otherwise valid items. Do not repeat unchanged arguments or tell the user a request exists. Fix the invalid item; if its target is not yet known, first request only the prerequisite read permission, inspect the target, then request the action with complete exact_input."
+            "invalid request_capability_grants arguments: {detail}. The entire batch was rejected: no request or approval card was created, including otherwise valid items. Do not repeat unchanged arguments or tell the user a request exists. Fix the invalid item; if its target is not yet known, first request only the prerequisite read permission, inspect the target, then request native UI actions with application_scope, or other mutations with exact_input when required by their tool contract."
         ),
         retryable: false,
         safe_for_model: true,
@@ -550,7 +551,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-            description: "Ask the user for one bounded batch of tool permissions. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
+            description: "Create one bounded approval request by actually calling this tool. First load missing capability details with load_capability_details; loading alone creates no request. Only report an approval card as submitted after a successful result contains request_id and status=pending_user_decision. An error creates no card; correct the input and call again. Never invent a submitted request or tell the user to refresh to find one without a successful receipt. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -565,8 +566,8 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "tool_name": {"type": "string", "maxLength": 128},
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
-                                "application_scope": {"type":"object","description":"For reusable native UI permission in this conversation. Mutually exclusive with exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object"},"actions":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value"]}}},"required":["application","actions"],"additionalProperties":false},
-                                "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, desktop semantic UI actions without application_scope, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
+                                "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value"]}}},"required":["application","actions"],"additionalProperties":false},
+                                "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
@@ -650,6 +651,15 @@ pub fn build_permission_request(
             ));
         }
         let application_scope = item.application_scope;
+        if capability.required_capability == Capability::DesktopUiActionConfirmed
+            && (application_scope.is_none() || item.exact_input.is_some())
+        {
+            return Err(invalid(format!(
+                r#"item_id={} tool_name={}: native UI permission requires application_scope, never exact_input. Required shape: {{"application_scope":{{"application":{{"token":"<observed application token>","snapshot_id":"<observed snapshot>","object_kind":"application","expires_at":"<observed expiry>"}},"actions":["invoke","set_value"]}}}}. Load the tool details first. If no application reference is known, request prerequisite desktop reads and observe the application before requesting actions"#,
+                item.item_id, item.tool_name
+            )));
+        }
+
         if let Some(scope) = &application_scope {
             if item.tool_name != crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
                 || item.exact_input.is_some()
@@ -754,8 +764,7 @@ pub fn build_permission_request(
         let exact_semantic_action = application_scope.is_none()
             && matches!(
                 capability.wire.capability_id.as_str(),
-                crate::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID
-                    | crate::device_assistant::DESKTOP_RAW_INPUT_CAPABILITY_ID
+                crate::device_assistant::DESKTOP_RAW_INPUT_CAPABILITY_ID
                     | crate::device_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
                     | crate::device_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID
                     | crate::device_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID
@@ -772,23 +781,10 @@ pub fn build_permission_request(
             }
             let canonical = canonical_input_json
                 .as_deref()
-                .ok_or_else(|| invalid(format!(r#"item_id={} tool_name={}: semantic actions require exact_input. For execute_confirmed_ui_action use {{"exact_input":{{"target":{{"token":"<observed token>","snapshot_id":"<observed snapshot>","object_kind":"ui_element","expires_at":"<observed expiry>"}},"action":{{"kind":"invoke"}}}}}}; set_value uses action={{"kind":"set_value","params":{{"value":"text"}}}}"#, item.item_id, item.tool_name)))?;
-            if capability.required_capability == Capability::DesktopUiActionConfirmed
-                && serde_json::from_str::<serde_json::Value>(canonical)
-                    .ok()
-                    .is_some_and(|value| value.get("application").is_some_and(|v| !v.is_null()))
-            {
-                return Err(invalid(format!(
-                    "item_id={}: omit application from exact_input for a single-control approval; for reusable application permission use application_scope={{application:<observed application reference>,actions:[\"invoke\",\"set_value\"]}} instead of exact_input",
-                    item.item_id
-                )));
-            }
+                .ok_or_else(|| invalid(format!("item_id={} tool_name={}: semantic mutations require exact_input containing the complete tool arguments and observed target", item.item_id, item.tool_name)))?;
             let input: SemanticActionInput = serde_json::from_str(canonical)
                 .map_err(|error| invalid(format!("decode semantic action input: {error}")))?;
             let expected_kind = match capability.required_capability {
-                Capability::DesktopUiActionConfirmed => {
-                    desk_agent_protocol::computer_use::ObjectKind::UiElement
-                }
                 Capability::DesktopInputFallbackConfirmed => {
                     desk_agent_protocol::computer_use::ObjectKind::Application
                 }
@@ -811,13 +807,6 @@ pub fn build_permission_request(
                 return Err(invalid(
                     "semantic action requires one complete target reference of the expected kind",
                 ));
-            }
-            if capability.required_capability == Capability::DesktopUiActionConfirmed {
-                crate::provider_preflight::ui_action_from_call(&ToolCall {
-                    id: item.item_id.clone(),
-                    name: capability.wire.tool_name.clone(),
-                    arguments_json: canonical.into(),
-                })?;
             }
             if capability.required_capability == Capability::DesktopInputFallbackConfirmed {
                 #[derive(Deserialize)]
@@ -1577,7 +1566,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_ui_permission_binds_one_fresh_target_and_exact_action() {
+    fn semantic_ui_permission_requires_application_scope_and_includes_reads() {
         let registry = crate::device_assistant::device_assistant_provider_registry();
         let missing = r#"{"items":[{"item_id":"ui","provider_id":"desktop.ui.action","tool_name":"execute_confirmed_ui_action","expected_effect":"mutate_application","suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update the selected control"}]}"#;
         let error = build_permission_request(
@@ -1588,9 +1577,9 @@ mod tests {
             "2026-08-28T00:00:00Z".into(),
         )
         .unwrap_err();
-        assert!(error.message.contains("require exact_input"));
+        assert!(error.message.contains("requires application_scope"));
 
-        let exact = r#"{"items":[{"item_id":"ui","provider_id":"desktop.ui.action","tool_name":"execute_confirmed_ui_action","expected_effect":"mutate_application","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"opaque-token","snapshot_id":"snapshot-1","object_kind":"ui_element","expires_at":"2026-08-28T00:01:00Z"},"action":{"kind":"set_value","params":{"value":"Ready"}}},"suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update the selected control"}]}"#;
+        let exact = r#"{"items":[{"item_id":"ui","tool_name":"execute_confirmed_ui_action","resource_scope":["model:chosen"],"application_scope":{"application":{"token":"app","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"actions":["set_value"]},"suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update controls"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -1600,10 +1589,10 @@ mod tests {
         )
         .unwrap();
         let item = &request.items[0];
-        assert_eq!(item.suggested_max_uses, 1);
-        assert_eq!(item.operation_scope, vec!["use_selected_object"]);
+        assert_eq!(item.suggested_max_uses, 4);
+        assert_eq!(item.operation_scope, vec!["ui:set_value"]);
         assert_eq!(item.resource_scope.len(), 1);
-        assert!(item.resource_scope[0].starts_with("selected:sha256:"));
+        assert!(item.resource_scope[0].starts_with("ui_application:sha256:"));
         assert!(item.canonical_input_digest_sha256.is_some());
         assert!(
             !item
@@ -1646,34 +1635,17 @@ mod tests {
         assert!(include_desktop_action_reads(&mut crowded, &registry).is_err());
         assert_eq!(crowded, original);
 
-        let toggle = exact.replace(
-            r#"{"kind":"set_value","params":{"value":"Ready"}}"#,
-            r#"{"kind":"toggle","params":{"desired":true}}"#,
+        let invalid = exact.replace("application_scope", "exact_input");
+        assert!(
+            build_permission_request(
+                &call(&invalid),
+                &registry,
+                "invalid".into(),
+                1,
+                "2026-08-28T00:00:00Z".into()
+            )
+            .is_err()
         );
-        let toggle_request = build_permission_request(
-            &call(&toggle),
-            &registry,
-            "permission-ui-toggle".into(),
-            1,
-            "2026-08-28T00:00:00Z".into(),
-        )
-        .unwrap();
-        assert_eq!(toggle_request.items[0].suggested_max_uses, 1);
-        assert_eq!(toggle_request.items[0].resource_scope, item.resource_scope);
-
-        let unsupported = exact.replace(
-            r#"{"kind":"set_value","params":{"value":"Ready"}}"#,
-            r#"{"kind":"scroll","params":{"horizontal":0,"vertical":1}}"#,
-        );
-        let error = build_permission_request(
-            &call(&unsupported),
-            &registry,
-            "permission-ui-scroll".into(),
-            1,
-            "2026-08-28T00:00:00Z".into(),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
     }
 
     #[test]
