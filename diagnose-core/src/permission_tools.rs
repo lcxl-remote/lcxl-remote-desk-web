@@ -170,7 +170,7 @@ pub fn capability_authorization_prompt(
     }
     CapabilityAuthorizationPrompt {
         text: format!(
-            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, copy its application reference into the required application field of execute_confirmed_ui_action, use the current observed target and an approved action; do not request another exact permission for each control within that scope. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
+            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, use its application_id in execute_confirmed_ui_action, use the current observed element_id and an approved action; do not request another exact permission for each control within that scope. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
             serde_json::to_string(&entries).expect("authorization projection is serializable")
         ),
         approved_exact_input_expires_at_unix_ms,
@@ -360,14 +360,10 @@ pub(crate) fn capability_catalog_entries(
                         "supports_cancel".into(),
                         json!(capability.wire.supports_cancel),
                     );
-                    object.insert(
-                        "description".into(),
-                        json!(capability.tool_spec.description),
-                    );
-                    object.insert(
-                        "input_schema".into(),
-                        capability.tool_spec.parameters_schema.clone(),
-                    );
+                    let mut model_spec = capability.tool_spec.clone();
+                    crate::ui_model_ids::project_tool(&mut model_spec);
+                    object.insert("description".into(), json!(model_spec.description));
+                    object.insert("input_schema".into(), model_spec.parameters_schema);
                 }
                 entry
             })

@@ -419,7 +419,13 @@ async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup
         .unwrap()
         .unwrap();
     assert_eq!(bodies.len(), 4);
-    assert!(String::from_utf8_lossy(&bodies[3]).contains("synthetic-original-marker"));
+    let model_body = String::from_utf8_lossy(&bodies[3]);
+    if read_name == "inspect_desktop_ui" {
+        assert!(model_body.contains("DesktopUiInspect"));
+        assert!(!model_body.contains("synthetic-original-marker"));
+    } else {
+        assert!(model_body.contains("synthetic-original-marker"));
+    }
     assert_eq!(
         latest_committed_answer(&sessions.read_snapshot(&run_id).await.unwrap().unwrap())
             .as_deref(),

@@ -8134,7 +8134,7 @@ async fn unknown_outcome_allows_requesting_a_new_authorized_mutation() {
             [tool_use_args(
                 "permission-call",
                 crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                r#"{"items":[{"item_id":"command","tool_name":"execute_confirmed_ui_action","application_scope":{"application":{"token":"original","snapshot_id":"snapshot","object_kind":"application","expires_at":"2026-06-20T00:05:00Z"},"actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Create event"}]}"#,
+                r#"{"items":[{"item_id":"command","tool_name":"execute_confirmed_ui_action","application_scope":{"application_id":"original","actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Create event"}]}"#,
             ), answer("Please review the unresolved action.")]
             .into(),
         ),
@@ -8237,3 +8237,5 @@ async fn unknown_outcome_allows_requesting_a_new_authorized_mutation() {
             .collect::<Vec<_>>()
     );
 }
+
+mod ui_model_ids;

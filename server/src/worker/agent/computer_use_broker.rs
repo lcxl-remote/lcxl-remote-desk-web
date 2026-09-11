@@ -3207,6 +3207,15 @@ impl ComputerUseBroker {
             )
         })?;
         let now = Utc::now();
+        if chrono::DateTime::parse_from_rfc3339(&object_ref.expires_at)
+            .is_ok_and(|expiry| expiry <= now)
+        {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "Computer Use object reference has expired. Read the UI again and retry using the returned ID.",
+                false,
+            ));
+        }
         objects.retain(|_, object| object.expires_at > now);
         let Some(stored) = objects.get(&reference_storage_key(
             &object_ref.token,
@@ -3221,7 +3230,7 @@ impl ComputerUseBroker {
             );
             return Err(error(
                 AgentErrorKind::InvalidInput,
-                "Computer Use object reference is stale or unknown",
+                "Computer Use object is no longer available in this worker. Read the desktop/UI again and use the returned ID.",
                 false,
             ));
         };
@@ -4240,6 +4249,40 @@ mod tests {
         let mut tampered = second;
         tampered.expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
         assert!(broker.resolve_ref(&tampered).is_err());
+    }
+
+    #[test]
+    fn expired_reference_reports_expiry_separately_from_missing_object() {
+        let broker = ComputerUseBroker::new();
+        let reference = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "test-incarnation",
+                ObjectKind::DesktopSession,
+                ResolvedObject::DesktopSession { session_id: 1 },
+            )
+            .unwrap();
+        let mut expired = reference.clone();
+        expired.expires_at = (Utc::now() - Duration::seconds(1)).to_rfc3339();
+        assert!(
+            broker
+                .resolve_ref(&expired)
+                .err()
+                .unwrap()
+                .message
+                .contains("has expired")
+        );
+        let mut unknown = reference.clone();
+        unknown.token = "never-issued".into();
+        assert!(
+            broker
+                .resolve_ref(&unknown)
+                .err()
+                .unwrap()
+                .message
+                .contains("no longer available")
+        );
+        assert!(broker.resolve_ref(&reference).is_ok());
     }
 
     #[test]

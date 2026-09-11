@@ -1484,7 +1484,19 @@ async fn ensure_lease_healthy(deps: &LoopDeps<'_>) -> Result<(), AgentError> {
     Ok(())
 }
 
-async fn run_inner(
+// Keep the growing per-tool state machine on the heap for every entry point,
+// including scheduled and permission continuations on small runtime stacks.
+#[inline(never)]
+fn run_inner<'a, 'd: 'a>(
+    deps: &'a LoopDeps<'d>,
+    session: &'a mut PersistedAgentSession,
+    turn_id: &'a str,
+    sink: &'a mut dyn TurnSink,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<LoopOutcome, AgentError>> + 'a>> {
+    Box::pin(run_inner_impl(deps, session, turn_id, sink))
+}
+
+async fn run_inner_impl(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
     turn_id: &str,
@@ -2472,6 +2484,32 @@ async fn run_inner(
                         )?;
                         continue;
                     }
+
+                    let resolved_call = match crate::ui_model_ids::resolve_call(
+                        call,
+                        &session.conversation,
+                        if crate::ui_model_ids::needs_resolution(&call.name) {
+                            current_unix_ms(deps.clock)?
+                        } else {
+                            0
+                        },
+                    ) {
+                        Ok(call) => call,
+                        Err(error) => {
+                            append_internal_tool_result(
+                                session,
+                                turn.provider_meta.data_envelope.as_ref(),
+                                mint(),
+                                &call.id,
+                                format!("tool error: {}", error.message),
+                                "invalid_desktop_id",
+                            )?;
+                            deps.session_seam.save(session).await?;
+                            finish_tool(session, &call.id, false, sink);
+                            continue;
+                        }
+                    };
+                    let call = &resolved_call;
 
                     // Some mutation inputs name evidence produced earlier in
                     // this durable run. Resolve those references before any
@@ -4197,7 +4235,11 @@ fn append_mutating_result(
                 && message.tool_calls.iter().any(|candidate| {
                     candidate.id == call.id
                         && candidate.name == call.name
-                        && candidate.arguments_json == call.arguments_json
+                        && crate::ui_model_ids::same_call_input(
+                            &call.name,
+                            &candidate.arguments_json,
+                            &call.arguments_json,
+                        )
                 })
         })
         .and_then(|message| message.data_envelope.as_ref());

@@ -1,3 +1,4 @@
+import { AssistantToolCall } from './assistant-tool-call';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
 import './assistant-responsive.css';
 import { AssistantSchedules } from './assistant-schedules';
@@ -791,7 +792,7 @@ export function DeviceAssistantWorkspace({
                                         : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
                                 }`}
                             >
-                                {message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.deviceAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} /></> : message.role === 'assistant'
+                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.deviceAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} /></> : message.role === 'assistant'
                                     ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
                                     : <p className="whitespace-pre-wrap">{message.text}</p>}
                             </div>

@@ -59,6 +59,12 @@ pub fn serialize(output: &OperationOutput) -> Result<String, serde_json::Error> 
 /// Expand only the model representation for existing typed validators.
 pub fn deserialize(text: &str) -> Result<OperationOutput, serde_json::Error> {
     let mut value: Value = serde_json::from_str(text)?;
+    expand_value(&mut value);
+    serde_json::from_value(value)
+}
+
+/// Restore internal reference defaults without allocating the large operation enum.
+pub fn expand_value(value: &mut Value) {
     if let Some(body) = value
         .pointer_mut("/ReadContext/DesktopUiInspect")
         .and_then(Value::as_object_mut)
@@ -91,7 +97,6 @@ pub fn deserialize(text: &str) -> Result<OperationOutput, serde_json::Error> {
             }
         }
     }
-    serde_json::from_value(value)
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
     let input: Input = serde_json::from_str(&call.arguments_json).map_err(|_| {
         error(
             AgentErrorKind::InvalidInput,
-            r#"Invalid semantic UI input format. Required shape: {"application":{"token":"<approved application token>","snapshot_id":"<approved application snapshot>","object_kind":"application","expires_at":"<approved application expiry>"},"target":{"token":"<copy from observation>","snapshot_id":"<copy from observation>","object_kind":"ui_element","expires_at":"<copy from observation>"},"action":{"kind":"set_value","params":{"value":"text"}}}. Actions: invoke/select/focus use {"kind":"invoke"} (replace kind); toggle uses {"kind":"toggle","params":{"desired":true}}. Put value/desired inside action.params, not directly inside action. Copy the complete original target unchanged. Fix the input format; this error does not mean the target expired and does not require another UI read. No permission request or action was executed."#,
+            r#"Invalid semantic UI input. Required shape: {"application_id":"<observed application ID>","element_id":"<observed control ID>","action":{"kind":"set_value","params":{"value":"text"}}}. invoke/select/focus use {"kind":"invoke"}; toggle uses {"kind":"toggle","params":{"desired":true}}. Put value/desired inside action.params. This format error does not mean the target expired. The server resolves references; never supply reference metadata. No action was executed."#,
             false,
             true,
         )

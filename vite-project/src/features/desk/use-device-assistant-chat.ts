@@ -39,7 +39,8 @@ export type DeviceAssistantMessage = {
     permissionReason?: string;
     contextBoundaryIds?: string[];
     id: string;
-    role: 'user' | 'assistant' | 'tool_result';
+    role: 'user' | 'assistant' | 'tool_result' | 'tool_call';
+    toolCallId?: string;
     text: string;
     reasoning?: string | null;
     provenance?: AiProvenance | null;
@@ -128,7 +129,10 @@ function upsertTool(
 ) {
     const index = tools.findIndex((tool) => tool.callId === next.callId);
     if (index === -1) return [...tools, next];
-    return tools.map((tool, current) => current === index ? next : tool);
+    const existing = tools[index];
+    const merged = next.name === 'unknown' && existing.name !== 'unknown'
+        ? { ...next, name: existing.name, argumentsJson: existing.argumentsJson } : next;
+    return tools.map((tool, current) => current === index ? merged : tool);
 }
 
 function upsertVisualEvidence(
@@ -214,6 +218,7 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
             });
         }
         for (const call of message.toolCalls ?? []) {
+            messages.push({ id: `tool-call-${call.id}`, role: 'tool_call', toolCallId: call.id, text: '', contextBoundaryIds: [message.id] });
             tools = upsertTool(tools, {
                 callId: call.id,
                 name: call.name,
@@ -227,6 +232,9 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
         }
         if ((message.role === 'tool' || message.role === 'untrusted_output') && message.toolCallId) {
             const existing = tools.find((tool) => tool.callId === message.toolCallId);
+            if (!existing) {
+                messages.push({ id: `tool-call-${message.toolCallId}`, role: 'tool_call', toolCallId: message.toolCallId, text: '', contextBoundaryIds: [message.id] });
+            }
             let permissionReason: string | undefined;
             let nativeFailed = false;
             try {
@@ -242,7 +250,7 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 status: backgroundRunning ? 'running'
                     : nativeFailed || /^(tool error:|not executed:|execution failed:|execution did not complete:)/i.test(message.text) ? 'failed' : 'ok',
                 argumentsJson: existing?.argumentsJson ?? '{}',
-                output: message.text || null,
+                output: message.text,
             });
             if (!backgroundRunning && message.text && (existing?.name === 'execute_confirmed_command' || message.backgroundTaskId || (nativeFailed && permissionReason))) {
                 messages.push({ id: message.id, role: 'tool_result', text: message.text, permissionReason });
@@ -251,9 +259,9 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
     }
     let lastVisible: DeviceAssistantMessage | undefined;
     for (const raw of snapshot.messages) {
-        lastVisible = messages.find(message => message.id === raw.id) ?? lastVisible;
+        lastVisible = messages.find(message => message.id === raw.id || message.contextBoundaryIds?.includes(raw.id)) ?? lastVisible;
         if (lastVisible && lastVisible.id !== raw.id) {
-            lastVisible.contextBoundaryIds = [...(lastVisible.contextBoundaryIds ?? []), raw.id];
+            lastVisible.contextBoundaryIds = [...new Set([...(lastVisible.contextBoundaryIds ?? []), raw.id])];
         }
     }
     return {
@@ -791,11 +799,17 @@ export function useDeviceAssistantChat({
                     argumentsJson,
                     output: null,
                 }));
+                setMessages(current => current.some(message => message.toolCallId === callId) ? current : [...current, {
+                    id: `tool-call-${callId}`, role: 'tool_call', toolCallId: callId, text: '',
+                }]);
                 setStatus('using_tool');
                 break;
             }
             case 'tool_finished': {
                 const callId = event.tool_call_id ?? `tool-${event.seq}`;
+                setMessages(current => current.some(message => message.toolCallId === callId) ? current : [...current, {
+                    id: `tool-call-${callId}`, role: 'tool_call', toolCallId: callId, text: '',
+                }]);
                 setTools((current) => {
                     const existing = current.find((tool) => tool.callId === callId);
                     return upsertTool(current, {

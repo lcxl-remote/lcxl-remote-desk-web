@@ -324,6 +324,7 @@ describe('useDeviceAssistantChat', () => {
         }));
         await waitFor(() => expect(result.current.hydrating).toBe(false));
         expect(result.current.messages).toEqual([
+            expect.objectContaining({ id: 'tool-call-command-1', role: 'tool_call', toolCallId: 'command-1' }),
             { id: 'waiting', role: 'assistant', text: 'Waiting for the background command.' },
             { id: 'finished', role: 'tool_result', text: output },
         ]);
@@ -1104,6 +1105,10 @@ describe('useDeviceAssistantChat', () => {
             });
         });
 
+        expect(result.current.messages.filter(message => message.toolCallId === 'draft-1')).toHaveLength(1);
+        expect(result.current.tools.find(tool => tool.callId === 'draft-1')).toMatchObject({
+            name: 'preview_computer_action', argumentsJson: JSON.stringify(draft), output: JSON.stringify(draft), status: 'ok',
+        });
         expect(result.current.draft?.actions).toHaveLength(1);
         expect(result.current.messages.at(-1)?.text).toContain('Nothing was executed');
         expect(result.current.running).toBe(false);
@@ -1193,6 +1198,28 @@ describe('useDeviceAssistantChat', () => {
         });
         expect(result.current.messages.some((message) => message.text === 'stale answer')).toBe(false);
         expect(result.current.running).toBe(true);
+    });
+
+    it('restores ordered tool calls including tool-only turns, errors, and missing results', async () => {
+        localStorage.setItem('device-assistant-conversation:tool-records', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 3, active: false, messages: [
+                { id: 'user', role: 'user', text: 'check' },
+                { id: 'calls', role: 'assistant', text: '', toolCalls: [
+                    { id: 'a', name: 'inspect_desktop_ui', argumentsJson: '{"query":{"name":"Calendar"}}' },
+                    { id: 'b', name: 'load_tool_details', argumentsJson: '{}' },
+                ] },
+                { id: 'result', role: 'tool', toolCallId: 'a', text: 'tool error: permission required' },
+                { id: 'answer', role: 'assistant', text: 'stopped' },
+            ],
+        } }) }));
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'tool-records',
+            subscribe: () => () => undefined, sendMessage: () => 'unused' }));
+        await waitFor(() => expect(result.current.messages).toHaveLength(4));
+        expect(result.current.messages.map(message => message.id)).toEqual(['user', 'tool-call-a', 'tool-call-b', 'answer']);
+        expect(result.current.tools[0]).toMatchObject({ name: 'inspect_desktop_ui', status: 'failed', output: 'tool error: permission required' });
+        expect(result.current.tools[1].output).toBeNull();
+        unmount();
     });
 
     it('restores reasoning on tool-only assistant messages and final answers', async () => {

@@ -249,14 +249,16 @@ fn detail_entries(
                 return Some(json!({"tool_name": name, "state": "callable_when_loaded"}));
             }
             if availability.callable() && requestable.contains(name.as_str()) {
+                let mut model_spec = capability.tool_spec.clone();
+                crate::ui_model_ids::project_tool(&mut model_spec);
                 return Some(json!({
                     "provider_id": provider.wire.provider_id,
                     "capability_id": capability.wire.capability_id,
                     "tool_name": name,
                     "state": "permission_requestable",
                     "effect": capability.wire.effect,
-                    "description": capability.tool_spec.description,
-                    "input_schema": capability.tool_spec.parameters_schema,
+                    "description": model_spec.description,
+                    "input_schema": model_spec.parameters_schema,
                     "execution_policy": capability.wire.execution_policy,
                     "authorization_hint": capability.wire.authorization_hint,
                     "limits": capability.wire.limits,

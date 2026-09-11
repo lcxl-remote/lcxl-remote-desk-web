@@ -844,6 +844,8 @@ fn build_openai_body_profiled(
     profile: &ModelRequestProfile,
     effective_output_limit: PositiveOutputLimit,
 ) -> Result<Value, desk_diagnose_core::model_profile::ProfileError> {
+    let projected = desk_diagnose_core::ui_model_ids::project_request(request);
+    let request = &projected;
     let messages = openai_messages_to_json(&request.messages);
     let mut body = json!({
         "model": model,
@@ -1172,6 +1174,8 @@ fn build_anthropic_body_profiled(
     profile: &ModelRequestProfile,
     effective_output_limit: PositiveOutputLimit,
 ) -> Result<Value, desk_diagnose_core::model_profile::ProfileError> {
+    let projected = desk_diagnose_core::ui_model_ids::project_request(request);
+    let request = &projected;
     let mut system = String::new();
     let mut messages: Vec<Value> = Vec::new();
     for m in &request.messages {
@@ -1432,6 +1436,38 @@ fn append_block_string(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_model_wire_exposes_ids_without_reference_metadata() {
+        let mut request = ModelRequest::text_only(vec![ChatMessage::tool_result("observation", "read", json!({"ReadContext":{"DesktopSessionInspect":{
+            "session":{"token":"session-id","snapshot_id":"private-snapshot","object_kind":"desktop_session","expires_at":"2030-01-01T00:00:00Z"},
+            "os":"macos","interactive_session_incarnation":"worker",
+            "active_application":{"token":"calendar-id","snapshot_id":"private-snapshot","object_kind":"application","expires_at":"2030-01-01T00:00:00Z"},"active_application_name":"Calendar"
+        }}}).to_string())], ResponseFormatSpec::None);
+        request.tools = desk_diagnose_core::device_assistant::device_assistant_tool_registry()
+            .into_iter()
+            .filter(|tool| {
+                matches!(
+                    tool.name(),
+                    "inspect_desktop_ui" | "execute_confirmed_ui_action" | "read_current_screen"
+                )
+            })
+            .map(|tool| tool.spec)
+            .collect();
+        for body in [
+            build_openai_body("model", &request),
+            build_anthropic_body("model", &request),
+        ] {
+            let wire = body.to_string();
+            assert!(!wire.contains("private-snapshot"));
+            assert!(!wire.contains("snapshot_id"));
+            assert!(!wire.contains("expires_at"));
+            assert!(wire.contains("calendar-id"));
+            assert!(wire.contains("application_id"));
+            assert!(wire.contains("element_id"));
+        }
+        assert!(request.messages[0].text.contains("private-snapshot"));
+    }
+
     use super::*;
     #[actix_web::test]
     async fn compression_transport_records_real_call_provenance_without_tools() {

@@ -66,7 +66,11 @@ impl ActionResultOrigin {
                     && message.tool_calls.iter().any(|candidate| {
                         candidate.id == call.id
                             && candidate.name == call.name
-                            && same_json(&candidate.arguments_json, &call.arguments_json)
+                            && crate::ui_model_ids::same_call_input(
+                                &call.name,
+                                &candidate.arguments_json,
+                                &call.arguments_json,
+                            )
                     })
             })
             .and_then(|message| message.data_envelope.as_ref())
@@ -112,7 +116,11 @@ impl ActionResultOrigin {
                     && message.tool_calls.iter().any(|candidate| {
                         candidate.id == call.id
                             && candidate.name == call.name
-                            && same_json(&candidate.arguments_json, &call.arguments_json)
+                            && crate::ui_model_ids::same_call_input(
+                                &call.name,
+                                &candidate.arguments_json,
+                                &call.arguments_json,
+                            )
                     })
             })
             .and_then(|message| message.data_envelope.as_ref())
@@ -316,13 +324,6 @@ impl ActionResultOrigin {
             envelope,
         })
     }
-}
-
-fn same_json(left: &str, right: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(left)
-        .ok()
-        .zip(serde_json::from_str::<serde_json::Value>(right).ok())
-        .is_some_and(|(left, right)| left == right)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
