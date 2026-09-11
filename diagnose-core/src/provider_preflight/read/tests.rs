@@ -389,7 +389,11 @@ fn unselected_desktop_preflight_requires_explicit_r1_authority_on_both_surfaces(
             let call = ToolCall {
                 id: "read".into(),
                 name: name.into(),
-                arguments_json: "{}".into(),
+                arguments_json: if name == "inspect_desktop_ui" {
+                    r#"{"allow_unfiltered":true}"#.into()
+                } else {
+                    "{}".into()
+                },
             };
             let preflight = ReadCallPreflight::build(
                 &registry,

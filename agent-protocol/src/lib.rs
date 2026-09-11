@@ -692,6 +692,14 @@ pub struct SystemInfoParams {
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct ProcessListParams {
+    /// Explicit opt-in to bounded enumeration when no selection is supplied.
+    #[serde(default)]
+    pub allow_unfiltered: bool,
+    /// OR across case-insensitive process-name substrings.
+    #[serde(default)]
+    pub queries: Vec<String>,
+    #[serde(default)]
+    pub include_details: bool,
     #[serde(default)]
     pub limit: u32,
     #[serde(default)]
@@ -837,10 +845,14 @@ pub struct ProcessListOutput {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
 pub struct ProcessEntry {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_queries: Vec<u32>,
     pub pid: u32,
     pub name: String,
-    pub cpu_percent: f32,
-    pub memory_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
     pub user: Option<String>,
     #[serde(default)]
     pub command_line_redacted: bool,
@@ -1249,6 +1261,9 @@ mod tests {
     fn envelope_json_round_trips() {
         let env = sample_envelope(OperationInput::ReadContext(ReadContextInput {
             kind: ContextKind::ProcessList(ProcessListParams {
+                allow_unfiltered: false,
+                queries: Vec::new(),
+                include_details: false,
                 limit: 50,
                 sort: ProcessSort::CpuDesc,
                 include_command_line: false,
@@ -1436,6 +1451,8 @@ mod tests {
             ),
             (
                 ContextKind::DesktopUiInspect(computer_use::UiInspectParams {
+                    allow_unfiltered: false,
+                    overview: false,
                     query: None,
                     element_only: false,
                     scope: Default::default(),
@@ -1525,5 +1542,83 @@ mod tests {
         let _ = AgentEnvelope::schema();
         let _ = AgentOutcome::schema();
         let _ = AgentRequestData::schema();
+    }
+}
+
+/// Bounded literal substring search shared by all native adapters. No regex,
+/// shell interpretation, transliteration, or implicit fuzzy spelling guesses.
+pub fn validate_search_terms(terms: &[String]) -> bool {
+    terms.len() <= 16
+        && terms
+            .iter()
+            .all(|term| !term.trim().is_empty() && term.len() <= 128)
+}
+
+pub fn matching_search_terms(terms: &[String], fields: &[&str]) -> Vec<u32> {
+    let fields: Vec<_> = fields.iter().map(|field| field.to_lowercase()).collect();
+    terms
+        .iter()
+        .take(16)
+        .enumerate()
+        .filter_map(|(i, term)| {
+            let needle = term.trim().to_lowercase();
+            (!needle.is_empty() && fields.iter().any(|field| field.contains(&needle)))
+                .then_some(i as u32)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod batch_search_tests {
+    use super::*;
+    #[test]
+    fn alternatives_are_case_insensitive_literal_substrings() {
+        let terms = vec!["日历".into(), "calendar".into(), "calc".into(), ".*".into()];
+        assert_eq!(
+            matching_search_terms(&terms, &["日历", "Calendar"]),
+            vec![0, 1]
+        );
+        assert_eq!(matching_search_terms(&terms, &["Calculator"]), vec![2]);
+        assert!(matching_search_terms(&terms, &["Notes"]).is_empty());
+        assert!(!validate_search_terms(&vec!["x".into(); 17]));
+        assert!(!validate_search_terms(&[" ".into()]));
+    }
+}
+
+impl ProcessListParams {
+    pub fn validate_selection(&self) -> Result<(), &'static str> {
+        if !validate_search_terms(&self.queries) {
+            return Err("queries must contain at most 16 nonempty strings of at most 128 bytes");
+        }
+        if self.queries.is_empty() && !self.allow_unfiltered {
+            return Err(
+                r#"Search conditions are required. Use {"queries":["Calendar","Calculator"]}. Only when a broader listing is necessary, explicitly set {"allow_unfiltered":true}; normal result limits still apply. No processes were read."#,
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod required_process_search_tests {
+    use super::*;
+    #[test]
+    fn enumeration_requires_explicit_opt_in() {
+        let mut params = ProcessListParams::default();
+        assert!(
+            params
+                .validate_selection()
+                .unwrap_err()
+                .contains("allow_unfiltered")
+        );
+        params.limit = 1;
+        assert!(params.validate_selection().is_err());
+        params.allow_unfiltered = true;
+        assert!(params.validate_selection().is_ok());
+        params.queries = vec![" ".into()];
+        assert!(params.validate_selection().is_err());
+        params.allow_unfiltered = false;
+        params.queries = vec!["calendar".into()];
+        assert!(params.validate_selection().is_ok());
     }
 }

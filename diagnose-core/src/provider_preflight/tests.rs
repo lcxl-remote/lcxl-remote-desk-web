@@ -233,8 +233,11 @@ fn process_command_lines_raise_the_shared_risk_floor() {
     let registry = crate::device_assistant::device_assistant_provider_registry();
     let descriptor = registry.capability_for_tool("read_process_list").unwrap();
     for (input, expected) in [
-        ("{}", CapabilityRiskTier::R0),
-        ("{\"include_command_line\":true}", CapabilityRiskTier::R1),
+        (r#"{"allow_unfiltered":true}"#, CapabilityRiskTier::R0),
+        (
+            r#"{"allow_unfiltered":true,"include_command_line":true}"#,
+            CapabilityRiskTier::R1,
+        ),
     ] {
         let call = ToolCall {
             id: "call".into(),

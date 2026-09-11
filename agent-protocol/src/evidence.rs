@@ -128,10 +128,11 @@ mod tests {
         AgentOutcome::Ok(OperationOutput::ReadContext(
             ReadContextOutput::ProcessList(ProcessListOutput {
                 processes: vec![ProcessEntry {
+                    matched_queries: Vec::new(),
                     pid: 1,
                     name: "init".into(),
-                    cpu_percent: 0.1,
-                    memory_bytes: 1000,
+                    cpu_percent: Some(0.1),
+                    memory_bytes: Some(1000),
                     user: None,
                     command_line_redacted: false,
                 }],

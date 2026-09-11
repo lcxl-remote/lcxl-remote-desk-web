@@ -4,13 +4,14 @@ use desk_agent_protocol::computer_use::UiInspectScope;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::time::{Duration, Instant};
 
+use super::native_ui_identity::{IdentityStore, NativeElement};
 use core_graphics::geometry::{CGPoint, CGSize};
 use desk_agent_protocol::computer_use::{UiSemanticAction, UiSemanticActionKind};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use objc2::rc::autoreleasepool;
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
-use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 
 use super::computer_use_broker::{
     CollectedUiNode, CollectedUiTree, ObservedApplication, ObservedDesktop,
@@ -70,6 +71,8 @@ unsafe extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRelease(value: CfTypeRef);
+    fn CFEqual(a: CfTypeRef, b: CfTypeRef) -> u8;
+    fn CFHash(value: CfTypeRef) -> usize;
     fn CFRetain(value: CfTypeRef) -> CfTypeRef;
     fn CFGetTypeID(value: CfTypeRef) -> CfTypeId;
     fn CFStringGetTypeID() -> CfTypeId;
@@ -97,6 +100,12 @@ unsafe extern "C" {
 }
 
 struct OwnedCf(CfTypeRef);
+
+impl Clone for OwnedCf {
+    fn clone(&self) -> Self {
+        Self(unsafe { CFRetain(self.0) })
+    }
+}
 
 impl Drop for OwnedCf {
     fn drop(&mut self) {
@@ -235,6 +244,35 @@ pub(super) fn collect_application_selection(
     query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
     element_only: bool,
 ) -> Result<CollectedUiTree, AgentError> {
+    let expected_image_path = expected_image_path.to_owned();
+    let query = query.cloned();
+    let selection = menu_window.map(str::to_owned);
+    super::native_ui_identity::run(move || {
+        collect_application_selection_inner(
+            expected_process_id,
+            &expected_image_path,
+            max_depth,
+            max_nodes,
+            max_bytes,
+            scope,
+            selection.as_deref(),
+            query.as_ref(),
+            element_only,
+        )
+    })
+}
+
+fn collect_application_selection_inner(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    max_depth: u16,
+    max_nodes: u32,
+    max_bytes: u32,
+    scope: UiInspectScope,
+    menu_window: Option<&str>,
+    query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
+    element_only: bool,
+) -> Result<CollectedUiTree, AgentError> {
     if !crate::macos_permissions::probe().accessibility {
         return Err(failure(
             AgentErrorKind::PermissionDenied,
@@ -259,6 +297,11 @@ pub(super) fn collect_application_selection(
         ));
     }
     let root = OwnedCf(root);
+    let root = if let Some(id) = menu_window {
+        retained_element(id, expected_process_id, process_start(expected_process_id)?)?
+    } else {
+        root
+    };
     set_messaging_timeout(root.0)?;
     let config = WalkConfig {
         query: query.cloned(),
@@ -276,7 +319,7 @@ pub(super) fn collect_application_selection(
     let mut nodes = Vec::new();
     walk(
         root.0, None, 0, 0, false, false, &config, &mut state, &mut nodes,
-    );
+    )?;
     if menu_window.is_some() && !state.found_menu_window {
         return Err(failure(
             AgentErrorKind::SessionUnavailable,
@@ -317,12 +360,47 @@ pub(super) fn preflight_action(
     target_fingerprint: &str,
     action: &UiSemanticAction,
 ) -> Result<(), AgentError> {
+    let expected_image_path = expected_image_path.to_owned();
+    let target_fingerprint = target_fingerprint.to_owned();
+    let action = action.clone();
+    super::native_ui_identity::run(move || {
+        preflight_action_inner(
+            expected_process_id,
+            &expected_image_path,
+            &target_fingerprint,
+            &action,
+        )
+    })
+}
+
+fn preflight_action_inner(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    target_fingerprint: &str,
+    action: &UiSemanticAction,
+) -> Result<(), AgentError> {
     let element =
         locate_action_target(expected_process_id, expected_image_path, target_fingerprint)?;
     validate_action_target(element.0, action)
 }
 
 pub(super) fn resolve_window_capture_target(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    target_fingerprint: &str,
+) -> Result<super::collectors::screen_capture::WindowCaptureTarget, AgentError> {
+    let expected_image_path = expected_image_path.to_owned();
+    let target_fingerprint = target_fingerprint.to_owned();
+    super::native_ui_identity::run(move || {
+        resolve_window_capture_target_inner(
+            expected_process_id,
+            &expected_image_path,
+            &target_fingerprint,
+        )
+    })
+}
+
+fn resolve_window_capture_target_inner(
     expected_process_id: u32,
     expected_image_path: &str,
     target_fingerprint: &str,
@@ -417,6 +495,25 @@ pub(super) fn apply_action(
     target_fingerprint: &str,
     action: &UiSemanticAction,
 ) -> Result<AppliedUiAction, AgentError> {
+    let expected_image_path = expected_image_path.to_owned();
+    let target_fingerprint = target_fingerprint.to_owned();
+    let action = action.clone();
+    super::native_ui_identity::run(move || {
+        apply_action_inner(
+            expected_process_id,
+            &expected_image_path,
+            &target_fingerprint,
+            &action,
+        )
+    })
+}
+
+fn apply_action_inner(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    target_fingerprint: &str,
+    action: &UiSemanticAction,
+) -> Result<AppliedUiAction, AgentError> {
     let element =
         locate_action_target(expected_process_id, expected_image_path, target_fingerprint)?;
     validate_action_target(element.0, action)?;
@@ -498,106 +595,13 @@ fn locate_action_target(
             false,
         ));
     }
-    let root = unsafe { AXUIElementCreateApplication(expected_process_id as libc::pid_t) };
-    if root.is_null() {
-        return Err(failure(
-            AgentErrorKind::SessionUnavailable,
-            "the selected application has no Accessibility root",
-            false,
-        ));
-    }
-    let root = OwnedCf(root);
-    set_messaging_timeout(root.0)?;
-    let config = WalkConfig {
-        query: None,
-        element_only: false,
-        menu_window: None,
-        scope: UiInspectScope::All,
-        process_id: expected_process_id,
-        process_started_at: process_start(expected_process_id)?,
-        max_depth: 16,
-        max_nodes: 1_024,
-        max_bytes: usize::MAX,
-        deadline: Instant::now() + HARD_DEADLINE,
-    };
-    let mut visited = 0usize;
-    find_element(
-        root.0,
-        None,
-        0,
-        0,
+    let element = retained_element(
         target_fingerprint,
-        &config,
-        &mut visited,
-    )
-    .ok_or_else(|| {
-        failure(
-            AgentErrorKind::InvalidInput,
-            "the Accessibility element reference is stale or no longer reachable",
-            false,
-        )
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn find_element(
-    element: AxUiElementRef,
-    parent_fingerprint: Option<&str>,
-    depth: u16,
-    sibling_ordinal: usize,
-    target_fingerprint: &str,
-    config: &WalkConfig,
-    visited: &mut usize,
-) -> Option<OwnedCf> {
-    if *visited >= config.max_nodes || Instant::now() >= config.deadline {
-        return None;
-    }
-    if unsafe { AXUIElementSetMessagingTimeout(element, AX_MESSAGE_TIMEOUT_SECONDS) } != AX_SUCCESS
-    {
-        return None;
-    }
-    *visited += 1;
-    let role = attribute_string(element, "AXRole").unwrap_or_else(|| "AXUnknown".into());
-    let subrole = attribute_string(element, "AXSubrole").unwrap_or_default();
-    let role = if subrole.is_empty() {
-        role
-    } else {
-        format!("{role}/{subrole}")
-    };
-    let identifier = attribute_string(element, "AXIdentifier").unwrap_or_default();
-    let current_fingerprint = fingerprint(
-        parent_fingerprint,
-        sibling_ordinal,
-        config.process_id,
-        config.process_started_at,
-        &role,
-        &identifier,
-    );
-    if current_fingerprint == target_fingerprint {
-        return Some(OwnedCf(unsafe { CFRetain(element) }));
-    }
-    if depth >= config.max_depth {
-        return None;
-    }
-    let children = copy_attribute(element, "AXChildren")?;
-    let count = unsafe { CFArrayGetCount(children.0) }.max(0);
-    for ordinal in 0..count {
-        let child = unsafe { CFArrayGetValueAtIndex(children.0, ordinal) };
-        if !child.is_null()
-            && let Some(found) = find_element(
-                child,
-                Some(&current_fingerprint),
-                depth + 1,
-                ordinal as usize,
-                target_fingerprint,
-                config,
-                visited,
-            )
-        {
-            return Some(found);
-        }
-    }
-    None
+        expected_process_id,
+        process_start(expected_process_id)?,
+    )?;
+    set_messaging_timeout(element.0)?;
+    Ok(element)
 }
 
 fn validate_action_target(
@@ -650,83 +654,64 @@ fn is_menu_role(role: &str) -> bool {
     )
 }
 
-fn element_identity(
-    element: AxUiElementRef,
-    parent: Option<&str>,
-    ordinal: usize,
-    config: &WalkConfig,
-) -> String {
-    let role = attribute_string(element, "AXRole").unwrap_or_else(|| "AXUnknown".into());
-    let subrole = attribute_string(element, "AXSubrole").unwrap_or_default();
-    let (role, _) = bounded_string(if subrole.is_empty() {
-        role
-    } else {
-        format!("{role}/{subrole}")
-    });
-    let identifier = attribute_string(element, "AXIdentifier").unwrap_or_default();
-    fingerprint(
-        parent,
-        ordinal,
-        config.process_id,
-        config.process_started_at,
-        &role,
-        &identifier,
-    )
+fn element_identity(element: AxUiElementRef, config: &WalkConfig) -> Result<String, AgentError> {
+    let retained = OwnedCf(unsafe { CFRetain(element) });
+    let key = unsafe { CFHash(element) }.to_le_bytes().to_vec();
+    IDENTITIES.with(|store| {
+        store
+            .borrow_mut()
+            .identify(config.process_id, config.process_started_at, key, retained)
+    })
 }
 
 fn walk(
     element: AxUiElementRef,
     parent: Option<(Option<u32>, String)>,
     depth: u16,
-    sibling_ordinal: usize,
+    _sibling_ordinal: usize,
     inside_menu: bool,
     within_window: bool,
     config: &WalkConfig,
     state: &mut WalkState,
     output: &mut Vec<CollectedUiNode>,
-) {
+) -> Result<(), AgentError> {
     if config.element_only && state.found_menu_window {
-        return;
+        return Ok(());
     }
     if state.visited >= 4096 || Instant::now() >= config.deadline {
         state.truncated = true;
-        return;
+        return Ok(());
     }
     state.visited += 1;
     if unsafe { AXUIElementSetMessagingTimeout(element, AX_MESSAGE_TIMEOUT_SECONDS) } != AX_SUCCESS
     {
         state.truncated = true;
-        return;
+        return Ok(());
     }
 
     let inside_menu =
         inside_menu || attribute_string(element, "AXRole").is_some_and(|role| is_menu_role(&role));
     if config.scope == UiInspectScope::Content && inside_menu {
-        return;
+        return Ok(());
     }
+    let identity = element_identity(element, config)?;
     let within_window = within_window
-        || config.menu_window.as_ref().is_some_and(|target| {
-            element_identity(
-                element,
-                parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
-                sibling_ordinal,
-                config,
-            ) == *target
-        });
+        || config
+            .menu_window
+            .as_ref()
+            .is_some_and(|target| target == &identity);
     state.found_menu_window |= within_window;
     let selected = config.menu_window.is_none() || within_window;
     let emit = selected && (config.scope != UiInspectScope::Menus || inside_menu);
     if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
         state.truncated = true;
-        return;
+        return Ok(());
     }
     let (index, fingerprint) = if emit {
         let (node, strings_truncated) = read_node(
             element,
-            parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
+            identity.clone(),
             parent.as_ref().and_then(|(index, _)| *index),
-            sibling_ordinal,
-            config,
         );
         let matches = super::computer_use_broker::ui_query_matches(config.query.as_ref(), &node);
         if !matches {
@@ -737,7 +722,7 @@ fn walk(
                 .saturating_add(OBJECT_REF_BUDGET);
             if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
                 state.truncated = true;
-                return;
+                return Ok(());
             }
             state.encoded_bytes += encoded_bytes;
             state.truncated |= strings_truncated;
@@ -747,35 +732,27 @@ fn walk(
             (Some(index), fingerprint)
         }
     } else {
-        (
-            None,
-            element_identity(
-                element,
-                parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
-                sibling_ordinal,
-                config,
-            ),
-        )
+        (None, identity)
     };
 
     if selected && config.element_only {
-        return;
+        return Ok(());
     }
     let Some(children) = copy_attribute(element, "AXChildren") else {
-        return;
+        return Ok(());
     };
     let count = unsafe { CFArrayGetCount(children.0) }.max(0) as usize;
     if depth >= config.max_depth {
         state.truncated |= count > 0;
-        return;
+        return Ok(());
     }
     for ordinal in 0..count {
         if config.element_only && state.found_menu_window {
-            return;
+            return Ok(());
         }
         if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
             state.truncated = true;
-            return;
+            return Ok(());
         }
         let child = unsafe { CFArrayGetValueAtIndex(children.0, ordinal as isize) };
         if child.is_null() {
@@ -791,16 +768,15 @@ fn walk(
             config,
             state,
             output,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn read_node(
     element: AxUiElementRef,
-    parent_fingerprint: Option<&str>,
+    fingerprint: String,
     parent_index: Option<u32>,
-    sibling_ordinal: usize,
-    config: &WalkConfig,
 ) -> (CollectedUiNode, bool) {
     let role = attribute_string(element, "AXRole").unwrap_or_else(|| "AXUnknown".into());
     let subrole = attribute_string(element, "AXSubrole").unwrap_or_default();
@@ -851,16 +827,10 @@ fn read_node(
             supported_actions.push(UiSemanticActionKind::Focus);
         }
     }
-    let fingerprint = fingerprint(
-        parent_fingerprint,
-        sibling_ordinal,
-        config.process_id,
-        config.process_started_at,
-        &role,
-        &identifier,
-    );
+
     (
         CollectedUiNode {
+            is_collection: matches!(role.as_str(), "AXGrid" | "AXOutline" | "AXTable"),
             native_id: (!is_protected && !identifier.is_empty() && identifier.len() <= 512)
                 .then(|| identifier.clone()),
             parent_index,
@@ -880,6 +850,29 @@ pub(super) fn application_by_pid(process_id: u32) -> Result<ObservedApplication,
     autoreleasepool(|_| unsafe {
         let application: *mut AnyObject = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: process_id as i32];
         application_identity(application)
+    })
+}
+
+pub(super) fn application_display_name(pid: u32) -> Option<String> {
+    autoreleasepool(|_| unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid as i32];
+        if app.is_null() {
+            return None;
+        }
+        let name: *mut AnyObject = msg_send![app, localizedName];
+        if name.is_null() {
+            return None;
+        }
+        let bytes: *const c_char = msg_send![name, UTF8String];
+        if bytes.is_null() {
+            None
+        } else {
+            Some(
+                std::ffi::CStr::from_ptr(bytes)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }
     })
 }
 
@@ -1234,26 +1227,24 @@ fn bounded_string(mut value: String) -> (String, bool) {
     (value, true)
 }
 
-fn fingerprint(
-    parent: Option<&str>,
-    sibling_ordinal: usize,
-    process_id: u32,
-    process_started_at: u64,
-    role: &str,
-    identifier: &str,
-) -> String {
-    let mut hasher = Sha256::new();
-    let parent = parent.unwrap_or("root").as_bytes();
-    hasher.update(parent.len().to_le_bytes());
-    hasher.update(parent);
-    hasher.update(sibling_ordinal.to_le_bytes());
-    hasher.update(process_id.to_le_bytes());
-    hasher.update(process_started_at.to_le_bytes());
-    hasher.update(role.len().to_le_bytes());
-    hasher.update(role.as_bytes());
-    hasher.update(identifier.len().to_le_bytes());
-    hasher.update(identifier.as_bytes());
-    format!("{:x}", hasher.finalize())
+thread_local! { static IDENTITIES: RefCell<IdentityStore<OwnedCf>> = RefCell::new(IdentityStore::new(8192)); }
+
+impl NativeElement for OwnedCf {
+    fn same_element(&self, other: &Self) -> bool {
+        unsafe { CFEqual(self.0, other.0) != 0 }
+    }
+    fn definitely_destroyed(&self) -> bool {
+        let Some(attribute) = create_string("AXRole") else {
+            return false;
+        };
+        let mut value = std::ptr::null();
+        let status = unsafe { AXUIElementCopyAttributeValue(self.0, attribute.0, &mut value) };
+        if !value.is_null() {
+            drop(OwnedCf(value));
+        }
+        // kAXErrorInvalidUIElement; permission/timeout errors preserve identity.
+        status == -25202
+    }
 }
 
 fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
@@ -1297,6 +1288,8 @@ mod tests {
         );
         let all = collect_application(app.process_id, &app.image_path, 12, 300, 262144).unwrap();
         let query = UiInspectQuery {
+            element_id: None,
+            any: Vec::new(),
             role: Some("AXStaticText".into()),
             ..Default::default()
         };
@@ -1341,6 +1334,8 @@ mod tests {
             .find(|node| node.native_id.is_some())
             .expect("a native identifier");
         let query = UiInspectQuery {
+            element_id: None,
+            any: Vec::new(),
             native_id: identified.native_id.clone(),
             ..Default::default()
         };
@@ -1363,6 +1358,8 @@ mod tests {
                 .any(|node| node.fingerprint == identified.fingerprint)
         );
         let query = UiInspectQuery {
+            element_id: None,
+            any: Vec::new(),
             name: Some("nonexistent-precise-query".into()),
             ..Default::default()
         };
@@ -1592,19 +1589,6 @@ mod tests {
     }
 
     #[test]
-    fn fingerprints_bind_process_incarnation_and_parent() {
-        let first = fingerprint(Some("parent-a"), 1, 4, 8, "AXButton", "id");
-        let second = fingerprint(Some("parent-b"), 1, 4, 8, "AXButton", "id");
-        let restarted = fingerprint(Some("parent-a"), 1, 4, 9, "AXButton", "id");
-        assert_ne!(first, second);
-        assert_ne!(first, restarted);
-        assert_ne!(
-            fingerprint(Some("parent-a"), 1, 4, 8, "AB", "C"),
-            fingerprint(Some("parent-a"), 1, 4, 8, "A", "BC")
-        );
-    }
-
-    #[test]
     fn toggle_state_rejects_mixed_or_unknown_numeric_values() {
         assert_eq!(toggle_state_from_number(0), Some(false));
         assert_eq!(toggle_state_from_number(1), Some(true));
@@ -1746,35 +1730,16 @@ mod tests {
         };
         assert_ne!(restarted_at, original_started_at);
 
-        let root = unsafe { AXUIElementCreateApplication(restarted_process_id as libc::pid_t) };
-        assert!(!root.is_null(), "restarted Calculator Accessibility root");
-        let root = OwnedCf(root);
-        set_messaging_timeout(root.0).expect("bound restarted Calculator AX messaging");
-        let config = WalkConfig {
-            query: None,
-            element_only: false,
-            menu_window: None,
-            scope: UiInspectScope::All,
-            process_id: restarted_process_id,
-            process_started_at: restarted_at,
-            max_depth: 16,
-            max_nodes: 1_024,
-            max_bytes: usize::MAX,
-            deadline: Instant::now() + HARD_DEADLINE,
-        };
-        let mut visited = 0;
+        let stale_for_lookup = stale_fingerprint.clone();
         assert!(
-            find_element(
-                root.0,
-                None,
-                0,
-                0,
-                &stale_fingerprint,
-                &config,
-                &mut visited,
+            super::super::native_ui_identity::run(move || Ok(retained_element(
+                &stale_for_lookup,
+                restarted_process_id,
+                restarted_at
             )
-            .is_none(),
-            "an AX reference fingerprint from the old process must not resolve in the restarted process"
+            .is_err()))
+            .unwrap(),
+            "an old native element must not resolve in a restarted process"
         );
 
         let error = preflight_action(
@@ -1787,4 +1752,35 @@ mod tests {
         assert_eq!(error.kind, AgentErrorKind::SessionUnavailable);
         let _ = std::fs::remove_file(marker);
     }
+}
+
+pub(super) fn retained_element_ids() -> Result<std::collections::HashSet<String>, AgentError> {
+    super::native_ui_identity::run(|| Ok(IDENTITIES.with(|store| store.borrow().retained_ids())))
+}
+
+#[cfg(test)]
+mod native_identity_tests {
+    use super::*;
+    #[test]
+    fn repeated_native_application_handles_compare_as_one_identity() {
+        super::super::native_ui_identity::run(|| {
+            let pid = std::process::id();
+            let first = OwnedCf(unsafe { AXUIElementCreateApplication(pid as i32) });
+            let second = OwnedCf(unsafe { AXUIElementCreateApplication(pid as i32) });
+            assert!(!first.0.is_null() && !second.0.is_null());
+            assert!(first.same_element(&second));
+            let first_key = unsafe { CFHash(first.0) }.to_le_bytes().to_vec();
+            let second_key = unsafe { CFHash(second.0) }.to_le_bytes().to_vec();
+            let mut registry = IdentityStore::new(4);
+            let id = registry.identify(pid, 1, first_key, first)?;
+            assert_eq!(registry.identify(pid, 1, second_key, second)?, id);
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+fn retained_element(id: &str, process_id: u32, started: u64) -> Result<OwnedCf, AgentError> {
+    IDENTITIES.with(|store| store.borrow_mut().get(id, process_id, started))
+        .ok_or_else(|| failure(AgentErrorKind::InvalidInput, "the native UI element was destroyed or belongs to a different process lifetime; search for a new element", false))
 }

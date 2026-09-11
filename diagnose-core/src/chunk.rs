@@ -495,10 +495,11 @@ mod tests {
     fn snapshot(n: usize) -> EvidenceSnapshot {
         let processes = (0..n)
             .map(|i| ProcessEntry {
+                matched_queries: Vec::new(),
                 pid: i as u32,
                 name: format!("process-number-{i}-with-a-longish-name"),
-                cpu_percent: 1.0,
-                memory_bytes: 1000,
+                cpu_percent: Some(1.0),
+                memory_bytes: Some(1000),
                 user: Some("svc\\app".into()),
                 command_line_redacted: false,
             })

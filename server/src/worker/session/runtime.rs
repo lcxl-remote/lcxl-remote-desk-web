@@ -1889,8 +1889,8 @@ impl WorkerSession {
                                             let action = action.clone();
                                             let broker = action_broker.clone();
                                             let generation_for_call = generation.clone();
-                                            let result = tokio::task::spawn_blocking(move || -> Result<_, desk_agent_protocol::AgentError> {
-                                                // Re-read at dispatch, and keep the read lock through
+                                            let result = tokio::task::spawn_blocking(move || crate::worker::agent::native_ui_identity::run(move || -> Result<_, desk_agent_protocol::AgentError> {
+                                                // Recheck after entering the native thread, and keep the read lock through
                                                 // the native call so a tightening cannot acknowledge
                                                 // while an older application policy is still in use.
                                                 let settings = application_settings.blocking_read();
@@ -1906,7 +1906,7 @@ impl WorkerSession {
                                                 // the writer lease was preempted.
                                                 broker.require_writer_lease(&generation_for_call)?;
                                                 Ok(result)
-                                            })
+                                            }))
                                             .await
                                             .map_err(|error| format!("semantic UI action worker failed to join: {error}"))
                                             .and_then(|result| result.map_err(|error| error.message));

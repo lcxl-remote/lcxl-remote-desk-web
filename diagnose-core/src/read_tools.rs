@@ -101,13 +101,16 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_process_list",
             Capability::ProcessList,
-            "List running processes, optionally sorted and limited.",
+            "Search conditions are required unless allow_unfiltered=true explicitly opts into bounded enumeration. Find running processes with queries (OR, case-insensitive name substrings). Return matching query indices; filter before limit. Default to at most 20 names/PIDs for discovery. Request include_details=true only for CPU/memory/owner diagnostics.",
             json!({
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "minimum": 0, "maximum": MAX_PROCESS_LIST_ENTRIES},
                     "sort": {"type": "string", "enum": ["cpu_desc", "memory_desc", "pid"]},
-                    "include_command_line": {"type": "boolean"}
+                    "include_command_line": {"type": "boolean"},
+                    "include_details": {"type":"boolean", "default":false},
+                    "allow_unfiltered": {"type":"boolean", "default":false, "description":"Explicitly allow bounded enumeration without search conditions; use only when targeted lookup is insufficient. Does not bypass authorization or limits."},
+                    "queries": {"type":"array", "maxItems":16, "items":{"type":"string","minLength":1,"maxLength":128}}
                 },
                 "additionalProperties": false
             }),
@@ -193,7 +196,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_desktop_ui",
             Capability::DesktopUiInspect,
-            "Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. scope=content (default) reads ordinary UI without menus; scope=menus returns only menu subtrees, useful after the window was already read; scope=all reads both. Choose an Application or null root for the application menu bar; a Window root searches only that window. Pass an existing UI element reference as root with element_only=true to refresh only its current value; otherwise read its subtree. query searches exact native_id, role and/or name within the selected root and returns matching nodes only (fields combine with AND). Use max_depth=12 for result text; do not reduce depth to reduce output, use query or element_only instead. Application catalog nodes do not contain UI contents or authorize actions. Protected field values are never returned.",
+            "Require query.element_id/any/name/native_id/role or a UiElement root with element_only=true; otherwise reject unless allow_unfiltered=true explicitly opts into bounded enumeration. Returned element_id is stable for the native element lifetime, independent of authorization and object_ref expiry. Use query.element_id with root omitted to refresh a known element after object_ref expires; never substitute element_id for an action ObjectRef. Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. scope=content (default) reads ordinary UI without menus; scope=menus returns only menu subtrees, useful after the window was already read; scope=all reads both. Choose an Application or null root for the application menu bar; a Window root searches only that window. Pass an existing UI element reference as root with element_only=true to refresh only its current value; otherwise read its subtree. query.any searches multiple candidate name/native_id/role substrings (OR, case-insensitive); query also searches exact native_id, role and/or name within the selected root and returns matching nodes only (fields combine with AND). Use max_depth=12 for result text; do not reduce depth to reduce output, use query or element_only instead. Application catalog nodes do not contain UI contents or authorize actions. Protected field values are never returned.",
             json!({
                 "type": "object",
                 "properties": {
@@ -213,8 +216,12 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                             }
                         ]
                     },
+                    "allow_unfiltered": {"type":"boolean", "default":false, "description":"Explicitly allow bounded enumeration without search conditions; use only when targeted lookup is insufficient. Does not bypass authorization or limits."},
+                    "overview": {"type":"boolean", "default":true},
                     "element_only": {"type":"boolean", "default":false},
                     "query": {"type":"object", "additionalProperties":false, "properties": {
+                        "any":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}},
+                        "element_id":{"type":"string","minLength":1,"maxLength":512},
                         "native_id":{"type":"string","maxLength":512},
                         "role":{"type":"string","maxLength":512},
                         "name":{"type":"string","maxLength":512}
@@ -389,6 +396,10 @@ const fn default_true() -> bool {
 #[serde(deny_unknown_fields)]
 struct DesktopUiToolArgs {
     #[serde(default)]
+    allow_unfiltered: bool,
+    #[serde(default = "default_true")]
+    overview: bool,
+    #[serde(default)]
     query: Option<desk_agent_protocol::computer_use::UiInspectQuery>,
     #[serde(default)]
     element_only: bool,
@@ -520,6 +531,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
         }
         "read_process_list" => {
             let params = parse_params::<ProcessListParams>(&call.arguments_json)?;
+            params.validate_selection().map_err(bad_arguments)?;
             if params.limit > MAX_PROCESS_LIST_ENTRIES {
                 return Err(bad_arguments(format!(
                     "limit must be at most {MAX_PROCESS_LIST_ENTRIES}"
@@ -583,7 +595,18 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
         }
         "inspect_desktop_ui" => {
             let args = parse_params::<DesktopUiToolArgs>(&call.arguments_json)?;
-            ContextKind::DesktopUiInspect(UiInspectParams {
+            if args
+                .query
+                .as_ref()
+                .is_some_and(|q| !desk_agent_protocol::validate_search_terms(&q.any))
+            {
+                return Err(bad_arguments(
+                    "query.any must contain at most 16 nonempty strings, each at most 128 bytes",
+                ));
+            }
+            let params = UiInspectParams {
+                allow_unfiltered: args.allow_unfiltered,
+                overview: args.overview,
                 query: args.query,
                 element_only: args.element_only,
                 scope: args.scope,
@@ -591,7 +614,9 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_depth: args.max_depth,
                 max_nodes: args.max_nodes,
                 max_bytes: args.max_bytes,
-            })
+            };
+            params.validate_selection().map_err(bad_arguments)?;
+            ContextKind::DesktopUiInspect(params)
         }
         "inspect_office_selection" => {
             let args = parse_params::<OfficeSelectionToolArgs>(&call.arguments_json)?;
@@ -774,7 +799,7 @@ mod tests {
         let (cap, input) = build_read_operation(&ToolCall {
             id: "c".into(),
             name: "read_process_list".into(),
-            arguments_json: r#"{"limit": 5, "sort": "memory_desc"}"#.into(),
+            arguments_json: r#"{"allow_unfiltered":true,"limit": 5, "sort": "memory_desc"}"#.into(),
         })
         .unwrap();
         assert_eq!(cap, Capability::ProcessList);
@@ -845,7 +870,12 @@ mod tests {
             let (cap, _) = build_read_operation(&ToolCall {
                 id: "c".into(),
                 name: tool.name().into(),
-                arguments_json: String::new(),
+                arguments_json: if matches!(tool.name(), "read_process_list" | "inspect_desktop_ui")
+                {
+                    r#"{"allow_unfiltered":true}"#.into()
+                } else {
+                    String::new()
+                },
             })
             .unwrap();
             assert_eq!(cap, tool.required_capability);
@@ -868,6 +898,8 @@ mod tests {
             assert_eq!(tool.effect, ToolEffect::ReadOnly);
             let arguments_json = if tool.name() == "preview_spreadsheet_merge" {
                 r#"{"columns":[{"output_header":"Region","source_headers":["Region"]}]}"#
+            } else if tool.name() == "inspect_desktop_ui" {
+                r#"{"allow_unfiltered":true}"#
             } else {
                 "{}"
             };
@@ -1024,11 +1056,52 @@ mod menu_scope_tests {
     }
 
     #[test]
+    fn batch_search_and_overview_arguments_reach_the_native_contract() {
+        let call = ToolCall {
+            id: "search".into(),
+            name: "inspect_desktop_ui".into(),
+            arguments_json: r#"{"query":{"any":["Calendar","日历"]}}"#.into(),
+        };
+        let (_, OperationInput::ReadContext(input)) = build_read_operation(&call).unwrap() else {
+            panic!("read");
+        };
+        let ContextKind::DesktopUiInspect(params) = input.kind else {
+            panic!("UI");
+        };
+        assert!(params.overview);
+        assert_eq!(params.query.unwrap().any, vec!["Calendar", "日历"]);
+        let call = ToolCall {
+            id: "search".into(),
+            name: "read_process_list".into(),
+            arguments_json: r#"{"queries":["Calendar","Calculator"],"limit":8}"#.into(),
+        };
+        let (_, OperationInput::ReadContext(input)) = build_read_operation(&call).unwrap() else {
+            panic!("read");
+        };
+        let ContextKind::ProcessList(params) = input.kind else {
+            panic!("process");
+        };
+        assert_eq!(params.queries.len(), 2);
+        assert!(!params.include_details);
+        let call = ToolCall {
+            arguments_json: r#"{"queries":[" "]}"#.into(),
+            ..call
+        };
+        assert!(build_read_operation(&call).is_err());
+    }
+
+    #[test]
     fn ui_scope_defaults_to_content_and_supports_menus_without_other_ui() {
         for (args, expected) in [
-            ("{}", UiInspectScope::Content),
-            (r#"{"scope":"menus"}"#, UiInspectScope::Menus),
-            (r#"{"scope":"all"}"#, UiInspectScope::All),
+            (r#"{"allow_unfiltered":true}"#, UiInspectScope::Content),
+            (
+                r#"{"allow_unfiltered":true,"scope":"menus"}"#,
+                UiInspectScope::Menus,
+            ),
+            (
+                r#"{"allow_unfiltered":true,"scope":"all"}"#,
+                UiInspectScope::All,
+            ),
         ] {
             let call = ToolCall {
                 id: "scope-test".into(),
@@ -1064,4 +1137,79 @@ fn object_ref_schema() -> serde_json::Value {
     json!({"type":"object","additionalProperties":false,"required":["token","snapshot_id","object_kind","expires_at"],"properties":{
         "token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"type":"string","enum":["window"]},"expires_at":{"type":"string"}
     }})
+}
+
+#[cfg(test)]
+mod required_search_tests {
+    use super::*;
+    #[test]
+    fn tool_arguments_require_filters_before_enumeration() {
+        for name in ["read_process_list", "inspect_desktop_ui"] {
+            for args in ["{}", r#"{"allow_unfiltered":false}"#] {
+                let err = build_read_operation(&ToolCall {
+                    id: "search".into(),
+                    name: name.into(),
+                    arguments_json: args.into(),
+                })
+                .unwrap_err();
+                assert!(format!("{err:?}").contains("allow_unfiltered"));
+            }
+            assert!(
+                build_read_operation(&ToolCall {
+                    id: "search".into(),
+                    name: name.into(),
+                    arguments_json: r#"{"allow_unfiltered":true}"#.into()
+                })
+                .is_ok()
+            );
+        }
+        for (name, args) in [
+            (
+                "read_process_list",
+                r#"{"queries":["Calendar","Calculator"]}"#,
+            ),
+            (
+                "inspect_desktop_ui",
+                r#"{"query":{"any":["结果","result"]}}"#,
+            ),
+            ("inspect_desktop_ui", r#"{"query":{"native_id":"result"}}"#),
+            (
+                "inspect_desktop_ui",
+                r#"{"query":{"element_id":"ui-known"}}"#,
+            ),
+        ] {
+            assert!(
+                build_read_operation(&ToolCall {
+                    id: "search".into(),
+                    name: name.into(),
+                    arguments_json: args.into()
+                })
+                .is_ok()
+            );
+        }
+        for (name, args) in [
+            ("read_process_list", r#"{"limit":1}"#),
+            (
+                "read_process_list",
+                r#"{"queries":[" "],"allow_unfiltered":true}"#,
+            ),
+            (
+                "inspect_desktop_ui",
+                r#"{"query":{},"scope":"menus","overview":true}"#,
+            ),
+            (
+                "inspect_desktop_ui",
+                r#"{"query":{"name":" "},"allow_unfiltered":true}"#,
+            ),
+        ] {
+            assert!(
+                build_read_operation(&ToolCall {
+                    id: "search".into(),
+                    name: name.into(),
+                    arguments_json: args.into()
+                })
+                .is_err()
+            );
+        }
+    }
 }

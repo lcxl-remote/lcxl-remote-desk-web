@@ -1,19 +1,19 @@
 //! Bounded Windows UI Automation projection and semantic actions.
 //!
-//! Every action rechecks the foreground process and relocates the target from
-//! its process-incarnation-bound fingerprint. Password controls fail closed;
+//! Every action rechecks the foreground process and resolves a retained native
+//! element bound to that process lifetime. Password controls fail closed;
 //! mutations are limited to typed UIA patterns; callers inspect their effects separately.
 
 use desk_agent_protocol::computer_use::UiInspectScope;
 use std::time::{Duration, Instant};
 
+use super::native_ui_identity::{IdentityStore, NativeElement};
 use desk_agent_protocol::computer_use::{UiSemanticAction, UiSemanticActionKind};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
-use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use windows::Win32::Foundation::{CloseHandle, FILETIME};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoUninitialize,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -21,8 +21,10 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
     IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
-    IUIAutomationValuePattern, ToggleState, ToggleState_Off, ToggleState_On, UIA_InvokePatternId,
-    UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId, UIA_WindowControlTypeId,
+    IUIAutomationValuePattern, ToggleState, ToggleState_Off, ToggleState_On,
+    UIA_DataGridControlTypeId, UIA_InvokePatternId, UIA_ListControlTypeId,
+    UIA_SelectionItemPatternId, UIA_TableControlTypeId, UIA_TogglePatternId, UIA_TreeControlTypeId,
+    UIA_ValuePatternId, UIA_WindowControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 use windows::core::{BSTR, PWSTR};
@@ -40,7 +42,7 @@ struct ComGuard;
 
 impl ComGuard {
     fn initialize() -> Result<Self, AgentError> {
-        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
             .ok()
             .map_err(|_| failure("Windows UI Automation COM initialization failed", true))?;
         Ok(Self)
@@ -302,6 +304,35 @@ pub(super) fn collect_foreground_selection(
     query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
     element_only: bool,
 ) -> Result<CollectedUiTree, AgentError> {
+    let expected_image_path = expected_image_path.to_owned();
+    let query = query.cloned();
+    let selection = selection.map(str::to_owned);
+    super::native_ui_identity::run(move || {
+        collect_foreground_selection_inner(
+            expected_process_id,
+            &expected_image_path,
+            max_depth,
+            max_nodes,
+            max_bytes,
+            scope,
+            selection.as_deref(),
+            query.as_ref(),
+            element_only,
+        )
+    })
+}
+
+fn collect_foreground_selection_inner(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    max_depth: u16,
+    max_nodes: u32,
+    max_bytes: u32,
+    scope: UiInspectScope,
+    selection: Option<&str>,
+    query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
+    element_only: bool,
+) -> Result<CollectedUiTree, AgentError> {
     let _com = ComGuard::initialize()?;
     let foreground = resolve_foreground_application()?;
     if foreground.process_id != expected_process_id
@@ -316,16 +347,19 @@ pub(super) fn collect_foreground_selection(
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
             .map_err(|_| failure("Windows UI Automation is unavailable", true))?;
-    let root = unsafe {
-        automation.ElementFromHandle(windows::Win32::Foundation::HWND(
-            foreground.window_handle as *mut std::ffi::c_void,
-        ))
-    }
-    .map_err(|_| failure("the foreground window has no UI Automation root", true))?;
     let walker = unsafe { automation.ControlViewWalker() }
         .map_err(|_| failure("cannot create a UI Automation tree walker", true))?;
-    let mut root_search_visited = 0usize;
-    let root = find_process_root(
+    let root = if let Some(id) = selection {
+        retained_element(id, expected_process_id, foreground.process_started_at)?
+    } else {
+        let root = unsafe {
+            automation.ElementFromHandle(windows::Win32::Foundation::HWND(
+                foreground.window_handle as *mut std::ffi::c_void,
+            ))
+        }
+        .map_err(|_| failure("the foreground window has no UI Automation root", true))?;
+        let mut root_search_visited = 0usize;
+        find_process_root(
         &root,
         &walker,
         expected_process_id,
@@ -338,7 +372,8 @@ pub(super) fn collect_foreground_selection(
             "the foreground UI Automation tree has no root for the resolved application process",
             false,
         )
-    })?;
+    })?
+    };
     let config = WalkConfig {
         selection,
         query,
@@ -355,7 +390,7 @@ pub(super) fn collect_foreground_selection(
     let mut nodes = Vec::new();
     walk(
         root, None, 0, 0, false, false, &config, &mut state, &mut nodes,
-    );
+    )?;
     if selection.is_some() && !state.found_selection {
         return Err(failure(
             "selected UI root was not found within the bounded search",
@@ -388,6 +423,25 @@ pub(super) fn preflight_action(
     target_fingerprint: &str,
     action: &UiSemanticAction,
 ) -> Result<(), AgentError> {
+    let expected_image_path = expected_image_path.to_owned();
+    let target_fingerprint = target_fingerprint.to_owned();
+    let action = action.clone();
+    super::native_ui_identity::run(move || {
+        preflight_action_inner(
+            expected_process_id,
+            &expected_image_path,
+            &target_fingerprint,
+            &action,
+        )
+    })
+}
+
+fn preflight_action_inner(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    target_fingerprint: &str,
+    action: &UiSemanticAction,
+) -> Result<(), AgentError> {
     let target =
         locate_action_target(expected_process_id, expected_image_path, target_fingerprint)?;
     validate_action_target(&target.element, action)
@@ -405,6 +459,25 @@ impl AppliedUiAction {
 }
 
 pub(super) fn apply_action(
+    expected_process_id: u32,
+    expected_image_path: &str,
+    target_fingerprint: &str,
+    action: &UiSemanticAction,
+) -> Result<AppliedUiAction, AgentError> {
+    let expected_image_path = expected_image_path.to_owned();
+    let target_fingerprint = target_fingerprint.to_owned();
+    let action = action.clone();
+    super::native_ui_identity::run(move || {
+        apply_action_inner(
+            expected_process_id,
+            &expected_image_path,
+            &target_fingerprint,
+            &action,
+        )
+    })
+}
+
+fn apply_action_inner(
     expected_process_id: u32,
     expected_image_path: &str,
     target_fingerprint: &str,
@@ -485,128 +558,12 @@ fn locate_action_target(
             false,
         ));
     }
-    let process_id = foreground.process_id;
-    let started = foreground.process_started_at;
-    let automation: IUIAutomation =
-        unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
-            .map_err(|_| failure("Windows UI Automation is unavailable", false))?;
-    let root = unsafe {
-        automation.ElementFromHandle(windows::Win32::Foundation::HWND(
-            foreground.window_handle as *mut std::ffi::c_void,
-        ))
-    }
-    .map_err(|_| failure("the foreground window has no UI Automation root", false))?;
-    let walker = unsafe { automation.ControlViewWalker() }
-        .map_err(|_| failure("cannot create a UI Automation tree walker", false))?;
-    let deadline = Instant::now() + HARD_DEADLINE;
-    let mut root_search_visited = 0usize;
-    let root = find_process_root(
-        &root,
-        &walker,
-        process_id,
-        0,
-        deadline,
-        &mut root_search_visited,
-    )
-    .ok_or_else(|| {
-        failure(
-            "the foreground UI Automation tree has no root for the resolved application process",
-            false,
-        )
-    })?;
-    let mut visited = 0usize;
-    let element = find_element(
-        &root,
-        &walker,
-        None,
-        0,
-        0,
-        process_id,
-        started,
+    let element = retained_element(
         target_fingerprint,
-        deadline,
-        &mut visited,
-    )
-    .ok_or_else(|| {
-        failure(
-            "the UI Automation element reference is stale or no longer reachable",
-            false,
-        )
-    })?;
+        foreground.process_id,
+        foreground.process_started_at,
+    )?;
     Ok(LocatedElement { element, _com: com })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn find_element(
-    element: &IUIAutomationElement,
-    walker: &IUIAutomationTreeWalker,
-    parent_fingerprint: Option<&str>,
-    depth: u16,
-    sibling_ordinal: usize,
-    process_id: u32,
-    process_started_at: u64,
-    target_fingerprint: &str,
-    deadline: Instant,
-    visited: &mut usize,
-) -> Option<IUIAutomationElement> {
-    if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
-        return None;
-    }
-    let element_process_id = unsafe { element.CurrentProcessId() }.ok()?.max(0) as u32;
-    if element_process_id != process_id {
-        return None;
-    }
-    *visited += 1;
-    let hwnd = unsafe { element.CurrentNativeWindowHandle() }
-        .map(|value| value.0 as isize)
-        .unwrap_or_default();
-    let control_type = unsafe { element.CurrentControlType() }
-        .map(|value| value.0)
-        .unwrap_or_default();
-    let automation_id = unsafe { element.CurrentAutomationId() }
-        .map(|value| value.to_string())
-        .unwrap_or_default();
-    let current_fingerprint = fingerprint(
-        parent_fingerprint,
-        sibling_ordinal,
-        process_id as i32,
-        Some(process_started_at),
-        hwnd,
-        control_type,
-        &automation_id,
-    );
-    if current_fingerprint == target_fingerprint {
-        return Some(element.clone());
-    }
-    if depth >= ACTION_MAX_DEPTH {
-        return None;
-    }
-    let mut child = unsafe { walker.GetFirstChildElement(element) }.ok()?;
-    let mut ordinal = 0usize;
-    loop {
-        if let Some(found) = find_element(
-            &child,
-            walker,
-            Some(&current_fingerprint),
-            depth + 1,
-            ordinal,
-            process_id,
-            process_started_at,
-            target_fingerprint,
-            deadline,
-            visited,
-        ) {
-            return Some(found);
-        }
-        if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
-            return None;
-        }
-        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&child) }) else {
-            return None;
-        };
-        child = next;
-        ordinal += 1;
-    }
 }
 
 fn validate_action_target(
@@ -725,90 +682,72 @@ fn is_menu_control(kind: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID) 
         || kind == UIA_MenuItemControlTypeId
 }
 
-fn element_identity(
-    element: &IUIAutomationElement,
-    parent: Option<&str>,
-    ordinal: usize,
-) -> String {
-    unsafe {
-        let process_id = element.CurrentProcessId().unwrap_or_default();
-        let started = process_start(process_id.max(0) as u32);
-        let hwnd = element
-            .CurrentNativeWindowHandle()
-            .map(|value| value.0 as isize)
-            .unwrap_or_default();
-        let control_type = element
-            .CurrentControlType()
-            .map(|value| value.0)
-            .unwrap_or_default();
-        let automation_id = element
-            .CurrentAutomationId()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        fingerprint(
-            parent,
-            ordinal,
+fn element_identity(element: &IUIAutomationElement) -> Result<String, AgentError> {
+    let process_id = unsafe { element.CurrentProcessId() }
+        .map_err(|_| failure("cannot identify UI element process", false))?
+        .max(0) as u32;
+    let started = process_start(process_id)
+        .ok_or_else(|| failure("cannot identify UI process lifetime", false))?;
+    let key = runtime_key(element)?;
+    IDENTITIES.with(|store| {
+        store.borrow_mut().identify(
             process_id,
             started,
-            hwnd,
-            control_type,
-            &automation_id,
+            key.clone(),
+            RetainedUiaElement {
+                element: element.clone(),
+                runtime_id: key,
+            },
         )
-    }
+    })
 }
 
 fn walk(
     element: IUIAutomationElement,
     parent: Option<(Option<u32>, String)>,
     depth: u16,
-    sibling_ordinal: usize,
+    _sibling_ordinal: usize,
     inside_menu: bool,
     within_selection: bool,
     config: &WalkConfig<'_>,
     state: &mut WalkState,
     output: &mut Vec<CollectedUiNode>,
-) {
+) -> Result<(), AgentError> {
     if config.element_only && state.found_selection {
-        return;
+        return Ok(());
     }
     if state.visited >= 4096 || Instant::now() >= config.deadline {
         state.truncated = true;
-        return;
+        return Ok(());
     }
     state.visited += 1;
     let inside_menu =
         inside_menu || unsafe { element.CurrentControlType() }.is_ok_and(is_menu_control);
     if config.scope == UiInspectScope::Content && inside_menu {
-        return;
+        return Ok(());
     }
-    let within_selection = within_selection
-        || config.selection.is_some_and(|target| {
-            element_identity(
-                &element,
-                parent.as_ref().map(|(_, fp)| fp.as_str()),
-                sibling_ordinal,
-            ) == target
-        });
+    let identity = element_identity(&element)?;
+    let within_selection =
+        within_selection || config.selection.is_some_and(|target| target == identity);
     state.found_selection |= within_selection;
     let selected = config.selection.is_none() || within_selection;
     let emit = selected && (config.scope != UiInspectScope::Menus || inside_menu);
     if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
         state.truncated = true;
-        return;
+        return Ok(());
     }
     let element_process_id = unsafe { element.CurrentProcessId() }
         .unwrap_or_default()
         .max(0) as u32;
     if element_process_id != config.process_id {
         state.truncated = true;
-        return;
+        return Ok(());
     }
     let (index, fingerprint) = if emit {
         let (node, strings_truncated) = read_node(
             &element,
-            parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
+            identity.clone(),
             parent.as_ref().and_then(|(index, _)| *index),
-            sibling_ordinal,
         );
         if !super::computer_use_broker::ui_query_matches(config.query, &node) {
             (None, node.fingerprint)
@@ -818,7 +757,7 @@ fn walk(
                 .saturating_add(OBJECT_REF_BUDGET);
             if state.encoded_bytes.saturating_add(encoded_bytes) > config.max_bytes {
                 state.truncated = true;
-                return;
+                return Ok(());
             }
             state.encoded_bytes += encoded_bytes;
             state.truncated |= strings_truncated;
@@ -828,27 +767,20 @@ fn walk(
             (Some(index), fingerprint)
         }
     } else {
-        (
-            None,
-            element_identity(
-                &element,
-                parent.as_ref().map(|(_, fingerprint)| fingerprint.as_str()),
-                sibling_ordinal,
-            ),
-        )
+        (None, identity)
     };
 
     if selected && config.element_only {
-        return;
+        return Ok(());
     }
     if depth >= config.max_depth {
         if unsafe { config.walker.GetFirstChildElement(&element) }.is_ok() {
             state.truncated = true;
         }
-        return;
+        return Ok(());
     }
     let Ok(mut child) = (unsafe { config.walker.GetFirstChildElement(&element) }) else {
-        return;
+        return Ok(());
     };
     let mut ordinal = 0usize;
     loop {
@@ -862,13 +794,13 @@ fn walk(
             config,
             state,
             output,
-        );
+        )?;
         if config.element_only && state.found_selection {
-            return;
+            return Ok(());
         }
         if output.len() >= config.max_nodes || Instant::now() >= config.deadline {
             state.truncated = true;
-            return;
+            return Ok(());
         }
         let Ok(next) = (unsafe { config.walker.GetNextSiblingElement(&child) }) else {
             break;
@@ -876,21 +808,15 @@ fn walk(
         ordinal += 1;
         child = next;
     }
+    Ok(())
 }
 
 fn read_node(
     element: &IUIAutomationElement,
-    parent_fingerprint: Option<&str>,
+    fingerprint: String,
     parent_index: Option<u32>,
-    sibling_ordinal: usize,
 ) -> (CollectedUiNode, bool) {
     unsafe {
-        let process_id = element.CurrentProcessId().unwrap_or_default();
-        let started = process_start(process_id.max(0) as u32);
-        let hwnd = element
-            .CurrentNativeWindowHandle()
-            .map(|value| value.0 as isize)
-            .unwrap_or_default();
         let control_type = element
             .CurrentControlType()
             .map(|value| value.0)
@@ -976,17 +902,16 @@ fn read_node(
         {
             supported_actions.push(UiSemanticActionKind::Focus);
         }
-        let fingerprint = fingerprint(
-            parent_fingerprint,
-            sibling_ordinal,
-            process_id,
-            started,
-            hwnd,
-            control_type,
-            &automation_id,
-        );
+
         (
             CollectedUiNode {
+                is_collection: [
+                    UIA_DataGridControlTypeId.0,
+                    UIA_TableControlTypeId.0,
+                    UIA_TreeControlTypeId.0,
+                    UIA_ListControlTypeId.0,
+                ]
+                .contains(&control_type),
                 native_id: (!is_protected
                     && !automation_id.is_empty()
                     && automation_id.len() <= 512)
@@ -1017,24 +942,57 @@ fn bounded_string(mut value: String) -> (String, bool) {
     (value, true)
 }
 
-fn fingerprint(
-    parent: Option<&str>,
-    sibling_ordinal: usize,
-    process_id: i32,
-    process_started_at: Option<u64>,
-    hwnd: isize,
-    control_type: i32,
-    automation_id: &str,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(parent.unwrap_or("root").as_bytes());
-    hasher.update(sibling_ordinal.to_le_bytes());
-    hasher.update(process_id.to_le_bytes());
-    hasher.update(process_started_at.unwrap_or_default().to_le_bytes());
-    hasher.update(hwnd.to_le_bytes());
-    hasher.update(control_type.to_le_bytes());
-    hasher.update(automation_id.as_bytes());
-    format!("{:x}", hasher.finalize())
+thread_local! { static IDENTITIES: RefCell<IdentityStore<RetainedUiaElement>> = RefCell::new(IdentityStore::new(8192)); }
+
+#[derive(Clone)]
+struct RetainedUiaElement {
+    element: IUIAutomationElement,
+    runtime_id: Vec<u8>,
+}
+
+impl NativeElement for RetainedUiaElement {
+    fn same_element(&self, other: &Self) -> bool {
+        // Compare cached native identity; transient provider errors must not
+        // allocate a different identity for the same still-live element.
+        self.runtime_id == other.runtime_id
+    }
+    fn definitely_destroyed(&self) -> bool {
+        unsafe { self.element.CurrentProcessId() }.is_err_and(|e| e.code().0 as u32 == 0x80040201)
+    }
+}
+
+fn runtime_key(element: &IUIAutomationElement) -> Result<Vec<u8>, AgentError> {
+    use windows::Win32::System::Ole::{
+        SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetElemsize,
+        SafeArrayGetLBound, SafeArrayGetUBound,
+    };
+    let array = unsafe { element.GetRuntimeId() }
+        .map_err(|_| failure("UI element has no runtime identity", false))?;
+    if array.is_null() {
+        return Err(failure("UI element has no runtime identity", false));
+    }
+    let result = (|| unsafe {
+        if SafeArrayGetDim(array) != 1 || SafeArrayGetElemsize(array) != 4 {
+            return Err(failure("invalid UI runtime identity dimensions", false));
+        }
+        let lower = SafeArrayGetLBound(array, 1)
+            .map_err(|_| failure("invalid UI runtime identity", false))?;
+        let upper = SafeArrayGetUBound(array, 1)
+            .map_err(|_| failure("invalid UI runtime identity", false))?;
+        if upper < lower || i64::from(upper) - i64::from(lower) >= 128 {
+            return Err(failure("UI runtime identity exceeds bounds", false));
+        }
+        let mut key = Vec::new();
+        for index in lower..=upper {
+            let mut value = 0i32;
+            SafeArrayGetElement(array, &index, (&mut value as *mut i32).cast())
+                .map_err(|_| failure("cannot read UI runtime identity", false))?;
+            key.extend_from_slice(&value.to_le_bytes());
+        }
+        Ok(key)
+    })();
+    let _ = unsafe { SafeArrayDestroy(array) };
+    result
 }
 
 pub(super) fn process_start(process_id: u32) -> Option<u64> {
@@ -1131,17 +1089,6 @@ mod tests {
         assert!(truncated);
         assert!(value.len() <= MAX_STRING_BYTES);
         assert!(value.is_char_boundary(value.len()));
-    }
-
-    #[test]
-    fn fingerprints_bind_process_incarnation_and_parent() {
-        let first = fingerprint(Some("parent-a"), 1, 4, Some(8), 9, 10, "id");
-        let second = fingerprint(Some("parent-b"), 1, 4, Some(8), 9, 10, "id");
-        let restarted = fingerprint(Some("parent-a"), 1, 4, Some(9), 9, 10, "id");
-        let replaced_window = fingerprint(Some("parent-a"), 1, 4, Some(8), 11, 10, "id");
-        assert_ne!(first, second);
-        assert_ne!(first, restarted);
-        assert_ne!(first, replaced_window);
     }
 
     #[test]
@@ -1289,4 +1236,18 @@ mod tests {
         assert!(result.changed);
         assert!(result.verified, "{}", result.summary);
     }
+}
+
+pub(super) fn retained_element_ids() -> Result<std::collections::HashSet<String>, AgentError> {
+    super::native_ui_identity::run(|| Ok(IDENTITIES.with(|store| store.borrow().retained_ids())))
+}
+
+fn retained_element(
+    id: &str,
+    process_id: u32,
+    started: u64,
+) -> Result<IUIAutomationElement, AgentError> {
+    IDENTITIES.with(|store| store.borrow_mut().get(id, process_id, started))
+        .map(|retained| retained.element)
+        .ok_or_else(|| failure("the native UI element was destroyed or belongs to a different process lifetime; search for a new element", false))
 }

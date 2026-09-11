@@ -111,7 +111,8 @@ fn read_output_limits_count_wire_bytes_and_actual_projections() {
 #[test]
 fn desktop_ui_limits_narrow_request_and_count_returned_nodes() {
     let registry = crate::device_assistant::device_assistant_provider_registry();
-    let ui_call = call("inspect_desktop_ui");
+    let mut ui_call = call("inspect_desktop_ui");
+    ui_call.arguments_json = r#"{"allow_unfiltered":true}"#.into();
     let (_, mut input) = build_read_operation(&ui_call).unwrap();
     bind(&registry, &ui_call, &mut input, &limit(512, 1)).unwrap();
     let OperationInput::ReadContext(input) = input else {
@@ -123,6 +124,9 @@ fn desktop_ui_limits_narrow_request_and_count_returned_nodes() {
     assert_eq!((params.max_bytes, params.max_nodes), (512, 1));
 
     let node = UiNodeProjection {
+        element_id: None,
+        matched_queries: Vec::new(),
+        collapsed_children: 0,
         native_id: None,
         object_ref: ObjectRef {
             object_kind: ObjectKind::UiElement,

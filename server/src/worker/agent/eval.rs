@@ -71,18 +71,20 @@ pub fn scenario_high_cpu() -> EvidenceSnapshot {
     let process_list = read(ReadContextOutput::ProcessList(ProcessListOutput {
         processes: vec![
             ProcessEntry {
+                matched_queries: Vec::new(),
                 pid: 7321,
                 name: "ffmpeg.exe".into(),
-                cpu_percent: 760.0,
-                memory_bytes: 1_500_000_000,
+                cpu_percent: Some(760.0),
+                memory_bytes: Some(1_500_000_000),
                 user: Some("BUILD\\ci".into()),
                 command_line_redacted: false,
             },
             ProcessEntry {
+                matched_queries: Vec::new(),
                 pid: 1044,
                 name: "System".into(),
-                cpu_percent: 12.0,
-                memory_bytes: 200_000_000,
+                cpu_percent: Some(12.0),
+                memory_bytes: Some(200_000_000),
                 user: None,
                 command_line_redacted: false,
             },
@@ -125,10 +127,11 @@ pub fn scenario_port_occupied() -> EvidenceSnapshot {
     ));
     let process_list = read(ReadContextOutput::ProcessList(ProcessListOutput {
         processes: vec![ProcessEntry {
+            matched_queries: Vec::new(),
             pid: 5120,
             name: "old-api.exe".into(),
-            cpu_percent: 0.3,
-            memory_bytes: 80_000_000,
+            cpu_percent: Some(0.3),
+            memory_bytes: Some(80_000_000),
             user: Some("SVC\\app".into()),
             command_line_redacted: false,
         }],

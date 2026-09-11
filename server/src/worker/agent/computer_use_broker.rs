@@ -205,6 +205,9 @@ pub struct ComputerUseBroker {
     human_input_epoch: AtomicU64,
     input_ownership_ready: AtomicBool,
     objects: Mutex<HashMap<String, StoredObject>>,
+    ui_identities: Mutex<HashMap<String, ResolvedObject>>,
+    ui_identity_session: Mutex<Option<String>>,
+    ui_identity_generation: AtomicU64,
     writer_lease: WriterLeaseCoordinator,
     browser_extension: Arc<BrowserExtensionBroker>,
 }
@@ -236,6 +239,9 @@ impl ComputerUseBroker {
             human_input_epoch: AtomicU64::new(0),
             input_ownership_ready: AtomicBool::new(false),
             objects: Mutex::new(HashMap::new()),
+            ui_identities: Mutex::new(HashMap::new()),
+            ui_identity_session: Mutex::new(None),
+            ui_identity_generation: AtomicU64::new(0),
             writer_lease: WriterLeaseCoordinator::new(),
             browser_extension: Arc::new(BrowserExtensionBroker::default()),
         }
@@ -2378,13 +2384,43 @@ impl ComputerUseBroker {
             if !ceiling.application_allowed(&application.image_path) {
                 continue;
             }
+            let display_name = std::path::Path::new(&application.image_path)
+                .file_name()
+                .map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let localized_name = super::macos_accessibility_observer::application_display_name(
+                application.process_id,
+            )
+            .unwrap_or_default();
+            let catalog_name = if localized_name.is_empty() || localized_name == display_name {
+                display_name.clone()
+            } else {
+                format!("{localized_name} ({display_name})")
+            };
+            let matched_queries = params
+                .query
+                .as_ref()
+                .map(|q| {
+                    desk_agent_protocol::matching_search_terms(
+                        &q.any,
+                        &[&display_name, &localized_name, &application.image_path],
+                    )
+                })
+                .unwrap_or_default();
+            if params.query.as_ref().is_some_and(|q| {
+                (!q.any.is_empty() && matched_queries.is_empty())
+                    || q.name.as_ref().is_some_and(|v| v != &catalog_name)
+                    || q.role.as_ref().is_some_and(|v| v != "application")
+                    || q.native_id.is_some()
+                    || q.element_id.is_some()
+            }) {
+                continue;
+            }
             if output.nodes.len() >= (params.max_nodes as usize).min(128) {
                 output.truncated = true;
                 break;
             }
-            let name = std::path::Path::new(&application.image_path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned());
+            let name = Some(catalog_name);
             let object_ref = self.issue_ref(
                 &snapshot_id,
                 &incarnation,
@@ -2397,6 +2433,9 @@ impl ComputerUseBroker {
                 },
             )?;
             output.nodes.push(UiNodeProjection {
+                element_id: None,
+                matched_queries,
+                collapsed_children: 0,
                 native_id: None,
                 object_ref,
                 parent_index: None,
@@ -2448,18 +2487,9 @@ impl ComputerUseBroker {
         params: &UiInspectParams,
         ceiling: &ComputerUseSettings,
     ) -> Result<UiInspectOutput, AgentError> {
-        if params.query.as_ref().is_some_and(|q| {
-            [q.native_id.as_ref(), q.role.as_ref(), q.name.as_ref()]
-                .into_iter()
-                .flatten()
-                .any(|v| v.is_empty() || v.len() > 512)
-        }) {
-            return Err(error(
-                AgentErrorKind::InvalidInput,
-                "UI query values must contain 1 to 512 bytes",
-                false,
-            ));
-        }
+        params
+            .validate_selection()
+            .map_err(|message| error(AgentErrorKind::InvalidInput, message, false))?;
         ensure_observation_enabled(ceiling)?;
         if params.max_depth == 0
             || params.max_depth > MAX_UI_INSPECT_DEPTH
@@ -2474,6 +2504,12 @@ impl ComputerUseBroker {
                 false,
             ));
         }
+        let stable_target = params
+            .query
+            .as_ref()
+            .and_then(|q| q.element_id.as_deref())
+            .map(|id| self.resolve_ui_identity(id))
+            .transpose()?;
         let resolved_root = if let Some(root) = params.root.as_ref() {
             match root.object_kind {
                 ObjectKind::DesktopSession
@@ -2490,7 +2526,7 @@ impl ComputerUseBroker {
             }
             Some(self.resolve_ref(root)?)
         } else {
-            None
+            stable_target.clone()
         };
 
         let observed = observe_interactive_desktop()?;
@@ -2498,7 +2534,7 @@ impl ComputerUseBroker {
         if let Some(ResolvedObject::DesktopSession { session_id }) = &resolved_root
             && *session_id == observed.session_id
         {
-            if params.query.is_some() || params.element_only {
+            if params.element_only {
                 return Err(error(
                     AgentErrorKind::InvalidInput,
                     "select an Application or UI root before searching controls",
@@ -2572,13 +2608,30 @@ impl ComputerUseBroker {
             }
         }
 
-        let (collected, adapter_kind, adapter_version, adapter_name) =
+        let mut native_params = params.clone();
+        if let Some(ResolvedObject::UiElement { fingerprint, .. }) = &stable_target {
+            native_params
+                .query
+                .as_mut()
+                .expect("stable query")
+                .element_id = Some(fingerprint.clone());
+            if params.root.is_none() {
+                native_params.element_only = true;
+            }
+        }
+        let (mut collected, adapter_kind, adapter_version, adapter_name) =
             collect_foreground_desktop_ui(
                 application.process_id,
                 &application.image_path,
-                params,
+                &native_params,
                 selected_window.as_deref(),
             )?;
+
+        let collapsed = if params.overview && params.query.is_none() && !params.element_only {
+            fold_ui_collections(&mut collected)
+        } else {
+            std::collections::HashMap::new()
+        };
 
         #[cfg(target_os = "macos")]
         if super::macos_accessibility_observer::application_by_pid(application.process_id)?
@@ -2624,6 +2677,12 @@ impl ComputerUseBroker {
             } else {
                 None
             };
+            let collapsed_children = collapsed.get(&node.fingerprint).copied().unwrap_or(0);
+            let element_id = self.register_ui_identity(ResolvedObject::UiElement {
+                process_id: application.process_id,
+                image_path: application.image_path.clone(),
+                fingerprint: node.fingerprint.clone(),
+            })?;
             let object_ref = self.issue_ref(
                 &snapshot_id,
                 &incarnation,
@@ -2635,6 +2694,22 @@ impl ComputerUseBroker {
                 },
             )?;
             let projection = UiNodeProjection {
+                element_id: Some(element_id),
+                matched_queries: params
+                    .query
+                    .as_ref()
+                    .map(|q| {
+                        desk_agent_protocol::matching_search_terms(
+                            &q.any,
+                            &[
+                                node.name.as_deref().unwrap_or(""),
+                                node.native_id.as_deref().unwrap_or(""),
+                                &node.role,
+                            ],
+                        )
+                    })
+                    .unwrap_or_default(),
+                collapsed_children,
                 native_id: node.native_id,
                 object_ref,
                 parent_index: node.parent_index,
@@ -2873,6 +2948,19 @@ impl ComputerUseBroker {
     }
 
     fn update_active_session_incarnation(&self, next: Option<String>) {
+        // An unavailable observation (including revoked access) fences live
+        // operations but does not establish that native elements were destroyed.
+        if let Some(next) = next.as_ref()
+            && let Ok(mut known) = self.ui_identity_session.lock()
+        {
+            if known.as_ref().is_some_and(|previous| previous != next) {
+                self.ui_identity_generation.fetch_add(1, Ordering::SeqCst);
+                if let Ok(mut identities) = self.ui_identities.lock() {
+                    identities.clear();
+                }
+            }
+            *known = Some(next.clone());
+        }
         let changed_from_live = if let Ok(mut active) = self.active_session_incarnation.lock() {
             let changed = active.is_some() && *active != next;
             *active = next;
@@ -2904,6 +2992,9 @@ impl ComputerUseBroker {
         self.human_input_epoch.fetch_add(1, Ordering::SeqCst);
         self.writer_lease
             .preempt(InputPreemptionSource::LocalExternal);
+        if let Ok(mut identities) = self.ui_identities.lock() {
+            identities.clear();
+        }
         if let Ok(mut objects) = self.objects.lock() {
             objects.clear();
         }
@@ -2913,6 +3004,67 @@ impl ComputerUseBroker {
     #[must_use]
     pub(crate) fn human_input_epoch(&self) -> u64 {
         self.human_input_epoch.load(Ordering::SeqCst)
+    }
+
+    fn register_ui_identity(&self, resolved: ResolvedObject) -> Result<String, AgentError> {
+        use sha2::{Digest, Sha256};
+        let ResolvedObject::UiElement { fingerprint, .. } = &resolved else {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "native UI identity required",
+                false,
+            ));
+        };
+        let id = format!(
+            "ui-{:x}",
+            Sha256::digest(
+                format!(
+                    "{}:{}:{fingerprint}",
+                    self.current_incarnation_nonce(),
+                    self.ui_identity_generation.load(Ordering::SeqCst)
+                )
+                .as_bytes()
+            )
+        );
+        let mut identities = self.ui_identities.lock().map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "UI identity store unavailable",
+                false,
+            )
+        })?;
+        if !identities.contains_key(&id) && identities.len() >= MAX_OBJECT_REFS {
+            drop(identities);
+            #[cfg(target_os = "macos")]
+            let retained = super::macos_accessibility_observer::retained_element_ids()?;
+            #[cfg(windows)]
+            let retained = super::windows_uia_observer::retained_element_ids()?;
+            #[cfg(not(any(target_os = "macos", windows)))]
+            let retained = std::collections::HashSet::<String>::new();
+            identities = self.ui_identities.lock().map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "UI identity store unavailable",
+                    false,
+                )
+            })?;
+            identities.retain(|_, target| matches!(target, ResolvedObject::UiElement { fingerprint, .. } if retained.contains(fingerprint)));
+        }
+        if !identities.contains_key(&id) && identities.len() >= MAX_OBJECT_REFS {
+            return Err(error(
+                AgentErrorKind::OutputLimitExceeded,
+                "UI identity capacity reached; live IDs were preserved",
+                false,
+            ));
+        }
+        identities.insert(id.clone(), resolved);
+        Ok(id)
+    }
+
+    fn resolve_ui_identity(&self, id: &str) -> Result<ResolvedObject, AgentError> {
+        self.ui_identities.lock().map_err(|_| error(AgentErrorKind::Internal, "UI identity store unavailable", false))?
+            .get(id).cloned().ok_or_else(|| error(AgentErrorKind::InvalidInput,
+                "element_id is unknown to this worker or was invalidated; search for the element again. No full UI listing was performed.", false))
     }
 
     fn next_snapshot_id(&self) -> String {
@@ -2935,7 +3087,11 @@ impl ComputerUseBroker {
         object_kind: ObjectKind,
         resolved: ResolvedObject,
     ) -> Result<ObjectRef, AgentError> {
-        let token = uuid::Uuid::new_v4().to_string();
+        let token = if matches!(resolved, ResolvedObject::UiElement { .. }) {
+            self.register_ui_identity(resolved.clone())?
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
         let mut objects = self.objects.lock().map_err(|_| {
             error(
                 AgentErrorKind::Internal,
@@ -2965,7 +3121,7 @@ impl ComputerUseBroker {
             ));
         }
         objects.insert(
-            token,
+            reference_storage_key(&token, snapshot_id),
             StoredObject {
                 snapshot_id: snapshot_id.to_string(),
                 object_kind,
@@ -2991,7 +3147,10 @@ impl ComputerUseBroker {
         })?;
         let now = Utc::now();
         objects.retain(|_, object| object.expires_at > now);
-        let Some(stored) = objects.get(&object_ref.token) else {
+        let Some(stored) = objects.get(&reference_storage_key(
+            &object_ref.token,
+            &object_ref.snapshot_id,
+        )) else {
             log::debug!(
                 "[computer-use-ref] missing snapshot={} kind={:?} store_size={} epoch={}",
                 object_ref.snapshot_id,
@@ -3392,6 +3551,8 @@ pub(super) struct ObservedApplication {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub(super) struct CollectedUiNode {
+    #[serde(skip)]
+    pub(super) is_collection: bool,
     pub native_id: Option<String>,
     pub(super) parent_index: Option<u32>,
     pub(super) role: String,
@@ -3600,9 +3761,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn overview_folds_grid_and_remaps_following_controls() {
+        let node = |role: &str, parent, id: &str| CollectedUiNode {
+            is_collection: role == "AXGrid",
+            native_id: None,
+            parent_index: parent,
+            role: role.into(),
+            name: None,
+            value: None,
+            is_protected: false,
+            enabled: true,
+            supported_actions: vec![],
+            fingerprint: id.into(),
+        };
+        let mut tree = CollectedUiTree {
+            nodes: vec![
+                node("AXWindow", None, "window"),
+                node("AXGrid", Some(0), "grid"),
+                node("AXList", Some(1), "day"),
+                node("AXStaticText", Some(2), "event"),
+                node("AXButton", Some(0), "add"),
+            ],
+            truncated: false,
+        };
+        let folded = fold_ui_collections(&mut tree);
+        assert_eq!(tree.nodes.len(), 3);
+        assert_eq!(folded.get("grid"), Some(&2));
+        assert_eq!(tree.nodes[2].fingerprint, "add");
+        assert_eq!(tree.nodes[2].parent_index, Some(0));
+        assert!(!tree.truncated);
+        let q = desk_agent_protocol::computer_use::UiInspectQuery {
+            element_id: None,
+            any: vec!["missing".into(), "button".into()],
+            ..Default::default()
+        };
+        assert!(ui_query_matches(Some(&q), &tree.nodes[2]));
+        let q = desk_agent_protocol::computer_use::UiInspectQuery {
+            name: Some("absent".into()),
+            ..q
+        };
+        assert!(!ui_query_matches(Some(&q), &tree.nodes[2]));
+    }
+
+    #[test]
     fn exact_ui_query_requires_all_fields_and_never_matches_a_missing_id() {
         use desk_agent_protocol::computer_use::UiInspectQuery;
         let node = CollectedUiNode {
+            is_collection: false,
             native_id: Some("result".into()),
             parent_index: None,
             role: "AXStaticText".into(),
@@ -3614,6 +3819,8 @@ mod tests {
             fingerprint: "opaque".into(),
         };
         let mut query = UiInspectQuery {
+            element_id: None,
+            any: Vec::new(),
             native_id: Some("result".into()),
             role: Some("AXStaticText".into()),
             name: Some("Display".into()),
@@ -3660,11 +3867,147 @@ mod tests {
     }
 
     #[test]
+    fn ui_identity_survives_snapshot_expiry_input_and_refresh_without_renewing_old_snapshot() {
+        let broker = ComputerUseBroker::new();
+        broker.update_active_session_incarnation(Some("session-a".into()));
+        let native = ResolvedObject::UiElement {
+            process_id: 42,
+            image_path: "/app".into(),
+            fingerprint: "native-a".into(),
+        };
+        let id = broker.register_ui_identity(native.clone()).unwrap();
+        let first = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "session",
+                ObjectKind::UiElement,
+                native.clone(),
+            )
+            .unwrap();
+        let second = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "session",
+                ObjectKind::UiElement,
+                native.clone(),
+            )
+            .unwrap();
+        assert_eq!(first.token, id);
+        assert_eq!(second.token, id);
+        assert_ne!(first.snapshot_id, second.snapshot_id);
+        assert!(broker.resolve_ref(&first).is_ok());
+        assert!(broker.resolve_ref(&second).is_ok());
+        broker
+            .objects
+            .lock()
+            .unwrap()
+            .get_mut(&reference_storage_key(&first.token, &first.snapshot_id))
+            .unwrap()
+            .expires_at = Utc::now() - Duration::seconds(1);
+        assert!(broker.resolve_ref(&first).is_err());
+        assert_eq!(broker.resolve_ui_identity(&id).unwrap(), native);
+        broker.note_external_input();
+        assert_eq!(broker.resolve_ui_identity(&id).unwrap(), native);
+        let fresh = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                "session",
+                ObjectKind::UiElement,
+                native.clone(),
+            )
+            .unwrap();
+        assert_eq!(fresh.token, id);
+        assert!(broker.resolve_ref(&first).is_err());
+        assert!(broker.resolve_ref(&fresh).is_ok());
+        let rebuilt = ResolvedObject::UiElement {
+            process_id: 42,
+            image_path: "/app".into(),
+            fingerprint: "native-b".into(),
+        };
+        assert_ne!(broker.register_ui_identity(rebuilt).unwrap(), id);
+        broker.update_active_session_incarnation(None);
+        assert_eq!(broker.resolve_ui_identity(&id).unwrap(), native);
+        broker.update_active_session_incarnation(Some("session-a".into()));
+        assert_eq!(broker.register_ui_identity(native.clone()).unwrap(), id);
+        broker.update_active_session_incarnation(Some("session-b".into()));
+        assert!(broker.resolve_ui_identity(&id).is_err());
+        let next_session_id = broker.register_ui_identity(native.clone()).unwrap();
+        assert_ne!(next_session_id, id);
+        broker.reset_worker_incarnation();
+        assert!(broker.resolve_ui_identity(&next_session_id).is_err());
+        assert!(broker.resolve_ui_identity(&id).is_err());
+        assert_ne!(broker.register_ui_identity(native).unwrap(), id);
+    }
+
+    #[test]
+    fn stable_id_does_not_grant_read_or_action_authority() {
+        let broker = ComputerUseBroker::new();
+        let id = broker
+            .register_ui_identity(ResolvedObject::UiElement {
+                process_id: 42,
+                image_path: "/app".into(),
+                fingerprint: "native-a".into(),
+            })
+            .unwrap();
+        let params = UiInspectParams {
+            allow_unfiltered: false,
+            overview: true,
+            query: Some(desk_agent_protocol::computer_use::UiInspectQuery {
+                element_id: Some(id),
+                ..Default::default()
+            }),
+            element_only: false,
+            scope: Default::default(),
+            root: None,
+            max_depth: 12,
+            max_nodes: 20,
+            max_bytes: 4096,
+        };
+        assert_eq!(
+            broker
+                .inspect_desktop_ui(&params, &ComputerUseSettings::default())
+                .unwrap_err()
+                .kind,
+            AgentErrorKind::PermissionDenied
+        );
+        let mut missing = params;
+        missing.query.as_mut().unwrap().element_id = Some("unknown".into());
+        let err = broker.inspect_desktop_ui(&missing, &enabled()).unwrap_err();
+        assert_eq!(err.kind, AgentErrorKind::InvalidInput);
+        assert!(err.message.contains("No full UI listing"));
+    }
+
+    #[test]
+    fn ui_search_is_required_and_opt_in_does_not_grant_observation() {
+        let broker = ComputerUseBroker::new();
+        let mut params = UiInspectParams {
+            allow_unfiltered: false,
+            overview: true,
+            query: None,
+            element_only: false,
+            scope: Default::default(),
+            root: None,
+            max_depth: 12,
+            max_nodes: 20,
+            max_bytes: 4096,
+        };
+        let disabled = ComputerUseSettings::default();
+        let error = broker.inspect_desktop_ui(&params, &disabled).unwrap_err();
+        assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+        assert!(error.message.contains("allow_unfiltered"));
+        params.allow_unfiltered = true;
+        let error = broker.inspect_desktop_ui(&params, &disabled).unwrap_err();
+        assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
+    }
+
+    #[test]
     fn ui_bounds_fail_before_the_adapter_is_consulted() {
         let broker = ComputerUseBroker::new();
         let error = broker
             .inspect_desktop_ui(
                 &UiInspectParams {
+                    allow_unfiltered: true,
+                    overview: false,
                     query: None,
                     element_only: false,
                     scope: Default::default(),
@@ -3686,6 +4029,8 @@ mod tests {
             1,
             "/usr/bin/example",
             &UiInspectParams {
+                allow_unfiltered: true,
+                overview: false,
                 query: None,
                 element_only: false,
                 scope: Default::default(),
@@ -4024,7 +4369,10 @@ mod tests {
             .objects
             .lock()
             .unwrap()
-            .get_mut(&reference.token)
+            .get_mut(&reference_storage_key(
+                &reference.token,
+                &reference.snapshot_id,
+            ))
             .unwrap()
             .expires_at = Utc::now() - Duration::seconds(1);
         assert!(broker.resolve_ref(&reference).is_err());
@@ -4066,7 +4414,10 @@ mod tests {
             .objects
             .lock()
             .unwrap()
-            .get_mut(&reference.token)
+            .get_mut(&reference_storage_key(
+                &reference.token,
+                &reference.snapshot_id,
+            ))
             .unwrap()
             .expires_at = Utc::now() - Duration::seconds(1);
         assert!(broker.resolve_ref(&reference).is_err());
@@ -4689,6 +5040,8 @@ mod tests {
             )
             .unwrap();
         let mut params = UiInspectParams {
+            allow_unfiltered: true,
+            overview: false,
             query: None,
             element_only: false,
             scope: Default::default(),
@@ -4769,7 +5122,7 @@ mod tests {
             .objects
             .lock()
             .unwrap()
-            .get_mut(&app.token)
+            .get_mut(&reference_storage_key(&app.token, &app.snapshot_id))
             .unwrap()
             .resolved
         {
@@ -4821,6 +5174,8 @@ mod tests {
         let output = broker
             .inspect_desktop_ui(
                 &UiInspectParams {
+                    allow_unfiltered: true,
+                    overview: false,
                     query: None,
                     element_only: false,
                     scope: Default::default(),
@@ -4855,12 +5210,59 @@ pub(super) fn ui_query_matches(
     node: &CollectedUiNode,
 ) -> bool {
     query.is_none_or(|q| {
-        q.native_id
-            .as_ref()
-            .is_none_or(|v| node.native_id.as_ref() == Some(v))
+        (q.any.is_empty()
+            || !desk_agent_protocol::matching_search_terms(
+                &q.any,
+                &[
+                    node.name.as_deref().unwrap_or(""),
+                    node.native_id.as_deref().unwrap_or(""),
+                    &node.role,
+                ],
+            )
+            .is_empty())
+            && q.element_id
+                .as_ref()
+                .is_none_or(|id| id == &node.fingerprint)
+            && q.native_id
+                .as_ref()
+                .is_none_or(|v| node.native_id.as_ref() == Some(v))
             && q.role.as_ref().is_none_or(|v| &node.role == v)
             && q.name
                 .as_ref()
                 .is_none_or(|v| node.name.as_ref() == Some(v))
     })
+}
+
+/// Collapse collection descendants while preserving stable native targets and
+/// valid parent indices. Expanding the collection root reads its own subtree.
+fn fold_ui_collections(tree: &mut CollectedUiTree) -> std::collections::HashMap<String, u32> {
+    let mut collapsed = std::collections::HashMap::new();
+    let mut parents = Vec::<Option<u32>>::new();
+    let mut folded_under = Vec::<Option<String>>::new();
+    let mut output = Vec::new();
+    for (i, mut node) in std::mem::take(&mut tree.nodes).into_iter().enumerate() {
+        let ancestor = node
+            .parent_index
+            .and_then(|p| folded_under.get(p as usize).cloned().flatten());
+        if let Some(key) = ancestor {
+            *collapsed.entry(key.clone()).or_insert(0) += 1;
+            parents.push(None);
+            folded_under.push(Some(key));
+            continue;
+        }
+        let fold = i != 0 && node.is_collection;
+        node.parent_index = node
+            .parent_index
+            .and_then(|p| parents.get(p as usize).copied().flatten());
+        parents.push(Some(output.len() as u32));
+        folded_under.push(fold.then(|| node.fingerprint.clone()));
+        output.push(node);
+    }
+    tree.nodes = output;
+    collapsed
+}
+
+fn reference_storage_key(token: &str, snapshot_id: &str) -> String {
+    // Length-prefix the opaque token to avoid delimiter ambiguity.
+    format!("{}:{token}{snapshot_id}", token.len())
 }

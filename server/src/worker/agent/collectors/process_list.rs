@@ -11,7 +11,7 @@ use sysinfo::{ProcessesToUpdate, System, Users};
 /// Cap applied when the caller leaves `limit` at its default (0). Keeps a full
 /// process table from flooding a model's context window; a caller that wants
 /// more sets an explicit `limit`.
-const DEFAULT_LIMIT: usize = 100;
+const DEFAULT_LIMIT: usize = 20;
 
 /// Collect the process table, sorted per `params.sort` and truncated to the
 /// effective limit. Infallible: `sysinfo` yields best-effort data, and a host
@@ -30,6 +30,14 @@ pub fn collect(params: &ProcessListParams) -> ProcessListOutput {
     let mut entries: Vec<ProcessEntry> = sys
         .processes()
         .values()
+        .filter(|proc| {
+            params.queries.is_empty()
+                || !desk_agent_protocol::matching_search_terms(
+                    &params.queries,
+                    &[&proc.name().to_string_lossy()],
+                )
+                .is_empty()
+        })
         .map(|proc| {
             let user = proc
                 .user_id()
@@ -41,10 +49,14 @@ pub fn collect(params: &ProcessListParams) -> ProcessListOutput {
             // data was withheld rather than absent.
             let command_line_redacted = params.include_command_line && !proc.cmd().is_empty();
             ProcessEntry {
+                matched_queries: desk_agent_protocol::matching_search_terms(
+                    &params.queries,
+                    &[&proc.name().to_string_lossy()],
+                ),
                 pid: proc.pid().as_u32(),
                 name: proc.name().to_string_lossy().into_owned(),
-                cpu_percent: proc.cpu_usage(),
-                memory_bytes: proc.memory(),
+                cpu_percent: Some(proc.cpu_usage()),
+                memory_bytes: Some(proc.memory()),
                 user,
                 command_line_redacted,
             }
@@ -53,7 +65,11 @@ pub fn collect(params: &ProcessListParams) -> ProcessListOutput {
 
     match params.sort {
         // `total_cmp` gives a total order over f32 (handles NaN deterministically).
-        ProcessSort::CpuDesc => entries.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent)),
+        ProcessSort::CpuDesc => entries.sort_by(|a, b| {
+            b.cpu_percent
+                .unwrap_or_default()
+                .total_cmp(&a.cpu_percent.unwrap_or_default())
+        }),
         ProcessSort::MemoryDesc => entries.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes)),
         ProcessSort::Pid => entries.sort_by_key(|e| e.pid),
     }
@@ -65,6 +81,13 @@ pub fn collect(params: &ProcessListParams) -> ProcessListOutput {
     };
     let truncated = entries.len() > limit;
     entries.truncate(limit);
+    if !params.include_details {
+        for entry in &mut entries {
+            entry.cpu_percent = None;
+            entry.memory_bytes = None;
+            entry.user = None;
+        }
+    }
 
     ProcessListOutput {
         processes: entries,
@@ -78,6 +101,9 @@ mod tests {
 
     fn params(limit: u32, sort: ProcessSort, include_command_line: bool) -> ProcessListParams {
         ProcessListParams {
+            allow_unfiltered: false,
+            queries: Vec::new(),
+            include_details: true,
             limit,
             sort,
             include_command_line,
@@ -85,9 +111,37 @@ mod tests {
     }
 
     #[test]
+    fn batch_name_filter_runs_before_limit_and_discovery_omits_details() {
+        let full = collect(&params(100_000, ProcessSort::Pid, false));
+        let own = full
+            .processes
+            .iter()
+            .find(|p| p.pid == std::process::id())
+            .unwrap();
+        let query = ProcessListParams {
+            allow_unfiltered: false,
+            queries: vec!["no-such-process-1234567890".into(), own.name.to_uppercase()],
+            include_details: false,
+            limit: 1,
+            sort: ProcessSort::Pid,
+            include_command_line: false,
+        };
+        let found = collect(&query);
+        assert_eq!(found.processes.len(), 1);
+        assert_eq!(found.processes[0].matched_queries, vec![1]);
+        assert!(found.processes[0].cpu_percent.is_none());
+        assert!(found.processes[0].memory_bytes.is_none());
+        assert!(
+            !serde_json::to_string(&found)
+                .unwrap()
+                .contains("cpu_percent")
+        );
+    }
+
+    #[test]
     fn collect_returns_processes_including_self() {
         // The current process is always present, proving real enumeration. A
-        // high limit returns the full table so a CPU-sorted top-100 cap can't
+        // high limit returns the full table so a CPU-sorted default cap can't
         // truncate us out. We assert self-presence rather than "every pid > 0":
         // pid 0 is legitimate on Windows (the System Idle Process), so the
         // latter is a false invariant.

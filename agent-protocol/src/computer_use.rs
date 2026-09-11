@@ -179,6 +179,13 @@ pub enum UiInspectScope {
 )]
 #[serde(deny_unknown_fields)]
 pub struct UiInspectQuery {
+    /// Worker-issued native element identity; independent of snapshot/grant expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
+    /// Case-insensitive substring alternatives, combined with OR across name,
+    /// native id and role. Exact fields below remain AND constraints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub any: Vec<String>,
     pub native_id: Option<String>,
     pub role: Option<String>,
     pub name: Option<String>,
@@ -188,6 +195,12 @@ pub struct UiInspectQuery {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct UiInspectParams {
+    /// Explicit opt-in to bounded enumeration when no selection is supplied.
+    #[serde(default)]
+    pub allow_unfiltered: bool,
+    /// Fold large collection subtrees; query and element_only override this.
+    #[serde(default)]
+    pub overview: bool,
     #[serde(default)]
     pub query: Option<UiInspectQuery>,
     /// Return only the selected element when true; otherwise inspect its subtree.
@@ -206,6 +219,14 @@ pub struct UiInspectParams {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct UiNodeProjection {
+    /// Stable for this native element lifetime; not an authorization token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_queries: Vec<u32>,
+    /// Number of observed descendants folded out of an overview.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub collapsed_children: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
     pub object_ref: ObjectRef,
@@ -2768,5 +2789,87 @@ mod tests {
             sealed.validate(),
             Err(ComputerUseValidationError::InvalidContextReference(_))
         ));
+    }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+impl UiInspectParams {
+    pub fn validate_selection(&self) -> Result<(), &'static str> {
+        if self.query.as_ref().is_some_and(|q| {
+            !crate::validate_search_terms(&q.any)
+                || [&q.element_id, &q.native_id, &q.role, &q.name]
+                    .into_iter()
+                    .flatten()
+                    .any(|v| v.trim().is_empty() || v.len() > 512)
+        }) {
+            return Err(
+                "query.any accepts at most 16 nonempty strings of at most 128 bytes; exact element_id/native_id/name/role must be nonblank and at most 512 bytes",
+            );
+        }
+        let query = self.query.as_ref().is_some_and(|q| {
+            !q.any.is_empty()
+                || q.element_id.is_some()
+                || q.native_id.is_some()
+                || q.name.is_some()
+                || q.role.is_some()
+        });
+        let exact_element = self.element_only
+            && self
+                .root
+                .as_ref()
+                .is_some_and(|r| r.object_kind == ObjectKind::UiElement);
+        if !query && !exact_element && !self.allow_unfiltered {
+            return Err(
+                r#"Search conditions are required. Use {"query":{"any":["Add event","Calendar"]}} or query.element_id/native_id/name/role. To read one known control, provide its complete UI element root and element_only=true. An application/window/session root, overview, scope or limit alone is not a search condition. Only if a broader listing is necessary, explicitly set allow_unfiltered=true; normal bounds and overview behavior still apply. No UI was read."#,
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod required_ui_search_tests {
+    use super::*;
+    #[test]
+    fn only_a_real_filter_or_single_element_read_avoids_enumeration_opt_in() {
+        let mut params = UiInspectParams {
+            allow_unfiltered: false,
+            overview: true,
+            query: None,
+            element_only: false,
+            scope: UiInspectScope::Menus,
+            root: None,
+            max_depth: 12,
+            max_nodes: 1,
+            max_bytes: 1024,
+        };
+        assert!(params.validate_selection().is_err());
+        params.query = Some(UiInspectQuery::default());
+        assert!(params.validate_selection().is_err());
+        params.query.as_mut().unwrap().name = Some("Add".into());
+        assert!(params.validate_selection().is_ok());
+        params.query = None;
+        params.root = Some(ObjectRef {
+            token: "t".into(),
+            snapshot_id: "s".into(),
+            expires_at: "2026-09-10T00:00:00Z".into(),
+            object_kind: ObjectKind::Application,
+        });
+        params.element_only = true;
+        assert!(params.validate_selection().is_err());
+        params.root.as_mut().unwrap().object_kind = ObjectKind::UiElement;
+        assert!(params.validate_selection().is_ok());
+        params.element_only = false;
+        assert!(params.validate_selection().is_err());
+        params.allow_unfiltered = true;
+        assert!(params.validate_selection().is_ok());
+        params.query = Some(UiInspectQuery {
+            name: Some(" ".into()),
+            ..Default::default()
+        });
+        assert!(params.validate_selection().is_err());
     }
 }

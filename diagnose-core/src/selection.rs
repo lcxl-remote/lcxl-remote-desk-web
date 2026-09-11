@@ -18,7 +18,7 @@
 use desk_agent_protocol::diagnose::DiagnoseRequestData;
 use desk_agent_protocol::{
     Capability, ContainerListParams, ContextKind, LogRecentParams, NetworkPortsParams,
-    ProcessListParams, ReadContextInput, ServiceStatusParams, SystemInfoParams,
+    ReadContextInput, ServiceStatusParams, SystemInfoParams,
 };
 
 /// Server-side gate on what evidence may leave the host for the model.
@@ -255,7 +255,8 @@ pub fn select_capabilities(
 pub fn context_input_for(cap: Capability) -> Option<ReadContextInput> {
     let kind = match cap {
         Capability::SystemInfo => ContextKind::SystemInfo(SystemInfoParams::default()),
-        Capability::ProcessList => ContextKind::ProcessList(ProcessListParams::default()),
+        // Process enumeration requires explicit search parameters or opt-in.
+        Capability::ProcessList => return None,
         Capability::NetworkPorts => ContextKind::NetworkPorts(NetworkPortsParams::default()),
         Capability::ServiceStatus => ContextKind::ServiceStatus(ServiceStatusParams::default()),
         Capability::LogRecent => ContextKind::LogRecent(LogRecentParams::default()),
@@ -427,11 +428,8 @@ mod tests {
     fn narrow_keeps_only_granted_of_default_set() {
         let granted = [Capability::SystemInfo, Capability::ProcessList];
         let narrowed = narrow_to_granted(&request(&[], false), &granted).expect("non-empty");
-        // The default set intersected with the grant → exactly the two granted.
-        assert_eq!(
-            narrowed.context_kinds,
-            vec!["system.info".to_string(), "process.list".to_string()]
-        );
+        // Parameterized process reads are not silently enumerated during collection.
+        assert_eq!(narrowed.context_kinds, vec!["system.info".to_string()]);
         assert!(!narrowed.include_screen);
     }
 
@@ -515,6 +513,7 @@ mod tests {
     fn context_input_buildability() {
         assert!(context_input_for(Capability::SystemInfo).is_some());
         assert!(context_input_for(Capability::ScreenCaptureCurrent).is_some());
+        assert!(context_input_for(Capability::ProcessList).is_none());
         assert!(context_input_for(Capability::ContainerInspect).is_none());
         assert!(context_input_for(Capability::ContainerLogs).is_none());
         assert!(context_input_for(Capability::ShellExecReadonly).is_none());

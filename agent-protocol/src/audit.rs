@@ -1067,18 +1067,20 @@ mod tests {
             OperationOutput::ReadContext(ReadContextOutput::ProcessList(ProcessListOutput {
                 processes: vec![
                     ProcessEntry {
+                        matched_queries: Vec::new(),
                         pid: 1,
                         name: "a".into(),
-                        cpu_percent: 0.0,
-                        memory_bytes: 0,
+                        cpu_percent: Some(0.0),
+                        memory_bytes: Some(0),
                         user: None,
                         command_line_redacted: true,
                     },
                     ProcessEntry {
+                        matched_queries: Vec::new(),
                         pid: 2,
                         name: "b".into(),
-                        cpu_percent: 0.0,
-                        memory_bytes: 0,
+                        cpu_percent: Some(0.0),
+                        memory_bytes: Some(0),
                         user: None,
                         command_line_redacted: false,
                     },

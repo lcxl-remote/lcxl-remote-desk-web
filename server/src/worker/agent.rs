@@ -25,6 +25,7 @@ pub mod macos_accessibility_observer;
 pub mod macos_input_ownership;
 #[cfg(target_os = "macos")]
 pub mod macos_iwork_adapter;
+pub(crate) mod native_ui_identity;
 pub mod office_bridge_observer;
 pub mod outlook_new_handoff;
 pub mod spreadsheet_file;
@@ -299,6 +300,13 @@ async fn dispatch_read_context(
             )))
         }
         ContextKind::ProcessList(params) => {
+            params.validate_selection().map_err(|message| AgentError {
+                kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+                message: message.into(),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            })?;
             let output = run_blocking(move || collectors::process_list::collect(&params)).await?;
             Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ProcessList(output),

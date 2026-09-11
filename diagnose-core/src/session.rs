@@ -1583,8 +1583,20 @@ impl PersistedAgentSession {
         {
             return false;
         }
+        // This is a new runtime receipt, not the original Provider result.
+        // Derive a new identity/digest while preserving the original authority
+        // and lineage. Never leave the old envelope attached to changed bytes.
+        let Ok(envelope) = crate::model_message_labels::internal_tool_result_envelope(
+            message.data_envelope.as_ref(),
+            message.tool_call_id.as_deref().unwrap(),
+            MANUALLY_DISPOSED_OUTCOME_UNKNOWN,
+            "manual_outcome_disposition",
+        ) else {
+            return false;
+        };
         message.text = MANUALLY_DISPOSED_OUTCOME_UNKNOWN.to_string();
         message.image_data_url = None;
+        message.data_envelope = envelope;
         let now = now.into();
         self.manual_outcome_disposition = Some(ManualOutcomeDisposition {
             action,
@@ -3055,6 +3067,67 @@ mod tests {
             MANUALLY_DISPOSED_OUTCOME_UNKNOWN
         );
         assert!(!s.manually_dispose_unknown(8, "e9", "t3"));
+    }
+
+    #[test]
+    fn manual_disposition_relabels_content_without_widening_authority() {
+        use crate::sink_authorizer::{DefaultSinkAuthorizer, SinkAuthorizer, SinkInput};
+        use desk_agent_protocol::data_lineage::DestinationIdentity;
+        let destination = DestinationIdentity::Model {
+            connection_id: "original-model".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        };
+        let mut s = session();
+        let mut message =
+            crate::chat::ChatMessage::tool_result("run-1", "call-1", RECOVER_OUTCOME_UNKNOWN);
+        let parent = crate::model_message_labels::model_bound_user_message(
+            "original".into(),
+            RECOVER_OUTCOME_UNKNOWN.into(),
+            destination.clone(),
+        )
+        .unwrap()
+        .data_envelope
+        .unwrap();
+        message.data_envelope = Some(parent.clone());
+        s.conversation.push(message);
+        s.execution_state = ExecutionState::OutcomeUnknown {
+            action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
+            placeholder_message_id: "run-1".into(),
+            since: "t0".into(),
+        };
+        assert!(s.manually_dispose_unknown(8, "e9", "t1"));
+        let message = &s.conversation[0];
+        let envelope = message.data_envelope.as_ref().unwrap();
+        assert_ne!(envelope.envelope_id, parent.envelope_id);
+        assert_eq!(
+            envelope.provenance.source_envelope_ids,
+            vec![parent.envelope_id]
+        );
+        assert_eq!(envelope.allowed_destinations, parent.allowed_destinations);
+        assert_eq!(envelope.retention, parent.retention);
+        assert_eq!(envelope.sensitivity, parent.sensitivity);
+        let inputs = [SinkInput {
+            envelope,
+            bytes: message.text.as_bytes(),
+        }];
+        assert!(
+            DefaultSinkAuthorizer
+                .authorize(&destination, &inputs, 0, 4096)
+                .is_ok()
+        );
+        let other = DestinationIdentity::Model {
+            connection_id: "other".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        };
+        assert!(
+            DefaultSinkAuthorizer
+                .authorize(&other, &inputs, 0, 4096)
+                .is_err()
+        );
     }
 
     #[test]

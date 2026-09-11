@@ -97,11 +97,13 @@ impl McpServer {
             ),
             tool(
                 TOOL_PROCESS_LIST,
-                "List running processes (sorted by CPU usage). Read-only; command \
+                "Search running processes by queries, or explicitly set allow_unfiltered=true for bounded enumeration. Read-only; command \
                  lines are never returned.",
                 json!({
                     "type": "object",
                     "properties": {
+                        "queries": {"type":"array", "maxItems":16, "items":{"type":"string", "minLength":1, "maxLength":128}},
+                        "allow_unfiltered": {"type":"boolean", "default":false},
                         "limit": {"type": "integer", "minimum": 0,
                             "description": "Max processes to return (0 = server default cap)."}
                     },
@@ -156,11 +158,17 @@ impl McpServer {
             }
             TOOL_PROCESS_LIST => {
                 let a: ProcessListArgs = parse_args(args)?;
-                self.read(ContextKind::ProcessList(ProcessListParams {
+                let params = ProcessListParams {
+                    allow_unfiltered: a.allow_unfiltered,
+                    queries: a.queries,
+                    include_details: false,
                     limit: a.limit,
                     ..Default::default()
-                }))
-                .await
+                };
+                if let Err(message) = params.validate_selection() {
+                    return Ok(error_result(message));
+                }
+                self.read(ContextKind::ProcessList(params)).await
             }
             TOOL_NETWORK_PORTS => {
                 let a: NetworkPortsArgs = parse_args(args)?;
@@ -293,6 +301,8 @@ fn parse_severity(s: &str) -> Option<LogSeverity> {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ProcessListArgs {
+    queries: Vec<String>,
+    allow_unfiltered: bool,
     limit: u32,
 }
 
@@ -404,6 +414,32 @@ mod tests {
             .expect_err("diagnose must be an unknown tool");
         let _ = err;
         assert!(reader.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_search_requires_explicit_selection_before_reader() {
+        let (server, reader) = server(true);
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"allow_unfiltered":true,"queries":[" "]}),
+        ] {
+            let result = server
+                .dispatch_tool(TOOL_PROCESS_LIST, args.as_object().unwrap().clone())
+                .await
+                .unwrap();
+            assert!(is_error(&result));
+        }
+        assert!(reader.calls.lock().unwrap().is_empty());
+        for args in [
+            serde_json::json!({"queries":["Calculator"]}),
+            serde_json::json!({"allow_unfiltered":true}),
+        ] {
+            server
+                .dispatch_tool(TOOL_PROCESS_LIST, args.as_object().unwrap().clone())
+                .await
+                .unwrap();
+        }
+        assert_eq!(reader.calls.lock().unwrap().len(), 2);
     }
 
     /// A read tool dispatches to the reader with the right capability.

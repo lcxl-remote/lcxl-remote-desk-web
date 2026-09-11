@@ -269,3 +269,9 @@ On macOS, semantic UI actions relocate and validate the original process and ele
 Unresolved operation cards show the operation category, receipt uncertainty, and checking steps. Request and execution identifiers remain in collapsed troubleshooting details. The card states when no specific error reason is available.
 
 Failed or unresolved actions show the original request reason associated with the grant actually reserved for that execution. The link uses server work and grant-use records, never timing or approximate input matching. A reason explains the intended operation, not its error cause, and grants no new authority.
+
+### Stable UI element identities
+
+Each UI element's `element_id` equals its `object_ref.token` and identifies one native element within the controlled worker. Repeated reads, different searches, text/value updates, and grant expiry or renewal do not allocate a new ID. macOS compares retained AXUIElement objects; Windows uses process-lifetime RuntimeIds and retained UIA elements. Tree positions, labels, and coordinates are not element identity. Destroyed/recreated elements and restarted applications receive new identities; worker or desktop-session replacement invalidates the old IDs.
+
+`snapshot_id` and `expires_at` still describe an individual observation. Stable identity renews neither authority nor old snapshots. After a reference expires, the assistant can use `{"query":{"element_id":"previously returned ID"}}` with the expired `root` omitted to read that element and obtain a fresh reference. Actions still require valid authorization and the complete current reference. Unknown or invalid IDs fail without falling back to enumeration. Array positions and `parent_index` remain local to each result.

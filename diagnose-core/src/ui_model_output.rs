@@ -21,11 +21,19 @@ pub fn serialize(output: &OperationOutput) -> Result<String, serde_json::Error> 
             "expires_at": first.object_ref.expires_at,
         });
         body["reference_defaults"] = defaults.clone();
+        body["element_id_is_reference_token"] = json!(true);
         body["node_defaults"] = json!({"enabled":true,"is_protected":false});
         for node in body["nodes"].as_array_mut().expect("serialized UI nodes") {
+            let element_id = node.get("element_id").cloned();
             let reference = node["object_ref"]
                 .as_object_mut()
                 .expect("serialized reference");
+            if element_id
+                .as_ref()
+                .is_some_and(|id| reference.get("token") == Some(id))
+            {
+                reference.remove("token");
+            }
             for key in ["snapshot_id", "object_kind", "expires_at"] {
                 if reference.get(key) == defaults.get(key) {
                     reference.remove(key);
@@ -51,14 +59,19 @@ pub fn deserialize(text: &str) -> Result<OperationOutput, serde_json::Error> {
         .and_then(Value::as_object_mut)
     {
         body.remove("truncation_hint");
+        let stable_token = body.remove("element_id_is_reference_token") == Some(json!(true));
         if let Some(defaults) = body.remove("reference_defaults") {
             body.remove("node_defaults");
             if let Some(nodes) = body.get_mut("nodes").and_then(Value::as_array_mut) {
                 for node in nodes {
+                    let element_id = node.get("element_id").cloned();
                     if let (Some(base), Some(reference)) = (
                         defaults.as_object(),
                         node.get_mut("object_ref").and_then(Value::as_object_mut),
                     ) {
+                        if stable_token && let Some(id) = element_id {
+                            reference.entry("token").or_insert(id);
+                        }
                         for (key, value) in base {
                             reference.entry(key.clone()).or_insert(value.clone());
                         }
@@ -84,6 +97,9 @@ mod tests {
     fn compact_receipt_preserves_exact_references_and_non_default_states() {
         let nodes = (0..100)
             .map(|i| UiNodeProjection {
+                element_id: (i % 2 == 0).then(|| format!("opaque-token-{i}")),
+                matched_queries: Vec::new(),
+                collapsed_children: 0,
                 native_id: None,
                 object_ref: ObjectRef {
                     token: format!("opaque-token-{i}"),
@@ -124,6 +140,10 @@ mod tests {
         for (i, node) in body["nodes"].as_array().unwrap().iter().enumerate() {
             let mut reference = body["reference_defaults"].as_object().unwrap().clone();
             reference.extend(node["object_ref"].as_object().unwrap().clone());
+            if let Some(id) = node.get("element_id") {
+                assert!(node["object_ref"].get("token").is_none());
+                reference.insert("token".into(), id.clone());
+            }
             assert_eq!(
                 Value::Object(reference),
                 raw["ReadContext"]["DesktopUiInspect"]["nodes"][i]["object_ref"]
