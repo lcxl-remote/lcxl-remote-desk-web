@@ -128,10 +128,10 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_service_status",
             Capability::ServiceStatus,
-            "Read the status of system services; name one or enumerate.",
+            "Search service names and display names using queries: 1–16 case-insensitive literal substrings combined with OR. No regex or exact-name selector. Search conditions are required unless allow_unfiltered=true explicitly requests a bounded listing. No match returns an empty list.",
             json!({
                 "type": "object",
-                "properties": {"name": {"type": "string", "minLength": 1, "maxLength": MAX_DIAGNOSTIC_FILTER_CHARS}},
+                "properties": {"queries":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}}, "allow_unfiltered":{"type":"boolean","default":false}},
                 "additionalProperties": false
             }),
         ),
@@ -184,7 +184,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_desktop_session",
             Capability::DesktopSessionInspect,
-            "Inspect the current interactive desktop session and optionally return an opaque reference to the active application.",
+            "Inspect the current interactive desktop session and optionally return a reference to the foreground application, not a list of running applications. For macOS application discovery, use the returned session reference as inspect_desktop_ui root and queries with localized and English application names; then inspect the matching application reference.",
             json!({
                 "type": "object",
                 "properties": {
@@ -196,7 +196,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_desktop_ui",
             Capability::DesktopUiInspect,
-            "Require query.element_id/any/name/native_id/role or a UiElement root with element_only=true; otherwise reject unless allow_unfiltered=true explicitly opts into bounded enumeration. Returned element_id is stable for the native element lifetime, independent of authorization and object_ref expiry. Use query.element_id with root omitted to refresh a known element after object_ref expires; never substitute element_id for an action ObjectRef. Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. scope=content (default) reads ordinary UI without menus; scope=menus returns only menu subtrees, useful after the window was already read; scope=all reads both. Choose an Application or null root for the application menu bar; a Window root searches only that window. Pass an existing UI element reference as root with element_only=true to refresh only its current value; otherwise read its subtree. query.any searches name/native_id/role substrings and bilingual control-type aliases (OR, case-insensitive): 日期/date, 时间/time, 输入框/input, 按钮/button, 弹层/popover and 对话框/dialog. Locate a popover and search within its root for unnamed controls. No match does not prove an operation is unsupported; query also searches exact native_id, role and/or name within the selected root and returns matching nodes only (fields combine with AND). Use max_depth=12 for result text; do not reduce depth to reduce output, use query or element_only instead. Application catalog nodes do not contain UI contents or authorize actions. Protected field values are never returned.",
+            "Require element_id or queries or a UiElement root with element_only=true; otherwise reject unless allow_unfiltered=true explicitly opts into bounded enumeration. Returned element_id is stable for the native element lifetime, independent of authorization and object_ref expiry. Use element_id with root omitted to refresh a known element after object_ref expires; never substitute element_id for an action ObjectRef. Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. scope=content (default) reads ordinary UI without menus; scope=menus returns only menu subtrees, useful after the window was already read; scope=all reads both. Choose an Application or null root for the application menu bar; a Window root searches only that window. Pass an existing UI element reference as root with element_only=true to refresh only its current value; otherwise read its subtree. queries searches name/native_id/role substrings and bilingual control-type aliases (OR, case-insensitive): 日期/date, 时间/time, 输入框/input, 按钮/button, 弹层/popover and 对话框/dialog. Locate a popover and search within its root for unnamed controls. No match does not prove an operation is unsupported; queries fuzzy-match native_id, role and name within the selected root and return matching nodes only (OR across terms). Use max_depth=12 for result text; do not reduce depth to reduce output, use query or element_only instead. Application catalog nodes expose application_state=foreground/background/hidden when available (hidden takes priority); missing state means unknown. This is application activation/visibility, not window minimization or screen visibility. Application catalog nodes omit matched_queries and do not contain UI contents or authorize actions. On macOS, search the session application catalog before searching an app UI. If the application is found, use its Application reference as root. If a complete application-name search is empty, increasing max_depth or searching button/date labels cannot find a non-running app: launch it through an available authorized tool (for example an approved exact open -a command), then refresh the application catalog. Empty control searches within an existing app do not mean the app is absent. Protected field values are never returned.",
             json!({
                 "type": "object",
                 "properties": {
@@ -219,13 +219,8 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                     "allow_unfiltered": {"type":"boolean", "default":false, "description":"Explicitly allow bounded enumeration without search conditions; use only when targeted lookup is insufficient. Does not bypass authorization or limits."},
                     "overview": {"type":"boolean", "default":true},
                     "element_only": {"type":"boolean", "default":false},
-                    "query": {"type":"object", "additionalProperties":false, "properties": {
-                        "any":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}},
-                        "element_id":{"type":"string","minLength":1,"maxLength":512},
-                        "native_id":{"type":"string","maxLength":512},
-                        "role":{"type":"string","maxLength":512},
-                        "name":{"type":"string","maxLength":512}
-                    }},
+                    "queries":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}},
+                    "element_id":{"type":"string","minLength":1,"maxLength":512},
                     "scope": {"type": "string", "enum": ["content", "menus", "all"], "default": "content"},
                     "max_depth": {"type": "integer", "minimum": 1, "maximum": 12, "default": 12},
                     "max_nodes": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 300},
@@ -400,7 +395,9 @@ struct DesktopUiToolArgs {
     #[serde(default = "default_true")]
     overview: bool,
     #[serde(default)]
-    query: Option<desk_agent_protocol::computer_use::UiInspectQuery>,
+    queries: Vec<String>,
+    #[serde(default)]
+    element_id: Option<String>,
     #[serde(default)]
     element_only: bool,
     #[serde(default)]
@@ -552,8 +549,8 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             ContextKind::NetworkPorts(params)
         }
         "read_service_status" => {
-            let params = parse_params::<ServiceStatusParams>(&call.arguments_json)?;
-            validate_optional_filter(&params.name, "name")?;
+            let params = parse_params::<ServiceStatusParams>(&call.arguments_json).map_err(|error| bad_arguments(format!("{}. Required format: {{\"queries\":[\"service name\",\"another name\"]}}; the old name selector is not supported. No services were read.", error.message)))?;
+            params.validate_selection().map_err(bad_arguments)?;
             ContextKind::ServiceStatus(params)
         }
         "read_recent_logs" => {
@@ -594,20 +591,18 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             })
         }
         "inspect_desktop_ui" => {
-            let args = parse_params::<DesktopUiToolArgs>(&call.arguments_json)?;
-            if args
-                .query
-                .as_ref()
-                .is_some_and(|q| !desk_agent_protocol::validate_search_terms(&q.any))
-            {
-                return Err(bad_arguments(
-                    "query.any must contain at most 16 nonempty strings, each at most 128 bytes",
-                ));
-            }
+            let args = parse_params::<DesktopUiToolArgs>(&call.arguments_json).map_err(|error| bad_arguments(format!("{}. Required format: {{\"queries\":[\"localized name\",\"English name\"],\"root_id\":\"<observed root>\"}}. Use top-level element_id only to locate a known control. query/name/native_id/role exact-search parameters are not supported; pass their text in queries. No UI was read.", error.message)))?;
             let params = UiInspectParams {
                 allow_unfiltered: args.allow_unfiltered,
                 overview: args.overview,
-                query: args.query,
+                query: if args.queries.is_empty() && args.element_id.is_none() {
+                    None
+                } else {
+                    Some(desk_agent_protocol::computer_use::UiInspectQuery {
+                        queries: args.queries,
+                        element_id: args.element_id,
+                    })
+                },
                 element_only: args.element_only,
                 scope: args.scope,
                 root: args.root,
@@ -787,6 +782,37 @@ mod tests {
     /// `build_read_operation` maps each known tool name to the right capability
     /// and accepts both empty and populated arguments.
     #[test]
+    fn unified_search_schema_and_parser_reject_legacy_exact_selectors() {
+        for name in [
+            "inspect_desktop_ui",
+            "read_service_status",
+            "read_process_list",
+        ] {
+            let call = ToolCall {
+                id: "query".into(),
+                name: name.into(),
+                arguments_json: r#"{"queries":["calendar","CALC"]}"#.into(),
+            };
+            assert!(build_read_operation(&call).is_ok());
+            for invalid in [
+                r#"{"query":{"any":["calendar"]}}"#,
+                r#"{"query":{"name":"calendar"}}"#,
+                r#"{"name":"calendar"}"#,
+                r#"{"queries":[""]}"#,
+            ] {
+                assert!(
+                    build_read_operation(&ToolCall {
+                        arguments_json: invalid.into(),
+                        ..call.clone()
+                    })
+                    .is_err(),
+                    "{name}: {invalid}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn read_operation_mapping() {
         let (cap, _) = build_read_operation(&ToolCall {
             id: "c".into(),
@@ -870,8 +896,10 @@ mod tests {
             let (cap, _) = build_read_operation(&ToolCall {
                 id: "c".into(),
                 name: tool.name().into(),
-                arguments_json: if matches!(tool.name(), "read_process_list" | "inspect_desktop_ui")
-                {
+                arguments_json: if matches!(
+                    tool.name(),
+                    "read_process_list" | "inspect_desktop_ui" | "read_service_status"
+                ) {
                     r#"{"allow_unfiltered":true}"#.into()
                 } else {
                     String::new()
@@ -1038,7 +1066,13 @@ mod menu_scope_tests {
             serde_json::to_value(params.window.unwrap()).unwrap(),
             reference
         );
-        let call = ToolCall { id:"find".into(), name:"inspect_desktop_ui".into(), arguments_json:json!({"root":reference,"query":{"native_id":"result", "role":"AXStaticText"},"element_only":true}).to_string() };
+        let call = ToolCall {
+            id: "find".into(),
+            name: "inspect_desktop_ui".into(),
+            arguments_json:
+                json!({"root":reference,"queries":["result","AXStaticText"],"element_only":true})
+                    .to_string(),
+        };
         let (_, OperationInput::ReadContext(input)) = build_read_operation(&call).unwrap() else {
             panic!()
         };
@@ -1047,9 +1081,12 @@ mod menu_scope_tests {
         };
         assert_eq!(params.max_depth, 12);
         assert!(params.element_only);
-        assert_eq!(params.query.unwrap().native_id.as_deref(), Some("result"));
+        assert_eq!(
+            params.query.unwrap().queries,
+            vec!["result", "AXStaticText"]
+        );
         let call = ToolCall {
-            arguments_json: r#"{"query":{"id":"typo"}}"#.into(),
+            arguments_json: r#"{"id":"typo"}"#.into(),
             ..call
         };
         assert!(build_read_operation(&call).is_err());
@@ -1060,7 +1097,7 @@ mod menu_scope_tests {
         let call = ToolCall {
             id: "search".into(),
             name: "inspect_desktop_ui".into(),
-            arguments_json: r#"{"query":{"any":["Calendar","日历"]}}"#.into(),
+            arguments_json: r#"{"queries":["Calendar","日历"]}"#.into(),
         };
         let (_, OperationInput::ReadContext(input)) = build_read_operation(&call).unwrap() else {
             panic!("read");
@@ -1069,7 +1106,7 @@ mod menu_scope_tests {
             panic!("UI");
         };
         assert!(params.overview);
-        assert_eq!(params.query.unwrap().any, vec!["Calendar", "日历"]);
+        assert_eq!(params.query.unwrap().queries, vec!["Calendar", "日历"]);
         let call = ToolCall {
             id: "search".into(),
             name: "read_process_list".into(),
@@ -1168,15 +1205,9 @@ mod required_search_tests {
                 "read_process_list",
                 r#"{"queries":["Calendar","Calculator"]}"#,
             ),
-            (
-                "inspect_desktop_ui",
-                r#"{"query":{"any":["结果","result"]}}"#,
-            ),
-            ("inspect_desktop_ui", r#"{"query":{"native_id":"result"}}"#),
-            (
-                "inspect_desktop_ui",
-                r#"{"query":{"element_id":"ui-known"}}"#,
-            ),
+            ("inspect_desktop_ui", r#"{"queries":["结果","result"]}"#),
+            ("inspect_desktop_ui", r#"{"queries":["result"]}"#),
+            ("inspect_desktop_ui", r#"{"element_id":"ui-known"}"#),
         ] {
             assert!(
                 build_read_operation(&ToolCall {
@@ -1195,11 +1226,11 @@ mod required_search_tests {
             ),
             (
                 "inspect_desktop_ui",
-                r#"{"query":{},"scope":"menus","overview":true}"#,
+                r#"{"queries":[],"scope":"menus","overview":true}"#,
             ),
             (
                 "inspect_desktop_ui",
-                r#"{"query":{"name":" "},"allow_unfiltered":true}"#,
+                r#"{"queries":[" "],"allow_unfiltered":true}"#,
             ),
         ] {
             assert!(

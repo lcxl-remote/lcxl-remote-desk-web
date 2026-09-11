@@ -694,6 +694,7 @@ pub struct SystemInfoParams {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ProcessListParams {
     /// Explicit opt-in to bounded enumeration when no selection is supplied.
     #[serde(default)]
@@ -743,9 +744,27 @@ pub struct NetworkPortsParams {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ServiceStatusParams {
-    /// Specific service to query; `None` enumerates.
-    pub name: Option<String>,
+    #[serde(default)]
+    pub queries: Vec<String>,
+    #[serde(default)]
+    pub allow_unfiltered: bool,
+}
+impl ServiceStatusParams {
+    pub fn validate_selection(&self) -> Result<(), &'static str> {
+        if !validate_search_terms(&self.queries) {
+            return Err(
+                "queries accepts at most 16 nonempty strings, each at most 128 bytes. Required format: {\"queries\":[\"service name\",\"another name\"]}. No services were read.",
+            );
+        }
+        if self.queries.is_empty() && !self.allow_unfiltered {
+            return Err(
+                "Search conditions are required: use queries=[service names] with multiple fuzzy alternatives, or explicitly set allow_unfiltered=true for bounded enumeration. No services were read.",
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(

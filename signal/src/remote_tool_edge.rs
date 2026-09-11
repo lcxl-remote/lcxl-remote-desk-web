@@ -782,6 +782,7 @@ fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind
             Some(ObjectKind::File)
         }
         ComputerActionKind::UiInApplication { .. } => Some(ObjectKind::UiElement),
+        ComputerActionKind::BackgroundInput { .. } => Some(ObjectKind::Window),
         ComputerActionKind::RawInput(_) => Some(ObjectKind::Application),
         ComputerActionKind::SpreadsheetLive(_) => Some(ObjectKind::Range),
         ComputerActionKind::DocumentLive(_) => Some(ObjectKind::Document),
@@ -5876,6 +5877,46 @@ mod tests {
             snapshot_id: format!("snapshot-{token}"),
             object_kind,
             expires_at: "2099-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn background_batch_preflight_targets_pass_signal_semantic_gate() {
+        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        for input in [
+            serde_json::json!({"kind":"scroll","position":{"x":300,"y":450},"horizontal":0,"vertical":-400}),
+            serde_json::json!({"kind":"type_text","text":"hello"}),
+            serde_json::json!({"kind":"key_press","key":"ArrowDown","modifiers":[]}),
+            serde_json::json!({"kind":"click","position":{"x":300,"y":450}}),
+            serde_json::json!({"kind":"double_click","position":{"x":300,"y":450}}),
+        ] {
+            let call = ToolCall {
+                id: "background".into(),
+                name: EXECUTE_BACKGROUND_INPUT_TOOL.into(),
+                arguments_json: serde_json::json!({
+                    "application":object_ref("app",ObjectKind::Application),
+                    "target":object_ref("window",ObjectKind::Window),
+                    "action":input,
+                    "remaining_steps":[]
+                })
+                .to_string(),
+            };
+            let preflight =
+                desk_diagnose_core::provider_preflight::BackgroundInputCallPreflight::build(
+                    &registry,
+                    desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
+                    &call,
+                    1_800_000_000_000,
+                )
+                .unwrap();
+            assert_eq!(
+                semantic_action_target_kind(&preflight.computer_action()),
+                Some(preflight.target().object_kind)
+            );
+            assert_ne!(
+                semantic_action_target_kind(&preflight.computer_action()),
+                Some(ObjectKind::UiElement)
+            );
         }
     }
 

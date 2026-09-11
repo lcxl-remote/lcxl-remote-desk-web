@@ -124,22 +124,22 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
     for index in 0..3 {
         let first_listener = listener.clone();
         let first = actix_web::rt::spawn(async move {
-            capture_one_openai_request_with_sse(first_listener.as_ref(), &sse(&"z".repeat(16_000)))
+            capture_one_openai_request_with_sse(first_listener.as_ref(), &sse(&"z".repeat(14_000)))
                 .await
         });
-        ask(&db, client, &format!("first-{index}"), "a".repeat(16_000)).await;
+        ask(&db, client, &format!("first-{index}"), "a".repeat(14_000)).await;
         tokio::time::timeout(std::time::Duration::from_secs(5), first)
             .await
             .unwrap()
             .unwrap();
         let snapshot = sessions.read_snapshot(&run).await.unwrap().unwrap();
-        assert_eq!(latest_committed_answer(&snapshot).unwrap().len(), 16_000);
+        assert_eq!(latest_committed_answer(&snapshot).unwrap().len(), 14_000);
         assert_eq!(
             snapshot
                 .messages
                 .iter()
                 .filter(
-                    |message| message.role == ChatRole::Assistant && message.text.len() == 16_000
+                    |message| message.role == ChatRole::Assistant && message.text.len() == 14_000
                 )
                 .count(),
             index + 1
@@ -150,7 +150,7 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
         );
     }
     let before = sessions.read_snapshot(&run).await.unwrap().unwrap();
-    assert_eq!(latest_committed_answer(&before).unwrap().len(), 16_000);
+    assert_eq!(latest_committed_answer(&before).unwrap().len(), 14_000);
     let source = before
         .messages
         .iter()
@@ -170,7 +170,7 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
                 .await;
         (compression, answer)
     });
-    ask(&db, client, "second", "b".repeat(16_000)).await;
+    ask(&db, client, "second", "b".repeat(14_000)).await;
     let after = sessions.read_snapshot(&run).await.unwrap().unwrap();
     assert_eq!(
         latest_committed_answer(&after).as_deref(),

@@ -2672,10 +2672,11 @@ impl ComputerUseBroker {
                 .file_name()
                 .map(|v| v.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let localized_name = super::macos_accessibility_observer::application_display_name(
+            let metadata = super::macos_accessibility_observer::application_display_metadata(
                 application.process_id,
-            )
-            .unwrap_or_default();
+            );
+            let application_state = metadata.as_ref().map(|(_, state)| *state);
+            let localized_name = metadata.map(|(name, _)| name).unwrap_or_default();
             let catalog_name = if localized_name.is_empty() || localized_name == display_name {
                 display_name.clone()
             } else {
@@ -2686,17 +2687,13 @@ impl ComputerUseBroker {
                 .as_ref()
                 .map(|q| {
                     desk_agent_protocol::matching_search_terms(
-                        &q.any,
+                        &q.queries,
                         &[&display_name, &localized_name, &application.image_path],
                     )
                 })
                 .unwrap_or_default();
             if params.query.as_ref().is_some_and(|q| {
-                (!q.any.is_empty() && matched_queries.is_empty())
-                    || q.name.as_ref().is_some_and(|v| v != &catalog_name)
-                    || q.role.as_ref().is_some_and(|v| v != "application")
-                    || q.native_id.is_some()
-                    || q.element_id.is_some()
+                (!q.queries.is_empty() && matched_queries.is_empty()) || q.element_id.is_some()
             }) {
                 continue;
             }
@@ -2717,8 +2714,9 @@ impl ComputerUseBroker {
                 },
             )?;
             output.nodes.push(UiNodeProjection {
+                application_state,
                 element_id: None,
-                matched_queries,
+                matched_queries: Vec::new(),
                 collapsed_children: 0,
                 native_id: None,
                 object_ref,
@@ -2978,13 +2976,14 @@ impl ComputerUseBroker {
                 },
             )?;
             let projection = UiNodeProjection {
+                application_state: None,
                 element_id: Some(element_id),
                 matched_queries: params
                     .query
                     .as_ref()
                     .map(|q| {
                         ui_matching_terms(
-                            &q.any,
+                            &q.queries,
                             node.name.as_deref(),
                             node.native_id.as_deref(),
                             &node.role,
@@ -4150,12 +4149,12 @@ mod tests {
         assert!(!tree.truncated);
         let q = desk_agent_protocol::computer_use::UiInspectQuery {
             element_id: None,
-            any: vec!["missing".into(), "button".into()],
+            queries: vec!["missing".into(), "button".into()],
             ..Default::default()
         };
         assert!(ui_query_matches(Some(&q), &tree.nodes[2]));
         let q = desk_agent_protocol::computer_use::UiInspectQuery {
-            name: Some("absent".into()),
+            queries: vec!["absent".into()],
             ..q
         };
         assert!(!ui_query_matches(Some(&q), &tree.nodes[2]));
@@ -4231,16 +4230,16 @@ mod tests {
             fingerprint: "date".into(),
         };
         let mut query = desk_agent_protocol::computer_use::UiInspectQuery {
-            any: terms,
+            queries: terms,
             ..Default::default()
         };
         assert!(ui_query_matches(Some(&query), &node));
-        query.native_id = Some("end-datepicker".into());
+        query.queries = vec!["end-datepicker".into()];
         assert!(!ui_query_matches(Some(&query), &node));
     }
 
     #[test]
-    fn exact_ui_query_requires_all_fields_and_never_matches_a_missing_id() {
+    fn fuzzy_ui_queries_match_any_name_role_or_native_id_case_insensitively() {
         use desk_agent_protocol::computer_use::UiInspectQuery;
         let node = CollectedUiNode {
             is_collection: false,
@@ -4256,15 +4255,13 @@ mod tests {
         };
         let mut query = UiInspectQuery {
             element_id: None,
-            any: Vec::new(),
-            native_id: Some("result".into()),
-            role: Some("AXStaticText".into()),
-            name: Some("Display".into()),
+            queries: vec!["missing".into(), "display".into()],
         };
         assert!(ui_query_matches(Some(&query), &node));
-        query.name = Some("display".into());
-        assert!(!ui_query_matches(Some(&query), &node));
-        query.name = None;
+        query.queries = vec!["statictext".into()];
+        assert!(ui_query_matches(Some(&query), &node));
+        query.queries = vec!["RESU".into()];
+        assert!(ui_query_matches(Some(&query), &node));
         let missing = CollectedUiNode {
             native_id: None,
             ..node
@@ -4438,7 +4435,7 @@ mod tests {
         // enumeration or search. They still require observation permission.
         params.allow_unfiltered = false;
         params.query = Some(desk_agent_protocol::computer_use::UiInspectQuery {
-            any: vec!["Calendar".into()],
+            queries: vec!["Calendar".into()],
             ..Default::default()
         });
         assert!(params.root.is_none());
@@ -5763,9 +5760,9 @@ pub(super) fn ui_query_matches(
     node: &CollectedUiNode,
 ) -> bool {
     query.is_none_or(|q| {
-        (q.any.is_empty()
+        (q.queries.is_empty()
             || !ui_matching_terms(
-                &q.any,
+                &q.queries,
                 node.name.as_deref(),
                 node.native_id.as_deref(),
                 &node.role,
@@ -5774,13 +5771,6 @@ pub(super) fn ui_query_matches(
             && q.element_id
                 .as_ref()
                 .is_none_or(|id| id == &node.fingerprint)
-            && q.native_id
-                .as_ref()
-                .is_none_or(|v| node.native_id.as_ref() == Some(v))
-            && q.role.as_ref().is_none_or(|v| &node.role == v)
-            && q.name
-                .as_ref()
-                .is_none_or(|v| node.name.as_ref() == Some(v))
     })
 }
 

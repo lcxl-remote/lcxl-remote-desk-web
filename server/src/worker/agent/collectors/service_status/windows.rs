@@ -29,8 +29,8 @@ fn internal(message: String) -> AgentError {
     }
 }
 
-/// Query a single service by name via the safe `windows-service` wrapper.
-pub(super) fn query_one(name: &str) -> Result<ServiceEntry, AgentError> {
+/// Enrich an already matched service with state and startup configuration.
+pub(super) fn read_metadata(name: &str) -> Result<ServiceEntry, AgentError> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|e| internal(format!("open SCM failed: {e}")))?;
     let service = manager

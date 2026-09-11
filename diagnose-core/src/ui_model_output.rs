@@ -11,7 +11,7 @@ pub fn serialize(output: &OperationOutput) -> Result<String, serde_json::Error> 
     let body = &mut value["ReadContext"]["DesktopUiInspect"];
     if ui.nodes.is_empty() {
         body["search_hint"] = json!(
-            "No controls matched this bounded query. This does not establish that the UI or operation is unsupported. Try query.any with both localized and English candidates (up to 16), because native identifiers often remain English even on a Chinese UI: 日期/时间/date/time/input/dialog/popover, or an observed native_id. Locate a dialog/popover then search within its root. Use allow_unfiltered=true only explicitly when targeted searches are insufficient."
+            "No results matched this bounded query. If your root is a macOS DesktopSession, this searched running application names only, not controls: when truncated=false and known localized/English application names have no match, open the requested application through an authorized launch tool, then search the session again. Do not increase UI depth or search button/date labels to find a non-running app. A truncated listing or read error does not prove absence. If your root is an application/window/control, this does not establish that the UI or operation is unsupported. Try queries with both localized and English candidates (up to 16), because native identifiers often remain English even on a Chinese UI: 日期/时间/date/time/input/dialog/popover, or an observed native_id. Locate a dialog/popover then search within its root. Use allow_unfiltered=true only explicitly when targeted searches are insufficient."
         );
     }
     if ui.truncated {
@@ -105,9 +105,82 @@ mod tests {
     use desk_agent_protocol::computer_use::*;
 
     #[test]
+    fn application_catalog_retains_state_without_search_match_indices() {
+        for state in [
+            ApplicationState::Foreground,
+            ApplicationState::Background,
+            ApplicationState::Hidden,
+        ] {
+            let output = OperationOutput::ReadContext(ReadContextOutput::DesktopUiInspect(
+                UiInspectOutput {
+                    snapshot_id: "catalog".into(),
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::MacosAccessibility,
+                        version: "test".into(),
+                    },
+                    nodes: vec![UiNodeProjection {
+                        application_state: Some(state),
+                        element_id: None,
+                        matched_queries: vec![],
+                        collapsed_children: 0,
+                        native_id: None,
+                        object_ref: ObjectRef {
+                            token: "app".into(),
+                            snapshot_id: "identity".into(),
+                            object_kind: ObjectKind::Application,
+                            expires_at: String::new(),
+                        },
+                        parent_index: None,
+                        role: "application".into(),
+                        name: Some("Calendar".into()),
+                        value: None,
+                        is_protected: false,
+                        enabled: true,
+                        supported_actions: vec![],
+                    }],
+                    owner_selectable_windows: vec![],
+                    truncated: false,
+                },
+            ));
+            let encoded = serialize(&output).unwrap();
+            assert!(!encoded.contains("matched_queries"));
+            let value: Value = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(
+                value["ReadContext"]["DesktopUiInspect"]["nodes"][0]["application_state"],
+                serde_json::to_value(state).unwrap()
+            );
+            assert_eq!(deserialize(&encoded).unwrap(), output);
+        }
+    }
+
+    #[test]
+    fn empty_search_guidance_distinguishes_app_discovery_from_control_search() {
+        for truncated in [false, true] {
+            let output = OperationOutput::ReadContext(ReadContextOutput::DesktopUiInspect(
+                UiInspectOutput {
+                    snapshot_id: "snapshot".into(),
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::MacosAccessibility,
+                        version: "test".into(),
+                    },
+                    nodes: vec![],
+                    owner_selectable_windows: vec![],
+                    truncated,
+                },
+            ));
+            let encoded = serialize(&output).unwrap();
+            assert!(encoded.contains("running application names only"));
+            assert!(encoded.contains("truncated=false"));
+            assert!(encoded.contains("A truncated listing or read error does not prove absence"));
+            assert_eq!(deserialize(&encoded).unwrap(), output);
+        }
+    }
+
+    #[test]
     fn compact_receipt_preserves_exact_references_and_non_default_states() {
         let nodes = (0..100)
             .map(|i| UiNodeProjection {
+                application_state: None,
                 element_id: (i % 2 == 0).then(|| format!("opaque-token-{i}")),
                 matched_queries: Vec::new(),
                 collapsed_children: 0,

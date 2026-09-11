@@ -2477,7 +2477,7 @@ async fn run_inner_impl(
                             mint(),
                             &call.id,
                             format!(
-                                "tool `{}` is not loaded in the current focus. Call load_capability_details to load it; this does not itself grant permission. Currently advertised tools: {}",
+                                "tool `{}` is not loaded in the current focus. Call load_capability_details to load it; this does not itself grant permission. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
                                 call.name,
                                 exposed
                                     .iter()

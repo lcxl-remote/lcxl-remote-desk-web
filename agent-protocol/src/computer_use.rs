@@ -185,7 +185,7 @@ pub enum UiInspectScope {
     All,
 }
 
-/// Exact fields use AND; any matches native text and bilingual control-type aliases.
+/// Multiple case-insensitive substring terms match native text and control-type aliases.
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
@@ -195,12 +195,9 @@ pub struct UiInspectQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub element_id: Option<String>,
     /// Case-insensitive substring alternatives, combined with OR across name,
-    /// native id, role and bilingual control types. Exact fields remain AND constraints.
+    /// native id, role and bilingual control types.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub any: Vec<String>,
-    pub native_id: Option<String>,
-    pub role: Option<String>,
-    pub name: Option<String>,
+    pub queries: Vec<String>,
 }
 
 #[derive(
@@ -227,10 +224,36 @@ pub struct UiInspectParams {
     pub max_bytes: u32,
 }
 
+/// Application activation state, independent of individual window minimization.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationState {
+    Foreground,
+    Background,
+    Hidden,
+}
+
+impl ApplicationState {
+    pub fn from_native_flags(hidden: bool, active: bool) -> Self {
+        if hidden {
+            Self::Hidden
+        } else if active {
+            Self::Foreground
+        } else {
+            Self::Background
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct UiNodeProjection {
+    /// Present on application catalog nodes when native state is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_state: Option<ApplicationState>,
     /// Stable for this native element lifetime; not an authorization token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub element_id: Option<String>,
@@ -2926,23 +2949,20 @@ fn is_zero(value: &u32) -> bool {
 impl UiInspectParams {
     pub fn validate_selection(&self) -> Result<(), &'static str> {
         if self.query.as_ref().is_some_and(|q| {
-            !crate::validate_search_terms(&q.any)
-                || [&q.element_id, &q.native_id, &q.role, &q.name]
+            !crate::validate_search_terms(&q.queries)
+                || [&q.element_id]
                     .into_iter()
                     .flatten()
                     .any(|v| v.trim().is_empty() || v.len() > 512)
         }) {
             return Err(
-                "query.any accepts at most 16 nonempty strings of at most 128 bytes; exact element_id/native_id/name/role must be nonblank and at most 512 bytes",
+                "queries accepts at most 16 nonempty strings of at most 128 bytes; element_id must be nonblank and at most 512 bytes",
             );
         }
-        let query = self.query.as_ref().is_some_and(|q| {
-            !q.any.is_empty()
-                || q.element_id.is_some()
-                || q.native_id.is_some()
-                || q.name.is_some()
-                || q.role.is_some()
-        });
+        let query = self
+            .query
+            .as_ref()
+            .is_some_and(|q| !q.queries.is_empty() || q.element_id.is_some());
         let exact_element = self.element_only
             && self
                 .root
@@ -2950,7 +2970,7 @@ impl UiInspectParams {
                 .is_some_and(|r| r.object_kind == ObjectKind::UiElement);
         if !query && !exact_element && !self.allow_unfiltered {
             return Err(
-                r#"Search conditions are required. Use {"query":{"any":["Add event","Calendar"]}} or query.element_id/native_id/name/role. To read one known control, provide its complete UI element root and element_only=true. An application/window/session root, overview, scope or limit alone is not a search condition. Only if a broader listing is necessary, explicitly set allow_unfiltered=true; normal bounds and overview behavior still apply. No UI was read."#,
+                r#"Search conditions are required. Use {"queries":["Add event","Calendar"]} or element_id or queries. To read one known control, provide its complete UI element root and element_only=true. An application/window/session root, overview, scope or limit alone is not a search condition. Only if a broader listing is necessary, explicitly set allow_unfiltered=true; normal bounds and overview behavior still apply. No UI was read."#,
             );
         }
         Ok(())
@@ -2976,7 +2996,7 @@ mod required_ui_search_tests {
         assert!(params.validate_selection().is_err());
         params.query = Some(UiInspectQuery::default());
         assert!(params.validate_selection().is_err());
-        params.query.as_mut().unwrap().name = Some("Add".into());
+        params.query.as_mut().unwrap().queries = vec!["Add".into()];
         assert!(params.validate_selection().is_ok());
         params.query = None;
         params.root = Some(ObjectRef {
@@ -2994,9 +3014,30 @@ mod required_ui_search_tests {
         params.allow_unfiltered = true;
         assert!(params.validate_selection().is_ok());
         params.query = Some(UiInspectQuery {
-            name: Some(" ".into()),
+            queries: vec![" ".into()],
             ..Default::default()
         });
         assert!(params.validate_selection().is_err());
+    }
+}
+
+#[cfg(test)]
+mod application_state_tests {
+    use super::*;
+    #[test]
+    fn hidden_takes_priority_over_activation_and_wire_values_are_explicit() {
+        for (hidden, active, expected) in [
+            (true, true, "hidden"),
+            (true, false, "hidden"),
+            (false, true, "foreground"),
+            (false, false, "background"),
+        ] {
+            let state = ApplicationState::from_native_flags(hidden, active);
+            assert_eq!(serde_json::to_value(state).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_value::<ApplicationState>(serde_json::json!(expected)).unwrap(),
+                state
+            );
+        }
     }
 }

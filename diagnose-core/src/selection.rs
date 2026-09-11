@@ -260,7 +260,10 @@ pub fn context_input_for(cap: Capability) -> Option<ReadContextInput> {
         // Process enumeration requires explicit search parameters or opt-in.
         Capability::ProcessList => return None,
         Capability::NetworkPorts => ContextKind::NetworkPorts(NetworkPortsParams::default()),
-        Capability::ServiceStatus => ContextKind::ServiceStatus(ServiceStatusParams::default()),
+        Capability::ServiceStatus => ContextKind::ServiceStatus(ServiceStatusParams {
+            allow_unfiltered: true,
+            ..Default::default()
+        }),
         Capability::LogRecent => ContextKind::LogRecent(LogRecentParams::default()),
         Capability::ContainerList => ContextKind::ContainerList(ContainerListParams::default()),
         Capability::ScreenCaptureCurrent => ContextKind::ScreenCaptureCurrent(Default::default()),

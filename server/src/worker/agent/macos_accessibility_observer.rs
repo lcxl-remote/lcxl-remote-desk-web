@@ -876,7 +876,9 @@ pub(super) fn application_by_pid(process_id: u32) -> Result<ObservedApplication,
     })
 }
 
-pub(super) fn application_display_name(pid: u32) -> Option<String> {
+pub(super) fn application_display_metadata(
+    pid: u32,
+) -> Option<(String, desk_agent_protocol::computer_use::ApplicationState)> {
     autoreleasepool(|_| unsafe {
         let app: *mut AnyObject = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid as i32];
         if app.is_null() {
@@ -890,11 +892,15 @@ pub(super) fn application_display_name(pid: u32) -> Option<String> {
         if bytes.is_null() {
             None
         } else {
-            Some(
+            Some((
                 std::ffi::CStr::from_ptr(bytes)
                     .to_string_lossy()
                     .into_owned(),
-            )
+                desk_agent_protocol::computer_use::ApplicationState::from_native_flags(
+                    msg_send![app, isHidden],
+                    msg_send![app, isActive],
+                ),
+            ))
         }
     })
 }
@@ -1412,8 +1418,7 @@ mod tests {
         let all = collect_application(app.process_id, &app.image_path, 12, 300, 262144).unwrap();
         let query = UiInspectQuery {
             element_id: None,
-            any: Vec::new(),
-            role: Some("AXStaticText".into()),
+            queries: vec!["AXStaticText".into()],
             ..Default::default()
         };
         let found = collect_application_selection(
@@ -1458,8 +1463,7 @@ mod tests {
             .expect("a native identifier");
         let query = UiInspectQuery {
             element_id: None,
-            any: Vec::new(),
-            native_id: identified.native_id.clone(),
+            queries: identified.native_id.clone().into_iter().collect(),
             ..Default::default()
         };
         let by_id = collect_application_selection(
@@ -1482,8 +1486,7 @@ mod tests {
         );
         let query = UiInspectQuery {
             element_id: None,
-            any: Vec::new(),
-            name: Some("nonexistent-precise-query".into()),
+            queries: vec!["nonexistent-precise-query".into()],
             ..Default::default()
         };
         assert!(

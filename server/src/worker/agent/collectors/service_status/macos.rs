@@ -27,19 +27,6 @@ pub(super) fn enumerate_all() -> Result<Vec<ServiceEntry>, AgentError> {
     Ok(parse_launchctl_list(&text))
 }
 
-/// Query a single launchd job by exact label. A label that matches no loaded
-/// job is a caller input error, not a backend failure.
-pub(super) fn query_one(name: &str) -> Result<ServiceEntry, AgentError> {
-    let entry = enumerate_all()?.into_iter().find(|e| e.name == name);
-    entry.ok_or_else(|| AgentError {
-        kind: AgentErrorKind::InvalidInput,
-        message: format!("service {name:?} not found"),
-        retryable: false,
-        safe_for_model: true,
-        error_code: None,
-    })
-}
-
 fn internal(message: String) -> AgentError {
     AgentError {
         kind: AgentErrorKind::Internal,

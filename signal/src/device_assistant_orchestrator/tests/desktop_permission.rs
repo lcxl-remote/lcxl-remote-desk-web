@@ -70,7 +70,7 @@ async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup
             "tool_name":read_name, "expected_effect":capability.wire.effect,
             "suggested_ttl_seconds":120, "suggested_max_uses":1, "reason":"Read the desktop session requested by the owner"
         }]})),
-        tool_reply(read_name, if read_name == "inspect_desktop_ui" { serde_json::json!({"query":{"any":["Calendar"]}}) } else { serde_json::json!({}) }),
+        tool_reply(read_name, if read_name == "inspect_desktop_ui" { serde_json::json!({"queries":["Calendar"]}) } else { serde_json::json!({}) }),
         "data: {\"choices\":[{\"delta\":{\"content\":\"object-read-complete\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
     ];
     if !approve {

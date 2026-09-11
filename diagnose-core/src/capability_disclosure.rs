@@ -115,7 +115,23 @@ fn invalid(error: CapabilityDisclosureError) -> AgentError {
             format!("too many capability names ({actual} > {maximum})")
         }
         CapabilityDisclosureError::UnknownOrOutOfSurface(name) => {
-            format!("unknown or unavailable capability name `{name}`")
+            if matches!(
+                name.as_str(),
+                "request_capability_grants"
+                    | "load_capability_details"
+                    | "update_task_status"
+                    | "load_conversation_history"
+                    | "read_conversation_image"
+                    | "request_conversation_directory"
+            ) {
+                format!(
+                    "`{name}` is a built-in conversation tool, not a Provider capability. It does not need capability loading and does not count toward the 8-name limit. Use it directly when present in the current tool list. Remove ALL built-in tools from tool_names and retry with Provider names from the capability index only. No working set or permission was changed; no approval card was created."
+                )
+            } else {
+                format!(
+                    "unknown or unavailable capability name `{name}`; use only Provider names from the capability index, not built-in conversation tools. No working set was changed."
+                )
+            }
         }
     };
     AgentError {
@@ -391,7 +407,7 @@ pub fn capability_discovery_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-            description: "Add exact tool names from the server-authored capability index to the current focus epoch's bounded working set. Existing names remain loaded. Use replace=true to explicitly replace the set when its count or byte budget is full. This reveals current details on the next model step but grants no permission and executes nothing.".into(),
+            description: "Add exact tool names from the server-authored capability index to the current focus epoch's bounded working set. Existing names remain loaded. Use replace=true to explicitly replace the set when its count or byte budget is full. Only Provider names from the capability index belong here: request_capability_grants, update_task_status and other built-in conversation tools are used directly when present, never loaded or counted toward the limit. Do not retain unrelated tools just to fill eight slots. This reveals current details on the next model step but grants no permission and executes nothing.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -412,8 +428,19 @@ pub fn capability_discovery_tool_registry() -> Vec<RegisteredTool> {
     }]
 }
 
+fn discovery_priority(name: &str) -> u8 {
+    match name {
+        "inspect_desktop_session" => 0,
+        "inspect_desktop_ui" => 1,
+        "read_process_list" => 2,
+        "read_system_info" => 3,
+        _ => 4,
+    }
+}
+
 /// Deterministic preload from server-owned structured context. Already
-/// authorized callable tools come first, then permission candidates. No user
+/// authorized read tools come first, then read permission candidates. Writes require explicit
+/// task-specific discovery so unrelated mutations do not occupy the working set. No user
 /// text or semantic classifier participates.
 pub fn deterministic_preload_names(
     registry: &ProviderRegistry,
@@ -422,22 +449,26 @@ pub fn deterministic_preload_names(
 ) -> Vec<String> {
     let mut callable = callable_tools
         .iter()
-        .filter(|tool| registry.capability_for_tool(tool.name()).is_some())
+        .filter(|tool| {
+            tool.effect == ToolEffect::ReadOnly
+                && registry.capability_for_tool(tool.name()).is_some()
+        })
         .map(|tool| tool.name().to_string())
         .collect::<Vec<_>>();
-    callable.sort();
+    callable.sort_by_key(|name| (discovery_priority(name), name.clone()));
     callable.dedup();
 
     let callable_set = callable.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut requestable = permission_candidates
         .iter()
         .filter(|tool| {
-            registry.capability_for_tool(tool.name()).is_some()
+            tool.effect == ToolEffect::ReadOnly
+                && registry.capability_for_tool(tool.name()).is_some()
                 && !callable_set.contains(tool.name())
         })
         .map(|tool| tool.name().to_string())
         .collect::<Vec<_>>();
-    requestable.sort();
+    requestable.sort_by_key(|name| (discovery_priority(name), name.clone()));
     requestable.dedup();
 
     let mut names = callable;
@@ -604,6 +635,51 @@ mod tests {
             .collect::<Vec<_>>();
         let callable = registry.registered_tools();
         (registry, inventory, callable)
+    }
+
+    #[test]
+    fn discovery_preloads_reads_and_explains_all_builtin_names_without_mutation() {
+        let (registry, inventory, callable) = every_capability_ready();
+        let preload = deterministic_preload_names(&registry, &[], &callable);
+        assert_eq!(
+            preload,
+            vec![
+                "inspect_desktop_session",
+                "inspect_desktop_ui",
+                "read_process_list",
+                "read_system_info"
+            ]
+        );
+        let mut state = CapabilityDisclosureState::default();
+        for name in [
+            "load_capability_details",
+            "request_capability_grants",
+            "update_task_status",
+        ] {
+            let error =
+                apply_load_call(
+                    &ToolCall {
+                        id: "load".into(),
+                        name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+                        arguments_json:
+                            json!({"replace":true,"tool_names":["inspect_desktop_ui",name]})
+                                .to_string(),
+                    },
+                    &mut state,
+                    1,
+                    &CapabilityLoadContext {
+                        registry: &registry,
+                        inventory: &inventory,
+                        max_context_bytes: 262_144,
+                        callable_tools: &callable,
+                        permission_candidates: &[],
+                    },
+                )
+                .unwrap_err();
+            assert!(error.message.contains("Remove ALL built-in tools"));
+            assert!(error.message.contains("does not need capability loading"));
+            assert_eq!(state, CapabilityDisclosureState::default());
+        }
     }
 
     #[test]
@@ -888,7 +964,11 @@ mod tests {
     #[test]
     fn preload_selects_authorized_callable_tools_before_permission_candidates() {
         let (registry, _, callable) = every_capability_ready();
-        let mut sorted = callable.clone();
+        let mut sorted = callable
+            .iter()
+            .filter(|tool| tool.effect == ToolEffect::ReadOnly)
+            .cloned()
+            .collect::<Vec<_>>();
         sorted.sort_by(|left, right| left.name().cmp(right.name()));
         let authorized = sorted.last().unwrap().clone();
         let candidates = sorted
