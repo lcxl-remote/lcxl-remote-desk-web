@@ -9,6 +9,11 @@ pub fn serialize(output: &OperationOutput) -> Result<String, serde_json::Error> 
     };
     let mut value = serde_json::to_value(output)?;
     let body = &mut value["ReadContext"]["DesktopUiInspect"];
+    if ui.nodes.is_empty() {
+        body["search_hint"] = json!(
+            "No controls matched this bounded query. This does not establish that the UI or operation is unsupported. Try query.any with control types such as date/time/input/dialog/popover (Chinese aliases supported), or an observed native_id. Locate a dialog/popover then search within its root. Use allow_unfiltered=true only explicitly when targeted searches are insufficient."
+        );
+    }
     if ui.truncated {
         body["truncation_hint"] = json!(
             "This bounded UI tree is incomplete. Missing display text does not mean no result. Inspect the exact window with a larger max_depth (at least 12) and adequate max_nodes/max_bytes before deciding the next action."
@@ -59,6 +64,7 @@ pub fn deserialize(text: &str) -> Result<OperationOutput, serde_json::Error> {
         .and_then(Value::as_object_mut)
     {
         body.remove("truncation_hint");
+        body.remove("search_hint");
         let stable_token = body.remove("element_id_is_reference_token") == Some(json!(true));
         if let Some(defaults) = body.remove("reference_defaults") {
             body.remove("node_defaults");

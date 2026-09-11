@@ -842,10 +842,23 @@ fn read_node(
         let (name, name_truncated) = if is_protected {
             (None, false)
         } else {
-            let raw = element
+            let mut raw = element
                 .CurrentName()
                 .map(|value| value.to_string())
                 .unwrap_or_default();
+            if raw.trim().is_empty() {
+                raw = element
+                    .CurrentLabeledBy()
+                    .ok()
+                    .filter(|label| {
+                        label
+                            .CurrentIsPassword()
+                            .is_ok_and(|value| !value.as_bool())
+                    })
+                    .and_then(|label| label.CurrentName().ok())
+                    .map(|value| value.to_string())
+                    .unwrap_or_default();
+            }
             let (value, truncated) = bounded_string(raw);
             ((!value.is_empty()).then_some(value), truncated)
         };

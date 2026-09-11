@@ -250,15 +250,36 @@ pub fn build_permission_grants(
         });
         let exact_external_query = capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExternalQuery];
-        let exact_ui_action = matches!(
-            capability.required_capability,
-            desk_agent_protocol::Capability::DesktopUiActionConfirmed
-                | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
+        let application_scope = crate::application_ui::from_canonical(
+            &requested.tool_name,
+            requested.canonical_input_json.as_deref(),
         );
+        let exact_ui_action = application_scope.is_none()
+            && matches!(
+                capability.required_capability,
+                desk_agent_protocol::Capability::DesktopUiActionConfirmed
+                    | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
+            );
         let text_mutation = crate::provider_preflight::text_file::TextMutationPreflight::supports(
             &requested.tool_name,
         );
-        let resource_scope = if text_mutation {
+        let resource_scope = if let Some(scope) = &application_scope {
+            let expected = crate::application_ui::resource(&scope.application);
+            if expected != *resource_scope
+                || operation_scope.is_empty()
+                || operation_scope.iter().any(|operation| {
+                    !scope
+                        .actions
+                        .iter()
+                        .copied()
+                        .map(crate::application_ui::operation_kind)
+                        .any(|allowed| allowed == *operation)
+                })
+            {
+                return Err(internal("application UI approval scope is invalid"));
+            }
+            expected
+        } else if text_mutation {
             let call = crate::chat::ToolCall {
                 id: requested.item_id.clone(),
                 name: requested.tool_name.clone(),
@@ -446,8 +467,9 @@ pub fn build_permission_grants(
                 unpredictable_input: false,
             },
         );
-        let (use_policy, canonical_input_digest_sha256) = if risk_tier
-            == desk_agent_protocol::capability_grant::CapabilityRiskTier::R3
+        let (use_policy, canonical_input_digest_sha256) = if application_scope.is_some() {
+            (CapabilityGrantUsePolicy::Reusable, None)
+        } else if risk_tier == desk_agent_protocol::capability_grant::CapabilityRiskTier::R3
             || exact_ui_action
         {
             if *max_uses != 1 || requested.canonical_input_json.is_none() {
@@ -472,6 +494,14 @@ pub fn build_permission_grants(
         let expires_at_unix_ms = original_read.map_or(expires_at_unix_ms, |(_, expiry)| {
             expires_at_unix_ms.min(expiry)
         });
+        let expires_at_unix_ms = if let Some(scope) = &application_scope {
+            let expiry = chrono::DateTime::parse_from_rfc3339(&scope.application.expires_at)
+                .ok().and_then(|v| u64::try_from(v.timestamp_millis()).ok()).filter(|v| *v > context.now_unix_ms)
+                .ok_or_else(|| internal("application reference expired; inspect the application and request permission again"))?;
+            expires_at_unix_ms.min(expiry)
+        } else {
+            expires_at_unix_ms
+        };
         let grant_id =
             permission_item_grant_id(&session.conversation_id, request, &requested.item_id);
         let export_destinations = if exact_external_query {

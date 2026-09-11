@@ -149,6 +149,8 @@ pub struct DesktopSessionInspectOutput {
     pub os: String,
     pub interactive_session_incarnation: String,
     pub active_application: Option<ObjectRef>,
+    #[serde(default)]
+    pub active_application_name: Option<String>,
 }
 
 /// UI reading scope; menus are opt-in and can be requested independently.
@@ -173,7 +175,7 @@ pub enum UiInspectScope {
     All,
 }
 
-/// Exact, case-sensitive native UI search; supplied fields are combined with AND.
+/// Exact fields use AND; any matches native text and bilingual control-type aliases.
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
@@ -183,7 +185,7 @@ pub struct UiInspectQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub element_id: Option<String>,
     /// Case-insensitive substring alternatives, combined with OR across name,
-    /// native id and role. Exact fields below remain AND constraints.
+    /// native id, role and bilingual control types. Exact fields remain AND constraints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub any: Vec<String>,
     pub native_id: Option<String>,
@@ -726,6 +728,19 @@ pub enum UiSemanticAction {
     Focus,
 }
 
+/// Owner-reviewed application boundary for reusable native UI operations.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct UiApplicationScope {
+    pub application: ObjectRef,
+    pub actions: Vec<UiSemanticActionKind>,
+    /// Resolved from an observed application by the server, never model authority.
+    #[serde(default)]
+    pub application_name: Option<String>,
+}
+
 /// Exact screen geometry observed immediately before one raw-input fallback
 /// step. The edge re-resolves the owner-selected display and foreground
 /// application, then requires these physical-pixel and DPI facts to remain
@@ -1157,13 +1172,28 @@ pub enum ComputerActionKind {
     File(FilePatchAction),
     Browser(BrowserActionRequest),
     Communication(OutlookNewComposeHandoffRequest),
+    UiInApplication {
+        application: ObjectRef,
+        action: UiSemanticAction,
+    },
 }
 
 impl ComputerActionKind {
+    pub fn semantic_ui(&self) -> Option<(&UiSemanticAction, Option<&ObjectRef>)> {
+        match self {
+            Self::Ui(action) => Some((action, None)),
+            Self::UiInApplication {
+                application,
+                action,
+            } => Some((action, Some(application))),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub const fn required_capability(&self) -> Capability {
         match self {
-            Self::Ui(_) => Capability::DesktopUiActionConfirmed,
+            Self::Ui(_) | Self::UiInApplication { .. } => Capability::DesktopUiActionConfirmed,
             Self::RawInput(_) => Capability::DesktopInputFallbackConfirmed,
             Self::Excel(_) => Capability::OfficeExcelPatchConfirmed,
             Self::PowerPoint(_) => Capability::OfficePowerPointPatchConfirmed,
@@ -1431,7 +1461,7 @@ fn validate_actions(
             (&adapter.kind, &step.action),
             (
                 ComputerUseAdapterKind::WindowsUia | ComputerUseAdapterKind::MacosAccessibility,
-                ComputerActionKind::Ui(_)
+                ComputerActionKind::Ui(_) | ComputerActionKind::UiInApplication { .. }
             ) | (
                 ComputerUseAdapterKind::WindowsRawInput,
                 ComputerActionKind::RawInput(_)
@@ -1468,8 +1498,10 @@ fn validate_actions(
         }
         let target_matches = matches!(
             (&step.action, step.target.object_kind),
-            (ComputerActionKind::Ui(_), ObjectKind::UiElement)
-                | (ComputerActionKind::RawInput(_), ObjectKind::Application)
+            (
+                ComputerActionKind::Ui(_) | ComputerActionKind::UiInApplication { .. },
+                ObjectKind::UiElement
+            ) | (ComputerActionKind::RawInput(_), ObjectKind::Application)
                 | (ComputerActionKind::Excel(_), ObjectKind::Range)
                 | (ComputerActionKind::PowerPoint(_), ObjectKind::Shape)
                 | (ComputerActionKind::SpreadsheetLive(_), ObjectKind::Range)

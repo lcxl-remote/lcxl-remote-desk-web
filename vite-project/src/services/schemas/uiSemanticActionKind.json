@@ -1,0 +1,1 @@
+{"type":"string","enum":["invoke","toggle","select","set_value","scroll","focus"],"x-readme-ref-name":"UiSemanticActionKind"}

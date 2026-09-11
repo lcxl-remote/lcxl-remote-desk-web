@@ -18,6 +18,8 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
     struct Input {
         target: ObjectRef,
         action: UiSemanticAction,
+        #[serde(default)]
+        application: Option<ObjectRef>,
     }
     if call.name != crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
         || call.arguments_json.len() > 64 * 1024
@@ -39,6 +41,9 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
     {
         return Err(unavailable());
     }
+    if let Some(application) = &input.application {
+        validate_application(application)?;
+    }
     match &input.action {
         UiSemanticAction::Invoke
         | UiSemanticAction::Select
@@ -50,11 +55,34 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
     Ok((input.target, input.action))
 }
 
+fn validate_application(application: &ObjectRef) -> Result<(), AgentError> {
+    if application.object_kind != ObjectKind::Application
+        || application.token.is_empty()
+        || application.snapshot_id.is_empty()
+        || chrono::DateTime::parse_from_rfc3339(&application.expires_at).is_err()
+    {
+        return Err(unavailable());
+    }
+    Ok(())
+}
+
+pub fn ui_application_from_call(call: &ToolCall) -> Result<Option<ObjectRef>, AgentError> {
+    ui_action_from_call(call)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+    value
+        .get("application")
+        .filter(|v| !v.is_null())
+        .map(|value| serde_json::from_value(value.clone()).map_err(|_| unavailable()))
+        .transpose()
+}
+
 /// Parsing does not establish native object ownership. The original edge must
 /// still resolve its opaque reference and verify the exact supported action.
 pub struct UiCallPreflight {
     target: ObjectRef,
     action: UiSemanticAction,
+    application: Option<ObjectRef>,
     capability: CapabilityDescriptor,
     provider_id: String,
     surface: ProductSurface,
@@ -91,11 +119,22 @@ impl UiCallPreflight {
             return Err(unavailable());
         }
         let (target, action) = ui_action_from_call(call)?;
+        let application = ui_application_from_call(call)?;
         let expiry = chrono::DateTime::parse_from_rfc3339(&target.expires_at)
             .ok()
             .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
             .filter(|expiry| now_unix_ms > 0 && *expiry > now_unix_ms)
             .ok_or_else(unavailable)?;
+        let expiry = if let Some(app) = &application {
+            let app_expiry = chrono::DateTime::parse_from_rfc3339(&app.expires_at)
+                .ok()
+                .and_then(|v| u64::try_from(v.timestamp_millis()).ok())
+                .filter(|v| *v > now_unix_ms)
+                .ok_or_else(unavailable)?;
+            expiry.min(app_expiry)
+        } else {
+            expiry
+        };
         let canonical_input_json = canonical_tool_permission_input_json(
             &call.name,
             serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,
@@ -103,14 +142,22 @@ impl UiCallPreflight {
         .map_err(|_| unavailable())?;
         let canonical_input_digest_sha256 =
             format!("{:x}", Sha256::digest(canonical_input_json.as_bytes()));
-        let operation_scope = canonical_compiled_scope(
-            &capability.wire.authorization_hint.resources,
-            capability.wire.effect,
-        )
-        .ok_or_else(unavailable)?
-        .operations;
+        let operation_scope = if application.is_some() {
+            vec![crate::application_ui::operation(&action)]
+        } else {
+            canonical_compiled_scope(
+                &capability.wire.authorization_hint.resources,
+                capability.wire.effect,
+            )
+            .ok_or_else(unavailable)?
+            .operations
+        };
         Ok(Self {
-            resource_scope: fresh_object_resource_scope(std::slice::from_ref(&target)),
+            resource_scope: application
+                .as_ref()
+                .map(crate::application_ui::resource)
+                .unwrap_or_else(|| fresh_object_resource_scope(std::slice::from_ref(&target))),
+            application,
             target,
             action,
             capability: capability.clone(),
@@ -122,6 +169,21 @@ impl UiCallPreflight {
             risk_tier: classify_provider_call(capability, call)?,
             valid_until_unix_ms: expiry,
         })
+    }
+
+    pub fn computer_action(&self) -> desk_agent_protocol::computer_use::ComputerActionKind {
+        match &self.application {
+            Some(application) => {
+                desk_agent_protocol::computer_use::ComputerActionKind::UiInApplication {
+                    application: application.clone(),
+                    action: self.action.clone(),
+                }
+            }
+            None => desk_agent_protocol::computer_use::ComputerActionKind::Ui(self.action.clone()),
+        }
+    }
+    pub fn resource_scope(&self) -> &[String] {
+        &self.resource_scope
     }
 
     pub fn target(&self) -> &ObjectRef {

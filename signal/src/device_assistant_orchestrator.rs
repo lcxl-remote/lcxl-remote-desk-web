@@ -1240,10 +1240,7 @@ async fn compose_turn_inner(
         "read_current_screen",
     ]
     .into_iter()
-    .filter(|name| {
-        permission_decision_resume
-            && has_active_resume_desktop_read_grant(&current_desktop_grants, name, now_unix_ms)
-    })
+    .filter(|name| has_active_resume_desktop_read_grant(&current_desktop_grants, name, now_unix_ms))
     .collect::<Vec<_>>();
     let mut selected_source_tools = ask
         .selected_capability_ids

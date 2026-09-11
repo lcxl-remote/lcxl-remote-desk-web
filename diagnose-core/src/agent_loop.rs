@@ -2988,6 +2988,7 @@ async fn run_inner(
                                     safe_for_model: false,
                                     error_code: None,
                                 })?;
+                                crate::application_ui::bind_request(&mut request, &session.conversation)?;
                                 crate::permission_tools::include_desktop_action_reads(&mut request, providers)?;
                                 validate_permission_request_availability(
                                     &session.conversation,

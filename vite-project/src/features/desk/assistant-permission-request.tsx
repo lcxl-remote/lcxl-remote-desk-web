@@ -147,6 +147,14 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 <p className="mt-1 break-all text-xs text-muted-foreground">
                                     {item.providerId} · {item.toolName} · {item.expectedEffect}
                                 </p>
+                                {item.applicationScope && (
+                                    <div data-testid="application-ui-scope" className="mt-3 space-y-1 rounded-md border p-3 text-xs">
+                                        <p className="font-medium">{t('pages.deviceAssistant.applicationUiScopeTitle', { name: item.applicationScope.application_name })}</p>
+                                        <p>{t('pages.deviceAssistant.applicationUiScopeDescription')}</p>
+                                        <p>{t('pages.deviceAssistant.applicationUiScopeExpiry', { time: new Date(item.applicationScope.application.expires_at).toLocaleString() })}</p>
+                                        <p>{item.applicationScope.actions.map((action) => t(`pages.deviceAssistant.uiAction_${action}`)).join(' · ')}</p>
+                                    </div>
+                                )}
                                 {validCommandReview(commandConfirmation) && <CommandConfirmationCard value={commandConfirmation} />}
                                 {validTextFileReview(item.textFileConfirmation) && <TextFileConfirmationCard value={item.textFileConfirmation} />}
                                 {sendConfirmation && (
@@ -193,7 +201,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                             : commandBlocked ? 'pages.deviceAssistant.commandSummaryMissing' : 'pages.deviceAssistant.externalSendSummaryMissing')}
                                     </p>
                                 )}
-                                {(item.resourceScope.length > 0 || item.operationScope.length > 0) && (
+                                {!item.applicationScope && (item.resourceScope.length > 0 || item.operationScope.length > 0) && (
                                     <p className="mt-1 break-all text-xs text-muted-foreground">
                                         {[...item.resourceScope, ...item.operationScope].join(' · ')}
                                     </p>
@@ -219,7 +227,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                                 item.resourceScope,
                                                             )}
                                                         />
-                                                        <span className="break-all">{scope}</span>
+                                                        <span className="break-all">{item.applicationScope ? (scope.startsWith('ui:') ? t(`pages.deviceAssistant.uiAction_${scope.slice(3)}`) : item.applicationScope.application_name) : scope}</span>
                                                     </label>
                                                 ))}
                                             </div>
@@ -241,7 +249,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                                 item.operationScope,
                                                             )}
                                                         />
-                                                        <span className="break-all">{scope}</span>
+                                                        <span className="break-all">{item.applicationScope ? (scope.startsWith('ui:') ? t(`pages.deviceAssistant.uiAction_${scope.slice(3)}`) : item.applicationScope.application_name) : scope}</span>
                                                     </label>
                                                 ))}
                                             </div>

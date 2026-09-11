@@ -798,7 +798,18 @@ fn read_node(
         (None, false)
     } else {
         let raw = attribute_string(element, "AXTitle")
-            .or_else(|| attribute_string(element, "AXDescription"))
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                attribute_string(element, "AXDescription").filter(|text| !text.trim().is_empty())
+            })
+            .or_else(|| {
+                let label = copy_attribute(element, "AXTitleUIElement")?;
+                attribute_string(label.0, "AXValue")
+                    .filter(|text| !text.trim().is_empty())
+                    .or_else(|| {
+                        attribute_string(label.0, "AXTitle").filter(|text| !text.trim().is_empty())
+                    })
+            })
             .unwrap_or_default();
         let (value, truncated) = bounded_string(raw);
         ((!value.is_empty()).then_some(value), truncated)

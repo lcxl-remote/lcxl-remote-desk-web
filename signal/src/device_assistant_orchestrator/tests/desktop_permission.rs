@@ -35,7 +35,16 @@ async fn unselected_semantic_ui_read_resumes_after_owner_approval() {
     run_desktop_case(true, "inspect_desktop_ui").await;
 }
 
+#[actix_web::test]
+async fn ordinary_followup_reuses_approved_desktop_reads_over_transport() {
+    run_desktop_case_kind(true, "inspect_desktop_ui", true).await;
+}
+
 async fn run_desktop_case(approve: bool, read_name: &str) {
+    run_desktop_case_kind(approve, read_name, false).await;
+}
+
+async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup: bool) {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -262,22 +271,45 @@ async fn run_desktop_case(approve: bool, read_name: &str) {
         )
         .await
         .unwrap();
-    let resume = resume_after_permission_decision(
-        connections.clone(),
-        db.clone(),
-        "resume".into(),
-        host.clone(),
-        1,
-        "device".into(),
-        run_id.clone(),
-        request.request_id.clone(),
-        DeviceAssistantAsk {
-            question: "Inspect the desktop session".into(),
-            client_message_id: "resume".into(),
-            conversation_id: Some(client_id.into()),
-            ..Default::default()
-        },
-    );
+    let resume = async {
+        if ordinary_followup {
+            run_turn_inner(
+                connections.clone(),
+                db.clone(),
+                "followup".into(),
+                "controller".into(),
+                host.clone(),
+                1,
+                "device".into(),
+                DeviceAssistantAsk {
+                    question: "Continue inspecting".into(),
+                    client_message_id: "followup".into(),
+                    conversation_id: Some(client_id.into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await;
+        } else {
+            resume_after_permission_decision(
+                connections.clone(),
+                db.clone(),
+                "resume".into(),
+                host.clone(),
+                1,
+                "device".into(),
+                run_id.clone(),
+                request.request_id.clone(),
+                DeviceAssistantAsk {
+                    question: "Inspect the desktop session".into(),
+                    client_message_id: "resume".into(),
+                    conversation_id: Some(client_id.into()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    };
     if !approve {
         tokio::time::timeout(Duration::from_secs(10), resume)
             .await
@@ -330,6 +362,7 @@ async fn run_desktop_case(approve: bool, read_name: &str) {
                         os: "macos".into(),
                         interactive_session_incarnation: "synthetic-original-marker".into(),
                         active_application: None,
+                        active_application_name: None,
                     },
                 ),
             )),

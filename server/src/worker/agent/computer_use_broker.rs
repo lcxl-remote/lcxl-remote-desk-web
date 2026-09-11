@@ -358,6 +358,60 @@ impl ComputerUseBroker {
         )
     }
 
+    pub(crate) fn require_ui_application(
+        &self,
+        target: &ObjectRef,
+        application: &ObjectRef,
+    ) -> Result<(), AgentError> {
+        let ResolvedObject::Application {
+            process_id: app_pid,
+            image_path: app_path,
+            process_started_at,
+            ..
+        } = self.resolve_ref(application)?
+        else {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "approved application reference is invalid",
+                false,
+            ));
+        };
+        let ResolvedObject::UiElement {
+            process_id,
+            image_path,
+            ..
+        } = self.resolve_ref(target)?
+        else {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "application-scoped action requires a UI element",
+                false,
+            ));
+        };
+        if process_id != app_pid || image_path != app_path {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "target control does not belong to the approved application",
+                false,
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        let current_start =
+            super::macos_accessibility_observer::application_by_pid(app_pid)?.process_started_at;
+        #[cfg(windows)]
+        let current_start = super::windows_uia_observer::process_start(app_pid);
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let current_start: Option<u64> = None;
+        if process_started_at.is_none() || current_start != process_started_at {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "approved application process has restarted or is unavailable",
+                false,
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn preflight_ui_action(
         &self,
         target: &ObjectRef,
@@ -640,6 +694,14 @@ impl ComputerUseBroker {
                 session_id: observed.session_id,
             },
         )?;
+        let active_application_name = observed
+            .foreground_application
+            .as_ref()
+            .filter(|app| {
+                params.include_active_application && ceiling.application_allowed(&app.image_path)
+            })
+            .and_then(|app| std::path::Path::new(&app.image_path).file_name())
+            .map(|name| name.to_string_lossy().into_owned());
         let active_application = if params.include_active_application {
             observed
                 .foreground_application
@@ -666,6 +728,7 @@ impl ComputerUseBroker {
             os: std::env::consts::OS.to_string(),
             interactive_session_incarnation: incarnation,
             active_application,
+            active_application_name,
         })
     }
 
@@ -2699,13 +2762,11 @@ impl ComputerUseBroker {
                     .query
                     .as_ref()
                     .map(|q| {
-                        desk_agent_protocol::matching_search_terms(
+                        ui_matching_terms(
                             &q.any,
-                            &[
-                                node.name.as_deref().unwrap_or(""),
-                                node.native_id.as_deref().unwrap_or(""),
-                                &node.role,
-                            ],
+                            node.name.as_deref(),
+                            node.native_id.as_deref(),
+                            &node.role,
                         )
                     })
                     .unwrap_or_default(),
@@ -3801,6 +3862,84 @@ mod tests {
             ..q
         };
         assert!(!ui_query_matches(Some(&q), &tree.nodes[2]));
+    }
+
+    #[test]
+    fn application_scope_rejects_controls_from_another_process_before_native_call() {
+        let broker = ComputerUseBroker::new();
+        let incarnation = format!("1:{}", broker.current_incarnation_nonce());
+        let app = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                &incarnation,
+                ObjectKind::Application,
+                ResolvedObject::Application {
+                    window_handle: 0,
+                    process_id: 10,
+                    image_path: "Calendar".into(),
+                    process_started_at: Some(1),
+                },
+            )
+            .unwrap();
+        let target = broker
+            .issue_ref(
+                &broker.next_snapshot_id(),
+                &incarnation,
+                ObjectKind::UiElement,
+                ResolvedObject::UiElement {
+                    process_id: 11,
+                    image_path: "Calendar".into(),
+                    fingerprint: "target".into(),
+                },
+            )
+            .unwrap();
+        let error = broker.require_ui_application(&target, &app).unwrap_err();
+        assert!(error.message.contains("does not belong"));
+    }
+
+    #[test]
+    fn bilingual_control_types_match_unnamed_dates_and_popovers() {
+        let terms = vec!["标题".into(), "日期".into(), "时间".into(), "DATE".into()];
+        assert_eq!(
+            ui_matching_terms(&terms, None, Some("start-datepicker"), "AXDateTimeArea"),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            ui_matching_terms(&["弹层".into(), "dialog".into()], None, None, "AXPopover"),
+            vec![0, 1]
+        );
+        assert_eq!(
+            ui_matching_terms(&["input".into()], None, None, "编辑"),
+            vec![0]
+        );
+        assert!(
+            ui_matching_terms(
+                &["日期".into()],
+                Some("开会"),
+                Some("title-field"),
+                "AXTextField"
+            )
+            .is_empty()
+        );
+        let node = CollectedUiNode {
+            is_collection: false,
+            native_id: Some("start-datepicker".into()),
+            parent_index: None,
+            role: "AXDateTimeArea".into(),
+            name: None,
+            value: None,
+            is_protected: false,
+            enabled: true,
+            supported_actions: vec![],
+            fingerprint: "date".into(),
+        };
+        let mut query = desk_agent_protocol::computer_use::UiInspectQuery {
+            any: terms,
+            ..Default::default()
+        };
+        assert!(ui_query_matches(Some(&query), &node));
+        query.native_id = Some("end-datepicker".into());
+        assert!(!ui_query_matches(Some(&query), &node));
     }
 
     #[test]
@@ -5205,19 +5344,60 @@ mod tests {
 }
 
 /// Exact selectors never infer missing names or native identifiers.
+/// Match native text and explicit bilingual control-type aliases in one OR set.
+fn ui_matching_terms(
+    terms: &[String],
+    name: Option<&str>,
+    native_id: Option<&str>,
+    role: &str,
+) -> Vec<u32> {
+    let normalized = role.to_ascii_lowercase();
+    let aliases = if normalized.contains("datetime")
+        || normalized.contains("datepicker")
+        || normalized.contains("日期")
+        || normalized.contains("时间")
+    {
+        "日期 时间 日期选择器 时间选择器 date time datepicker timepicker"
+    } else if normalized.contains("popover")
+        || normalized.contains("dialog")
+        || normalized.contains("sheet")
+        || normalized.contains("对话框")
+        || normalized.contains("弹层")
+    {
+        "弹层 弹窗 对话框 popover popup dialog sheet"
+    } else if normalized.contains("textfield")
+        || normalized.contains("textarea")
+        || normalized == "edit"
+        || normalized.contains("编辑")
+        || normalized.contains("输入框")
+    {
+        "文本 输入框 编辑框 text input field edit"
+    } else if normalized.contains("button") || normalized.contains("按钮") {
+        "按钮 button"
+    } else if normalized.contains("checkbox") || normalized.contains("复选框") {
+        "复选框 checkbox"
+    } else if normalized.contains("combobox") || normalized.contains("组合框") {
+        "下拉框 组合框 combobox dropdown"
+    } else {
+        ""
+    };
+    desk_agent_protocol::matching_search_terms(
+        terms,
+        &[name.unwrap_or(""), native_id.unwrap_or(""), role, aliases],
+    )
+}
+
 pub(super) fn ui_query_matches(
     query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
     node: &CollectedUiNode,
 ) -> bool {
     query.is_none_or(|q| {
         (q.any.is_empty()
-            || !desk_agent_protocol::matching_search_terms(
+            || !ui_matching_terms(
                 &q.any,
-                &[
-                    node.name.as_deref().unwrap_or(""),
-                    node.native_id.as_deref().unwrap_or(""),
-                    &node.role,
-                ],
+                node.name.as_deref(),
+                node.native_id.as_deref(),
+                &node.role,
             )
             .is_empty())
             && q.element_id

@@ -781,7 +781,9 @@ fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind
         {
             Some(ObjectKind::File)
         }
-        ComputerActionKind::Ui(_) => Some(ObjectKind::UiElement),
+        ComputerActionKind::Ui(_) | ComputerActionKind::UiInApplication { .. } => {
+            Some(ObjectKind::UiElement)
+        }
         ComputerActionKind::RawInput(_) => Some(ObjectKind::Application),
         ComputerActionKind::SpreadsheetLive(_) => Some(ObjectKind::Range),
         ComputerActionKind::DocumentLive(_) => Some(ObjectKind::Document),
@@ -2255,6 +2257,18 @@ impl SignalDeviceAssistantTools {
             } else {
                 None
             };
+        let shared_ui = if call.name == EXECUTE_CONFIRMED_UI_ACTION_TOOL {
+            Some(
+                desk_diagnose_core::provider_preflight::UiCallPreflight::build(
+                    &self.provider_registry,
+                    ProductSurface::OssPersonalOwner,
+                    call,
+                    now_unix_ms,
+                )?,
+            )
+        } else {
+            None
+        };
         let shared_raw_input = if call.name == EXECUTE_CONFIRMED_RAW_INPUT_TOOL {
             Some(
                 desk_diagnose_core::provider_preflight::RawInputCallPreflight::build(
@@ -2311,7 +2325,7 @@ impl SignalDeviceAssistantTools {
                 (
                     target.clone(),
                     vec![target],
-                    ComputerActionKind::Ui(action),
+                    shared_ui.as_ref().expect("UI preflight").computer_action(),
                     desk_agent_protocol::Capability::DesktopUiActionConfirmed,
                     ui_adapter_kind,
                     action_name,
@@ -2511,7 +2525,9 @@ impl SignalDeviceAssistantTools {
             readiness_revision: self.readiness_revision,
             now_unix_ms,
         };
-        let call_authority = if let Some(preflight) = &shared_text {
+        let call_authority = if let Some(preflight) = &shared_ui {
+            preflight.grant_call(&subject)?
+        } else if let Some(preflight) = &shared_text {
             preflight.grant_call(&subject)?
         } else if let Some(preflight) = &shared_iwork {
             preflight.grant_call(&subject)?
@@ -2577,7 +2593,7 @@ impl SignalDeviceAssistantTools {
                 .ok_or_else(|| {
                     error(
                         AgentErrorKind::PermissionDenied,
-                        "semantic UI action requires an active exact approved grant",
+                        "semantic UI action requires an active approved exact input or application scope matching the target and action",
                         false,
                         true,
                     )

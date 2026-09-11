@@ -120,6 +120,40 @@ pub fn capability_authorization_prompt(
             "resource_scope": grant.resource_scope,
             "operation_scope": grant.operation_scope,
         });
+        if grant.canonical_input_digest_sha256.is_none() {
+            if let Some(mut scope) = permission_requests
+                .iter()
+                .filter(|r| {
+                    matches!(
+                        r.state,
+                        PermissionRequestState::Approved
+                            | PermissionRequestState::PartiallyApproved
+                    )
+                })
+                .flat_map(|r| &r.items)
+                .filter(|item| {
+                    item.tool_name == grant.tool_name && item.resource_scope == grant.resource_scope
+                })
+                .find_map(|item| {
+                    crate::application_ui::from_canonical(
+                        &item.tool_name,
+                        item.canonical_input_json.as_deref(),
+                    )
+                })
+            {
+                scope.actions.retain(|action| {
+                    grant
+                        .operation_scope
+                        .contains(&crate::application_ui::operation_kind(*action))
+                });
+                entry["application_scope"] = json!(scope);
+                approved_exact_input_expires_at_unix_ms = Some(
+                    approved_exact_input_expires_at_unix_ms.map_or(grant.expires_at_unix_ms, |v| {
+                        v.min(grant.expires_at_unix_ms)
+                    }),
+                );
+            }
+        }
         if state == "active"
             && let Some((canonical_input, digest)) = approved_exact
         {
@@ -136,7 +170,7 @@ pub fn capability_authorization_prompt(
     }
     CapabilityAuthorizationPrompt {
         text: format!(
-            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
+            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, copy its application reference into the optional application field of execute_confirmed_ui_action, use the current observed target and an approved action; do not request another exact permission for each control within that scope. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
             serde_json::to_string(&entries).expect("authorization projection is serializable")
         ),
         approved_exact_input_expires_at_unix_ms,
@@ -443,6 +477,8 @@ struct RequestItem {
     export_destinations: Vec<desk_agent_protocol::data_lineage::DestinationIdentity>,
     #[serde(default)]
     exact_input: Option<serde_json::Value>,
+    #[serde(default)]
+    application_scope: Option<desk_agent_protocol::computer_use::UiApplicationScope>,
     suggested_ttl_seconds: u32,
     suggested_max_uses: u32,
     reason: String,
@@ -451,7 +487,9 @@ struct RequestItem {
 fn invalid(detail: impl std::fmt::Display) -> AgentError {
     AgentError {
         kind: AgentErrorKind::InvalidInput,
-        message: format!("invalid request_capability_grants arguments: {detail}"),
+        message: format!(
+            "invalid request_capability_grants arguments: {detail}. The entire batch was rejected: no request or approval card was created, including otherwise valid items. Do not repeat unchanged arguments or tell the user a request exists. Fix the invalid item; if its target is not yet known, first request only the prerequisite read permission, inspect the target, then request the action with complete exact_input."
+        ),
         retryable: false,
         safe_for_model: true,
         error_code: None,
@@ -527,7 +565,8 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "tool_name": {"type": "string", "maxLength": 128},
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
-                                "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, desktop semantic UI actions, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
+                                "application_scope": {"type":"object","description":"For reusable native UI permission in this conversation. Mutually exclusive with exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object"},"actions":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value"]}}},"required":["application","actions"],"additionalProperties":false},
+                                "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, desktop semantic UI actions without application_scope, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
@@ -610,10 +649,29 @@ pub fn build_permission_request(
                 "export_destinations are only valid for external egress effects",
             ));
         }
-        let (canonical_input_json, canonical_input_digest_sha256) = match item.exact_input {
+        let application_scope = item.application_scope;
+        if let Some(scope) = &application_scope {
+            if item.tool_name != crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+                || item.exact_input.is_some()
+            {
+                return Err(invalid(
+                    "application_scope is only valid for native UI actions and is mutually exclusive with exact_input",
+                ));
+            }
+            crate::application_ui::validate(scope)?;
+        }
+        let input_value = application_scope
+            .as_ref()
+            .map(|scope| serde_json::json!({"application_scope":scope}))
+            .or(item.exact_input);
+        let (canonical_input_json, canonical_input_digest_sha256) = match input_value {
             Some(input) => {
-                let canonical = canonical_tool_permission_input_json(&item.tool_name, input)
-                    .map_err(|error| invalid(format!("canonicalize exact_input: {error}")))?;
+                let canonical = if application_scope.is_some() {
+                    canonical_permission_input_json(input)
+                } else {
+                    canonical_tool_permission_input_json(&item.tool_name, input)
+                }
+                .map_err(|error| invalid(format!("canonicalize exact_input: {error}")))?;
                 if canonical.len() > crate::dynamic_run::MAX_PERMISSION_EXACT_INPUT_BYTES {
                     return Err(invalid("exact_input exceeds the bounded storage limit"));
                 }
@@ -693,17 +751,18 @@ pub fn build_permission_request(
                 invalid(format!("validate Outlook (new) handoff input: {error}"))
             })?;
         }
-        let exact_semantic_action = matches!(
-            capability.wire.capability_id.as_str(),
-            crate::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID
-                | crate::device_assistant::DESKTOP_RAW_INPUT_CAPABILITY_ID
-                | crate::device_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
-                | crate::device_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID
-                | crate::device_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID
-                | crate::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
-                | crate::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
-                | crate::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
-        );
+        let exact_semantic_action = application_scope.is_none()
+            && matches!(
+                capability.wire.capability_id.as_str(),
+                crate::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID
+                    | crate::device_assistant::DESKTOP_RAW_INPUT_CAPABILITY_ID
+                    | crate::device_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
+                    | crate::device_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID
+                    | crate::device_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID
+                    | crate::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
+                    | crate::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
+                    | crate::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
+            );
         let exact_semantic_refs = if exact_semantic_action {
             #[derive(Deserialize)]
             struct SemanticActionInput {
@@ -713,7 +772,17 @@ pub fn build_permission_request(
             }
             let canonical = canonical_input_json
                 .as_deref()
-                .ok_or_else(|| invalid("semantic actions require exact_input"))?;
+                .ok_or_else(|| invalid(format!(r#"item_id={} tool_name={}: semantic actions require exact_input. For execute_confirmed_ui_action use {{"exact_input":{{"target":{{"token":"<observed token>","snapshot_id":"<observed snapshot>","object_kind":"ui_element","expires_at":"<observed expiry>"}},"action":{{"kind":"invoke"}}}}}}; set_value uses action={{"kind":"set_value","params":{{"value":"text"}}}}"#, item.item_id, item.tool_name)))?;
+            if capability.required_capability == Capability::DesktopUiActionConfirmed
+                && serde_json::from_str::<serde_json::Value>(canonical)
+                    .ok()
+                    .is_some_and(|value| value.get("application").is_some_and(|v| !v.is_null()))
+            {
+                return Err(invalid(format!(
+                    "item_id={}: omit application from exact_input for a single-control approval; for reusable application permission use application_scope={{application:<observed application reference>,actions:[\"invoke\",\"set_value\"]}} instead of exact_input",
+                    item.item_id
+                )));
+            }
             let input: SemanticActionInput = serde_json::from_str(canonical)
                 .map_err(|error| invalid(format!("decode semantic action input: {error}")))?;
             let expected_kind = match capability.required_capability {
@@ -882,7 +951,9 @@ pub fn build_permission_request(
             &capability.wire.authorization_hint.resources,
             capability.wire.effect,
         );
-        let resource_scope = if let Some(targets) = exact_semantic_refs.as_ref() {
+        let resource_scope = if let Some(scope) = &application_scope {
+            crate::application_ui::resource(&scope.application)
+        } else if let Some(targets) = exact_semantic_refs.as_ref() {
             fresh_object_resource_scope(targets)
         } else if exact_external_url {
             exact_external_url_resource_scope(
@@ -916,10 +987,19 @@ pub fn build_permission_request(
             tool_name: item.tool_name,
             expected_effect: capability.wire.effect,
             resource_scope,
-            operation_scope: compiled_scope.map_or_else(
-                || normalize_scope(item.operation_scope),
-                |scope| scope.operations,
-            ),
+            operation_scope: if let Some(scope) = &application_scope {
+                scope
+                    .actions
+                    .iter()
+                    .copied()
+                    .map(crate::application_ui::operation_kind)
+                    .collect()
+            } else {
+                compiled_scope.map_or_else(
+                    || normalize_scope(item.operation_scope),
+                    |scope| scope.operations,
+                )
+            },
             export_destinations: if exact_external_query {
                 vec![
                     registry

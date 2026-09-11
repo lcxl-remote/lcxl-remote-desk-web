@@ -1,4 +1,14 @@
 export default {
+    'pages.deviceAssistant.applicationUiScopeTitle': '会话内操作应用：{{name}}',
+    'pages.deviceAssistant.applicationUiScopeDescription': '仅允许操作此应用中的控件，可缩小下方动作、有效期和次数。其他应用、原始键鼠输入和截图不在此操作授权内。',
+    'pages.deviceAssistant.applicationUiScopeExpiry': '应用引用有效至 {{time}}；授权不会超过此时间。',
+    'pages.deviceAssistant.uiAction_invoke': '点击',
+    'pages.deviceAssistant.uiAction_select': '选择',
+    'pages.deviceAssistant.uiAction_focus': '聚焦',
+    'pages.deviceAssistant.uiAction_toggle': '切换开关',
+    'pages.deviceAssistant.uiAction_set_value': '填写内容',
+    'pages.deviceAssistant.uiAction_scroll': '滚动',
+
     'pages.deviceAssistant.permissionReasonLabel': '当时申请权限的理由：{{reason}}',
     'pages.deviceAssistant.schedules.loadError': '定时任务列表加载失败，请刷新重试。',
     'pages.deviceAssistant.schedules.title': '定时任务',

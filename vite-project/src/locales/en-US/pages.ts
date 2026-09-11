@@ -1,4 +1,14 @@
 export default {
+    'pages.deviceAssistant.applicationUiScopeTitle': 'Operate application in this conversation: {{name}}',
+    'pages.deviceAssistant.applicationUiScopeDescription': 'Only controls in this application are covered. Narrow actions, duration and uses below. Other applications, raw input and screenshots are outside this action permission.',
+    'pages.deviceAssistant.applicationUiScopeExpiry': 'Application reference valid until {{time}}; permission cannot outlive it.',
+    'pages.deviceAssistant.uiAction_invoke': 'Click',
+    'pages.deviceAssistant.uiAction_select': 'Select',
+    'pages.deviceAssistant.uiAction_focus': 'Focus',
+    'pages.deviceAssistant.uiAction_toggle': 'Toggle',
+    'pages.deviceAssistant.uiAction_set_value': 'Fill content',
+    'pages.deviceAssistant.uiAction_scroll': 'Scroll',
+
     'pages.deviceAssistant.permissionReasonLabel': 'Original permission request reason: {{reason}}',
     'pages.deviceAssistant.schedules.loadError': 'Could not load scheduled tasks. Please refresh to try again.',
     'pages.deviceAssistant.schedules.title': 'Scheduled tasks',

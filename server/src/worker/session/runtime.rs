@@ -1738,6 +1738,10 @@ impl WorkerSession {
                                             .unwrap_or_else(|_| chrono::Utc::now() - chrono::Duration::seconds(1)),
                                     };
                                     let action_preflight = match &plan.actions[0].action {
+                                        ComputerActionKind::UiInApplication { application, action } => computer_use_broker
+                                            .require_ui_application(&plan.actions[0].target, application)
+                                            .and_then(|_| computer_use_broker.preflight_ui_action(&plan.actions[0].target, action, &ceiling))
+                                            .map_err(|error| error.message),
                                         ComputerActionKind::Ui(action) => computer_use_broker
                                             .preflight_ui_action(
                                                 &plan.actions[0].target,
@@ -1884,7 +1888,8 @@ impl WorkerSession {
                                     tokio::spawn(async move {
                                         let generation = plan.execution_generation.clone();
                                         let step = plan.actions.into_iter().next().expect("preflight checked one action");
-                                        if let ComputerActionKind::Ui(action) = &step.action {
+                                        if let Some((action, application)) = step.action.semantic_ui() {
+                                            let application = application.cloned();
                                             let target = step.target.clone();
                                             let action = action.clone();
                                             let broker = action_broker.clone();
@@ -1896,6 +1901,7 @@ impl WorkerSession {
                                                 let settings = application_settings.blocking_read();
                                                 let ceiling = &settings.computer_use;
                                                 broker.require_writer_lease(&generation_for_call)?;
+                                                if let Some(application) = &application { broker.require_ui_application(&target, application)?; }
                                                 let result = broker.execute_ui_action(
                                                     &target,
                                                     &action,

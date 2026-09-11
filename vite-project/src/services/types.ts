@@ -2314,6 +2314,84 @@ export type SnapshotMessageDto = {
     turnId?: string | null;
 };
 
+export const uiSemanticActionKindEnum = {
+    invoke: "invoke",
+    toggle: "toggle",
+    select: "select",
+    set_value: "set_value",
+    scroll: "scroll",
+    focus: "focus"
+} as const;
+
+export type UiSemanticActionKindEnumKey = (typeof uiSemanticActionKindEnum)[keyof typeof uiSemanticActionKindEnum];
+
+export type UiSemanticActionKind = UiSemanticActionKindEnumKey;
+
+export const objectKindEnum = {
+    desktop_session: "desktop_session",
+    application: "application",
+    window: "window",
+    ui_element: "ui_element",
+    office_document: "office_document",
+    document: "document",
+    worksheet: "worksheet",
+    range: "range",
+    presentation: "presentation",
+    slide: "slide",
+    shape: "shape",
+    file: "file",
+    directory: "directory",
+    terminal_output: "terminal_output",
+    browser_surface: "browser_surface"
+} as const;
+
+export type ObjectKindEnumKey = (typeof objectKindEnum)[keyof typeof objectKindEnum];
+
+export type ObjectKind = ObjectKindEnumKey;
+
+/**
+ * @description Short-lived, device-issued reference to an observed object.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
+*/
+export type ObjectRef = {
+    /**
+     * @description RFC3339 timestamp. Kept as a string to avoid imposing a clock library on\nthis pure protocol crate.
+     * @type string
+    */
+    expires_at: string;
+    /**
+     * @type string
+    */
+    object_kind: ObjectKind;
+    /**
+     * @type string
+    */
+    snapshot_id: string;
+    /**
+     * @type string
+    */
+    token: string;
+};
+
+/**
+ * @description Owner-reviewed application boundary for reusable native UI operations.
+*/
+export type UiApplicationScope = {
+    /**
+     * @type array
+    */
+    actions: UiSemanticActionKind[];
+    /**
+     * @description Short-lived, device-issued reference to an observed object.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
+     * @type object
+    */
+    application: ObjectRef;
+    /**
+     * @description Resolved from an observed application by the server, never model authority.
+     * @type string,null
+    */
+    application_name?: string | null;
+};
+
 export type ExternalSendAttachmentDto = {
     /**
      * @type string
@@ -2446,6 +2524,7 @@ export type TextFileConfirmationDto = {
 };
 
 export type GrantRequestItemDto = {
+    applicationScope?: (null | UiApplicationScope);
     commandConfirmation?: (null | CommandConfirmationDto);
     /**
      * @type string
@@ -4085,51 +4164,6 @@ export type MouseEventData = {
      * @type number, double
     */
     y: number;
-};
-
-export const objectKindEnum = {
-    desktop_session: "desktop_session",
-    application: "application",
-    window: "window",
-    ui_element: "ui_element",
-    office_document: "office_document",
-    document: "document",
-    worksheet: "worksheet",
-    range: "range",
-    presentation: "presentation",
-    slide: "slide",
-    shape: "shape",
-    file: "file",
-    directory: "directory",
-    terminal_output: "terminal_output",
-    browser_surface: "browser_surface"
-} as const;
-
-export type ObjectKindEnumKey = (typeof objectKindEnum)[keyof typeof objectKindEnum];
-
-export type ObjectKind = ObjectKindEnumKey;
-
-/**
- * @description Short-lived, device-issued reference to an observed object.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
-*/
-export type ObjectRef = {
-    /**
-     * @description RFC3339 timestamp. Kept as a string to avoid imposing a clock library on\nthis pure protocol crate.
-     * @type string
-    */
-    expires_at: string;
-    /**
-     * @type string
-    */
-    object_kind: ObjectKind;
-    /**
-     * @type string
-    */
-    snapshot_id: string;
-    /**
-     * @type string
-    */
-    token: string;
 };
 
 export const permissionItemDecisionBodyDecisionEnum = {

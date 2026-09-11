@@ -1041,6 +1041,7 @@ pub struct GrantRequestItemDto {
     pub reason: String,
     pub external_send_confirmation: Option<ExternalSendConfirmationDto>,
     pub command_confirmation: Option<CommandConfirmationDto>,
+    pub application_scope: Option<desk_agent_protocol::computer_use::UiApplicationScope>,
     pub text_file_confirmation: Option<TextFileConfirmationDto>,
 }
 
@@ -1237,7 +1238,12 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                                 execution_basis: confirmation.plan.execution_basis,
                                 one_shot: true,
                             });
+                    let application_scope = desk_diagnose_core::application_ui::from_canonical(
+                        &item.tool_name,
+                        item.canonical_input_json.as_deref(),
+                    );
                     GrantRequestItemDto {
+                        application_scope,
                         item_id: item.item_id,
                         provider_id: item.provider_id,
                         tool_name: item.tool_name,

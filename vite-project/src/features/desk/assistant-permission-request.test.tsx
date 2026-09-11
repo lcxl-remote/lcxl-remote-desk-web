@@ -15,6 +15,19 @@ const request = (items = [item()]): PermissionRequestDto => ({
 });
 const submit = () => screen.getByRole('button', { name: 'pages.deviceAssistant.permissionSubmitSelection' });
 describe('shared permission review', () => {
+    it('shows the observed application and allows narrowing reusable actions and uses', () => {
+        const onDecide = vi.fn().mockResolvedValue(true);
+        const value = request([item({ itemId: 'app', toolName: 'execute_confirmed_ui_action', expectedEffect: 'mutate_application',
+            resourceScope: ['ui_application:sha256:opaque'], operationScope: ['ui:invoke', 'ui:set_value'], suggestedMaxUses: 8,
+            applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Calendar', actions: ['invoke', 'set_value'] },
+        })]);
+        render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
+        expect(screen.getByTestId('application-ui-scope')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', { name: 'Calendar' })).toBeChecked();
+        fireEvent.click(screen.getByRole('checkbox', { name: 'pages.deviceAssistant.uiAction_invoke' }));
+        fireEvent.click(submit());
+        expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', resource_scope: ['ui_application:sha256:opaque'], operation_scope: ['ui:set_value'], max_uses: 8 });
+    });
     it('submits narrowed scope and explicit denial for missing action reviews', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         const value = request([item(), item({ itemId: 'command', toolName: 'execute_confirmed_command' }),
