@@ -8,6 +8,7 @@ pub fn serialize(output: &OperationOutput) -> Result<String, serde_json::Error> 
         return serde_json::to_string(output);
     };
     let mut value = serde_json::to_value(output)?;
+    add_window_discovery_hint(&mut value);
     let body = &mut value["ReadContext"]["DesktopUiInspect"];
     if ui.nodes.is_empty() {
         body["search_hint"] = json!(
@@ -56,6 +57,40 @@ pub fn serialize(output: &OperationOutput) -> Result<String, serde_json::Error> 
     serde_json::to_string(&value)
 }
 
+/// Apply after reference expansion, before projecting IDs for the model.
+pub(crate) fn add_window_discovery_hint(value: &mut Value) {
+    let Some(body) = value
+        .pointer_mut("/ReadContext/DesktopUiInspect")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if body
+        .get("owner_selectable_windows")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        body.remove("owner_selectable_windows");
+    }
+    let applications_only = body
+        .get("nodes")
+        .and_then(Value::as_array)
+        .is_some_and(|nodes| {
+            !nodes.is_empty()
+                && nodes.iter().all(|node| {
+                    node.pointer("/object_ref/object_kind").or_else(|| {
+                        body.get("reference_defaults")
+                            .and_then(|defaults| defaults.get("object_kind"))
+                    }) == Some(&json!("application"))
+                })
+        });
+    if applications_only {
+        body.insert("window_discovery_hint".into(), json!(
+            "This is an application catalog; windows have not been queried. Use the returned application object_ref.id as inspect_desktop_ui root_id with queries=[\"窗口\",\"window\"] to discover its windows. Then pass owner_selectable_windows[].object_ref.id as read_current_screen window_id. An application ID is not a window ID. Missing window entries here do not mean the application has no windows or cannot be captured."
+        ));
+    }
+}
+
 /// Expand only the model representation for existing typed validators.
 pub fn deserialize(text: &str) -> Result<OperationOutput, serde_json::Error> {
     let mut value: Value = serde_json::from_str(text)?;
@@ -71,6 +106,7 @@ pub fn expand_value(value: &mut Value) {
     {
         body.remove("truncation_hint");
         body.remove("search_hint");
+        body.remove("window_discovery_hint");
         let stable_token = body.remove("element_id_is_reference_token") == Some(json!(true));
         if let Some(defaults) = body.remove("reference_defaults") {
             body.remove("node_defaults");
@@ -103,6 +139,19 @@ pub fn expand_value(value: &mut Value) {
 mod tests {
     use super::*;
     use desk_agent_protocol::computer_use::*;
+
+    #[test]
+    fn window_receipts_keep_capture_ids_and_do_not_claim_catalog_results() {
+        let windows = json!([{"object_ref":{"token":"window-1","object_kind":"window"}}]);
+        let mut value = json!({"ReadContext":{"DesktopUiInspect":{
+            "nodes":[{"object_ref":{"object_kind":"ui_element"}}],
+            "owner_selectable_windows":windows.clone()
+        }}});
+        add_window_discovery_hint(&mut value);
+        let body = &value["ReadContext"]["DesktopUiInspect"];
+        assert_eq!(body["owner_selectable_windows"], windows);
+        assert!(body.get("window_discovery_hint").is_none());
+    }
 
     #[test]
     fn application_catalog_retains_state_without_search_match_indices() {
@@ -144,6 +193,16 @@ mod tests {
             ));
             let encoded = serialize(&output).unwrap();
             assert!(!encoded.contains("matched_queries"));
+            assert!(!encoded.contains("\"owner_selectable_windows\":"));
+            let mut projected = serde_json::from_str(&encoded).unwrap();
+            expand_value(&mut projected);
+            add_window_discovery_hint(&mut projected);
+            assert!(
+                projected["ReadContext"]["DesktopUiInspect"]["window_discovery_hint"]
+                    .as_str()
+                    .unwrap()
+                    .contains("windows have not been queried")
+            );
             let value: Value = serde_json::from_str(&encoded).unwrap();
             assert_eq!(
                 value["ReadContext"]["DesktopUiInspect"]["nodes"][0]["application_state"],

@@ -3693,9 +3693,7 @@ fn ensure_screen_capture_safe() -> Result<(), AgentError> {
     if super::macos_accessibility_observer::foreground_contains_protected_control(
         application.process_id,
         &application.image_path,
-    )
-    .unwrap_or(false)
-    {
+    )? {
         return Err(error(
             AgentErrorKind::PermissionDenied,
             "the foreground application contains a protected UI control",

@@ -6,10 +6,26 @@ import type { DeviceAssistantToolActivity } from './use-device-assistant-chat';
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 const tool: DeviceAssistantToolActivity = {
     callId: 'call-1', name: 'inspect_desktop_ui', status: 'running',
-    argumentsJson: '{"query":{"name":"Calendar"}}', output: null,
+    argumentsJson: '{"queries":["Calendar"]}', output: null,
 };
 
 describe('tool call transcript', () => {
+    it('shows accessible status icons while folded and updates from running to success or failure', () => {
+        const { container, rerender } = render(<AssistantToolCall tool={tool} running />);
+        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.waiting' }).querySelector('.animate-spin')).toBeTruthy();
+        rerender(<AssistantToolCall tool={{ ...tool, status: 'ok', output: '' }} running />);
+        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.success' })).toBeTruthy();
+        expect(container.querySelector('.animate-spin')).toBeNull();
+        rerender(<AssistantToolCall tool={{ ...tool, status: 'failed', output: 'access denied' }} running />);
+        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.failure' })).toBeTruthy();
+        expect(container.querySelector('details')?.open).toBe(false);
+        expect(container.querySelector('pre')).toBeNull();
+        rerender(<AssistantToolCall tool={tool} running={false} />);
+        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.missing' })).toBeTruthy();
+        expect(container.querySelector('.animate-spin')).toBeNull();
+        expect(screen.queryByRole('img', { name: 'pages.deviceAssistant.toolCall.success' })).toBeNull();
+    });
+
     it('starts folded, lazily renders payloads, and keeps expansion when output arrives', async () => {
         const { container, rerender } = render(<AssistantToolCall tool={tool} running />);
         expect(container.querySelector('details')?.open).toBe(false);

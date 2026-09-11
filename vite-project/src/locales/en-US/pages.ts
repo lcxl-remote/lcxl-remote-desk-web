@@ -1138,6 +1138,8 @@ export default {
   'pages.deviceAssistant.toolCall.batchCompleted': 'Completed {{count}} steps',
   'pages.deviceAssistant.toolCall.batchFailed': 'Step {{count}} failed',
   'pages.deviceAssistant.batchGrantUses': 'One batch consumes one use, with up to 20 steps. Every action must be within the approved scope.',
+  'pages.deviceAssistant.toolCall.success': 'Tool call succeeded',
+  'pages.deviceAssistant.toolCall.failure': 'Tool call failed',
   'pages.deviceAssistant.toolCall.title': 'Tool call',
   'pages.deviceAssistant.toolCall.input': 'Input',
   'pages.deviceAssistant.toolCall.output': 'Output',

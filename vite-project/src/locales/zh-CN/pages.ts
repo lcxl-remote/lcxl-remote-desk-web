@@ -1136,6 +1136,8 @@ export default {
   'pages.deviceAssistant.toolCall.batchCompleted': '已完成 {{count}} 步',
   'pages.deviceAssistant.toolCall.batchFailed': '第 {{count}} 步失败',
   'pages.deviceAssistant.batchGrantUses': '一次批量调用消耗一次使用次数，每批最多 20 步，全部动作均须在批准范围内。',
+  'pages.deviceAssistant.toolCall.success': '工具调用成功',
+  'pages.deviceAssistant.toolCall.failure': '工具调用失败',
   'pages.deviceAssistant.toolCall.title': '工具调用',
   'pages.deviceAssistant.toolCall.input': '入参',
   'pages.deviceAssistant.toolCall.output': '出参',

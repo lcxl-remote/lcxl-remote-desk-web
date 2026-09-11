@@ -34,9 +34,6 @@ const AX_ACTION_TIMEOUT_SECONDS: f32 = 3.0;
 const MAX_STRING_BYTES: usize = 16 * 1024;
 const OBJECT_REF_BUDGET: usize = 320;
 const CF_NUMBER_SINT64_TYPE: i32 = 4;
-const ACTION_OBSERVATION_MAX_DEPTH: u16 = 16;
-const ACTION_OBSERVATION_MAX_NODES: u32 = 1_024;
-const ACTION_OBSERVATION_MAX_BYTES: u32 = 1024 * 1024;
 const AX_VALUE_CGPOINT_TYPE: i32 = 1;
 const AX_VALUE_CGSIZE_TYPE: i32 = 2;
 
@@ -70,6 +67,7 @@ unsafe extern "C" {
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
+    fn CFArrayGetTypeID() -> CfTypeId;
     fn CFRelease(value: CfTypeRef);
     fn CFEqual(a: CfTypeRef, b: CfTypeRef) -> u8;
     fn CFHash(value: CfTypeRef) -> usize;
@@ -348,14 +346,138 @@ pub(super) fn foreground_contains_protected_control(
     expected_process_id: u32,
     expected_image_path: &str,
 ) -> Result<bool, AgentError> {
-    collect_foreground(
-        expected_process_id,
-        expected_image_path,
-        ACTION_OBSERVATION_MAX_DEPTH,
-        ACTION_OBSERVATION_MAX_NODES,
-        ACTION_OBSERVATION_MAX_BYTES,
+    let expected_image_path = expected_image_path.to_owned();
+    super::native_ui_identity::run(move || {
+        let before = frontmost_application()?;
+        if before.process_id != expected_process_id || before.image_path != expected_image_path {
+            return Err(protection_scan_error("foreground application changed"));
+        }
+        let root = unsafe { AXUIElementCreateApplication(expected_process_id as libc::pid_t) };
+        if root.is_null() {
+            return Err(protection_scan_error(
+                "application has no Accessibility root",
+            ));
+        }
+        let protected = scan_protected_controls(OwnedCf(root))?;
+        let after = frontmost_application()?;
+        if after.process_id != before.process_id
+            || after.image_path != before.image_path
+            || after.process_started_at != before.process_started_at
+        {
+            return Err(protection_scan_error(
+                "foreground application changed during scan",
+            ));
+        }
+        Ok(protected)
+    })
+}
+
+// Screenshot preflight is not a model-facing UI projection. Walk every reachable
+// child without depth/node/text budgets, retaining only native identity metadata.
+// A separate deadline bounds unresponsive or continuously changing applications.
+fn protection_scan_error(detail: &str) -> AgentError {
+    tracing::warn!(detail, "screenshot protected-control scan incomplete");
+    failure(
+        AgentErrorKind::SessionUnavailable,
+        &format!(
+            "screenshot safety check could not complete: {detail}; retry after the application responds"
+        ),
+        true,
     )
-    .map(|tree| tree.truncated || tree.nodes.iter().any(|node| node.is_protected))
+}
+
+struct ProtectionElement(OwnedCf);
+
+impl PartialEq for ProtectionElement {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same_element(&other.0)
+    }
+}
+impl Eq for ProtectionElement {}
+impl std::hash::Hash for ProtectionElement {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_usize(unsafe { CFHash(self.0.0) });
+    }
+}
+
+fn scan_protection_graph<T: Eq + std::hash::Hash>(
+    root: T,
+    deadline: Instant,
+    mut inspect: impl FnMut(&T) -> Result<(bool, Vec<T>), AgentError>,
+) -> Result<bool, AgentError> {
+    let mut pending = vec![root];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(element) = pending.pop() {
+        if Instant::now() >= deadline {
+            return Err(protection_scan_error("Accessibility traversal timed out"));
+        }
+        if visited.contains(&element) {
+            continue;
+        }
+        let (protected, children) = inspect(&element)?;
+        if protected {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Err(protection_scan_error("Accessibility traversal timed out"));
+        }
+        visited.insert(element);
+        pending.extend(children);
+    }
+    Ok(false)
+}
+
+fn protection_attribute(
+    element: AxUiElementRef,
+    name: &str,
+) -> Result<Option<OwnedCf>, AgentError> {
+    let attribute = create_string(name)
+        .ok_or_else(|| protection_scan_error("could not allocate Accessibility attribute"))?;
+    let mut value = std::ptr::null();
+    let status = unsafe { AXUIElementCopyAttributeValue(element, attribute.0, &mut value) };
+    let value = (!value.is_null()).then_some(OwnedCf(value));
+    match status {
+        AX_SUCCESS if value.is_some() => Ok(value),
+        // Optional attributes: kAXErrorAttributeUnsupported / kAXErrorNoValue.
+        -25205 | -25212 => Ok(None),
+        _ => Err(protection_scan_error(&format!(
+            "reading {name} failed (AX error {status})"
+        ))),
+    }
+}
+
+fn scan_protected_controls(root: OwnedCf) -> Result<bool, AgentError> {
+    set_messaging_timeout(root.0)?;
+    scan_protection_graph(
+        ProtectionElement(root),
+        Instant::now() + Duration::from_secs(10),
+        |element| {
+            let subrole = protection_attribute(element.0.0, "AXSubrole")?;
+            if let Some(subrole) = subrole {
+                let subrole = cf_string(subrole.0)
+                    .ok_or_else(|| protection_scan_error("invalid Accessibility subrole"))?;
+                if subrole == "AXSecureTextField" {
+                    return Ok((true, Vec::new()));
+                }
+            }
+            let Some(children) = protection_attribute(element.0.0, "AXChildren")? else {
+                return Ok((false, Vec::new()));
+            };
+            if unsafe { CFGetTypeID(children.0) != CFArrayGetTypeID() } {
+                return Err(protection_scan_error("invalid Accessibility children"));
+            }
+            let count = unsafe { CFArrayGetCount(children.0) }.max(0);
+            let mut pending = Vec::new();
+            for index in 0..count {
+                let child = unsafe { CFArrayGetValueAtIndex(children.0, index) };
+                if child.is_null() {
+                    return Err(protection_scan_error("invalid Accessibility child"));
+                }
+                pending.push(ProtectionElement(OwnedCf(unsafe { CFRetain(child) })));
+            }
+            Ok((false, pending))
+        },
+    )
 }
 
 pub(super) fn preflight_action(
@@ -409,24 +531,6 @@ fn resolve_window_capture_target_inner(
     expected_image_path: &str,
     target_fingerprint: &str,
 ) -> Result<super::collectors::screen_capture::WindowCaptureTarget, AgentError> {
-    let inspected = collect_application_selection(
-        expected_process_id,
-        expected_image_path,
-        16,
-        1024,
-        1024 * 1024,
-        UiInspectScope::All,
-        Some(target_fingerprint),
-        None,
-        false,
-    )?;
-    if inspected.truncated || inspected.nodes.iter().any(|node| node.is_protected) {
-        return Err(failure(
-            AgentErrorKind::PermissionDenied,
-            "window capture cannot establish that the selected window has no protected fields",
-            false,
-        ));
-    }
     let element =
         locate_action_target(expected_process_id, expected_image_path, target_fingerprint)?;
     let role = attribute_string(element.0, "AXRole").unwrap_or_default();
@@ -442,6 +546,13 @@ fn resolve_window_capture_target_inner(
             AgentErrorKind::SessionUnavailable,
             "the selected window is minimized; restore it before requesting a fresh screenshot",
             true,
+        ));
+    }
+    if scan_protected_controls(OwnedCf(unsafe { CFRetain(element.0) }))? {
+        return Err(failure(
+            AgentErrorKind::PermissionDenied,
+            "the selected window contains a protected UI control",
+            false,
         ));
     }
     let title = attribute_string(element.0, "AXTitle").unwrap_or_default();
@@ -1388,6 +1499,47 @@ fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn protection_scan_exceeds_projection_limits_and_handles_cycles() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut visits = 0;
+        assert!(
+            scan_protection_graph(0_u32, deadline, |id| {
+                visits += 1;
+                Ok((*id == 5000, vec![id + 1]))
+            })
+            .unwrap()
+        );
+        assert_eq!(visits, 5001);
+        let mut visits = 0;
+        assert!(
+            !scan_protection_graph(0_u32, deadline, |id| {
+                visits += 1;
+                Ok((
+                    false,
+                    if *id == 0 {
+                        (1..5001).collect()
+                    } else {
+                        vec![0]
+                    },
+                ))
+            })
+            .unwrap()
+        );
+        assert_eq!(visits, 5001);
+    }
+
+    #[test]
+    fn protection_scan_reports_read_failure_and_timeout() {
+        let error = scan_protection_graph(0_u32, Instant::now() + Duration::from_secs(5), |_| {
+            Err(protection_scan_error("reading AXChildren failed"))
+        })
+        .unwrap_err();
+        assert!(error.message.contains("could not complete"));
+        assert!(error.retryable);
+        assert!(scan_protection_graph(0_u32, Instant::now(), |_| Ok((false, vec![]))).is_err());
+    }
+
     use super::*;
 
     #[test]

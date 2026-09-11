@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { CheckCircle2, CircleHelp, Loader2, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { DeviceAssistantToolActivity } from './use-device-assistant-chat';
 
@@ -24,8 +25,15 @@ export function AssistantToolCall({ tool, running }: { tool?: DeviceAssistantToo
     if (!tool) return null;
     const prefix = 'pages.deviceAssistant.toolCall.';
     const batch = batchResult(tool);
+    const status = tool.status === 'running' && !running ? 'missing' : tool.status;
+    const StatusIcon = status === 'ok' ? CheckCircle2 : status === 'failed' ? XCircle : status === 'running' ? Loader2 : CircleHelp;
+    const statusLabel = t(`${prefix}${status === 'ok' ? 'success' : status === 'failed' ? 'failure' : status === 'running' ? 'waiting' : 'missing'}`);
+    const statusClass = status === 'ok' ? 'text-green-600 dark:text-green-400' : status === 'failed' ? 'text-destructive' : 'text-muted-foreground';
     return <details open={open} onToggle={event => setOpen(event.currentTarget.open)} className="min-w-0 rounded-md border bg-muted/30 px-3 py-2">
         <summary className="cursor-pointer select-none break-words text-sm [overflow-wrap:anywhere]">
+            <span role="img" aria-label={statusLabel} title={statusLabel} className={`mr-2 inline-flex align-middle ${statusClass}`}>
+                <StatusIcon aria-hidden="true" className={`size-4 shrink-0${status === 'running' ? ' animate-spin motion-reduce:animate-none' : ''}`} />
+            </span>
             {t(`${prefix}title`)} · {tool.name === 'unknown' ? t(`${prefix}unknown`) : tool.name}
             {batch && <> · {t(`${prefix}${batch.key}`, { count: batch.count })}</>}
         </summary>
