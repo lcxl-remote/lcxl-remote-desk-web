@@ -1675,6 +1675,11 @@ async fn run_inner_impl(
         if session.surface == crate::session::AgentSessionSurface::DeviceAssistant {
             system_prompt
                 .text
+                .push_str(&crate::device_assistant::current_time_prompt(
+                    current_unix_ms(deps.clock)?,
+                ));
+            system_prompt
+                .text
                 .push_str(&crate::directory_tools::scope_prompt(
                     session,
                     current_unix_ms(deps.clock)?,

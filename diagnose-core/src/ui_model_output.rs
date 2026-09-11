@@ -11,7 +11,7 @@ pub fn serialize(output: &OperationOutput) -> Result<String, serde_json::Error> 
     let body = &mut value["ReadContext"]["DesktopUiInspect"];
     if ui.nodes.is_empty() {
         body["search_hint"] = json!(
-            "No controls matched this bounded query. This does not establish that the UI or operation is unsupported. Try query.any with control types such as date/time/input/dialog/popover (Chinese aliases supported), or an observed native_id. Locate a dialog/popover then search within its root. Use allow_unfiltered=true only explicitly when targeted searches are insufficient."
+            "No controls matched this bounded query. This does not establish that the UI or operation is unsupported. Try query.any with both localized and English candidates (up to 16), because native identifiers often remain English even on a Chinese UI: 日期/时间/date/time/input/dialog/popover, or an observed native_id. Locate a dialog/popover then search within its root. Use allow_unfiltered=true only explicitly when targeted searches are insufficient."
         );
     }
     if ui.truncated {
