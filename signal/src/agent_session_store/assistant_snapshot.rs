@@ -106,9 +106,9 @@ impl SignalAgentSessionStore {
                 tasks,
                 session.input_revision,
             );
-            let mut grants =
+            let grants =
                 SignalCapabilityGrantStore::list_for_subject_on(&txn, run, actor, device).await?;
-            grants.retain(|grant| grant.input_revision == session.input_revision);
+
             let fingerprint = format!(
                 "{:x}",
                 Sha256::digest(

@@ -363,6 +363,7 @@ mod tests {
     fn device_assistant_profile_is_explicit_and_complete_for_oss() {
         let value = serde_json::to_value(DeviceAssistantClientCapabilities::oss()).unwrap();
         assert_eq!(value["schema_version"], 1);
+        assert!(value.get("unknown_outcome_disposition").is_none());
         for field in [
             "turn_stream",
             "capability_inventory",
@@ -370,7 +371,6 @@ mod tests {
             "permission_decision",
             "grant_revoke",
             "background_task_cancel",
-            "unknown_outcome_disposition",
             "object_context",
         ] {
             assert_eq!(value[field], true, "OSS must advertise {field}");

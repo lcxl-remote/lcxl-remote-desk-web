@@ -5982,14 +5982,20 @@ mod tests {
             CapabilityRiskTier::R0
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(process, &call("read_process_list", "{}"))
-                .unwrap(),
+            SignalDeviceAssistantTools::capability_risk(
+                process,
+                &call("read_process_list", r#"{"queries":["Calendar"]}"#)
+            )
+            .unwrap(),
             CapabilityRiskTier::R0
         );
         assert_eq!(
             SignalDeviceAssistantTools::capability_risk(
                 process,
-                &call("read_process_list", r#"{"include_command_line":true}"#)
+                &call(
+                    "read_process_list",
+                    r#"{"queries":["Calendar"],"include_command_line":true}"#
+                )
             )
             .unwrap(),
             CapabilityRiskTier::R1

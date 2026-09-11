@@ -12,7 +12,7 @@
 //! turns into the conversation and the execution-reconciliation state — including
 //! the unknown-outcome closure (§6): a placeholder tool result keeps the model
 //! history well-formed and a late result replaces it in place. Mutating calls in
-//! one turn run serially; a rejection / timeout / unknown outcome halts the rest.
+//! one turn run serially; a rejection or failed dependent action halts the rest of that group.
 //! The same exposure matrix ([`registry::exposed_tools`] /
 //! [`registry::lookup_exposed`]) both advertises tools to the model and validates
 //! a returned call, so a model can never invoke a tool it was not shown.
@@ -55,8 +55,7 @@ use crate::session::{
 /// The placeholder tool-result text written when a mutating execution's outcome is
 /// unknown (§6): it keeps the conversation well-formed and tells the model not to
 /// assume the command succeeded. A late real result replaces it in place.
-const OUTCOME_UNKNOWN_PLACEHOLDER: &str =
-    "execution outcome unknown; the command may have executed; do not assume success";
+const OUTCOME_UNKNOWN_PLACEHOLDER: &str = "Execution failed to return a conclusive result; effects may have occurred. Read the current target state before choosing the next action. Other authorized operations remain available; no user acknowledgement or record closure is required. Do not infer success or blindly repeat the same action.";
 
 fn image_input_error(error: crate::image_input::ImageInputError) -> AgentError {
     AgentError {
@@ -1881,7 +1880,7 @@ async fn run_inner(
                 );
                 let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. Re-read CURRENT AUTHORIZED GRANTS. If a required tool has state=active with approved_exact_input, call that tool now with exactly approved_exact_input and no changed fields. Do not inspect again, create another preview, or request the same permission before that call, because doing so can replace the approved ephemeral object reference. If no matching active grant exists, adapt to the recorded decision or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
                 let marker_text = if permission_continuation_blocked {
-                    "PERMISSION CONTINUATION BLOCKED (server authoritative): the approved tool is not currently executable under the runtime state/scope. Approval does not override this restriction. Do not retry the mutation or request the same permission. Available read/discovery tools remain usable. If an earlier action has an unknown outcome, inspect the UI without repeating it and ask the owner to review and close that unresolved action record before further mutations. Explain the blocker instead of claiming the approved action ran."
+                    "PERMISSION CONTINUATION BLOCKED (server authoritative): the approved tool is not currently executable under the runtime state/scope. Approval does not override this restriction. Do not retry the mutation or request the same permission. Available read/discovery tools remain usable. If an earlier action failed, inspect the current UI before choosing the next action. Previous failures do not block other authorized operations. Explain the blocker instead of claiming the approved action ran."
                 } else {
                     marker_text
                 };
@@ -2443,21 +2442,10 @@ async fn run_inner(
                             turn.provider_meta.data_envelope.as_ref(),
                             mint(),
                             &call.id,
-                            if !session.execution_state.allows_new_mutation()
-                                && deps.registry.iter().any(|tool| {
-                                    tool.name() == call.name && tool.effect == ToolEffect::Mutating
-                                })
-                            {
-                                format!(
-                                    "tool `{}` cannot execute while an earlier action has an unresolved outcome. Permission approval does not remove this restriction. Use read-only inspection and ask the owner to review and close the unresolved action record; do not reload, request permission again, or repeat the action.",
-                                    call.name
-                                )
-                            } else {
-                                format!(
-                                    "tool `{}` is not available in the current scope. Discover its capability, load its details, and request permission by tool_name if available. Do not infer that the device lacks this capability.",
-                                    call.name
-                                )
-                            },
+                            format!(
+                                "tool `{}` is not available in the current scope. Load its details and directly request permission by tool_name if needed; do not ask for a separate chat confirmation before creating the approval card.",
+                                call.name
+                            ),
                             "unavailable_tool_call",
                         )?;
                         continue;
@@ -2971,15 +2959,6 @@ async fn run_inner(
                                     created_at.clone(),
                                 )
                             }).and_then(|mut request| {
-                                if !session.execution_state.allows_new_mutation() && request.items.iter().any(|item| deps.provider_registry.and_then(|registry| registry.capability_for_tool(&item.tool_name)).is_some_and(|capability| capability.registered_tool().effect == ToolEffect::Mutating)) {
-                                    return Err(AgentError {
-                                        kind: AgentErrorKind::InvalidInput,
-                                        message: "Cannot request a new mutation while an earlier action has an unresolved outcome. Read-only inspection remains available. Inspect the current UI, then ask the owner to review and close the unresolved action record before requesting another mutation. Approval would not unblock execution; do not repeat this request.".into(),
-                                        retryable: false,
-                                        safe_for_model: true,
-                                        error_code: None,
-                                    });
-                                }
                                 let loaded = session
                                     .capability_disclosure
                                     .loaded_tool_names
@@ -4731,7 +4710,6 @@ async fn run_mutating<F: FnMut() -> String>(
                     since: (deps.clock)(),
                 });
             finish_tool(session, &call.id, false, sink);
-            *halted = Some("not executed: a prior command's outcome is unknown".to_string());
         }
         Ok(ExecOutcome::Dispatched(id)) => {
             // Background task model: close the tool call now with a task-id result (a
@@ -5032,7 +5010,6 @@ async fn run_wait<F: FnMut() -> String>(
                 ChatMessage::tool_result(mint(), &call.id, OUTCOME_UNKNOWN_PLACEHOLDER),
             )?;
             finish_tool(session, &call.id, false, sink);
-            *halted = Some("a prior command's outcome is unknown".into());
         }
         Ok(WaitOutcome::Unknown) => {
             // The task was recovered without a result. Degrade to an unknown outcome
@@ -5057,7 +5034,6 @@ async fn run_wait<F: FnMut() -> String>(
                     since: (deps.clock)(),
                 });
             finish_tool(session, &call.id, false, sink);
-            *halted = Some("a prior command's outcome is unknown".to_string());
         }
         Err(e) if e.safe_for_model => {
             append_mutating_result(

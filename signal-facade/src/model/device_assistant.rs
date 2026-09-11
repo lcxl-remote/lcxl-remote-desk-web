@@ -15,7 +15,6 @@ pub struct DeviceAssistantClientCapabilities {
     pub permission_decision: bool,
     pub grant_revoke: bool,
     pub background_task_cancel: bool,
-    pub unknown_outcome_disposition: bool,
     pub object_context: bool,
     /// This server exposes the dedicated one-shot exec-PTY carrier surface.
     /// Per-device/session readiness is still proven by a successful prepare.
@@ -34,7 +33,6 @@ impl DeviceAssistantClientCapabilities {
             permission_decision: true,
             grant_revoke: true,
             background_task_cancel: true,
-            unknown_outcome_disposition: true,
             object_context: true,
             exec_pty: true,
         }
@@ -49,7 +47,6 @@ impl DeviceAssistantClientCapabilities {
             permission_decision: true,
             grant_revoke: true,
             background_task_cancel: true,
-            unknown_outcome_disposition: true,
             object_context: true,
             exec_pty: true,
         }

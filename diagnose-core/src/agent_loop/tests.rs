@@ -4682,7 +4682,7 @@ async fn permission_resume_places_authorization_checkpoint_at_request_tail() {
 /// result, records `OutcomeUnknown`, and hides the mutating tool from the next
 /// model call (only read-only follow-up); the late result reconciles it later.
 #[tokio::test]
-async fn mutating_unknown_closes_with_placeholder_and_hides_mutating() {
+async fn mutating_unknown_returns_inspection_guidance_and_keeps_mutating() {
     let sess = MemSession::default();
     let model = ScriptModel {
         turns: RefCell::new(
@@ -4731,15 +4731,14 @@ async fn mutating_unknown_closes_with_placeholder_and_hides_mutating() {
                 .find(|m| &m.message_id == placeholder_message_id)
                 .unwrap();
             assert_eq!(ph.tool_call_id.as_deref(), Some("c1"));
-            assert!(ph.text.contains("outcome unknown"));
+            assert!(ph.text.contains("Read the current target state"));
         }
         other => panic!("expected OutcomeUnknown, got {other:?}"),
     }
-    // The follow-up model call did not advertise the mutating tool (no new
-    // mutation while an outcome is unknown), but kept the read tool.
+    // Receipt uncertainty keeps both authorized mutations and inspection available.
     let reqs = model.requests.borrow();
     let follow_up: Vec<_> = reqs[1].tools.iter().map(|t| t.name.clone()).collect();
-    assert!(!follow_up.contains(&"exec_command".to_string()));
+    assert!(follow_up.contains(&"exec_command".to_string()));
     assert!(follow_up.contains(&"read_sys".to_string()));
     // The first model call DID advertise the mutating tool.
     let first: Vec<_> = reqs[0].tools.iter().map(|t| t.name.clone()).collect();
@@ -8032,7 +8031,7 @@ async fn reasoning_display_is_saved_for_tool_turns_and_final_answers() {
 }
 
 #[tokio::test]
-async fn blocked_exact_permission_resume_restores_reads_without_forcing_mutation() {
+async fn scope_blocked_exact_permission_resume_restores_reads_without_forcing_mutation() {
     use crate::session::{AgentSessionSurface, TriggerOrigin};
     let sess = MemSession::default();
     let requests = Rc::new(RefCell::new(vec![]));
@@ -8048,7 +8047,7 @@ async fn blocked_exact_permission_resume_restores_reads_without_forcing_mutation
     };
     let scripted = tools(vec![]);
     let registry = vec![
-        mutating_tool("exact_action", Capability::ShellExecConfirmed),
+        mutating_tool("exact_action", Capability::ProcessList),
         read_tool("inspect", Capability::SystemInfo),
     ];
     let exact_tools = vec!["exact_action".to_string()];
@@ -8098,7 +8097,7 @@ async fn blocked_exact_permission_resume_restores_reads_without_forcing_mutation
 }
 
 #[tokio::test]
-async fn unknown_outcome_rejects_mutation_permission_before_showing_approval() {
+async fn unknown_outcome_allows_requesting_a_new_authorized_mutation() {
     let sess = MemSession::default();
     let mut initial = PersistedAgentSession::new(
         "conv",
@@ -8134,21 +8133,52 @@ async fn unknown_outcome_rejects_mutation_permission_before_showing_approval() {
     let providers = crate::device_assistant::device_assistant_provider_registry();
     let mut registry = vec![
         providers
-            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .capability(crate::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID)
             .unwrap()
             .registered_tool(),
     ];
+    registry.extend([
+        providers
+            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .unwrap()
+            .registered_tool(),
+        providers
+            .capability(crate::device_assistant::DESKTOP_UI_CAPABILITY_ID)
+            .unwrap()
+            .registered_tool(),
+    ]);
     registry.extend(crate::permission_tools::permission_planning_tool_registry());
-    let inventory = vec![crate::capability_availability::CapabilityAvailability {
-        provider_id: "desktop.session".into(),
-        capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
-        tool_name: "inspect_desktop_session".into(),
-        compiled: true,
-        enabled: true,
-        connected: true,
-        ready: true,
-        reason: None,
-    }];
+    let inventory = [
+        (
+            "desktop.ui.action",
+            crate::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID,
+            "execute_confirmed_ui_action",
+        ),
+        (
+            "desktop.session",
+            crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID,
+            "inspect_desktop_session",
+        ),
+        (
+            "desktop.ui",
+            crate::device_assistant::DESKTOP_UI_CAPABILITY_ID,
+            "inspect_desktop_ui",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(provider, capability, tool)| crate::capability_availability::CapabilityAvailability {
+            provider_id: provider.into(),
+            capability_id: capability.into(),
+            tool_name: tool.into(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        },
+    )
+    .collect::<Vec<_>>();
     let clock = || "2026-06-20T00:00:01Z".to_string();
     let mut loop_deps = deps(&sess, &model, &tools, &registry, &clock);
     loop_deps.provider_registry = Some(&providers);
@@ -8163,16 +8193,27 @@ async fn unknown_outcome_rejects_mutation_permission_before_showing_approval() {
     .await
     .unwrap();
 
-    assert!(matches!(outcome, LoopOutcome::Answered(_)));
+    assert!(
+        matches!(outcome, LoopOutcome::PermissionRequested { .. }),
+        "{:?}",
+        sess.inner
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .conversation
+            .iter()
+            .map(|m| &m.text)
+            .collect::<Vec<_>>()
+    );
     assert!(tools.calls.borrow().is_empty());
     let stored = sess.inner.borrow();
     let stored = stored.as_ref().unwrap();
-    assert!(stored.permission_requests.is_empty());
+    assert_eq!(stored.permission_requests.len(), 1);
     assert!(
         stored
             .conversation
             .iter()
-            .any(|m| m.text.contains("Cannot request a new mutation")),
+            .all(|m| !m.text.contains("Cannot request a new mutation")),
         "{:?}",
         stored
             .conversation

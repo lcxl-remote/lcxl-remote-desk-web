@@ -1457,63 +1457,19 @@ describe('useDeviceAssistantChat', () => {
         );
     });
 
-    it('requires an explicit exact disposition before clearing an unknown outcome', async () => {
+    it('does not require user disposition after an inconclusive action', async () => {
         localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
-        let unresolved = true;
-        const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-            if (String(input).endsWith('/outcome-unknown/dispose')) {
-                expect(JSON.parse(String(init?.body))).toEqual({
-                    connection: 'desk-1',
-                    conversation: 'conversation-1',
-                    workId: 94,
-                    executionId: 'generation-94',
-                });
-                unresolved = false;
-                return {
-                    ok: true,
-                    json: async () => ({ success: true, data: { disposed: true } }),
-                };
-            }
-            return {
-                ok: true,
-                json: async () => ({
-                    data: {
-                        sessionId: 'session-1',
-                        actionPermissionReasons: { '94': 'Create the approved calendar event' },
-                        seq: unresolved ? 1 : 2,
-                        active: false,
-                        messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
-                        contextAttachments: [],
-                        unresolvedOutcome: unresolved ? {
-                            workId: 94,
-                            fileRecoveryReceipt: 'persisted device recovery receipt',
-                            actionRequestId: 'action-94',
-                            executionId: 'generation-94',
-                            workKind: 'computer_action',
-                        } : null,
-                    },
-                }),
-            };
-        });
-        vi.stubGlobal('fetch', fetchMock);
+        vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+            sessionId: 'session-1', seq: 1, active: false,
+            messages: [{ id: 'result-1', role: 'assistant', text: 'Read the current UI before continuing.' }],
+            contextAttachments: [],
+        } }) })));
         const { result } = renderHook(() => useDeviceAssistantChat({
-            deskId: 'desk-1',
-            subscribe: () => () => undefined,
-            sendMessage: () => 'request',
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
         }));
-
-        await waitFor(() => expect(result.current.status).toBe('outcome_unknown'));
-        expect(result.current.unresolvedOutcome?.workId).toBe(94);
-        expect(result.current.unresolvedOutcome?.permissionReason).toBe('Create the approved calendar event');
-        expect(result.current.unresolvedOutcome?.fileRecoveryReceipt).toBe('persisted device recovery receipt');
-        await act(async () => {
-            expect(await result.current.disposeUnknownOutcome()).toBe(true);
-        });
-        await waitFor(() => expect(result.current.unresolvedOutcome).toBeNull());
-        expect(fetchMock).toHaveBeenCalledWith(
-            '/api/my/device-assistant-session/outcome-unknown/dispose',
-            expect.objectContaining({ method: 'POST' }),
-        );
+        await waitFor(() => expect(result.current.status).toBe('done'));
+        expect(result.current.running).toBe(false);
+        expect('disposeUnknownOutcome' in result.current).toBe(false);
     });
 });
 

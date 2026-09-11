@@ -265,16 +265,6 @@ pub(crate) fn project(
     } else {
         None
     };
-    if matches!(
-        completed.result,
-        ComputerActionResultClass::OutcomeUnknown
-            | ComputerActionResultClass::ChangedButUnverified
-            | ComputerActionResultClass::PartiallyApplied
-            | ComputerActionResultClass::RollbackUnsafe
-    ) || (!verified && completed.facts.iter().any(|f| f.changed))
-    {
-        return Ok(None);
-    }
     let content = if let Some(receipt) = exact_send_receipt {
         serde_json::to_string(&receipt).map_err(|_| invalid())?
     } else if verified && matches!(action, ComputerActionKind::Browser(_)) {

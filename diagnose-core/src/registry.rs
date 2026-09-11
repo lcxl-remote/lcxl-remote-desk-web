@@ -4,7 +4,7 @@
 //! it requires and the [`ToolEffect`] it has. [`exposed_tools`] is the first line
 //! of prompt-injection defence (§D8): the model is only ever shown the tools that
 //! the current scope grants and the current mode permits — and a mutating tool is
-//! hidden while a prior execution's outcome is still unknown.
+//! independent of prior action failures.
 //!
 //! Read tools are exposed in every mode (reads are not "execution"); a mutating
 //! tool is exposed only at `ConfirmEachAction` or higher. The same matrix is used
@@ -89,8 +89,8 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
 
 /// Whether a single tool is exposed under the given scope, execution state, and
 /// trigger origin. Requires the granted capability, a mode that permits the
-/// effect, and — for a mutating tool — no in-flight execution whose outcome is
-/// unknown **and** a turn origin that may start a new mutation (an automation turn
+/// effect, and — for a mutating tool — a turn origin that may start a new
+/// mutation (an automation turn
 /// may not, so completions cannot self-trigger an unbounded execution chain).
 pub fn is_exposed(
     tool: &RegisteredTool,
@@ -127,9 +127,7 @@ pub fn is_exposed(
     if !mode_allows_effect(scope.mode, tool.effect) {
         return false;
     }
-    if tool.effect == ToolEffect::Mutating
-        && (!execution_state.allows_new_mutation() || !origin.allows_new_mutation())
-    {
+    if tool.effect == ToolEffect::Mutating && !origin.allows_new_mutation() {
         return false;
     }
     true
@@ -249,10 +247,9 @@ mod tests {
         assert!(names.contains(&"file_write".to_string()));
     }
 
-    /// While an execution outcome is unknown, mutating tools are hidden but read
-    /// tools stay available (read-only follow-up is allowed).
+    /// A failed receipt does not revoke existing read or mutation permissions.
     #[test]
-    fn outcome_unknown_hides_mutating_keeps_read() {
+    fn outcome_unknown_keeps_authorized_mutations_and_reads() {
         let reg = registry();
         let s = scope(
             &[Capability::SystemInfo, Capability::LogRecent],
@@ -269,8 +266,8 @@ mod tests {
             .collect();
         assert!(names.contains(&"file_read".to_string()));
         assert!(
-            !names.contains(&"file_write".to_string()),
-            "no new mutation while an outcome is unknown"
+            names.contains(&"file_write".to_string()),
+            "prior failure does not revoke mutation authority"
         );
     }
 

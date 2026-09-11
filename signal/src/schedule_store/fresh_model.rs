@@ -30,7 +30,6 @@ impl ScheduleStore {
             || held.current_turn_id.as_deref() != Some(format!("{}-turn", request.run_id).as_str())
             || held.active_control_connection_id.is_some()
             || held.input_revision != 1
-            || held.execution_state.has_unresolved_outcome()
         {
             return Err(ScheduleStoreError::Conflict);
         }

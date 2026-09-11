@@ -278,9 +278,6 @@ fn match_capability_grant_inner(
     if grant.actor_id != call.actor_id || grant.run_id != call.run_id {
         return Err(GrantMismatch::Subject);
     }
-    if grant.input_revision != call.input_revision {
-        return Err(GrantMismatch::InputRevision);
-    }
     if grant.surface != call.surface {
         return Err(GrantMismatch::Surface);
     }
@@ -521,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn grant_from_an_older_focus_epoch_is_rejected() {
+    fn grant_survives_new_input_in_same_conversation() {
         let resources = vec!["root:selected".into()];
         let operations = vec!["create_new".into()];
         let envelopes = vec!["envelope-1".into()];
@@ -529,10 +526,7 @@ mod tests {
         let canonical = digest('a');
         let mut current = call(&resources, &operations, &envelopes, &digests, &canonical);
         current.input_revision = 4;
-        assert_eq!(
-            match_capability_grant(&grant(), &current),
-            Err(GrantMismatch::InputRevision)
-        );
+        assert_eq!(match_capability_grant(&grant(), &current), Ok(()));
     }
 
     #[test]

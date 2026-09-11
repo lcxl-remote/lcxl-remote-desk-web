@@ -492,7 +492,7 @@ async fn acceptance_captured_model_cannot_self_execute() {
 /// contract stays framed. A captured model cannot turn an ambiguous result into a
 /// fresh mutation.
 #[tokio::test]
-async fn acceptance_unknown_outcome_withdraws_mutating_tool() {
+async fn acceptance_unknown_outcome_keeps_authorized_tools() {
     let sess = MemSession::default();
     let model = model(vec![
         tool_use("c1", "exec_command"),
@@ -529,12 +529,11 @@ async fn acceptance_unknown_outcome_withdraws_mutating_tool() {
     ));
 
     let requests = model.requests.borrow();
-    // The first step advertised the mutating tool; the second (after the unknown
-    // outcome) withdrew it but kept the read tool and the safety contract.
+    // Both requests retain authorized mutation and inspection tools.
     assert!(requests[0].tools.iter().any(|t| t.name == "exec_command"));
     assert!(
-        !requests[1].tools.iter().any(|t| t.name == "exec_command"),
-        "no new mutation while a prior outcome is unknown"
+        requests[1].tools.iter().any(|t| t.name == "exec_command"),
+        "prior failure does not revoke authorization"
     );
     assert!(requests[1].tools.iter().any(|t| t.name == "read_log"));
     assert_contract_present(&requests[1].messages);

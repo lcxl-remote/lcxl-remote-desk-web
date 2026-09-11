@@ -1229,7 +1229,6 @@ async fn compose_turn_inner(
                 && grant.actor_id == actor_id
                 && grant.run_id == conversation_id
                 && grant.target_device_id == target_device_id
-                && grant.input_revision == snapshot.as_ref().map_or(0, |s| s.input_revision)
                 && grant.policy_revision == PERSONAL_ASSISTANT_POLICY_REVISION
                 && grant.readiness_revision == readiness_revision
         })

@@ -1,7 +1,6 @@
 import { useFollowLatest } from '@/hooks/use-follow-latest';
 import './assistant-responsive.css';
 import { AssistantSchedules } from './assistant-schedules';
-import { AssistantUnknownOutcome } from './assistant-unknown-outcome';
 import { AssistantImages } from './assistant-images';
 import { AssistantReasoning } from './assistant-reasoning';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
@@ -738,7 +737,7 @@ export function DeviceAssistantWorkspace({
                             </CardTitle>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
-                            <AssistantHistory deskId={deskId} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || chat.outcomeDisposing || !!chat.grantRevoking}
+                            <AssistantHistory deskId={deskId} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
                                 onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
@@ -747,7 +746,7 @@ export function DeviceAssistantWorkspace({
                                     return true;
                                 }} />
                             {!rehearsal && <Button variant="ghost" size="sm" className="assistant-action" aria-label={t('schedules.createResume')} title={t('schedules.createResume')} disabled={!assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision} onClick={() => { if (!chat.conversationId || !chat.inputRevision) return; scheduleNavigate(`/schedules?${new URLSearchParams({ resume_conversation: chat.conversationId, resume_device: stableDeviceId, resume_revision: String(chat.inputRevision) })}`); }}><CalendarClock className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('schedules.createResume')}</span></Button>}
-                            <Button variant="ghost" size="sm" className="assistant-action" aria-label={t('pages.deviceAssistant.newConversation')} title={t('pages.deviceAssistant.newConversation')} onClick={resetConversation} disabled={!!rehearsal || !assistantEnabled || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || chat.outcomeDisposing || !!chat.grantRevoking}>
+                            <Button variant="ghost" size="sm" className="assistant-action" aria-label={t('pages.deviceAssistant.newConversation')} title={t('pages.deviceAssistant.newConversation')} onClick={resetConversation} disabled={!!rehearsal || !assistantEnabled || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}>
                                 <MessageSquarePlus className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('pages.deviceAssistant.newConversation')}</span>
                             </Button>
                         </div>
@@ -807,22 +806,6 @@ export function DeviceAssistantWorkspace({
                         )}
                     </div>
 
-                    {chat.unresolvedOutcome && (
-                        <AssistantUnknownOutcome key={chat.unresolvedOutcome.executionId} outcome={chat.unresolvedOutcome}>
-                            {chat.unresolvedOutcome.fileRecoveryReceipt && <AssistantCommandResult text={chat.unresolvedOutcome.fileRecoveryReceipt} />}
-                            {featureProfile.unknown_outcome_disposition && (
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                disabled={chat.outcomeDisposing || chat.turnRunning}
-                                onClick={() => void chat.disposeUnknownOutcome()}
-                            >
-                                {chat.outcomeDisposing && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
-                                {t('pages.deviceAssistant.outcomeUnknownDispose')}
-                            </Button>
-                            )}
-                        </AssistantUnknownOutcome>
-                    )}
                     {externalSendReceipts.length > 0 && (
                         <div data-testid="device-assistant-external-send-results" className="space-y-3">
                             {externalSendReceipts.map(({ tool, receipt }) => (

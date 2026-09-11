@@ -653,7 +653,7 @@ pub fn permission_request_can_renew(
                     && grant.run_id == session.conversation_id
                     && grant.actor_id == session.actor_id
                     && grant.target_device_id == session.device_id
-                    && grant.input_revision == session.input_revision
+
                     && grant.revoked_at_unix_ms.is_none()
                     && (grant.remaining_uses == 0 || grant.expires_at_unix_ms <= now
                         // Included observation can outlive a consumed one-shot action.

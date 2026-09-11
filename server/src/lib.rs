@@ -92,8 +92,7 @@ use desk_signal::{
         connection::list_connections,
         device_assistant_session::{
             cancel_device_assistant_background_task, decide_device_assistant_permission,
-            delete_assistant_image, delete_device_assistant_session,
-            dispose_device_assistant_unknown_outcome, get_assistant_image,
+            delete_assistant_image, delete_device_assistant_session, get_assistant_image,
             get_device_assistant_session, list_assistant_images, list_device_assistant_sessions,
             revoke_device_assistant_capability_grant,
         },
@@ -261,7 +260,6 @@ pub fn configure_api_surface(
                         .service(list_assistant_images)
                         .service(get_assistant_image)
                         .service(delete_assistant_image)
-                        .service(dispose_device_assistant_unknown_outcome)
                         .service(decide_device_assistant_permission)
                         .service(revoke_device_assistant_capability_grant)
                         .service(cancel_device_assistant_background_task)

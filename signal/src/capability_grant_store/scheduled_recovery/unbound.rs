@@ -39,7 +39,6 @@ pub(super) async fn reconcile_on(
     if grant.actor_id != session.actor_id
         || grant.run_id != session.conversation_id
         || grant.target_device_id != session.device_id
-        || grant.input_revision != session.input_revision
         || grant.provider_id != payload.provider_id
         || grant.capability_id != payload.capability_id
         || grant.tool_name != payload.tool_name

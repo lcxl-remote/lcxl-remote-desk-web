@@ -62,7 +62,6 @@ pub(super) async fn list(
             || session.input_revision > i64::MAX as u64
             || session.turn_state.is_active()
             || session.trigger_origin == TriggerOrigin::ScheduledTask
-            || session.execution_state.has_unresolved_outcome()
         {
             continue;
         }

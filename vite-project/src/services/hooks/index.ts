@@ -29,7 +29,6 @@ export type { CancelDeviceAssistantBackgroundTaskMutationKey } from "./deviceAss
 export type { DecideDeviceAssistantPermissionMutationKey } from "./deviceAssistantSessionController/useDecideDeviceAssistantPermission.ts";
 export type { DeleteAssistantImageMutationKey } from "./deviceAssistantSessionController/useDeleteAssistantImage.ts";
 export type { DeleteDeviceAssistantSessionMutationKey } from "./deviceAssistantSessionController/useDeleteDeviceAssistantSession.ts";
-export type { DisposeDeviceAssistantUnknownOutcomeMutationKey } from "./deviceAssistantSessionController/useDisposeDeviceAssistantUnknownOutcome.ts";
 export type { GetAssistantImageQueryKey } from "./deviceAssistantSessionController/useGetAssistantImage.ts";
 export type { GetAssistantImageSuspenseQueryKey } from "./deviceAssistantSessionController/useGetAssistantImageSuspense.ts";
 export type { GetDeviceAssistantSessionQueryKey } from "./deviceAssistantSessionController/useGetDeviceAssistantSession.ts";
@@ -223,9 +222,6 @@ export { useDeleteAssistantImage } from "./deviceAssistantSessionController/useD
 export { deleteDeviceAssistantSessionMutationKey } from "./deviceAssistantSessionController/useDeleteDeviceAssistantSession.ts";
 export { deleteDeviceAssistantSessionMutationOptions } from "./deviceAssistantSessionController/useDeleteDeviceAssistantSession.ts";
 export { useDeleteDeviceAssistantSession } from "./deviceAssistantSessionController/useDeleteDeviceAssistantSession.ts";
-export { disposeDeviceAssistantUnknownOutcomeMutationKey } from "./deviceAssistantSessionController/useDisposeDeviceAssistantUnknownOutcome.ts";
-export { disposeDeviceAssistantUnknownOutcomeMutationOptions } from "./deviceAssistantSessionController/useDisposeDeviceAssistantUnknownOutcome.ts";
-export { useDisposeDeviceAssistantUnknownOutcome } from "./deviceAssistantSessionController/useDisposeDeviceAssistantUnknownOutcome.ts";
 export { getAssistantImageQueryKey } from "./deviceAssistantSessionController/useGetAssistantImage.ts";
 export { getAssistantImageQueryOptions } from "./deviceAssistantSessionController/useGetAssistantImage.ts";
 export { useGetAssistantImage } from "./deviceAssistantSessionController/useGetAssistantImage.ts";

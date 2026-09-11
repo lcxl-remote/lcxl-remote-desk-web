@@ -274,7 +274,6 @@ impl ScheduleStore {
             if grant.actor_id != work.actor_id
                 || grant.run_id != work.conversation_id
                 || grant.target_device_id != work.target_device_id
-                || grant.input_revision != prepared.input_revision
                 || grant.surface
                     != desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner
                 || grant.policy_revision != work.policy_revision

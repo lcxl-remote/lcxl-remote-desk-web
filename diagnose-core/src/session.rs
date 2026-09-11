@@ -314,13 +314,13 @@ pub enum ExecutionState {
     /// outstanding, but with **no recoverable execution identity** — the runtime
     /// could not prove whether the command ran or even reached dispatch. Unlike
     /// [`OutcomeUnknown`], no late result will ever reconcile this, so the
-    /// conversation is permanently barred from new mutation (read-only follow-up
-    /// only). This is the conservative recovery verdict when nothing better is known.
+    /// original receipt remains unavailable. The model must inspect the target
+    /// state before choosing its next action.
     ///
     /// [`OutcomeUnknown`]: ExecutionState::OutcomeUnknown
     Interrupted { since: String },
     /// Multiple independently correlated tasks; an unbound interruption remains
-    /// a conversation-wide safety barrier without discarding tracked work.
+    /// an informational recovery fact without discarding tracked work.
     Concurrent {
         tasks: Vec<BackgroundExecution>,
         interrupted_since: Option<String>,
@@ -339,16 +339,6 @@ pub struct ManualOutcomeDisposition {
 const MANUALLY_DISPOSED_OUTCOME_UNKNOWN: &str = "The user manually disposed this unresolved action after checking the target. The actual provider outcome remains unknown. Do not infer success, restore the consumed grant, or automatically retry the action.";
 
 impl ExecutionState {
-    /// Whether a mutating tool may be exposed/started right now. A new mutation is
-    /// allowed while known background tasks run; while an outcome is unknown or the
-    /// session was interrupted with no recoverable identity, only read-only
-    /// follow-up is allowed.
-    ///
-    /// [`None`]: ExecutionState::None
-    pub fn allows_new_mutation(&self) -> bool {
-        !self.has_unresolved_outcome()
-    }
-
     /// The in-flight task a `wait_for_task` call could wait on, as
     /// `(work_id, execution_id, exec_request_id)`. A dispatched background task
     /// ([`Executing`]) or a recoverable unknown outcome ([`OutcomeUnknown`]) both
@@ -1246,7 +1236,7 @@ impl PersistedAgentSession {
     /// a follow-up question continues the same conversation even after the prior
     /// turn finished or failed; the accumulated `conversation` history is left
     /// untouched. `execution_state` is also left as-is, so an unresolved
-    /// `OutcomeUnknown` keeps the next turn read-only. On success: bind the turn
+    /// `OutcomeUnknown` retains correlation for a possible late receipt. On success: bind the turn
     /// routing, recompute the scope at the turn boundary (`current_pdp` may expand
     /// or narrow vs the last turn), and reset the turn-level counters. The caller's
     /// [`SessionSeam`] is responsible for doing this atomically (DB CAS / in-memory
@@ -2034,11 +2024,10 @@ impl PersistedAgentSession {
 const RECOVER_NOT_EXECUTED: &str = "not executed: the turn was interrupted before this command ran";
 /// The placeholder text for a recovered call whose outcome is unknown but
 /// reconcilable; a late real result replaces it in place.
-const RECOVER_OUTCOME_UNKNOWN: &str =
-    "execution outcome unknown; the command may have executed; do not assume success";
+const RECOVER_OUTCOME_UNKNOWN: &str = "Execution did not return a conclusive receipt. Read the current target state before choosing the next action. Other authorized writes remain available, and no user acknowledgement is required. Do not infer success or blindly repeat the action.";
 /// The placeholder text for a recovered call with no recoverable identity (the
-/// conversation is barred from further mutation).
-const RECOVER_INTERRUPTED: &str = "the turn was interrupted; this command's outcome is unknown and cannot be reconciled; do not assume success";
+/// model must inspect the current target state).
+const RECOVER_INTERRUPTED: &str = "The turn was interrupted without a recoverable action receipt. Read the current target state before choosing the next action. Other authorized writes remain available; no user acknowledgement is required.";
 
 /// Deterministic message id for a recovery-appended tool result, derived from the
 /// closed tool call so it is unique within the conversation and stable for the
@@ -2333,7 +2322,10 @@ mod tests {
         assert_eq!(value.focus_epoch.task_status_input_revision, None);
         assert!(value.focus_epoch.selected_attachment_ids.is_empty());
         assert_eq!(value.capability_disclosure.focus_input_revision, 2);
-        assert!(value.capability_disclosure.loaded_tool_names.is_empty());
+        assert_eq!(
+            value.capability_disclosure.loaded_tool_names,
+            vec!["read_system_info"]
+        );
         assert!(value.task_status_projection.is_none());
         assert_eq!(
             value.permission_requests[0].state,
@@ -3024,7 +3016,6 @@ mod tests {
             .find(|m| m.message_id == "run-1")
             .unwrap();
         assert_eq!(anchor.text, RECOVER_OUTCOME_UNKNOWN);
-        assert!(!s.execution_state.allows_new_mutation());
 
         // A late real result reconciles the anchor in place.
         assert!(s.reconcile_late_result("e9", "exit_code=0", "2026-06-20T00:01:00Z"));
@@ -3053,11 +3044,10 @@ mod tests {
 
         assert!(!s.manually_dispose_unknown(7, "e9", "t1"));
         assert!(!s.manually_dispose_unknown(8, "e-other", "t1"));
-        assert!(!s.execution_state.allows_new_mutation());
 
         assert!(s.manually_dispose_unknown(8, "e9", "t2"));
         assert_eq!(s.execution_state, ExecutionState::None);
-        assert!(s.execution_state.allows_new_mutation());
+
         assert_eq!(
             s.conversation
                 .iter()
@@ -3248,7 +3238,7 @@ mod tests {
     /// Recovery of an interrupted mutating turn with no recoverable identity closes
     /// the unclosed tool call, settles to Failed, and bars further mutation.
     #[test]
-    fn recover_interrupted_unknown_closes_and_bars_mutation() {
+    fn recover_interrupted_unknown_closes_without_barring_mutation() {
         use crate::chat::{ChatMessage, ChatRole, ToolCallRef};
         let mut s = session();
         s.begin_turn("t1", None, None, 7, s.scope_snapshot.clone(), "t")
@@ -3275,9 +3265,9 @@ mod tests {
         assert_eq!(s.turn_state, TurnState::Failed);
         assert!(
             matches!(s.execution_state, ExecutionState::Interrupted { .. }),
-            "interrupted bars new mutation"
+            "interruption remains recorded"
         );
-        assert!(!s.execution_state.allows_new_mutation());
+
         assert!(
             s.conversation
                 .iter()
@@ -3317,7 +3307,6 @@ mod tests {
         s.recover_session(RecoveryVerdict::NotExecuted, "t2");
         assert_eq!(s.turn_state, TurnState::Failed);
         assert_eq!(s.execution_state, ExecutionState::None);
-        assert!(s.execution_state.allows_new_mutation());
     }
 
     /// Recovery with `OutcomeUnknown` records the identity + a placeholder that a
@@ -3352,7 +3341,7 @@ mod tests {
             "t2",
         );
         assert_eq!(s.turn_state, TurnState::Failed);
-        assert!(!s.execution_state.allows_new_mutation());
+
         assert!(s.conversation.iter().any(|message| {
             message.tool_call_id.as_deref() == Some("read-before")
                 && message.text == RECOVER_NOT_EXECUTED
@@ -3670,7 +3659,7 @@ mod tests {
             .insert(ExecutionState::Executing { action: a.clone() });
         s.execution_state
             .insert(ExecutionState::Executing { action: b.clone() });
-        assert!(s.execution_state.allows_new_mutation());
+
         let mut s =
             PersistedAgentSession::decode_json(&s.encode_json_for_storage().unwrap()).unwrap();
         assert_eq!(s.execution_state.tasks().len(), 2);
@@ -3703,12 +3692,12 @@ mod tests {
         });
         s.execution_state
             .insert(ExecutionState::Executing { action: b.clone() });
-        assert!(!s.execution_state.allows_new_mutation());
+
         assert!(s.apply_completion("done-b", "gen-b", "call-b", "task-b", "success", "t"));
-        assert!(!s.execution_state.allows_new_mutation());
+
         assert!(s.execution_state.contains(&a));
         assert!(s.apply_completion("done-a", "gen-a", "call-a", "task-a", "success", "t"));
-        assert!(s.execution_state.allows_new_mutation());
+
         assert!(
             s.conversation
                 .iter()

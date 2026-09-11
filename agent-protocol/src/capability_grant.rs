@@ -119,8 +119,8 @@ pub struct CapabilityGrant {
     pub grant_id: String,
     pub actor_id: String,
     pub run_id: String,
-    /// Focus/input epoch that issued this authority. A later user input must
-    /// never inherit a grant merely because the conversation id is unchanged.
+    /// Original input epoch for audit; authority is scoped to the conversation
+    /// and approved resources and survives ordinary follow-up messages.
     pub input_revision: u64,
     pub surface: ProductSurface,
     pub target_device_id: String,

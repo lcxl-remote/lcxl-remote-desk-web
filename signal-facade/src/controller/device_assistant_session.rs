@@ -106,16 +106,7 @@ pub struct CapabilityGrantRevokeBody {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct UnknownOutcomeDispositionBody {
-    pub connection: String,
-    pub conversation: Option<String>,
-    pub session: Option<String>,
-    pub work_id: i64,
-    pub execution_id: String,
-}
-
+/// Receipt correlation for independent automation run review, not a conversation write gate.
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UnknownOutcomeDto {
@@ -123,15 +114,6 @@ pub struct UnknownOutcomeDto {
     pub action_request_id: String,
     pub execution_id: String,
     pub work_kind: String,
-    /// Device evidence for a recoverable text mutation, never authority to retry.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_recovery_receipt: Option<String>,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct UnknownOutcomeDispositionResponse {
-    pub disposed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, ToSchema)]
@@ -520,8 +502,7 @@ pub struct DeviceAssistantSessionSnapshotDto {
     pub request_id: Option<String>,
     /// Running background command generation that may be cancelled.
     pub active_execution_generation: Option<String>,
-    /// Exact unresolved durable action that requires owner disposition before
-    /// another mutation can start. No payload or secret-bearing input is exposed.
+    /// Inconclusive receipt identity for independent automation history.
     pub unresolved_outcome: Option<UnknownOutcomeDto>,
     /// Latest durably accepted user input and the model-processing watermark.
     pub latest_input_seq: u64,

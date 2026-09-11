@@ -76,6 +76,10 @@ unsafe extern "C" {
     fn CFRetain(value: CfTypeRef) -> CfTypeRef;
     fn CFGetTypeID(value: CfTypeRef) -> CfTypeId;
     fn CFStringGetTypeID() -> CfTypeId;
+    fn CFDateGetTypeID() -> CfTypeId;
+    fn CFDateGetAbsoluteTime(value: CfTypeRef) -> f64;
+    fn CFDateCreate(allocator: CfTypeRef, at: f64) -> CfTypeRef;
+    fn CFNumberCreate(allocator: CfTypeRef, number_type: i32, value: *const c_void) -> CfTypeRef;
     fn CFBooleanGetTypeID() -> CfTypeId;
     fn CFBooleanGetValue(value: CfTypeRef) -> bool;
     fn CFNumberGetTypeID() -> CfTypeId;
@@ -557,13 +561,11 @@ fn apply_action_inner(
                     false,
                 ));
             }
-            let value_ref = create_string(value).ok_or_else(|| {
-                failure(
-                    AgentErrorKind::InvalidInput,
-                    "the Accessibility value contains an invalid NUL byte",
-                    false,
-                )
+            let current = copy_attribute(element.0, "AXValue").ok_or_else(|| {
+                failure(AgentErrorKind::InvalidInput,
+                    "Cannot read the native AXValue type; inspect the current UI before choosing another action. No write was attempted.", false)
             })?;
+            let value_ref = encode_native_value(current.0, value)?;
             set_attribute(element.0, "AXValue", value_ref.0)?;
             Ok(AppliedUiAction::accepted(true))
         }
@@ -628,7 +630,11 @@ fn validate_action_target(
             .iter()
             .any(|name| name == "AXPress" || name == "AXConfirm"),
         UiSemanticAction::Select => attribute_settable(element, "AXSelected"),
-        UiSemanticAction::SetValue { .. } => attribute_settable(element, "AXValue"),
+        UiSemanticAction::SetValue { .. } => {
+            attribute_settable(element, "AXValue")
+                && copy_attribute(element, "AXValue")
+                    .is_some_and(|value| native_value_supported(value.0))
+        }
         UiSemanticAction::Focus => attribute_settable(element, "AXFocused"),
         UiSemanticAction::Toggle { .. } => {
             action_names(element).iter().any(|name| name == "AXPress")
@@ -800,8 +806,11 @@ fn read_node(
     let (value, value_truncated) = if is_protected {
         (None, false)
     } else {
-        let (value, truncated) =
-            bounded_string(attribute_string(element, "AXValue").unwrap_or_default());
+        let (value, truncated) = bounded_string(
+            copy_attribute(element, "AXValue")
+                .and_then(|value| native_value_text(value.0))
+                .unwrap_or_default(),
+        );
         ((!value.is_empty()).then_some(value), truncated)
     };
     let mut supported_actions = Vec::new();
@@ -820,7 +829,10 @@ fn read_node(
         if attribute_settable(element, "AXSelected") {
             supported_actions.push(UiSemanticActionKind::Select);
         }
-        if attribute_settable(element, "AXValue") {
+        if attribute_settable(element, "AXValue")
+            && copy_attribute(element, "AXValue")
+                .is_some_and(|value| native_value_supported(value.0))
+        {
             supported_actions.push(UiSemanticActionKind::SetValue);
         }
         if attribute_settable(element, "AXFocused") {
@@ -962,6 +974,106 @@ fn copy_attribute(element: AxUiElementRef, attribute: &str) -> Option<OwnedCf> {
 fn attribute_string(element: AxUiElementRef, attribute: &str) -> Option<String> {
     let value = copy_attribute(element, attribute)?;
     cf_string(value.0)
+}
+
+const CF_DATE_UNIX_OFFSET: f64 = 978_307_200.0;
+const CF_NUMBER_DOUBLE_TYPE: i32 = 13;
+
+fn native_value_supported(value: CfTypeRef) -> bool {
+    let kind = unsafe { CFGetTypeID(value) };
+    kind == unsafe { CFStringGetTypeID() }
+        || kind == unsafe { CFDateGetTypeID() }
+        || kind == unsafe { CFNumberGetTypeID() }
+}
+
+fn native_date(value: CfTypeRef) -> Option<chrono::DateTime<chrono::Local>> {
+    let seconds = unsafe { CFDateGetAbsoluteTime(value) } + CF_DATE_UNIX_OFFSET;
+    if !seconds.is_finite() {
+        return None;
+    }
+    chrono::DateTime::from_timestamp_millis((seconds * 1000.0) as i64)
+        .map(|at| at.with_timezone(&chrono::Local))
+}
+
+fn native_value_text(value: CfTypeRef) -> Option<String> {
+    let kind = unsafe { CFGetTypeID(value) };
+    if kind == unsafe { CFDateGetTypeID() } {
+        return native_date(value).map(|at| at.to_rfc3339());
+    }
+    if kind == unsafe { CFNumberGetTypeID() } {
+        let mut number = 0.0_f64;
+        return (unsafe {
+            CFNumberGetValue(
+                value,
+                CF_NUMBER_DOUBLE_TYPE,
+                std::ptr::addr_of_mut!(number).cast(),
+            )
+        } && number.is_finite())
+        .then(|| number.to_string());
+    }
+    cf_string(value)
+}
+
+fn parse_native_date(
+    value: &str,
+    current: chrono::DateTime<chrono::Local>,
+) -> Option<chrono::DateTime<chrono::Local>> {
+    use chrono::TimeZone;
+    if let Ok(at) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(at.with_timezone(&chrono::Local));
+    }
+    let local = if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        date.and_time(current.time())
+    } else {
+        let time = chrono::NaiveTime::parse_from_str(value, "%H:%M:%S")
+            .or_else(|_| chrono::NaiveTime::parse_from_str(value, "%H:%M"))
+            .ok()?;
+        current.date_naive().and_time(time)
+    };
+    // Ambiguous/nonexistent local times require an explicit RFC3339 offset.
+    chrono::Local.from_local_datetime(&local).single()
+}
+
+fn encode_native_value(current: CfTypeRef, value: &str) -> Result<OwnedCf, AgentError> {
+    let invalid = || {
+        failure(
+            AgentErrorKind::InvalidInput,
+            "Invalid native AXValue. Strings require text; numbers require a finite decimal; dates require RFC3339 with offset, YYYY-MM-DD (preserves local time), or HH:MM[:SS] (preserves local date). No write was attempted. Read the current UI value before correcting the input.",
+            false,
+        )
+    };
+    let kind = unsafe { CFGetTypeID(current) };
+    if kind == unsafe { CFStringGetTypeID() } {
+        return create_string(value).ok_or_else(invalid);
+    }
+    let native = if kind == unsafe { CFDateGetTypeID() } {
+        let at = parse_native_date(value, native_date(current).ok_or_else(invalid)?)
+            .ok_or_else(invalid)?;
+        unsafe {
+            CFDateCreate(
+                std::ptr::null(),
+                at.timestamp_millis() as f64 / 1000.0 - CF_DATE_UNIX_OFFSET,
+            )
+        }
+    } else if kind == unsafe { CFNumberGetTypeID() } {
+        let number: f64 = value.parse().map_err(|_| invalid())?;
+        if !number.is_finite() {
+            return Err(invalid());
+        }
+        unsafe {
+            CFNumberCreate(
+                std::ptr::null(),
+                CF_NUMBER_DOUBLE_TYPE,
+                std::ptr::addr_of!(number).cast(),
+            )
+        }
+    } else {
+        return Err(invalid());
+    };
+    if native.is_null() {
+        return Err(invalid());
+    }
+    Ok(OwnedCf(native))
 }
 
 fn attribute_bool(element: AxUiElementRef, attribute: &str) -> Option<bool> {
@@ -1783,4 +1895,53 @@ mod native_identity_tests {
 fn retained_element(id: &str, process_id: u32, started: u64) -> Result<OwnedCf, AgentError> {
     IDENTITIES.with(|store| store.borrow_mut().get(id, process_id, started))
         .ok_or_else(|| failure(AgentErrorKind::InvalidInput, "the native UI element was destroyed or belongs to a different process lifetime; search for a new element", false))
+}
+
+#[cfg(test)]
+mod native_value_tests {
+    use super::*;
+
+    #[test]
+    fn dates_are_readable_and_written_as_dates() {
+        let native = OwnedCf(unsafe { CFDateCreate(std::ptr::null(), 810_000_000.0) });
+        let before = native_date(native.0).unwrap();
+        assert!(native_value_text(native.0).unwrap().contains('T'));
+        let changed = encode_native_value(native.0, "2026-09-11").unwrap();
+        assert_eq!(unsafe { CFGetTypeID(changed.0) }, unsafe {
+            CFDateGetTypeID()
+        });
+        let after = native_date(changed.0).unwrap();
+        assert_eq!(after.date_naive().to_string(), "2026-09-11");
+        assert_eq!(after.time(), before.time());
+        let time = encode_native_value(changed.0, "09:00").unwrap();
+        assert_eq!(
+            native_date(time.0)
+                .unwrap()
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+            "2026-09-11 09:00"
+        );
+        assert!(encode_native_value(native.0, "9/11/2026").is_err());
+    }
+
+    #[test]
+    fn numeric_and_string_values_keep_their_native_types() {
+        let text = create_string("old").unwrap();
+        assert_eq!(
+            native_value_text(encode_native_value(text.0, "new").unwrap().0).as_deref(),
+            Some("new")
+        );
+        let number = 12.5_f64;
+        let native = OwnedCf(unsafe {
+            CFNumberCreate(
+                std::ptr::null(),
+                CF_NUMBER_DOUBLE_TYPE,
+                std::ptr::addr_of!(number).cast(),
+            )
+        });
+        let changed = encode_native_value(native.0, "42.25").unwrap();
+        assert_eq!(native_value_text(changed.0).as_deref(), Some("42.25"));
+        assert!(encode_native_value(native.0, "NaN").is_err());
+        assert!(!native_value_supported(unsafe { kCFBooleanTrue }));
+    }
 }

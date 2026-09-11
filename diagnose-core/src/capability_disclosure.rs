@@ -57,7 +57,6 @@ impl CapabilityDisclosureState {
     pub fn reset_for_input(&mut self, input_revision: u64) {
         self.schema_version = CAPABILITY_DISCLOSURE_SCHEMA_VERSION;
         self.focus_input_revision = input_revision;
-        self.loaded_tool_names.clear();
         self.updated_input_revision = input_revision;
     }
 

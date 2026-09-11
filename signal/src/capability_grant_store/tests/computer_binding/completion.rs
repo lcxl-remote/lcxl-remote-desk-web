@@ -286,7 +286,7 @@ async fn terminal_receipt_survives_reopen_consumption_and_timeout_without_new_au
 }
 
 #[tokio::test]
-async fn unknown_observation_refines_to_terminal_without_refreshing_first_observation() {
+async fn inconclusive_receipt_is_a_terminal_failure_without_manual_disposition() {
     let dir = tempfile::tempdir().unwrap();
     let f = Fixture::new(file_db(&dir.path().join("unknown.db")).await).await;
     f.bind().await;
@@ -302,7 +302,7 @@ async fn unknown_observation_refines_to_terminal_without_refreshing_first_observ
     };
     assert_eq!(
         observe(&f, &unknown).await.unwrap(),
-        CompletionObservation::Unknown
+        CompletionObservation::Stored
     );
     let first = work(&f).await;
     assert_eq!(
@@ -310,7 +310,7 @@ async fn unknown_observation_refines_to_terminal_without_refreshing_first_observ
         CompletionObservation::Duplicate
     );
     assert_eq!(work(&f).await, first);
-    let WaitOutcome::UnknownWithIdentity {
+    let WaitOutcome::FailedWithReceipt {
         original_call_id, ..
     } = f
         .store
@@ -325,15 +325,18 @@ async fn unknown_observation_refines_to_terminal_without_refreshing_first_observ
         .unwrap()
         .unwrap()
     else {
-        panic!("unknown required")
+        panic!("failed receipt required")
     };
     assert_eq!(original_call_id, f.call.id);
     let native = verified(&f.plan);
     assert_eq!(
         observe(&f, &native).await.unwrap(),
-        CompletionObservation::Stored
+        CompletionObservation::Stale
     );
     let terminal = work(&f).await;
+    assert_eq!(first.status, CAPABILITY_WORK_FAILED);
+    assert!(first.manual_resolved_at.is_none());
+    assert_eq!(first, terminal);
     let before: serde_json::Value =
         serde_json::from_str(first.result_json.as_deref().unwrap()).unwrap();
     let after: serde_json::Value =
@@ -470,11 +473,12 @@ async fn semantic_projection_preserves_idempotent_success_and_unknown_effects() 
     ] {
         native.result = class;
         native.facts[0].verified = false;
-        assert!(
-            project(&plan, "execute_confirmed_ui_action", "run-1", "{}", &native)
-                .unwrap()
-                .is_none()
-        );
+        native.message = Some("AXValue rejected; inspect the current UI before continuing".into());
+        let projection = project(&plan, "execute_confirmed_ui_action", "run-1", "{}", &native)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection.outcome, CapabilityDispatchOutcome::Failed);
+        assert!(projection.content.contains("AXValue rejected"));
     }
 }
 

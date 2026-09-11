@@ -65,17 +65,13 @@ pub fn capability_authorization_prompt(
     grants: &[CapabilityGrant],
     permission_requests: &[PermissionRequest],
     now_unix_ms: u64,
-    current_input_revision: u64,
+    _current_input_revision: u64,
     current_readiness_revision: u64,
 ) -> CapabilityAuthorizationPrompt {
     let mut approved_exact_input_expires_at_unix_ms: Option<u64> = None;
     let mut entries = Vec::with_capacity(grants.len());
-    // Older epochs remain in the audit store, but they are neither authority nor
-    // useful model context for the current requirement.
-    for grant in grants
-        .iter()
-        .filter(|grant| grant.input_revision == current_input_revision)
-    {
+    // Approved scope remains valid across ordinary conversation inputs.
+    for grant in grants {
         let mut state = if grant.revoked_at_unix_ms.is_some() {
             "revoked"
         } else if grant.expires_at_unix_ms <= now_unix_ms {
@@ -156,7 +152,7 @@ pub fn active_exact_authorized_tool_names(
     grants: &[CapabilityGrant],
     permission_requests: &[PermissionRequest],
     now_unix_ms: u64,
-    current_input_revision: u64,
+    _current_input_revision: u64,
     current_readiness_revision: u64,
 ) -> Vec<String> {
     grants
@@ -165,7 +161,6 @@ pub fn active_exact_authorized_tool_names(
             grant.revoked_at_unix_ms.is_none()
                 && grant.expires_at_unix_ms > now_unix_ms
                 && grant.remaining_uses > 0
-                && grant.input_revision == current_input_revision
                 && grant.readiness_revision == current_readiness_revision
                 && grant.canonical_input_digest_sha256.is_some()
                 && approved_exact_input(grant, permission_requests).is_some()
@@ -1995,7 +1990,7 @@ mod tests {
         assert!(!compact.text.contains("target:current_device"));
         assert!(!compact.text.contains("expires_at_unix_ms"));
         let stale_focus = capability_authorization_prompt(&[grant], &[], 500, 2, 1);
-        assert!(!stale_focus.text.contains("inspect_office_selection"));
+        assert!(stale_focus.text.contains("inspect_office_selection"));
         assert_eq!(stale_focus.approved_exact_input_expires_at_unix_ms, None);
     }
 
@@ -2091,7 +2086,7 @@ mod tests {
         );
 
         assert!(
-            active_exact_authorized_tool_names(
+            !active_exact_authorized_tool_names(
                 std::slice::from_ref(&grant),
                 std::slice::from_ref(&request),
                 500,

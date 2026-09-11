@@ -233,7 +233,6 @@ impl ScheduleStore {
             || session.current_request_id.as_deref() != Some(lease.run_id)
             || session.active_control_connection_id.is_some()
             || session.input_revision != input_revision.unwrap() as u64
-            || session.execution_state.has_unresolved_outcome()
         {
             return Ok(false);
         }

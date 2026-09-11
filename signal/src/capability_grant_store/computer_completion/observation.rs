@@ -117,7 +117,6 @@ impl SignalCapabilityGrantStore {
             || issued.actor_id != work.actor_id
             || issued.run_id != work.conversation_id
             || issued.target_device_id != work.target_device_id
-            || issued.input_revision != payload.input_revision
             || issued.surface != ProductSurface::OssPersonalOwner
             || issued.policy_revision != work.policy_revision
             || match (&issued.issued_by, parent) {

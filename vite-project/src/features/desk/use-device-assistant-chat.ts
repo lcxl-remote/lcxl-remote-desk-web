@@ -162,15 +162,6 @@ export type DeviceAssistantTaskStatusProjection = {
     }>;
 };
 
-export type DeviceAssistantUnknownOutcome = {
-    permissionReason?: string;
-    fileRecoveryReceipt?: string | null;
-    workId: number;
-    actionRequestId: string;
-    executionId: string;
-    workKind: string;
-};
-
 type PersistedSnapshotMessage = {
     reasoning?: string | null;
     id: string;
@@ -199,7 +190,6 @@ type PersistedSnapshot = {
     backgroundTasks?: BackgroundTaskDto[];
     commandTasks?: CommandTaskDto[];
     capabilityGrants?: CapabilityGrantDto[];
-    unresolvedOutcome?: DeviceAssistantUnknownOutcome | null;
     messages: PersistedSnapshotMessage[];
     messagePage?: {
         hasMore: boolean;
@@ -283,9 +273,6 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
         capabilityGrants: Array.isArray(snapshot.capabilityGrants)
             ? snapshot.capabilityGrants
             : [],
-        unresolvedOutcome: snapshot.unresolvedOutcome ? { ...snapshot.unresolvedOutcome,
-            permissionReason: snapshot.actionPermissionReasons?.[String(snapshot.unresolvedOutcome.workId)],
-        } : null,
         pendingInputCount: Math.max(
             0,
             (snapshot.latestInputSeq ?? 0) - (snapshot.handledInputSeq ?? 0),
@@ -323,8 +310,6 @@ export function useDeviceAssistantChat({
     const [commandTasks, setCommandTasks] = useState<CommandTaskDto[]>([]);
     const [taskCancelling, setTaskCancelling] = useState<string | null>(null);
     const [capabilityGrants, setCapabilityGrants] = useState<CapabilityGrantDto[]>([]);
-    const [unresolvedOutcome, setUnresolvedOutcome] =
-        useState<DeviceAssistantUnknownOutcome | null>(null);
     const [outcomeDisposing, setOutcomeDisposing] = useState(false);
     const [permissionUpdating, setPermissionUpdating] = useState(false);
     const [grantRevoking, setGrantRevoking] = useState<string | null>(null);
@@ -459,7 +444,6 @@ export function useDeviceAssistantChat({
             setBackgroundTasks(projected.backgroundTasks);
             setCommandTasks(snapshot.commandTasks ?? []);
             setCapabilityGrants(projected.capabilityGrants);
-            setUnresolvedOutcome(projected.unresolvedOutcome);
             setPendingInputCount(projected.pendingInputCount);
             setMessagePage({
                 hasMore: Boolean(snapshot.messagePage?.hasMore),
@@ -487,9 +471,7 @@ export function useDeviceAssistantChat({
                 } else if (snapshot.terminalError) {
                     setStatus('error');
                     setError(snapshot.terminalError.message);
-                } else if (projected.unresolvedOutcome) {
-                    setStatus('outcome_unknown');
-                    setError(null);
+
                 } else if (projected.permissionRequests.some((request) => request.state === 'pending')
                     || snapshot.fileScope?.directories.some(directory => directory.state === 'pending')) {
                     setStatus('permission_required');
@@ -608,7 +590,6 @@ export function useDeviceAssistantChat({
         setBackgroundTasks([]);
         setCommandTasks([]);
         setCapabilityGrants([]);
-        setUnresolvedOutcome(null);
         setOutcomeDisposing(false);
         setPermissionUpdating(false);
         setGrantRevoking(null);
@@ -1082,38 +1063,6 @@ export function useDeviceAssistantChat({
         }
     }, [deskId, grantRevoking, loadSnapshot]);
 
-    const disposeUnknownOutcome = useCallback(async () => {
-        const currentConversationId = conversationId.current;
-        const outcome = unresolvedOutcome;
-        if (!currentConversationId || !outcome || outcomeDisposing) return false;
-        setOutcomeDisposing(true);
-        setError(null);
-        try {
-            const response = await fetch('/api/my/device-assistant-session/outcome-unknown/dispose', {
-                method: 'POST',
-                credentials: 'include',
-                headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    connection: deskId,
-                    conversation: currentConversationId,
-                    workId: outcome.workId,
-                    executionId: outcome.executionId,
-                }),
-            });
-            const result = response.ok ? await response.json() : null;
-            if (!response.ok || !result?.success || result?.data?.disposed !== true) {
-                throw new Error(result?.message ?? 'Unknown outcome disposition was rejected.');
-            }
-            await loadSnapshot(currentConversationId);
-            return true;
-        } catch (reason) {
-            setError(reason instanceof Error ? reason.message : 'Unknown outcome disposition failed.');
-            return false;
-        } finally {
-            setOutcomeDisposing(false);
-        }
-    }, [deskId, loadSnapshot, outcomeDisposing, unresolvedOutcome]);
-
     const cancelTask = useCallback(async (kind: 'command' | 'provider', taskId: string): Promise<void> => {
         if (!conversationId.current || taskCancelling) throw new Error('Task cancellation is unavailable.');
         const currentConversationId = conversationId.current;
@@ -1194,7 +1143,6 @@ export function useDeviceAssistantChat({
         setBackgroundTasks([]);
         setCommandTasks([]);
         setCapabilityGrants([]);
-        setUnresolvedOutcome(null);
         setOutcomeDisposing(false);
         setPermissionUpdating(false);
         setGrantRevoking(null);
@@ -1218,7 +1166,7 @@ export function useDeviceAssistantChat({
         if (rehearsal) return false;
         // Navigation must never cancel a turn or race an in-flight decision.
         if (!id || contextUpdating || permissionUpdating
-            || outcomeDisposing || grantRevoking || hydrating) return false;
+            || grantRevoking || hydrating) return false;
         reset();
         conversationId.current = id;
         try {
@@ -1226,7 +1174,7 @@ export function useDeviceAssistantChat({
         } catch { /* Continuation still works without local storage. */ }
         void loadSnapshot(id, true, true);
         return true;
-    }, [remoteActive, contextUpdating, permissionUpdating, outcomeDisposing, grantRevoking,
+    }, [remoteActive, contextUpdating, permissionUpdating, grantRevoking,
         hydrating, reset, conversationStorageScope, loadSnapshot, rehearsal]);
 
     return {
@@ -1256,8 +1204,6 @@ export function useDeviceAssistantChat({
         taskCancelling,
         cancelTask,
         capabilityGrants,
-        unresolvedOutcome,
-        outcomeDisposing,
         permissionUpdating,
         grantRevoking,
         pendingInputCount,
@@ -1279,7 +1225,6 @@ export function useDeviceAssistantChat({
         decidePermission,
         decidePermissionItems,
         revokeCapabilityGrant,
-        disposeUnknownOutcome,
         loadOlderMessages,
         selectSessionTarget,
         reset,

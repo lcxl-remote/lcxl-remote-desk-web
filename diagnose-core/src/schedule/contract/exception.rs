@@ -115,7 +115,6 @@ pub fn constrain_approval(
             || grant.run_id != session.conversation_id
             || grant.actor_id != session.actor_id
             || grant.target_device_id != session.device_id
-            || grant.input_revision != session.input_revision
             || grant.capability_id != rule.capability_id
             || grant.effect != rule.effect
             || grant.risk_tier != rule.risk_tier

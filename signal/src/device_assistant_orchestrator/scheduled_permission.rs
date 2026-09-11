@@ -108,7 +108,6 @@ pub async fn claim_scheduled_permission(
             || grant.actor_id != session.actor_id
             || grant.run_id != session.conversation_id
             || grant.target_device_id != session.device_id
-            || grant.input_revision != session.input_revision
             || grant.policy_revision != session.policy_revision
             || grant.readiness_revision != readiness.revision
             || grant.revoked_at_unix_ms.is_some()

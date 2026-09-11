@@ -132,7 +132,6 @@ async fn lock_action_session_inner(
             || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
             || session.active_control_connection_id.is_some()
             || !session.turn_state.is_active()
-            || session.execution_state.has_unresolved_outcome()
             || session.surface != AgentSessionSurface::DeviceAssistant
             || row
                 .lease_deadline
@@ -161,7 +160,6 @@ pub(crate) async fn fresh_action_authority_on(
             desk_diagnose_core::session::TurnState::Running
                 | desk_diagnose_core::session::TurnState::AwaitingApproval
         )
-        || session.execution_state.has_unresolved_outcome()
     {
         return Err(invalid());
     }
@@ -315,14 +313,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_action_boundary_is_allowed_but_settled_or_interrupted_session_is_rejected() {
+    async fn active_action_boundary_ignores_prior_failure_but_rejects_settled_turn() {
         for (state, interrupted, allowed) in [
             (TurnState::Running, false, true),
             (TurnState::AwaitingApproval, false, true),
             (TurnState::Idle, false, false),
             (TurnState::Failed, false, false),
             (TurnState::Cancelled, false, false),
-            (TurnState::AwaitingApproval, true, false),
+            (TurnState::AwaitingApproval, true, true),
         ] {
             let (store, claimed) = fixture().await;
             let row = agent_session::Entity::find()

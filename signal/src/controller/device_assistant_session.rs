@@ -52,39 +52,6 @@ async fn read_action_permission_reasons(
         .collect())
 }
 
-async fn read_file_recovery_receipt(
-    run: &str,
-    actor: &str,
-    device: &str,
-    action: &desk_diagnose_core::session::ActionIdentity,
-) -> Result<Option<String>, DeskSignalError> {
-    use crate::entity::agent_action_item as work;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-    let row = work::Entity::find_by_id(action.work_id)
-        .filter(work::Column::ConversationId.eq(run))
-        .filter(work::Column::ActorId.eq(actor))
-        .filter(work::Column::TargetDeviceId.eq(device))
-        .filter(work::Column::ActionRequestId.eq(&action.action_request_id))
-        .filter(work::Column::ExecutionId.eq(&action.execution_id))
-        .one(crate::db::get_db())
-        .await?;
-    let Some(raw) = row
-        .and_then(|row| row.result_json)
-        .filter(|raw| raw.len() <= 512 * 1024)
-    else {
-        return Ok(None);
-    };
-    let record: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    Ok(record.pointer("/unknown/native").and_then(|native| {
-        desk_diagnose_core::provider_preflight::text_file::unknown_text_recovery_receipt(
-            &native.to_string(),
-        )
-    }))
-}
-
 fn not_accessible() -> HttpResponse {
     HttpResponse::Ok().json(RestResponse::<()>::failed(
         DeskErrorCode::PERMISSION_ERROR,
@@ -164,13 +131,6 @@ pub async fn get_device_assistant_session(
                 &snapshot.permission_requests,
             )
             .await?;
-            let file_recovery_receipt = match &snapshot.unresolved_action {
-                Some(action) => {
-                    read_file_recovery_receipt(&session_id, &actor_id, &target_audience, action)
-                        .await?
-                }
-                None => None,
-            };
             let evidence_summary =
                 build_evidence_summary(&snapshot.messages, &snapshot.context_attachments);
             let permission_requests = snapshot
@@ -209,7 +169,6 @@ pub async fn get_device_assistant_session(
                             action_request_id: action.action_request_id,
                             execution_id: action.execution_id,
                             work_kind: action.kind.as_str().to_string(),
-                            file_recovery_receipt,
                         }
                     }),
                     latest_input_seq: snapshot.latest_input_seq,
@@ -239,124 +198,6 @@ pub async fn get_device_assistant_session(
         }
         None => Ok(not_accessible()),
     }
-}
-
-#[utoipa::path(
-    tag = TAG,
-    summary = "Manually dispose one exact unknown Device Assistant action",
-    request_body = UnknownOutcomeDispositionBody,
-    responses((status = 200, description = "Owner disposition recorded; no retry or grant restoration occurs", body = RestResponse<UnknownOutcomeDispositionResponse>)),
-)]
-#[post("/my/device-assistant-session/outcome-unknown/dispose")]
-pub async fn dispose_device_assistant_unknown_outcome(
-    connection_map: web::Data<SharedConnectionMap>,
-    body: web::Json<UnknownOutcomeDispositionBody>,
-) -> Result<HttpResponse, DeskSignalError> {
-    let target_audience = {
-        let map = connection_map.read().await;
-        let Some(target) = map.get(&body.connection) else {
-            return Ok(not_accessible());
-        };
-        if target.auth_context.auth_kind != AuthKind::TokenAuth
-            || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
-        {
-            return Ok(not_accessible());
-        }
-        match target.model.version_info.client_id.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => return Ok(not_accessible()),
-        }
-    };
-    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
-    let session_id = match (
-        body.session.as_deref().filter(|value| !value.is_empty()),
-        body.conversation.as_deref(),
-    ) {
-        (Some(session_id), _) => session_id.to_string(),
-        (None, Some(conversation)) => {
-            derive_conversation_key(&actor_id, &target_audience, Some(conversation), "")
-        }
-        (None, None) => return Ok(not_accessible()),
-    };
-    let session_store = SignalAgentSessionStore::new(crate::db::get_db().clone());
-    let Some(snapshot) = session_store
-        .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
-        .await
-        .map_err(|error| {
-            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
-        })?
-    else {
-        return Ok(not_accessible());
-    };
-    if !snapshot.unresolved_action.as_ref().is_some_and(|action| {
-        action.work_id == body.work_id && action.execution_id == body.execution_id
-    }) {
-        return Err(DeskSignalError::new_custom_error(
-            DeskErrorCode::PRECONDITION_FAILED,
-            "the exact unknown action is no longer pending disposition",
-        ));
-    }
-
-    let now_dt = chrono::Utc::now();
-    let now_unix_ms = u64::try_from(now_dt.timestamp_millis()).map_err(|_| {
-        DeskSignalError::new_custom_error(
-            DeskErrorCode::PRECONDITION_FAILED,
-            "system clock predates Unix epoch",
-        )
-    })?;
-    use crate::capability_grant_store::CapabilityManualDispositionResult;
-    match crate::capability_grant_store::SignalCapabilityGrantStore::new(
-        crate::db::get_db().clone(),
-    )
-    .manually_dispose_unknown_for_subject(
-        body.work_id,
-        &body.execution_id,
-        &session_id,
-        &actor_id,
-        &target_audience,
-        now_unix_ms,
-    )
-    .await
-    .map_err(|error| {
-        DeskSignalError::new_custom_error(
-            DeskErrorCode::SYSTEM_ERROR,
-            &format!("record unknown-action disposition: {error}"),
-        )
-    })? {
-        CapabilityManualDispositionResult::Applied
-        | CapabilityManualDispositionResult::AlreadyResolved => {}
-        CapabilityManualDispositionResult::SubjectMismatch
-        | CapabilityManualDispositionResult::StateMismatch => {
-            return Err(DeskSignalError::new_custom_error(
-                DeskErrorCode::PRECONDITION_FAILED,
-                "the exact unknown action cannot be manually disposed",
-            ));
-        }
-    }
-
-    let now = now_dt.to_rfc3339();
-    let disposition = session_store
-        .manually_dispose_unknown_for_subject(
-            &session_id,
-            &actor_id,
-            &target_audience,
-            body.work_id,
-            &body.execution_id,
-            &now,
-        )
-        .await
-        .map_err(|error| {
-            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
-        })?;
-    if disposition == crate::agent_session_store::EventAppend::Busy {
-        return Err(DeskSignalError::new_custom_error(
-            DeskErrorCode::ACTION_NEED_RETRY,
-            "the conversation is still active; retry the disposition",
-        ));
-    }
-    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
-        UnknownOutcomeDispositionResponse { disposed: true },
-    )))
 }
 
 #[utoipa::path(

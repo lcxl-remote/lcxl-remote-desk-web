@@ -2014,10 +2014,6 @@ export type DeviceAssistantClientCapabilities = {
      * @type boolean
     */
     turn_stream: boolean;
-    /**
-     * @type boolean
-    */
-    unknown_outcome_disposition: boolean;
 };
 
 export type DeviceAssistantSessionSummaryDto = {
@@ -2596,6 +2592,9 @@ export type TaskStatusProjectionDto = {
     updatedAt: string;
 };
 
+/**
+ * @description Receipt correlation for independent automation run review, not a conversation write gate.
+*/
 export type UnknownOutcomeDto = {
     /**
      * @type string
@@ -2605,11 +2604,6 @@ export type UnknownOutcomeDto = {
      * @type string
     */
     executionId: string;
-    /**
-     * @description Device evidence for a recoverable text mutation, never authority to retry.
-     * @type string,null
-    */
-    fileRecoveryReceipt?: string | null;
     /**
      * @type integer, int64
     */
@@ -7131,30 +7125,6 @@ export type RestResponseTurnUsageResult = {
     success: boolean;
 };
 
-export type RestResponseUnknownOutcomeDispositionResponse = {
-    /**
-     * @type integer, int32
-    */
-    code: number;
-    /**
-     * @type object | undefined
-    */
-    data?: {
-        /**
-         * @type boolean
-        */
-        disposed: boolean;
-    };
-    /**
-     * @type string,null
-    */
-    message?: string | null;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-};
-
 export type RestResponseUsageRetentionConfig = {
     /**
      * @type integer, int32
@@ -9949,36 +9919,6 @@ export type TurnUsageResult = {
     range: UsageRangeDto;
 };
 
-export type UnknownOutcomeDispositionBody = {
-    /**
-     * @type string
-    */
-    connection: string;
-    /**
-     * @type string,null
-    */
-    conversation?: string | null;
-    /**
-     * @type string
-    */
-    executionId: string;
-    /**
-     * @type string,null
-    */
-    session?: string | null;
-    /**
-     * @type integer, int64
-    */
-    workId: number;
-};
-
-export type UnknownOutcomeDispositionResponse = {
-    /**
-     * @type boolean
-    */
-    disposed: boolean;
-};
-
 export type UpdateContextManagementRequest = {
     /**
      * @minLength 0
@@ -11385,21 +11325,6 @@ export type ListAssistantImagesQueryResponse = ListAssistantImages200;
 export type ListAssistantImagesQuery = {
     Response: ListAssistantImages200;
     QueryParams: ListAssistantImagesQueryParams;
-    Errors: any;
-};
-
-/**
- * @description Owner disposition recorded; no retry or grant restoration occurs
-*/
-export type DisposeDeviceAssistantUnknownOutcome200 = RestResponseUnknownOutcomeDispositionResponse;
-
-export type DisposeDeviceAssistantUnknownOutcomeMutationRequest = UnknownOutcomeDispositionBody;
-
-export type DisposeDeviceAssistantUnknownOutcomeMutationResponse = DisposeDeviceAssistantUnknownOutcome200;
-
-export type DisposeDeviceAssistantUnknownOutcomeMutation = {
-    Response: DisposeDeviceAssistantUnknownOutcome200;
-    Request: DisposeDeviceAssistantUnknownOutcomeMutationRequest;
     Errors: any;
 };
 
