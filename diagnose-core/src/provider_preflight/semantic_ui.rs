@@ -36,7 +36,6 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
     if input.target.object_kind != ObjectKind::UiElement
         || input.target.token.trim().is_empty()
         || input.target.snapshot_id.trim().is_empty()
-        || chrono::DateTime::parse_from_rfc3339(&input.target.expires_at).is_err()
     {
         return Err(unavailable());
     }
@@ -56,7 +55,6 @@ fn validate_application(application: &ObjectRef) -> Result<(), AgentError> {
     if application.object_kind != ObjectKind::Application
         || application.token.is_empty()
         || application.snapshot_id.is_empty()
-        || chrono::DateTime::parse_from_rfc3339(&application.expires_at).is_err()
     {
         return Err(unavailable());
     }
@@ -113,17 +111,11 @@ impl UiCallPreflight {
         }
         let (target, action) = ui_action_from_call(call)?;
         let application = ui_application_from_call(call)?;
-        let expiry = chrono::DateTime::parse_from_rfc3339(&target.expires_at)
-            .ok()
-            .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
-            .filter(|expiry| now_unix_ms > 0 && *expiry > now_unix_ms)
-            .ok_or_else(unavailable)?;
-        let app_expiry = chrono::DateTime::parse_from_rfc3339(&application.expires_at)
-            .ok()
-            .and_then(|v| u64::try_from(v.timestamp_millis()).ok())
-            .filter(|v| *v > now_unix_ms)
-            .ok_or_else(unavailable)?;
-        let expiry = expiry.min(app_expiry);
+        if now_unix_ms == 0 {
+            return Err(unavailable());
+        }
+        // Object identity has no deadline; grant and dispatch leases still bound execution.
+        let expiry = u64::MAX;
         let canonical_input_json = canonical_tool_permission_input_json(
             &call.name,
             serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,

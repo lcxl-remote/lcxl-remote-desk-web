@@ -357,7 +357,7 @@ async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup
                             token: "session-token".into(),
                             snapshot_id: "snapshot".into(),
                             object_kind: ObjectKind::DesktopSession,
-                            expires_at: (Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
+                            expires_at: String::new(),
                         },
                         os: "macos".into(),
                         interactive_session_incarnation: "synthetic-original-marker".into(),

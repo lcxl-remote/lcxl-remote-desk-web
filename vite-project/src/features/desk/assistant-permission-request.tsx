@@ -152,7 +152,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                     <div data-testid="application-ui-scope" className="mt-3 space-y-1 rounded-md border p-3 text-xs">
                                         <p className="font-medium">{t('pages.deviceAssistant.applicationUiScopeTitle', { name: item.applicationScope.application_name })}</p>
                                         <p>{t('pages.deviceAssistant.applicationUiScopeDescription')}</p>
-                                        <p>{t('pages.deviceAssistant.applicationUiScopeExpiry', { time: new Date(item.applicationScope.application.expires_at).toLocaleString() })}</p>
+                                        <p>{t('pages.deviceAssistant.applicationUiScopeLifetime')}</p>
                                         <p>{item.applicationScope.actions.map((action) => t(`pages.deviceAssistant.uiAction_${action}`)).join(' · ')}</p>
                                     </div>
                                 )}

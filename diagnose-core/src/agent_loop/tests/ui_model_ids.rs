@@ -73,20 +73,10 @@ async fn model_ids_resolve_for_execution_without_rewriting_original_proposal() {
         .await
         .unwrap();
         assert_eq!(result, LoopOutcome::Answered("done".into()));
-        if expired {
-            assert!(tools.0.borrow().is_empty());
-            assert!(
-                requests.borrow()[1]
-                    .messages
-                    .iter()
-                    .any(|m| m.text.contains("has expired"))
-            );
-        } else {
-            let calls = tools.0.borrow();
-            let args: serde_json::Value = serde_json::from_str(&calls[0].arguments_json).unwrap();
-            assert_eq!(args["root"]["snapshot_id"], "server-snapshot");
-            assert_eq!(args["root"]["token"], "session");
-        }
+        let calls = tools.0.borrow();
+        let args: serde_json::Value = serde_json::from_str(&calls[0].arguments_json).unwrap();
+        assert_eq!(args["root"]["snapshot_id"], "server-snapshot");
+        assert_eq!(args["root"]["token"], "session");
         let stored = sess.inner.borrow();
         let original = stored
             .as_ref()

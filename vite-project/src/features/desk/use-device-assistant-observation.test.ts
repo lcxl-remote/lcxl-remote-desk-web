@@ -125,12 +125,12 @@ describe('background application selection', () => {
         expect(sendMessage.mock.calls[2][1]).toMatchObject({ operation: { input: { params: { kind: { params: { root: app } } } } } });
         unmount();
     });
-    it('does not accept incomplete application references or inspect an expired one', () => {
+    it('rejects incomplete application references but leaves lifecycle validation to the server', () => {
         expect(selectableApplications({ phase: 'ready', requestId: 'x', outcome: { status: 'ok', data: { ReadContext: { DesktopUiInspect: { nodes: [{ role: 'application', object_ref: { object_kind: 'application' } }] } } } } })).toEqual([]);
         const sendMessage = vi.fn();
         const { result, unmount } = renderHook(() => useDeviceAssistantObservation({ deskId: 'mac', subscribe: () => () => {}, sendMessage }));
-        act(() => result.current.inspectUi({ token: 'expired', snapshot_id: 'old', object_kind: 'application', expires_at: '2000-01-01T00:00:00Z' }));
-        expect(sendMessage).not.toHaveBeenCalled();
+        act(() => result.current.inspectUi({ token: 'existing', snapshot_id: 'worker', object_kind: 'application', expires_at: '' }));
+        expect(sendMessage).toHaveBeenCalledTimes(1);
         unmount();
     });
 });

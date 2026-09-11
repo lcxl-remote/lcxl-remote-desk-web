@@ -22,7 +22,6 @@ pub fn validate(scope: &UiApplicationScope) -> Result<(), AgentError> {
     if app.object_kind != ObjectKind::Application
         || app.token.is_empty()
         || app.snapshot_id.is_empty()
-        || chrono::DateTime::parse_from_rfc3339(&app.expires_at).is_err()
         || scope.actions.is_empty()
         || scope.actions.len() > 5
         || scope.actions.iter().enumerate().any(|(i, action)| {
@@ -102,15 +101,6 @@ pub fn bind_request(
             })
             .ok_or_else(invalid)?;
         scope.application_name = Some(name);
-        let expiry = chrono::DateTime::parse_from_rfc3339(&scope.application.expires_at)
-            .map_err(|_| invalid())?;
-        let created =
-            chrono::DateTime::parse_from_rfc3339(&request.created_at).map_err(|_| invalid())?;
-        let remaining = (expiry - created).num_seconds();
-        if remaining < 1 {
-            return Err(invalid());
-        }
-        item.suggested_ttl_seconds = item.suggested_ttl_seconds.min(remaining as u32);
         let canonical = crate::permission_tools::canonical_permission_input_json(
             serde_json::to_value(PermissionInput {
                 application_scope: scope,
@@ -135,7 +125,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn scope_review_uses_observed_application_name_and_bounded_expiry() {
+    fn scope_review_uses_observed_application_name_and_owner_expiry() {
         let app = json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
         let call = ToolCall { id:"request".into(),name:REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:json!({"items":[{"item_id":"app","tool_name":"execute_confirmed_ui_action","reason":"Add meeting","suggested_ttl_seconds":900,"suggested_max_uses":8,"application_scope":{"application":app,"application_name":"invented label","actions":["invoke","set_value"]}}]}).to_string() };
         let registry = crate::device_assistant::device_assistant_provider_registry();
@@ -150,7 +140,7 @@ mod tests {
         assert!(bind_request(&mut request, &[]).is_err());
         let observation = ChatMessage::tool_result("result","inspect",json!({"ReadContext":{"DesktopSessionInspect":{"session":{"token":"session","snapshot_id":"apps","object_kind":"desktop_session","expires_at":"2026-09-11T03:10:00Z"},"os":"macos","interactive_session_incarnation":"session","active_application":app,"active_application_name":"Calendar"}}}).to_string());
         bind_request(&mut request, &[observation]).unwrap();
-        assert_eq!(request.items[0].suggested_ttl_seconds, 60);
+        assert_eq!(request.items[0].suggested_ttl_seconds, 900);
         let scope = from_canonical(
             &request.items[0].tool_name,
             request.items[0].canonical_input_json.as_deref(),

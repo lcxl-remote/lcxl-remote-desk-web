@@ -1118,6 +1118,7 @@ impl SignalDeviceAssistantTools {
         let current = crate::computer_use_readiness::global_computer_use_readiness_cache()
             .get_fresh(&self.target_connection_id, chrono::Utc::now())
             .ok_or_else(|| {
+                log::warn!("[readiness-check] no fresh report: connection={} run={} tool={} expected_revision={}", self.target_connection_id, self.run_id, capability.wire.tool_name, self.readiness_revision);
                 error(
                     AgentErrorKind::TargetOffline,
                     "Provider readiness is no longer available",
@@ -5020,16 +5021,18 @@ impl SignalDeviceAssistantTools {
                 binding.bind(call, &mut bounded)?;
                 input = bounded;
                 Some(
-                    chrono::DateTime::from_timestamp_millis(binding.expiry(call)? as i64)
-                        .ok_or_else(|| {
-                            error(
-                                AgentErrorKind::Internal,
-                                "invalid object expiry",
-                                false,
-                                false,
-                            )
-                        })?
-                        .to_rfc3339(),
+                    chrono::DateTime::from_timestamp_millis(
+                        binding.expiry(call)?.min(authority_expiry) as i64,
+                    )
+                    .ok_or_else(|| {
+                        error(
+                            AgentErrorKind::Internal,
+                            "invalid object expiry",
+                            false,
+                            false,
+                        )
+                    })?
+                    .to_rfc3339(),
                 )
             } else {
                 None

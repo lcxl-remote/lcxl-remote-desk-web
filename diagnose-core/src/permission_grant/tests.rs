@@ -699,7 +699,7 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
             .remove(0);
         assert_eq!(grant.use_policy, CapabilityGrantUsePolicy::Reusable);
         assert_eq!(grant.remaining_uses, 8);
-        assert_eq!(grant.expires_at_unix_ms, now + 60_000);
+        assert_eq!(grant.expires_at_unix_ms, now + 120_000);
         assert!(grant.canonical_input_digest_sha256.is_none());
         // A persisted exact UI grant cannot be re-advertised by a later turn.
         let mut old_grant = grant.clone();
@@ -752,6 +752,22 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
         input["action"] = serde_json::json!({"kind":"invoke"});
         let other = UiCallPreflight::build(&registry, surface, &call(&input), now + 1000).unwrap();
         assert!(match_capability_grant(&grant, &other.grant_call(&subject).unwrap()).is_err());
-        assert!(UiCallPreflight::build(&registry, surface, &call(&input), now + 60_000).is_err());
+        input["action"] = serde_json::json!({"kind":"set_value","params":{"value":"meeting"}});
+        let later =
+            UiCallPreflight::build(&registry, surface, &call(&input), now + 60_000).unwrap();
+        let still_authorized = ProviderCallSubject {
+            now_unix_ms: now + 60_000,
+            ..subject
+        };
+        assert!(
+            match_capability_grant(&grant, &later.grant_call(&still_authorized).unwrap()).is_ok()
+        );
+        let expired_grant = ProviderCallSubject {
+            now_unix_ms: now + 120_000,
+            ..still_authorized
+        };
+        assert!(
+            match_capability_grant(&grant, &later.grant_call(&expired_grant).unwrap()).is_err()
+        );
     }
 }

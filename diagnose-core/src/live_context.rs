@@ -154,18 +154,16 @@ pub fn build_live_context(
         let provider = registry
             .provider_for_capability(capability_id)
             .ok_or_else(|| invalid("selected context Provider is missing"))?;
-        // The readiness report is a heartbeat (currently 25 seconds), while
-        // its edge-issued context reference is deliberately long enough to
-        // survive model latency. A durable selection is metadata rather than
-        // execution authority, so bind its lifetime to that exact reference
-        // when one exists. Turn intake still freezes and revalidates current
-        // readiness plus the original object reference before any live read.
+        // Desktop selections have no object deadline. Other adapters retain their
+        // reference deadline. Current readiness and authorization are independently
+        // validated before every read; this metadata never grants permission.
         let expires_at_unix_ms = match readiness.and_then(|readiness| {
             readiness
                 .context_references
                 .iter()
                 .find(|reference| reference.capability == capability.required_capability)
         }) {
+            Some(reference) if reference.object_ref.object_kind.is_lifecycle_bound() => u64::MAX,
             Some(reference) => {
                 let expiry = chrono::DateTime::parse_from_rfc3339(&reference.object_ref.expires_at)
                     .map_err(|_| invalid("invalid selected context reference expiry"))?

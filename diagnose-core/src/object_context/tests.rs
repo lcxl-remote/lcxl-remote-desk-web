@@ -121,7 +121,14 @@ fn selections_keep_original_refs_bounds_destination_and_metadata_digest() {
         );
         assert_eq!(value.envelope.allowed_destinations, vec![destination()]);
         assert_eq!(value.envelope.sensitivity, Sensitivity::Sensitive);
-        assert_eq!(value.expires_at_unix_ms, 1893456000000);
+        assert_eq!(
+            value.expires_at_unix_ms,
+            if kind == ObjectKind::Window {
+                u64::MAX
+            } else {
+                1893456000000
+            }
+        );
         assert_eq!(
             value.envelope.retention.expires_at_unix_ms,
             Some(value.expires_at_unix_ms)

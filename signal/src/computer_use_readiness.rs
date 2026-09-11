@@ -116,7 +116,16 @@ impl ComputerUseReadinessCache {
     ) -> Option<CachedComputerUseReadiness> {
         let mut entries = self.lock();
         let entry = entries.get(connection_id)?.clone();
-        if validate_readiness_time(&entry.readiness, now).is_err() {
+        if let Err(reason) = validate_readiness_time(&entry.readiness, now) {
+            log::warn!(
+                "[readiness-cache] invalidated connection={} revision={} observed_at={} expires_at={} checked_at={} reason={}",
+                connection_id,
+                entry.readiness.revision,
+                entry.readiness.observed_at,
+                entry.readiness.expires_at,
+                now,
+                reason
+            );
             entries.remove(connection_id);
             None
         } else {
@@ -203,7 +212,10 @@ impl ComputerUseReadinessObserver for SignalComputerUseReadinessObserver {
                     "dropping stale Computer Use readiness from {}",
                     source.model.connection_id
                 ),
-                Err(e) => log::warn!("dropping invalid Computer Use readiness: {e}"),
+                Err(e) => log::warn!(
+                    "dropping invalid Computer Use readiness: connection={} reason={e}",
+                    source.model.connection_id
+                ),
             }
         })
     }
@@ -262,6 +274,27 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-08-23T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn one_minute_reports_remain_fresh_until_expiry() {
+        let cache = ComputerUseReadinessCache::default();
+        let now = DateTime::parse_from_rfc3339("2026-08-23T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut report = readiness(1, "session");
+        report.expires_at = "2026-08-23T12:01:00Z".into();
+        cache.update("connection", report, now).unwrap();
+        assert!(
+            cache
+                .get_fresh("connection", now + Duration::seconds(59))
+                .is_some()
+        );
+        assert!(
+            cache
+                .get_fresh("connection", now + Duration::seconds(60))
+                .is_none()
+        );
     }
 
     #[test]

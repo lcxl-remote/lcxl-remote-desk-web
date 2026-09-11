@@ -28,7 +28,6 @@ pub fn raw_input_from_call(call: &ToolCall) -> Result<(ObjectRef, RawInputAction
     if input.target.object_kind != ObjectKind::Application
         || input.target.token.trim().is_empty()
         || input.target.snapshot_id.trim().is_empty()
-        || chrono::DateTime::parse_from_rfc3339(&input.target.expires_at).is_err()
         || input.action.validate().is_err()
     {
         return Err(unavailable());
@@ -78,11 +77,11 @@ impl RawInputCallPreflight {
             return Err(unavailable());
         }
         let (target, action) = raw_input_from_call(call)?;
-        let expiry = chrono::DateTime::parse_from_rfc3339(&target.expires_at)
-            .ok()
-            .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
-            .filter(|expiry| now_unix_ms > 0 && *expiry > now_unix_ms)
-            .ok_or_else(unavailable)?;
+        if now_unix_ms == 0 {
+            return Err(unavailable());
+        }
+        // Object identity has no deadline; grant and dispatch leases still bound execution.
+        let expiry = u64::MAX;
         let canonical_input_json = canonical_tool_permission_input_json(
             &call.name,
             serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,

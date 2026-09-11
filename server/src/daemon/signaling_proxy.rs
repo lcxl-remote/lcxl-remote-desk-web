@@ -70,7 +70,13 @@ fn emit_typed_signaling<T: serde::Serialize>(
     );
     match serde_json::to_string(&frame) {
         Ok(text) => {
-            let _ = outbound_tx.send(text);
+            if outbound_tx.send(text).is_err()
+                && signaling_type == SignalingType::ComputerUseReadinessUpdated
+            {
+                warn!(
+                    "[SignalingProxy] Readiness report dropped: no signaling subscribers, request_id={request_id}"
+                );
+            }
         }
         Err(error) => {
             warn!("[SignalingProxy] Failed to serialise {signaling_type:?} frame: {error}");

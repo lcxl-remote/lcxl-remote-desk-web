@@ -2,7 +2,7 @@ export default {
     'pages.deviceAssistant.applicationUiScopeMissing': '缺少应用授权范围，无法批准。请让助手重新申请应用范围授权。',
     'pages.deviceAssistant.applicationUiScopeTitle': '会话内操作应用：{{name}}',
     'pages.deviceAssistant.applicationUiScopeDescription': '仅允许操作此应用中的控件，可缩小下方动作、有效期和次数。其他应用、原始键鼠输入和截图不在此操作授权内。',
-    'pages.deviceAssistant.applicationUiScopeExpiry': '应用引用有效至 {{time}}；授权不会超过此时间。',
+    'pages.deviceAssistant.applicationUiScopeLifetime': '授权按批准的时长和次数生效；应用退出或重启后需重新申请。',
     'pages.deviceAssistant.uiAction_invoke': '点击',
     'pages.deviceAssistant.uiAction_select': '选择',
     'pages.deviceAssistant.uiAction_focus': '聚焦',

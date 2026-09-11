@@ -60,7 +60,7 @@ export function selectableApplications(entry: ObservationEntry): SelectableAppli
         if (value.role !== 'application' || ref?.object_kind !== 'application'
             || typeof ref.token !== 'string' || !ref.token
             || typeof ref.snapshot_id !== 'string' || !ref.snapshot_id
-            || typeof ref.expires_at !== 'string' || !Number.isFinite(Date.parse(ref.expires_at))) return [];
+            ) return [];
         return [{ objectRef: ref, name: typeof value.name === 'string' ? value.name : '' }];
     });
 }
@@ -93,7 +93,6 @@ export function ownerSelectableWindows(entry: ObservationEntry): OwnerSelectable
             || objectRef.object_kind !== 'window'
             || !objectRef.token
             || !objectRef.snapshot_id
-            || !objectRef.expires_at
         ) return [];
         return [{
             objectRef,
@@ -241,7 +240,7 @@ export function useDeviceAssistantObservation({
     }), [invoke]);
 
     const inspectUi = useCallback((root: ObservationRoot | null = null) => {
-        if (root && (!Number.isFinite(Date.parse(root.expires_at)) || Date.parse(root.expires_at) <= Date.now())) return null;
+        if (root && (!root.token || !root.snapshot_id)) return null;
         return invoke('desktop_ui_inspect', {
         root,
         scope: 'content',

@@ -66,7 +66,16 @@ pub enum ObjectKind {
     BrowserSurface,
 }
 
-/// Short-lived, device-issued reference to an observed object.
+impl ObjectKind {
+    pub fn is_lifecycle_bound(self) -> bool {
+        matches!(
+            self,
+            Self::DesktopSession | Self::Application | Self::Window | Self::UiElement
+        )
+    }
+}
+
+/// Device-issued reference to an observed object. Desktop references follow native lifetimes.
 ///
 /// `token` is opaque to the model and must bind the native locator,
 /// interactive-session incarnation, adapter version, snapshot generation,
@@ -77,8 +86,8 @@ pub struct ObjectRef {
     pub token: String,
     pub snapshot_id: String,
     pub object_kind: ObjectKind,
-    /// RFC3339 timestamp. Kept as a string to avoid imposing a clock library on
-    /// this pure protocol crate.
+    /// Empty for lifecycle-bound desktop objects; RFC3339 for other object types.
+    /// This field never grants authority.
     pub expires_at: String,
 }
 
@@ -1551,7 +1560,6 @@ fn validate_actions(
             for (field, value) in [
                 ("application.token", application.token.as_str()),
                 ("application.snapshot_id", application.snapshot_id.as_str()),
-                ("application.expires_at", application.expires_at.as_str()),
             ] {
                 require_non_empty(field, value)?;
             }
@@ -1632,7 +1640,9 @@ fn validate_actions(
             ("after_intent", step.after_intent.as_str()),
             ("verification", step.verification.as_str()),
         ] {
-            require_non_empty(field, value)?;
+            if field != "object_ref.expires_at" || !step.target.object_kind.is_lifecycle_bound() {
+                require_non_empty(field, value)?;
+            }
         }
         if step.target.snapshot_id != snapshot_id {
             return Err(ComputerUseValidationError::MixedSnapshots);
@@ -2153,7 +2163,11 @@ impl ComputerUseReadiness {
                     reference.object_ref.expires_at.as_str(),
                 ),
             ] {
-                require_non_empty(field, value)?;
+                if field != "context_ref.expires_at"
+                    || !reference.object_ref.object_kind.is_lifecycle_bound()
+                {
+                    require_non_empty(field, value)?;
+                }
             }
             if !referenced.insert(reference.capability)
                 || !self

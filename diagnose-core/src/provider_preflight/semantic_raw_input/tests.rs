@@ -109,7 +109,7 @@ fn raw_input_decoder_rejects_changed_authority_and_unbounded_inputs() {
             0 => value["target"]["object_kind"] = json!("ui_element"),
             1 => value["target"]["token"] = json!(" "),
             2 => value["target"]["snapshot_id"] = json!(""),
-            3 => value["target"]["expires_at"] = json!("not-a-date"),
+            3 => value["target"]["token"] = json!(""),
             4 => value["action"]["screen"]["width"] = json!(0),
             5 => value["action"]["step"]["params"]["x"] = json!(1920),
             6 => {
@@ -135,7 +135,7 @@ fn raw_input_reference_deadline_and_subject_facts_are_not_renewed() {
         now(),
     )
     .unwrap();
-    assert_eq!(input.valid_until_unix_ms(), now() + 60_000);
+    assert_eq!(input.valid_until_unix_ms(), u64::MAX);
     assert!(
         RawInputCallPreflight::build(
             &registry,
@@ -143,14 +143,9 @@ fn raw_input_reference_deadline_and_subject_facts_are_not_renewed() {
             &call,
             now() + 60_000
         )
-        .is_err()
+        .is_ok()
     );
-    for (policy, revision, clock) in [
-        (0, 7, now()),
-        (1, 0, now()),
-        (1, 7, now() + 60_000),
-        (1, 7, 0),
-    ] {
+    for (policy, revision, clock) in [(0, 7, now()), (1, 0, now()), (1, 7, 0)] {
         assert!(
             input
                 .grant_call(&ProviderCallSubject {

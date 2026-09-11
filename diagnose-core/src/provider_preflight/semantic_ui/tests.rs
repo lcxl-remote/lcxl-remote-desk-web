@@ -71,7 +71,7 @@ fn ui_decoder_rejects_non_ui_targets_extra_authority_and_unbounded_actions() {
         match case {
             0 => value["target"]["object_kind"] = json!("browser_surface"),
             1 => value["target"]["token"] = json!(" "),
-            2 => value["target"]["expires_at"] = json!("not-a-date"),
+            2 => value["target"]["token"] = json!(""),
             3 => value["risk_tier"] = json!("r0"),
             4 => value["action"] = json!({"kind":"scroll","params":{"horizontal":0,"vertical":1}}),
             5 => {
@@ -103,7 +103,7 @@ fn original_ui_reference_deadline_and_policy_are_checked_without_renewal() {
         now(),
     )
     .unwrap();
-    assert_eq!(input.valid_until_unix_ms(), now() + 60_000);
+    assert_eq!(input.valid_until_unix_ms(), u64::MAX);
     assert!(
         UiCallPreflight::build(
             &registry,
@@ -111,14 +111,9 @@ fn original_ui_reference_deadline_and_policy_are_checked_without_renewal() {
             &call,
             now() + 60_000
         )
-        .is_err()
+        .is_ok()
     );
-    for (policy, revision, clock) in [
-        (0, 7, now()),
-        (1, 0, now()),
-        (1, 7, now() + 60_000),
-        (1, 7, 0),
-    ] {
+    for (policy, revision, clock) in [(0, 7, now()), (1, 0, now()), (1, 7, 0)] {
         assert!(
             input
                 .grant_call(&ProviderCallSubject {

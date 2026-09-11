@@ -2,7 +2,7 @@ export default {
     'pages.deviceAssistant.applicationUiScopeMissing': 'Application scope is missing. Ask the assistant to request application-scoped permission before approval.',
     'pages.deviceAssistant.applicationUiScopeTitle': 'Operate application in this conversation: {{name}}',
     'pages.deviceAssistant.applicationUiScopeDescription': 'Only controls in this application are covered. Narrow actions, duration and uses below. Other applications, raw input and screenshots are outside this action permission.',
-    'pages.deviceAssistant.applicationUiScopeExpiry': 'Application reference valid until {{time}}; permission cannot outlive it.',
+    'pages.deviceAssistant.applicationUiScopeLifetime': 'Permission follows the approved duration and use count; request again after the application exits or restarts.',
     'pages.deviceAssistant.uiAction_invoke': 'Click',
     'pages.deviceAssistant.uiAction_select': 'Select',
     'pages.deviceAssistant.uiAction_focus': 'Focus',

@@ -101,9 +101,13 @@ pub fn validate_objects(objects: &[ContextAttachment]) -> Result<(), AgentError>
                 )
                 | (ContextAttachmentKind::WindowSelection, ObjectKind::Window)
         );
-        let expiry = DateTime::parse_from_rfc3339(&reference.expires_at)
-            .ok()
-            .and_then(|date| u64::try_from(date.timestamp_millis()).ok());
+        let expiry = if reference.object_kind.is_lifecycle_bound() {
+            Some(u64::MAX)
+        } else {
+            DateTime::parse_from_rfc3339(&reference.expires_at)
+                .ok()
+                .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
+        };
         if !kind_matches
             || !matches!(object.state, AttachmentState::Active)
             || reference.token.trim().is_empty()

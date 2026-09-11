@@ -54,12 +54,10 @@ use super::computer_use_writer::{
     WriterLeaseState,
 };
 
-// A readiness report can be almost 25 seconds old when the signal starts a
-// turn, and the model adapter permits up to 180 seconds for the first response
-// containing a tool call. Keep the reference alive across both windows. It is
-// still invalidated immediately by local/browser input, worker restart, or an
-// Office document identity mismatch.
+// Non-desktop (for example Office) references retain a bounded observation window.
+// Desktop session, application, window and UI element references use native lifetimes.
 const OBJECT_REF_TTL_SECS: i64 = 300;
+const READINESS_VALIDITY_SECS: i64 = 60;
 const MAX_UI_INSPECT_DEPTH: u16 = 16;
 const MAX_OBJECT_REFS: usize = 8_192;
 const SCREEN_CAPTURE_MIN_INTERVAL: StdDuration = StdDuration::from_secs(2);
@@ -804,7 +802,7 @@ impl ComputerUseBroker {
             .adapter_version
             .clone();
         let observed_at = Utc::now();
-        let expires_at = observed_at + Duration::seconds(25);
+        let expires_at = observed_at + Duration::seconds(READINESS_VALIDITY_SECS);
         let observation = if ceiling.observation_enabled() {
             Some(observe_interactive_desktop())
         } else {
@@ -3009,12 +3007,14 @@ impl ComputerUseBroker {
     }
 
     fn update_active_session_incarnation(&self, next: Option<String>) {
+        let mut identity_changed = false;
         // An unavailable observation (including revoked access) fences live
         // operations but does not establish that native elements were destroyed.
         if let Some(next) = next.as_ref()
             && let Ok(mut known) = self.ui_identity_session.lock()
         {
             if known.as_ref().is_some_and(|previous| previous != next) {
+                identity_changed = true;
                 self.ui_identity_generation.fetch_add(1, Ordering::SeqCst);
                 if let Ok(mut identities) = self.ui_identities.lock() {
                     identities.clear();
@@ -3023,7 +3023,8 @@ impl ComputerUseBroker {
             *known = Some(next.clone());
         }
         let changed_from_live = if let Ok(mut active) = self.active_session_incarnation.lock() {
-            let changed = active.is_some() && *active != next;
+            let changed =
+                identity_changed || (active.is_some() && next.is_some() && *active != next);
             *active = next;
             changed
         } else {
@@ -3148,10 +3149,41 @@ impl ComputerUseBroker {
         object_kind: ObjectKind,
         resolved: ResolvedObject,
     ) -> Result<ObjectRef, AgentError> {
+        let lifecycle = object_kind.is_lifecycle_bound();
+        let stable_snapshot;
+        let snapshot_id = if lifecycle {
+            stable_snapshot = format!(
+                "{}:identity-{}",
+                self.current_incarnation_nonce(),
+                self.ui_identity_generation.load(Ordering::SeqCst)
+            );
+            stable_snapshot.as_str()
+        } else {
+            snapshot_id
+        };
         let token = if matches!(resolved, ResolvedObject::UiElement { .. }) {
             self.register_ui_identity(resolved.clone())?
         } else {
-            uuid::Uuid::new_v4().to_string()
+            if lifecycle {
+                use sha2::{Digest, Sha256};
+                {
+                    let identity = match &resolved {
+                        ResolvedObject::Application {
+                            process_id,
+                            process_started_at,
+                            image_path,
+                            ..
+                        } => format!("app:{process_id}:{process_started_at:?}:{image_path}"),
+                        _ => format!("{resolved:?}"),
+                    };
+                    format!(
+                        "object-{:x}",
+                        Sha256::digest(format!("{snapshot_id}:{identity}").as_bytes())
+                    )
+                }
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            }
         };
         let mut objects = self.objects.lock().map_err(|_| {
             error(
@@ -3160,7 +3192,9 @@ impl ComputerUseBroker {
                 true,
             )
         })?;
-        objects.retain(|_, object| object.expires_at > Utc::now());
+        objects.retain(|_, object| {
+            object.object_kind.is_lifecycle_bound() || object.expires_at > Utc::now()
+        });
         // References from one snapshot share the earliest expiry; never extend a snapshot.
         let expires_at = objects
             .values()
@@ -3171,10 +3205,38 @@ impl ComputerUseBroker {
             token: token.clone(),
             snapshot_id: snapshot_id.to_string(),
             object_kind,
-            expires_at: expires_at.to_rfc3339(),
+            expires_at: if lifecycle {
+                String::new()
+            } else {
+                expires_at.to_rfc3339()
+            },
         };
 
-        if objects.len() >= MAX_OBJECT_REFS {
+        if !objects.contains_key(&reference_storage_key(&token, snapshot_id))
+            && objects.len() >= MAX_OBJECT_REFS
+        {
+            drop(objects);
+            #[cfg(target_os = "macos")]
+            let retained = super::macos_accessibility_observer::retained_element_ids()?;
+            #[cfg(windows)]
+            let retained = super::windows_uia_observer::retained_element_ids()?;
+            #[cfg(not(any(target_os = "macos", windows)))]
+            let retained = std::collections::HashSet::<String>::new();
+            objects = self.objects.lock().map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "Computer Use object store is unavailable",
+                    false,
+                )
+            })?;
+            objects.retain(|_, object| match &object.resolved {
+                ResolvedObject::UiElement { fingerprint, .. } => retained.contains(fingerprint),
+                _ => true,
+            });
+        }
+        if !objects.contains_key(&reference_storage_key(&token, snapshot_id))
+            && objects.len() >= MAX_OBJECT_REFS
+        {
             return Err(error(
                 AgentErrorKind::OutputLimitExceeded,
                 "Computer Use object reference store reached its bounded capacity",
@@ -3207,8 +3269,9 @@ impl ComputerUseBroker {
             )
         })?;
         let now = Utc::now();
-        if chrono::DateTime::parse_from_rfc3339(&object_ref.expires_at)
-            .is_ok_and(|expiry| expiry <= now)
+        if !object_ref.object_kind.is_lifecycle_bound()
+            && chrono::DateTime::parse_from_rfc3339(&object_ref.expires_at)
+                .is_ok_and(|expiry| expiry <= now)
         {
             return Err(error(
                 AgentErrorKind::InvalidInput,
@@ -3216,7 +3279,8 @@ impl ComputerUseBroker {
                 false,
             ));
         }
-        objects.retain(|_, object| object.expires_at > now);
+        objects
+            .retain(|_, object| object.object_kind.is_lifecycle_bound() || object.expires_at > now);
         let Some(stored) = objects.get(&reference_storage_key(
             &object_ref.token,
             &object_ref.snapshot_id,
@@ -3236,7 +3300,8 @@ impl ComputerUseBroker {
         };
         if stored.snapshot_id != object_ref.snapshot_id
             || stored.object_kind != object_ref.object_kind
-            || stored.expires_at.to_rfc3339() != object_ref.expires_at
+            || (!stored.object_kind.is_lifecycle_bound()
+                && stored.expires_at.to_rfc3339() != object_ref.expires_at)
             || !object_ref
                 .snapshot_id
                 .starts_with(&self.current_incarnation_nonce())
@@ -4015,7 +4080,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_identity_survives_snapshot_expiry_input_and_refresh_without_renewing_old_snapshot() {
+    fn ui_identity_survives_elapsed_time_input_and_refresh() {
         let broker = ComputerUseBroker::new();
         broker.update_active_session_incarnation(Some("session-a".into()));
         let native = ResolvedObject::UiElement {
@@ -4042,7 +4107,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.token, id);
         assert_eq!(second.token, id);
-        assert_ne!(first.snapshot_id, second.snapshot_id);
+        assert_eq!(first.snapshot_id, second.snapshot_id);
         assert!(broker.resolve_ref(&first).is_ok());
         assert!(broker.resolve_ref(&second).is_ok());
         broker
@@ -4052,7 +4117,7 @@ mod tests {
             .get_mut(&reference_storage_key(&first.token, &first.snapshot_id))
             .unwrap()
             .expires_at = Utc::now() - Duration::seconds(1);
-        assert!(broker.resolve_ref(&first).is_err());
+        assert!(broker.resolve_ref(&first).is_ok());
         assert_eq!(broker.resolve_ui_identity(&id).unwrap(), native);
         broker.note_external_input();
         assert_eq!(broker.resolve_ui_identity(&id).unwrap(), native);
@@ -4065,7 +4130,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fresh.token, id);
-        assert!(broker.resolve_ref(&first).is_err());
+        assert!(broker.resolve_ref(&first).is_ok());
         assert!(broker.resolve_ref(&fresh).is_ok());
         let rebuilt = ResolvedObject::UiElement {
             process_id: 42,
@@ -4223,7 +4288,36 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_references_share_expiry_without_extending_it() {
+    fn application_identity_reuses_storage_across_reads_and_changes_on_process_restart() {
+        let broker = ComputerUseBroker::new();
+        let issue = |started, window| {
+            broker
+                .issue_ref(
+                    &broker.next_snapshot_id(),
+                    "session",
+                    ObjectKind::Application,
+                    ResolvedObject::Application {
+                        process_id: 42,
+                        process_started_at: Some(started),
+                        image_path: "/app".into(),
+                        window_handle: window,
+                    },
+                )
+                .unwrap()
+        };
+        let first = issue(1, 10);
+        assert!(first.expires_at.is_empty());
+        for window in 11..100 {
+            assert_eq!(issue(1, window), first);
+        }
+        assert_eq!(broker.objects.lock().unwrap().len(), 1);
+        assert_ne!(issue(2, 10).token, first.token);
+        broker.reset_worker_incarnation();
+        assert!(broker.resolve_ref(&first).is_err());
+    }
+
+    #[test]
+    fn desktop_references_are_stable_and_have_no_expiry() {
         let broker = ComputerUseBroker::new();
         let snapshot = broker.next_snapshot_id();
         let first = broker
@@ -4243,16 +4337,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(first.expires_at, second.expires_at);
-        assert_ne!(first.token, second.token);
+        assert_eq!(first.token, second.token);
         assert!(broker.resolve_ref(&first).is_ok());
         assert!(broker.resolve_ref(&second).is_ok());
         let mut tampered = second;
         tampered.expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
-        assert!(broker.resolve_ref(&tampered).is_err());
+        assert!(broker.resolve_ref(&tampered).is_ok());
     }
 
     #[test]
-    fn expired_reference_reports_expiry_separately_from_missing_object() {
+    fn elapsed_time_preserves_references_but_missing_objects_fail() {
         let broker = ComputerUseBroker::new();
         let reference = broker
             .issue_ref(
@@ -4264,14 +4358,7 @@ mod tests {
             .unwrap();
         let mut expired = reference.clone();
         expired.expires_at = (Utc::now() - Duration::seconds(1)).to_rfc3339();
-        assert!(
-            broker
-                .resolve_ref(&expired)
-                .err()
-                .unwrap()
-                .message
-                .contains("has expired")
-        );
+        assert!(broker.resolve_ref(&expired).is_ok());
         let mut unknown = reference.clone();
         unknown.token = "never-issued".into();
         assert!(
@@ -4543,7 +4630,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn approval_input_preserves_semantic_identity_but_not_expiry_or_incarnation() {
+    fn approval_input_and_elapsed_time_preserve_identity_but_worker_restart_does_not() {
         let broker = ComputerUseBroker::new();
         let reference = broker
             .issue_ref(
@@ -4572,7 +4659,7 @@ mod tests {
             ))
             .unwrap()
             .expires_at = Utc::now() - Duration::seconds(1);
-        assert!(broker.resolve_ref(&reference).is_err());
+        assert!(broker.resolve_ref(&reference).is_ok());
         let reference = broker
             .issue_ref(
                 &broker.next_snapshot_id(),
@@ -4591,7 +4678,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn human_input_preserves_window_identity_until_expiry() {
+    fn human_input_and_elapsed_time_preserve_window_identity() {
         let broker = ComputerUseBroker::new();
         let reference = broker
             .issue_ref(
@@ -4617,7 +4704,7 @@ mod tests {
             ))
             .unwrap()
             .expires_at = Utc::now() - Duration::seconds(1);
-        assert!(broker.resolve_ref(&reference).is_err());
+        assert!(broker.resolve_ref(&reference).is_ok());
     }
 
     #[cfg(target_os = "macos")]
@@ -4835,7 +4922,6 @@ mod tests {
 
     #[test]
     fn reference_ttl_covers_readiness_cache_and_model_request_windows() {
-        const READINESS_VALIDITY_SECS: i64 = 25;
         const MODEL_REQUEST_TIMEOUT_SECS: i64 = 180;
 
         assert!(
@@ -4849,6 +4935,9 @@ mod tests {
         let broker = ComputerUseBroker::new();
         let readiness = broker.readiness(&ComputerUseSettings::default(), false, false);
         readiness.validate().unwrap();
+        let observed = chrono::DateTime::parse_from_rfc3339(&readiness.observed_at).unwrap();
+        let expires = chrono::DateTime::parse_from_rfc3339(&readiness.expires_at).unwrap();
+        assert_eq!((expires - observed).num_seconds(), 60);
         assert_eq!(readiness.capabilities.len(), 37);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(

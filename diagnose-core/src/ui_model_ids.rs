@@ -68,7 +68,7 @@ fn observation_value(text: &str) -> Option<Value> {
 
 /// Only observations in this conversation can supply references. A partial read
 /// updates its own IDs, never the metadata of unrelated controls.
-fn resolve(history: &[ChatMessage], id: &str, now_ms: u64) -> Result<ObjectRef, AgentError> {
+fn resolve(history: &[ChatMessage], id: &str, _now_ms: u64) -> Result<ObjectRef, AgentError> {
     if id.is_empty() || id.len() > 512 {
         return Err(invalid(
             "Object ID must be a nonempty observed ID (at most 512 bytes).",
@@ -96,14 +96,6 @@ fn resolve(history: &[ChatMessage], id: &str, now_ms: u64) -> Result<ObjectRef, 
         let mut observed = Vec::new();
         references(&output, &mut observed);
         if let Some(reference) = observed.into_iter().find(|r| r.token == id) {
-            let expiry = chrono::DateTime::parse_from_rfc3339(&reference.expires_at)
-                .map_err(|_| invalid("Object reference is invalid. Read the UI again."))?
-                .timestamp_millis();
-            if expiry <= 0 || expiry as u64 <= now_ms {
-                return Err(invalid(
-                    "Object reference has expired. Read the UI again (query.element_id may locate a known control), then retry using the returned ID. No action was executed; a reference expiry does not itself revoke application permission.",
-                ));
-            }
             return Ok(reference);
         }
     }
@@ -360,7 +352,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
     for (internal, model) in fields(&tool.name) {
         if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
             properties.remove(*internal);
-            properties.insert((*model).into(), json!({"type":"string","minLength":1,"maxLength":512,"description":"Copy the observed object ID. The server resolves the reference and checks expiry; if expired, read again."}));
+            properties.insert((*model).into(), json!({"type":"string","minLength":1,"maxLength":512,"description":"Copy the observed object ID. The server resolves the reference and checks native object lifetime."}));
         }
         if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
             for field in required {
@@ -387,10 +379,10 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
         }
     }
     match tool.name.as_str() {
-        "execute_confirmed_ui_action" => tool.description = "Execute one semantic UI action using application_id and element_id from observations. Requires an active application_scope grant for the application and action. The server resolves references, checks expiry, application ownership and current authorization. Expired IDs require a fresh read, not automatic permission renewal. Native API success does not prove the application saved the value; inspect the result. Never provide reference metadata.".into(),
-        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). Without root_id, observe the foreground application. Supply query.any/name/native_id/element_id/role, or a control root_id with element_only=true. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. The server validates IDs and reports expiry; query.element_id can refresh an expired known control. Reads require permission and never grant actions.".into(),
-        "execute_confirmed_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks expiry and authorization. Do not provide reference metadata.".into(),
-        "read_current_screen" => tool.description = "Capture the current display, or use window_id from UI observations to capture a background macOS window. Requires screen capture authorization. The server resolves the window reference and checks expiry. Minimized windows require restoration before capture.".into(),
+        "execute_confirmed_ui_action" => tool.description = "Execute one semantic UI action using application_id and element_id from observations. Requires an active application_scope grant for the application and action. The server resolves references, checks native object lifetime, application ownership and current authorization. Invalidated IDs require a fresh read, not automatic permission renewal. Native API success does not prove the application saved the value; inspect the result. Never provide reference metadata.".into(),
+        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). Without root_id, observe the foreground application. Supply query.any/name/native_id/element_id/role, or a control root_id with element_only=true. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. The server validates IDs and reports invalidated objects; query.element_id can locate a known control. Reads require permission and never grant actions.".into(),
+        "execute_confirmed_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
+        "read_current_screen" => tool.description = "Capture the current display, or use window_id from UI observations to capture a background macOS window. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture.".into(),
         _ => {}
     }
 }
@@ -471,7 +463,28 @@ mod tests {
     }
 
     #[test]
-    fn ids_are_conversation_bound_and_expiry_is_not_forged_or_renewed() {
+    fn desktop_calls_accept_references_without_expiry() {
+        let mut messages = history();
+        for message in &mut messages {
+            message.text = message.text.replace("2030-01-01T00:00:00Z", "");
+        }
+        let action = call(
+            "execute_confirmed_ui_action",
+            json!({"application_id":"calendar","element_id":"date","action":{"kind":"invoke"}}),
+        );
+        let resolved = resolve_call(&action, &messages, 2_000_000_000_000).unwrap();
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        crate::provider_preflight::UiCallPreflight::build(
+            &registry,
+            desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
+            &resolved,
+            2_000_000_000_000,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ids_are_conversation_bound_without_a_clock_deadline() {
         let original = call(
             "inspect_desktop_ui",
             json!({"root_id":"date","element_only":true}),
@@ -482,12 +495,7 @@ mod tests {
                 .message
                 .contains("not observed")
         );
-        assert!(
-            resolve_call(&original, &history(), 2_000_000_000_000)
-                .unwrap_err()
-                .message
-                .contains("has expired")
-        );
+        assert!(resolve_call(&original, &history(), 2_000_000_000_000).is_ok());
         let forged = call(
             "inspect_desktop_ui",
             json!({"root":reference("date","five","ui_element","2099-01-01T00:00:00Z"),"element_only":true}),

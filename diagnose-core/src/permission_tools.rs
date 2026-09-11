@@ -798,7 +798,8 @@ pub fn build_permission_request(
             if input.target.object_kind != expected_kind
                 || input.target.token.is_empty()
                 || input.target.snapshot_id.is_empty()
-                || input.target.expires_at.is_empty()
+                || (!input.target.object_kind.is_lifecycle_bound()
+                    && input.target.expires_at.is_empty())
             {
                 return Err(invalid(
                     "semantic action requires one complete target reference of the expected kind",

@@ -100,6 +100,25 @@ fn session() -> PersistedAgentSession {
 }
 
 #[test]
+fn desktop_selection_has_no_reference_deadline_and_grants_no_authority() {
+    let mut readiness = readiness();
+    readiness.context_references = vec![ComputerUseContextReference {
+        capability: Capability::DesktopUiInspect,
+        object_ref: ObjectRef {
+            token: "session".into(),
+            snapshot_id: "worker".into(),
+            object_kind: ObjectKind::DesktopSession,
+            expires_at: String::new(),
+        },
+    }];
+    let selection = build(&["desktop.ui.inspect".into()], Some(&readiness), true).unwrap();
+    assert_eq!(selection.candidates[0].expires_at_unix_ms, u64::MAX);
+    let mut session = session();
+    reconcile_live_context(&mut session, &selection).unwrap();
+    assert!(session.scope_snapshot.granted.is_empty());
+}
+
+#[test]
 fn live_metadata_keeps_original_destination_expiry_and_does_not_grant_tools() {
     let selection = selection();
     let mut session = session();

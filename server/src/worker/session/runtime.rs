@@ -301,7 +301,17 @@ impl WorkerSession {
             let readiness_settings = shared_settings.clone();
             tokio::spawn(async move {
                 let mut first_report = true;
+                let mut tick = tokio::time::interval(Duration::from_secs(25));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut last_started = std::time::Instant::now();
                 loop {
+                    tick.tick().await;
+                    let started = std::time::Instant::now();
+                    let gap = started.duration_since(last_started);
+                    if gap > Duration::from_secs(35) {
+                        warn!("Computer Use readiness refresh delayed: gap_ms={}", gap.as_millis());
+                    }
+                    last_started = started;
                     let settings = readiness_settings.read().await;
                     let ceiling = settings.computer_use.clone();
                     let allow_screen = settings.collection_policy.allow_screen;
@@ -316,10 +326,13 @@ impl WorkerSession {
                         Ok(readiness) => readiness,
                         Err(error) => {
                             warn!("Computer Use readiness refresh failed to join: {error}");
-                            tokio::time::sleep(Duration::from_secs(10)).await;
                             continue;
                         }
                     };
+                    let elapsed = started.elapsed();
+                    if elapsed > Duration::from_secs(10) {
+                        warn!("Computer Use readiness collection slow: revision={}, elapsed_ms={}, observed_at={}, expires_at={}", readiness.revision, elapsed.as_millis(), readiness.observed_at, readiness.expires_at);
+                    }
                     if first_report {
                         let ready_capabilities = readiness
                             .capabilities
@@ -342,9 +355,9 @@ impl WorkerSession {
                         ))
                         .is_err()
                     {
+                        warn!("Computer Use readiness report failed: worker event channel closed");
                         return;
                     }
-                    tokio::time::sleep(Duration::from_secs(10)).await;
                 }
             })
         });

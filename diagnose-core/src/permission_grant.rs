@@ -53,7 +53,7 @@ pub struct PermissionGrantIssuanceContext<'a> {
     /// capability rather than by a persisted user attachment. These resolve a
     /// non-exact request's `selected:server_resolved` placeholder. A persisted
     /// original live-read target or exact semantic-action target stays bound to
-    /// its own unexpired reference; the edge re-resolves and revalidates that
+    /// its own live reference; the edge re-resolves and revalidates that
     /// reference immediately before observing or mutating the application.
     pub implicit_fresh_object_refs: &'a [ObjectRef],
 }
@@ -488,14 +488,6 @@ pub fn build_permission_grants(
         let expires_at_unix_ms = original_read.map_or(expires_at_unix_ms, |(_, expiry)| {
             expires_at_unix_ms.min(expiry)
         });
-        let expires_at_unix_ms = if let Some(scope) = &application_scope {
-            let expiry = chrono::DateTime::parse_from_rfc3339(&scope.application.expires_at)
-                .ok().and_then(|v| u64::try_from(v.timestamp_millis()).ok()).filter(|v| *v > context.now_unix_ms)
-                .ok_or_else(|| internal("application reference expired; inspect the application and request permission again"))?;
-            expires_at_unix_ms.min(expiry)
-        } else {
-            expires_at_unix_ms
-        };
         let grant_id =
             permission_item_grant_id(&session.conversation_id, request, &requested.item_id);
         let export_destinations = if exact_external_query {

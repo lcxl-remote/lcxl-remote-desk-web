@@ -85,10 +85,14 @@ fn build_attachment(
     display_summary: &str,
     context: ObjectContextBuild<'_>,
 ) -> Result<ContextAttachment, AgentError> {
-    let expiry = chrono::DateTime::parse_from_rfc3339(&object_ref.expires_at)
-        .map_err(|_| invalid())?
-        .timestamp_millis();
-    let expires_at_unix_ms = u64::try_from(expiry).map_err(|_| invalid())?;
+    let expires_at_unix_ms = if object_ref.object_kind.is_lifecycle_bound() {
+        u64::MAX
+    } else {
+        let expiry = chrono::DateTime::parse_from_rfc3339(&object_ref.expires_at)
+            .map_err(|_| invalid())?
+            .timestamp_millis();
+        u64::try_from(expiry).map_err(|_| invalid())?
+    };
     if expires_at_unix_ms <= context.now_unix_ms
         || !matches!(context.destination, DestinationIdentity::Model { .. })
     {
