@@ -1080,9 +1080,7 @@ pub fn include_desktop_action_reads(
         .filter(|item| {
             matches!(
                 item.tool_name.as_str(),
-                "execute_confirmed_ui_action"
-                    | "execute_background_input"
-                    | "execute_confirmed_raw_input"
+                "execute_ui_actions" | "execute_background_inputs" | "execute_confirmed_raw_input"
             )
         })
         .map(|item| item.suggested_ttl_seconds)
@@ -1568,7 +1566,7 @@ mod tests {
     #[test]
     fn semantic_ui_permission_requires_application_scope_and_includes_reads() {
         let registry = crate::device_assistant::device_assistant_provider_registry();
-        let missing = r#"{"items":[{"item_id":"ui","provider_id":"desktop.ui.action","tool_name":"execute_confirmed_ui_action","expected_effect":"mutate_application","suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update the selected control"}]}"#;
+        let missing = r#"{"items":[{"item_id":"ui","provider_id":"desktop.ui.action","tool_name":"execute_ui_actions","expected_effect":"mutate_application","suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update the selected control"}]}"#;
         let error = build_permission_request(
             &call(missing),
             &registry,
@@ -1579,7 +1577,7 @@ mod tests {
         .unwrap_err();
         assert!(error.message.contains("requires application_scope"));
 
-        let exact = r#"{"items":[{"item_id":"ui","tool_name":"execute_confirmed_ui_action","resource_scope":["model:chosen"],"application_scope":{"application":{"token":"app","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"actions":["set_value"]},"suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update controls"}]}"#;
+        let exact = r#"{"items":[{"item_id":"ui","tool_name":"execute_ui_actions","resource_scope":["model:chosen"],"application_scope":{"application":{"token":"app","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"actions":["set_value"]},"suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update controls"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,

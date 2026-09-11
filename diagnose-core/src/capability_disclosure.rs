@@ -759,7 +759,7 @@ mod tests {
             permission_candidates: &[],
         };
         let mut state = CapabilityDisclosureState::default();
-        for name in ["inspect_desktop_ui", "execute_confirmed_ui_action"] {
+        for name in ["inspect_desktop_ui", "execute_ui_actions"] {
             apply_load_call(
                 &ToolCall {
                     id: "load".into(),
@@ -774,7 +774,7 @@ mod tests {
         }
         assert_eq!(
             state.loaded_tool_names,
-            vec!["execute_confirmed_ui_action", "inspect_desktop_ui"]
+            vec!["execute_ui_actions", "inspect_desktop_ui"]
         );
         apply_load_call(
             &ToolCall {

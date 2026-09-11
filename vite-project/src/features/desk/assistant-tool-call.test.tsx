@@ -31,4 +31,10 @@ describe('tool call transcript', () => {
         rerender(<AssistantToolCall tool={{ ...tool, status: 'ok', output: '' }} running={false} />);
         expect(screen.getByText('pages.deviceAssistant.toolCall.empty')).toBeTruthy();
     });
+    it('shows the first failed batch step while keeping full inputs folded', () => {
+        const { container } = render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', argumentsJson: '{"steps":[{"action":{"kind":"invoke"}}]}', output: '{"status":"stopped_on_error","failed_step_number":2,"error":{"message":"window closed"}}' }} running={false} />);
+        expect(screen.getByText(/pages.deviceAssistant.toolCall.batchFailed/)).toBeTruthy();
+        expect(container.querySelector('pre')).toBeNull();
+    });
+
 });

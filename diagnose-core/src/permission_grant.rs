@@ -678,7 +678,7 @@ pub fn permission_request_can_renew(
                         // A renewed action still requires a new owner decision.
                         || (item.item_id == format!("included-{}", item.tool_name)
                             && matches!(item.tool_name.as_str(), "inspect_desktop_session" | "inspect_desktop_ui")
-                            && request.items.iter().any(|item| matches!(item.tool_name.as_str(), "execute_confirmed_ui_action" | "execute_confirmed_raw_input" | "execute_background_input"))))
+                            && request.items.iter().any(|item| matches!(item.tool_name.as_str(), "execute_ui_actions" | "execute_confirmed_raw_input" | "execute_background_inputs"))))
             })
         })
 }

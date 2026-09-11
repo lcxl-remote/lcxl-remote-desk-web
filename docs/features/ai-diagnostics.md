@@ -305,10 +305,20 @@ UI search guidance combines localized labels with English names, native identifi
 
 Prefer semantic UI actions. When semantic UI cannot express the operation or observations and results show it is impractical or unreliable, combine background input with a current screenshot of the target application window. Obtain that screenshot with `read_current_screen` and `window_id`, refreshing it when needed. Do not default to background input when a suitable semantic UI action can accomplish the task.
 
-`execute_background_input` sends one click, double click, scroll, Unicode text input or named key with modifiers to an observed application window. It accepts application/window IDs and either a control ID or normalized window screenshot coordinates (0–1000). The server resolves PID, geometry and reference metadata. Mouse clicks currently use the primary button; dragging and batches are future work.
+`execute_background_inputs` supports click, double click, scroll, Unicode text input or named key with modifiers to an observed application window. It accepts application/window IDs and either a control ID or normalized window screenshot coordinates (0–1000). The server resolves PID, geometry and reference metadata. Mouse clicks currently use the primary button; dragging is not supported.
 
 The permission card approves an application and action scope in the current conversation, with editable duration, use count and actions. Approved operations reuse that grant and include desktop/UI observation; screenshots require separate permission. Background input and semantic UI actions use separate tool grants. Existing device application access rules still apply.
 
 Delivery does not activate the application, move the real cursor or fall back to foreground input. Keyboard input requires the requested window to be the application's keyboard input window. Minimized or ambiguous windows are rejected. Coordinate input needs a window screenshot and must refresh it after a resize; control-based input uses current control bounds. Human input in other foreground applications does not preempt background delivery. Stopping the conversation cancels subsequent events, but cannot retract events already sent.
 
 A receipt confirms event dispatch, not application state. The AI should read the UI or screenshot afterward. Failures explain the cause and, after partial dispatch, the number of events sent; they do not require an owner outcome acknowledgement or block subsequent authorized actions. Mouse delivery probes a private macOS API at runtime; unavailable mouse support does not disable keyboard input. TextEdit was tested on macOS 15.6.1. Background Command+A did not work in that environment; other applications and OS versions may behave differently.
+
+### Batch UI and background input (trial)
+
+The AI currently sees only `execute_ui_actions` (semantic UI) and `execute_background_inputs` (background mouse/keyboard). Single-action entry points are hidden. Use `steps` with 1–20 entries, even for one action. Each batch targets one application; background batches also bind one window. The two action families are not mixed in a batch.
+
+Existing application approval must cover every action kind. One batch consumes one grant use. A sealed batch holds one writer lease, executes sequentially and stops at the first error, without rollback or automatic retries. Existing 30-second dispatch deadlines and authorization/cancellation constraints still apply.
+
+There is no fixed inter-step delay beyond native input event timing. Split asynchronous dependencies such as opening windows or changing layouts into separate batches with a UI/window screenshot read between them. Prefer semantic UI; use background input with a window screenshot only when semantic actions are impractical.
+
+Success returns the completed count. An execution failure returns only the failing step number, its error and whether that step may have taken effect. Earlier steps completed native dispatch; later steps did not run. Whole-batch preflight failure explicitly reports that no steps ran. Original arguments remain in the folded tool record. Native dispatch does not verify the intended application state: the AI must read back. Errors need no user acknowledgement and do not block new authorized calls.

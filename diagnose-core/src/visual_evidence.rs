@@ -32,8 +32,8 @@ pub fn blocks_targeting(session: &PersistedAgentSession, tool_name: &str) -> boo
         && matches!(
             tool_name,
             "preview_computer_action"
-                | "execute_confirmed_ui_action"
-                | "execute_background_input"
+                | "execute_ui_actions"
+                | "execute_background_inputs"
                 | "execute_confirmed_raw_input"
         )
 }

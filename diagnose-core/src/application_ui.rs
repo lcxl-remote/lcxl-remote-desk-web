@@ -46,10 +46,7 @@ pub fn from_canonical(tool: &str, canonical: Option<&str>) -> Option<UiApplicati
 }
 
 pub fn supports(tool: &str) -> bool {
-    matches!(
-        tool,
-        "execute_confirmed_ui_action" | "execute_background_input"
-    )
+    matches!(tool, "execute_ui_actions" | "execute_background_inputs")
 }
 pub fn validate_for_tool(tool: &str, scope: &UiApplicationScope) -> Result<(), AgentError> {
     validate(scope)?;
@@ -57,7 +54,7 @@ pub fn validate_for_tool(tool: &str, scope: &UiApplicationScope) -> Result<(), A
         || scope
             .actions
             .iter()
-            .any(|a| a.is_background() != (tool == "execute_background_input"))
+            .any(|a| a.is_background() != (tool == "execute_background_inputs"))
     {
         return Err(invalid());
     }
@@ -154,7 +151,7 @@ mod tests {
     #[test]
     fn scope_review_uses_observed_application_name_and_owner_expiry() {
         let app = json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
-        let call = ToolCall { id:"request".into(),name:REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:json!({"items":[{"item_id":"app","tool_name":"execute_confirmed_ui_action","reason":"Add meeting","suggested_ttl_seconds":900,"suggested_max_uses":8,"application_scope":{"application":app,"application_name":"invented label","actions":["invoke","set_value"]}}]}).to_string() };
+        let call = ToolCall { id:"request".into(),name:REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:json!({"items":[{"item_id":"app","tool_name":"execute_ui_actions","reason":"Add meeting","suggested_ttl_seconds":900,"suggested_max_uses":8,"application_scope":{"application":app,"application_name":"invented label","actions":["invoke","set_value"]}}]}).to_string() };
         let registry = crate::device_assistant::device_assistant_provider_registry();
         let mut request = build_permission_request(
             &call,
@@ -179,8 +176,8 @@ mod tests {
         duplicated.actions.push(duplicated.actions[0]);
         assert!(validate(&duplicated).is_err());
         duplicated.actions = vec![ApplicationActionKind::Scroll];
-        assert!(validate_for_tool("execute_confirmed_ui_action", &duplicated).is_err());
-        assert!(validate_for_tool("execute_background_input", &duplicated).is_ok());
+        assert!(validate_for_tool("execute_ui_actions", &duplicated).is_err());
+        assert!(validate_for_tool("execute_background_inputs", &duplicated).is_ok());
     }
 
     #[test]
@@ -191,7 +188,7 @@ mod tests {
         let call = ToolCall {
             id: "request".into(),
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-            arguments_json: json!({"items":[{"item_id":"click","tool_name":"execute_confirmed_ui_action","reason":"Click","suggested_ttl_seconds":30,"suggested_max_uses":1,"exact_input":{"application":application,"target":target,"action":{"kind":"invoke"}}}]}).to_string(),
+            arguments_json: json!({"items":[{"item_id":"click","tool_name":"execute_ui_actions","reason":"Click","suggested_ttl_seconds":30,"suggested_max_uses":1,"exact_input":{"application":application,"target":target,"action":{"kind":"invoke"}}}]}).to_string(),
         };
         let error = build_permission_request(
             &call,
@@ -213,7 +210,7 @@ mod tests {
     #[test]
     fn invalid_batch_reports_no_card_and_prerequisite_recovery() {
         let registry = crate::device_assistant::device_assistant_provider_registry();
-        let call = ToolCall { id:"batch".into(),name:REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:json!({"items":[{"item_id":"read","tool_name":"inspect_desktop_ui","reason":"Inspect","suggested_ttl_seconds":300,"suggested_max_uses":8},{"item_id":"click","tool_name":"execute_confirmed_ui_action","reason":"Click unknown target","suggested_ttl_seconds":300,"suggested_max_uses":1}]}).to_string() };
+        let call = ToolCall { id:"batch".into(),name:REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:json!({"items":[{"item_id":"read","tool_name":"inspect_desktop_ui","reason":"Inspect","suggested_ttl_seconds":300,"suggested_max_uses":8},{"item_id":"click","tool_name":"execute_ui_actions","reason":"Click unknown target","suggested_ttl_seconds":300,"suggested_max_uses":1}]}).to_string() };
         let error = build_permission_request(
             &call,
             &registry,

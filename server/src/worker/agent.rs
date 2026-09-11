@@ -12,6 +12,7 @@
 //! platform) returns a structured `AgentError` so the path degrades gracefully
 //! instead of failing the transport.
 
+pub(crate) mod application_batch;
 pub mod audit_sink;
 pub mod browser_extension_bridge;
 pub mod collectors;

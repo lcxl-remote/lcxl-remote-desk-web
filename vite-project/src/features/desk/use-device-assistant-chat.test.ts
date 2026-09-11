@@ -1579,7 +1579,7 @@ it('projects a failed native action with the reason bound to its work record', a
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
         sessionId: 'server-session', seq: 1, active: false, actionPermissionReasons: { '44': 'Create the approved calendar event', '45': 'Unrelated reason' },
         messages: [
-            { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'call', name: 'execute_confirmed_ui_action', argumentsJson: '{}' }] },
+            { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'call', name: 'execute_ui_actions', argumentsJson: '{}' }] },
             { id: 'result', role: 'tool', toolCallId: 'call', text: JSON.stringify({ work_id: '44', result: 'definitely_not_started', message: 'target missing' }) },
         ],
     } }) })));

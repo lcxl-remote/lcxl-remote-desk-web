@@ -2743,7 +2743,7 @@ impl SignalDeviceAssistantTools {
         let background_input = required_capability == desk_agent_protocol::Capability::DesktopBackgroundInputConfirmed;
         let raw_input = required_capability
             == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed;
-        let plan = SealedComputerActionPlan {
+        let mut plan = SealedComputerActionPlan {
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: claimed.work_id.to_string(),
             action_request_id: server_call_id.clone(),
@@ -2779,6 +2779,19 @@ impl SignalDeviceAssistantTools {
                 },
             }],
         };
+        if let Some(input) = shared_ui.as_ref() { plan.actions = input.steps().to_vec(); }
+        if let Some(input) = shared_background.as_ref() { plan.actions = input.steps().to_vec(); }
+        if desk_diagnose_core::application_batch::supports(&call.name) {
+            let grant = store.list_for_subject(&self.run_id,&self.actor_id,&self.target_device_id).await
+                .map_err(|_|error(AgentErrorKind::Internal,"failed to read batch grant expiry",false,false))?
+                .into_iter().find(|grant|grant.grant_id==grant_id)
+                .ok_or_else(||error(AgentErrorKind::PermissionDenied,"batch application grant is unavailable",false,true))?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let expiry = grant.expires_at_unix_ms.min((now+30_000) as u64);
+            if expiry <= now as u64 { return Err(error(AgentErrorKind::PermissionDenied,"batch application grant has expired; no steps executed",false,true)); }
+            plan.expires_at=chrono::DateTime::from_timestamp_millis(expiry as i64).expect("bounded expiry").to_rfc3339();
+        }
+
         plan.validate().map_err(|validation_error| {
             error(
                 AgentErrorKind::Internal,
@@ -2832,7 +2845,7 @@ impl SignalDeviceAssistantTools {
             device: AuthzDevice { device_id: None },
             request_id: generation.clone(),
             session_id: None,
-            expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339()),
+            expires_at: Some(plan.expires_at.clone()),
             issuer: "signal".into(),
             audience,
             signature: None,

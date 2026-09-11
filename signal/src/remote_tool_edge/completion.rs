@@ -181,7 +181,7 @@ pub(crate) fn project(
 ) -> Result<Option<Projection>, AgentError> {
     plan.validate().map_err(|_| invalid())?;
     let content = serde_json::to_string(completed).map_err(|_| invalid())?;
-    if plan.actions.len() != 1
+    if (plan.actions.len() != 1 && !desk_diagnose_core::application_batch::supports(tool_name))
         || completed.work_id != plan.work_id
         || completed.action_request_id != plan.action_request_id
         || completed.execution_generation != plan.execution_generation
@@ -194,6 +194,30 @@ pub(crate) fn project(
         || completed.message.as_ref().is_some_and(|s| s.len() > 4096)
     {
         return Err(invalid());
+    }
+    if desk_diagnose_core::application_batch::supports(tool_name) {
+        if let Some((failed, content)) = desk_diagnose_core::application_batch::completion_receipt(
+            completed,
+            Some(plan.actions.len()),
+        )? {
+            return Ok(Some(Projection {
+                outcome: if failed {
+                    CapabilityDispatchOutcome::Failed
+                } else {
+                    CapabilityDispatchOutcome::Succeeded
+                },
+                content,
+            }));
+        }
+        if plan.actions.len() > 1
+            && matches!(
+                completed.result,
+                ComputerActionResultClass::ChangedButUnverified
+                    | ComputerActionResultClass::Verified
+            )
+        {
+            return Err(invalid());
+        }
     }
     let verified = completed.result == ComputerActionResultClass::Verified;
     if verified && (completed.facts.len() != 1 || !completed.facts[0].verified) {

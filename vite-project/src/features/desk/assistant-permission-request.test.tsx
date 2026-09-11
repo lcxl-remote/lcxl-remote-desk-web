@@ -17,7 +17,7 @@ const submit = () => screen.getByRole('button', { name: 'pages.deviceAssistant.p
 describe('shared permission review', () => {
     it('shows the observed application and allows narrowing reusable actions and uses', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
-        const value = request([item({ itemId: 'app', toolName: 'execute_confirmed_ui_action', expectedEffect: 'mutate_application',
+        const value = request([item({ itemId: 'app', toolName: 'execute_ui_actions', expectedEffect: 'mutate_application',
             resourceScope: ['ui_application:sha256:opaque'], operationScope: ['ui:invoke', 'ui:set_value'], suggestedMaxUses: 8,
             applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Calendar', actions: ['invoke', 'set_value'] },
         })]);
@@ -30,7 +30,7 @@ describe('shared permission review', () => {
     });
     it('shows background input scope and narrows actions independently of semantic UI', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
-        const value = request([item({ itemId: 'app', toolName: 'execute_background_input', expectedEffect: 'mutate_application',
+        const value = request([item({ itemId: 'app', toolName: 'execute_background_inputs', expectedEffect: 'mutate_application',
             resourceScope: ['ui_application:sha256:opaque'], operationScope: ['background_input:click', 'background_input:type_text'], suggestedMaxUses: 8,
             applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Calendar', actions: ['click', 'type_text'] },
         })]);
@@ -43,7 +43,7 @@ describe('shared permission review', () => {
     });
     it('rejects native UI approval without an application scope', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
-        render(<AssistantPermissionRequest request={request([item({ toolName: 'execute_confirmed_ui_action', expectedEffect: 'mutate_application' })])} canDecide onDecide={onDecide} />);
+        render(<AssistantPermissionRequest request={request([item({ toolName: 'execute_ui_actions', expectedEffect: 'mutate_application' })])} canDecide onDecide={onDecide} />);
         expect(screen.getByText('pages.deviceAssistant.applicationUiScopeMissing')).toBeInTheDocument();
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0].decision).toBe('deny');
@@ -63,7 +63,7 @@ describe('shared permission review', () => {
     it('discloses and selects action reads while allowing explicit read denial', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         const value = request([
-            item({ itemId: 'action', toolName: 'execute_confirmed_ui_action', expectedEffect: 'mutate_application', suggestedMaxUses: 1, applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Calendar', actions: ['invoke'] } }),
+            item({ itemId: 'action', toolName: 'execute_ui_actions', expectedEffect: 'mutate_application', suggestedMaxUses: 1, applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Calendar', actions: ['invoke'] } }),
             item({ itemId: 'included-inspect_desktop_session', toolName: 'inspect_desktop_session', suggestedMaxUses: 16 }),
             item({ itemId: 'included-inspect_desktop_ui', toolName: 'inspect_desktop_ui', suggestedMaxUses: 16 }),
         ]);

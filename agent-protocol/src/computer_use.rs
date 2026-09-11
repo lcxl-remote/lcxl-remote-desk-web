@@ -1458,18 +1458,40 @@ fn validate_actions(
             max: MAX_COMPUTER_ACTIONS,
         });
     }
-    if actions.iter().any(|step| {
-        matches!(
-            step.action,
-            ComputerActionKind::RawInput(_) | ComputerActionKind::BackgroundInput { .. }
-        )
-    }) && actions.len() != 1
+    if actions
+        .iter()
+        .any(|step| matches!(step.action, ComputerActionKind::RawInput(_)))
+        && actions.len() != 1
     {
         return Err(ComputerUseValidationError::InvalidContextReference(
             "raw input fallback plans must contain exactly one action",
         ));
     }
 
+    if matches!(
+        actions[0].action,
+        ComputerActionKind::UiInApplication { .. } | ComputerActionKind::BackgroundInput { .. }
+    ) {
+        if actions.len() > 20
+            || actions
+                .iter()
+                .any(|step| match (&actions[0].action, &step.action) {
+                    (
+                        ComputerActionKind::UiInApplication { application: a, .. },
+                        ComputerActionKind::UiInApplication { application: b, .. },
+                    ) => a != b,
+                    (
+                        ComputerActionKind::BackgroundInput { application: a, .. },
+                        ComputerActionKind::BackgroundInput { application: b, .. },
+                    ) => a != b || step.target != actions[0].target,
+                    _ => true,
+                })
+        {
+            return Err(ComputerUseValidationError::InvalidContextReference(
+                "application batches require 1–20 steps in one application and one background window",
+            ));
+        }
+    }
     let snapshot_id = actions[0].target.snapshot_id.as_str();
     require_non_empty("object_ref.snapshot_id", snapshot_id)?;
     for step in actions {
@@ -1675,7 +1697,7 @@ fn validate_actions(
                 require_non_empty(field, value)?;
             }
         }
-        if step.target.snapshot_id != snapshot_id {
+        if step.target.snapshot_id != snapshot_id && !step.target.object_kind.is_lifecycle_bound() {
             return Err(ComputerUseValidationError::MixedSnapshots);
         }
     }
@@ -2538,7 +2560,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_mixed_snapshots_but_allows_multiple_steps_per_target() {
+    fn lifecycle_bound_ui_steps_allow_distinct_observation_snapshots() {
         let mut same_target = plan();
         same_target.actions.push(step("token-1"));
         same_target
@@ -2549,10 +2571,15 @@ mod tests {
         let mut other = step("token-2");
         other.target.snapshot_id = "snapshot-2".to_string();
         mixed.actions.push(other);
-        assert_eq!(
-            mixed.validate(),
-            Err(ComputerUseValidationError::MixedSnapshots)
-        );
+        mixed
+            .validate()
+            .expect("native UI identities are independent of observation snapshots");
+        if let ComputerActionKind::UiInApplication { application, .. } =
+            &mut mixed.actions[1].action
+        {
+            application.token = "another-app".into();
+        }
+        assert!(mixed.validate().is_err());
     }
 
     #[test]

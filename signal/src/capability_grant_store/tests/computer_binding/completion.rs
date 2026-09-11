@@ -5,6 +5,7 @@ use desk_agent_protocol::computer_use::{
     ComputerActionStepFact,
 };
 use desk_diagnose_core::seam::{ExecOutcome, WaitOutcome};
+use serde_json::json;
 
 mod projections;
 mod rehearsal;
@@ -464,7 +465,7 @@ async fn semantic_projection_preserves_idempotent_success_and_unknown_effects() 
         summary: "Native UI API completed successfully; application state is not verified. Use inspect_desktop_ui to check the expected result.".into(),
     }];
     assert_eq!(
-        project(&plan, "execute_confirmed_ui_action", "run-1", "{}", &native)
+        project(&plan, "execute_ui_actions", "run-1", "{}", &native)
             .unwrap()
             .unwrap()
             .outcome,
@@ -479,7 +480,7 @@ async fn semantic_projection_preserves_idempotent_success_and_unknown_effects() 
         native.result = class;
         native.facts[0].verified = false;
         native.message = Some("AXValue rejected; inspect the current UI before continuing".into());
-        let projection = project(&plan, "execute_confirmed_ui_action", "run-1", "{}", &native)
+        let projection = project(&plan, "execute_ui_actions", "run-1", "{}", &native)
             .unwrap()
             .unwrap();
         assert_eq!(projection.outcome, CapabilityDispatchOutcome::Failed);
@@ -514,4 +515,41 @@ async fn timeout_and_authenticated_completion_converge_on_the_original_terminal_
         );
         assert_eq!(work(&f).await.status, CAPABILITY_WORK_SUCCEEDED);
     }
+}
+
+#[tokio::test]
+async fn batch_completion_projects_only_compact_failure_or_success() {
+    use crate::remote_tool_edge::completion::project;
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new(file_db(&dir.path().join("batch.db")).await).await;
+    let mut plan = f.plan.clone();
+    plan.adapter.kind = ComputerUseAdapterKind::MacosAccessibility;
+    plan.actions[0].target.object_kind = ObjectKind::UiElement;
+    plan.actions[0].action = ComputerActionKind::UiInApplication {
+        application: ObjectRef {
+            object_kind: ObjectKind::Application,
+            ..plan.actions[0].target.clone()
+        },
+        action: desk_agent_protocol::computer_use::UiSemanticAction::Invoke,
+    };
+    plan.actions.push(plan.actions[0].clone());
+    let mut native = failed(&plan);
+    native.facts.clear();
+    native.result = ComputerActionResultClass::ChangedButUnverified;
+    native.message = Some(
+        json!({"status":"completed","completed_steps":2,"application_state_verified":false})
+            .to_string(),
+    );
+    let result = project(&plan, "execute_ui_actions", "run", "{}", &native)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.outcome, CapabilityDispatchOutcome::Succeeded);
+    assert!(!result.content.contains("work_id"));
+    native.result = ComputerActionResultClass::Failed;
+    native.message=Some(json!({"status":"stopped_on_error","failed_step_number":2,"effect":"no_effect","application_state_verified":false,"error":{"message":"window closed"}}).to_string());
+    let result = project(&plan, "execute_ui_actions", "run", "{}", &native)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.outcome, CapabilityDispatchOutcome::Failed);
+    assert!(!result.content.contains("steps\""));
 }

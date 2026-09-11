@@ -21,6 +21,8 @@ pub fn background_input_from_call(
         target: ObjectRef,
         action: BackgroundInputAction,
         application: ObjectRef,
+        #[serde(default, rename = "remaining_steps")]
+        _remaining_steps: Option<Vec<serde_json::Value>>,
         #[serde(default)]
         #[serde(rename = "geometry")]
         _geometry: Option<desk_agent_protocol::background_input::WindowInputGeometry>,
@@ -72,6 +74,7 @@ pub fn background_application_from_call(call: &ToolCall) -> Result<ObjectRef, Ag
 /// Parsing does not establish native object ownership. The original edge must
 /// still resolve its opaque reference and verify application/window ownership.
 pub struct BackgroundInputCallPreflight {
+    steps: Vec<desk_agent_protocol::computer_use::ComputerActionStep>,
     target: ObjectRef,
     action: BackgroundInputAction,
     geometry: Option<desk_agent_protocol::background_input::WindowInputGeometry>,
@@ -125,8 +128,10 @@ impl BackgroundInputCallPreflight {
         .map_err(|_| unavailable())?;
         let canonical_input_digest_sha256 =
             format!("{:x}", Sha256::digest(canonical_input_json.as_bytes()));
-        let operation_scope = vec![crate::application_ui::operation_kind(action.kind())];
+        let steps = crate::application_batch::actions(call)?;
+        let operation_scope = crate::application_batch::operation_scope(&steps);
         Ok(Self {
+            steps,
             resource_scope: crate::application_ui::resource(&application),
             geometry: serde_json::from_str::<serde_json::Value>(&call.arguments_json)
                 .ok()
@@ -145,6 +150,9 @@ impl BackgroundInputCallPreflight {
         })
     }
 
+    pub fn steps(&self) -> &[desk_agent_protocol::computer_use::ComputerActionStep] {
+        &self.steps
+    }
     pub fn computer_action(&self) -> desk_agent_protocol::computer_use::ComputerActionKind {
         desk_agent_protocol::computer_use::ComputerActionKind::BackgroundInput {
             application: self.application.clone(),
@@ -223,7 +231,7 @@ mod tests {
         let registry = crate::device_assistant::device_assistant_provider_registry();
         let app = json!({"token":"app","snapshot_id":"native","object_kind":"application","expires_at":"2000-01-01T00:00:00Z"});
         let window = json!({"token":"window","snapshot_id":"native","object_kind":"window","expires_at":"2000-01-01T00:00:00Z"});
-        let call=ToolCall{id:"input".into(),name:"execute_background_input".into(),arguments_json:json!({"application":app,"target":window,"action":{"kind":"type_text","text":"中文🙂"},"geometry":null}).to_string()};
+        let call=ToolCall{id:"input".into(),name:"execute_background_inputs".into(),arguments_json:json!({"application":app,"target":window,"action":{"kind":"type_text","text":"中文🙂"},"geometry":null}).to_string()};
         for surface in [
             ProductSurface::OssPersonalOwner,
             ProductSurface::ManagerPersonalOwner,

@@ -2213,7 +2213,7 @@ mod tests {
         call.role = ChatRole::Assistant;
         call.tool_calls.push(ToolCallRef {
             id: "call".into(),
-            name: "execute_confirmed_ui_action".into(),
+            name: "execute_ui_actions".into(),
             arguments_json: "{}".into(),
         });
         let bytes = crate::model_egress::message_content_bytes(&call).unwrap();

@@ -19,6 +19,8 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
         target: ObjectRef,
         action: UiSemanticAction,
         application: ObjectRef,
+        #[serde(default, rename = "remaining_steps")]
+        _remaining_steps: Option<Vec<serde_json::Value>>,
     }
     if call.name != crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
         || call.arguments_json.len() > 64 * 1024
@@ -71,6 +73,7 @@ pub fn ui_application_from_call(call: &ToolCall) -> Result<ObjectRef, AgentError
 /// Parsing does not establish native object ownership. The original edge must
 /// still resolve its opaque reference and verify the exact supported action.
 pub struct UiCallPreflight {
+    steps: Vec<desk_agent_protocol::computer_use::ComputerActionStep>,
     target: ObjectRef,
     action: UiSemanticAction,
     application: ObjectRef,
@@ -123,8 +126,10 @@ impl UiCallPreflight {
         .map_err(|_| unavailable())?;
         let canonical_input_digest_sha256 =
             format!("{:x}", Sha256::digest(canonical_input_json.as_bytes()));
-        let operation_scope = vec![crate::application_ui::operation(&action)];
+        let steps = crate::application_batch::actions(call)?;
+        let operation_scope = crate::application_batch::operation_scope(&steps);
         Ok(Self {
+            steps,
             resource_scope: crate::application_ui::resource(&application),
             application,
             target,
@@ -140,6 +145,9 @@ impl UiCallPreflight {
         })
     }
 
+    pub fn steps(&self) -> &[desk_agent_protocol::computer_use::ComputerActionStep] {
+        &self.steps
+    }
     pub fn computer_action(&self) -> desk_agent_protocol::computer_use::ComputerActionKind {
         desk_agent_protocol::computer_use::ComputerActionKind::UiInApplication {
             application: self.application.clone(),

@@ -77,7 +77,7 @@ fn desktop_action_bundle_issues_only_owner_selected_bounded_reads_on_both_surfac
     let call = crate::chat::ToolCall { id: "click-request".into(),
         name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
         arguments_json: serde_json::json!({"items":[{
-            "item_id":"click", "provider_id":"desktop.ui.action", "tool_name":"execute_confirmed_ui_action",
+            "item_id":"click", "provider_id":"desktop.ui.action", "tool_name":"execute_ui_actions",
             "expected_effect":"mutate_application", "suggested_ttl_seconds":300, "suggested_max_uses":1,
             "reason":"Click in the selected application", "application_scope":{
                 "application":{"token":"app-token","snapshot_id":"snapshot","object_kind":"application","expires_at":"2026-09-10T00:00:00Z"},
@@ -643,7 +643,7 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
     session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
     let registry = crate::device_assistant::device_assistant_provider_registry();
     let app = serde_json::json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
-    let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"execute_confirmed_ui_action", "application_scope":{"application":app,"actions":["invoke","set_value"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
+    let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"execute_ui_actions", "application_scope":{"application":app,"actions":["invoke","set_value"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
     let request = crate::permission_tools::build_permission_request(
         &planning,
         &registry,
@@ -780,7 +780,7 @@ fn background_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
     session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
     let registry = crate::device_assistant::device_assistant_provider_registry();
     let app = serde_json::json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
-    let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"execute_background_input", "application_scope":{"application":app,"actions":["key_press","type_text"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
+    let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"execute_background_inputs", "application_scope":{"application":app,"actions":["key_press","type_text"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
     let request = crate::permission_tools::build_permission_request(
         &planning,
         &registry,

@@ -17,11 +17,11 @@ fn invalid(message: impl Into<String>) -> AgentError {
 
 fn fields(tool: &str) -> &'static [(&'static str, &'static str)] {
     match tool {
-        "execute_confirmed_ui_action" => {
-            &[("application", "application_id"), ("target", "element_id")]
-        }
+        "execute_ui_actions" => &[("application", "application_id"), ("target", "element_id")],
         "inspect_desktop_ui" => &[("root", "root_id")],
-        "execute_background_input" => &[("application", "application_id"), ("target", "window_id")],
+        "execute_background_inputs" => {
+            &[("application", "application_id"), ("target", "window_id")]
+        }
         "execute_confirmed_raw_input" => &[("target", "application_id")],
         "read_current_screen" => &[("window", "window_id")],
         _ => &[],
@@ -112,6 +112,17 @@ pub fn resolve_call(
     history: &[ChatMessage],
     now_ms: u64,
 ) -> Result<ToolCall, AgentError> {
+    if crate::application_batch::supports(&call.name) {
+        return crate::application_batch::resolve(call, history, now_ms);
+    }
+    resolve_single_call(call, history, now_ms)
+}
+
+pub(crate) fn resolve_single_call(
+    call: &ToolCall,
+    history: &[ChatMessage],
+    now_ms: u64,
+) -> Result<ToolCall, AgentError> {
     if !needs_resolution(&call.name) {
         return Ok(call.clone());
     }
@@ -129,7 +140,7 @@ pub fn resolve_call(
         let Some(id) = object.remove(*model) else {
             continue;
         };
-        if id.is_null() && call.name != "execute_confirmed_ui_action" {
+        if id.is_null() && call.name != "execute_ui_actions" {
             continue;
         }
         let id = id
@@ -149,14 +160,14 @@ pub fn resolve_call(
         }
         object.insert((*internal).into(), serde_json::to_value(reference).unwrap());
     }
-    if call.name == "execute_confirmed_ui_action"
+    if call.name == "execute_ui_actions"
         && (!object.contains_key("application") || !object.contains_key("target"))
     {
         return Err(invalid(
             r#"Required shape: {"application_id":"<application ID>","element_id":"<control ID>","action":{"kind":"invoke"}}. set_value uses {"kind":"set_value","params":{"value":"text"}}. No action was executed."#,
         ));
     }
-    if call.name == "execute_background_input" {
+    if call.name == "execute_background_inputs" {
         if object.contains_key("geometry") {
             return Err(invalid(
                 "The server supplies window geometry; do not provide geometry",
@@ -229,7 +240,7 @@ pub fn resolve_call(
                 }
                 if !matches!(
                     item["tool_name"].as_str(),
-                    Some("execute_confirmed_ui_action" | "execute_background_input")
+                    Some("execute_ui_actions" | "execute_background_inputs")
                 ) {
                     continue;
                 }
@@ -266,7 +277,44 @@ pub fn resolve_call(
 }
 
 fn project_arguments(tool: &str, value: &mut Value) {
-    if tool == "execute_background_input" {
+    if crate::application_batch::supports(tool) && value.get("remaining_steps").is_some() {
+        // Failed model calls are also replayed; only invert the trusted shape.
+        let Some(tail) = value.get("remaining_steps").and_then(Value::as_array) else {
+            return;
+        };
+        if tail.len() >= crate::application_batch::MAX_STEPS
+            || !value.get("application").is_some_and(Value::is_object)
+            || tail
+                .iter()
+                .any(|item| !item.is_object() || item.get("remaining_steps").is_some())
+        {
+            return;
+        }
+        let mut first = value.clone();
+        let rest = first
+            .as_object_mut()
+            .unwrap()
+            .remove("remaining_steps")
+            .unwrap();
+        let mut all = vec![first];
+        all.extend(rest.as_array().unwrap().iter().cloned());
+        for item in &mut all {
+            project_arguments(tool, item);
+        }
+        let mut result = json!({"application_id":all[0]["application_id"],"steps":[]});
+        if tool == "execute_background_inputs" {
+            result["window_id"] = all[0]["window_id"].clone();
+        }
+        for item in &mut all {
+            let obj = item.as_object_mut().unwrap();
+            obj.remove("application_id");
+            obj.remove("window_id");
+        }
+        result["steps"] = json!(all);
+        *value = result;
+        return;
+    }
+    if tool == "execute_background_inputs" {
         if let Some(object) = value.as_object_mut() {
             object.remove("geometry");
         }
@@ -417,6 +465,14 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
 }
 
 pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
+    if crate::application_batch::supports(&tool.name)
+        && tool
+            .parameters_schema
+            .pointer("/properties/steps")
+            .is_some()
+    {
+        return;
+    }
     let schema = &mut tool.parameters_schema;
     for (internal, model) in fields(&tool.name) {
         if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
@@ -448,12 +504,12 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
         }
     }
     match tool.name.as_str() {
-        "execute_confirmed_ui_action" => tool.description = "Execute one semantic UI action using application_id and element_id from observations. Requires an active application_scope grant for the application and action. The server resolves references, checks native object lifetime, application ownership and current authorization. Invalidated IDs require a fresh read, not automatic permission renewal. Native API success does not prove the application saved the value; inspect the result. Never provide reference metadata.".into(),
         "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). Without root_id, observe the foreground application. Supply query.any/name/native_id/element_id/role. For query.any combine localized and English labels/native identifiers/control types, at most 16 alternatives (e.g. 日期, 时间, date, time, input). Or use a control root_id with element_only=true. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. The server validates IDs and reports invalidated objects; query.element_id can locate a known control. Reads require permission and never grant actions.".into(),
         "execute_confirmed_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
         "read_current_screen" => tool.description = "Capture the current display, or use window_id from UI observations to capture a background macOS window. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture.".into(),
         _ => {}
     }
+    crate::application_batch::project_schema(tool);
 }
 
 #[cfg(test)]
@@ -491,7 +547,18 @@ mod tests {
         messages.insert(0, ChatMessage::assistant_tool_calls("reads", "", calls));
         messages
     }
-    fn call(tool: &str, input: Value) -> ToolCall {
+    fn call(tool: &str, mut input: Value) -> ToolCall {
+        if crate::application_batch::supports(tool)
+            && input.get("action").is_some()
+            && input.get("application_id").is_some()
+        {
+            let mut step =
+                json!({"action":input.as_object_mut().unwrap().remove("action").unwrap()});
+            if let Some(element) = input.as_object_mut().unwrap().remove("element_id") {
+                step["element_id"] = element;
+            }
+            input["steps"] = json!([step]);
+        }
         ToolCall {
             id: "action".into(),
             name: tool.into(),
@@ -502,7 +569,7 @@ mod tests {
     #[test]
     fn partial_read_does_not_replace_other_controls_reference() {
         let original = call(
-            "execute_confirmed_ui_action",
+            "execute_ui_actions",
             json!({"application_id":"calendar","element_id":"date","action":{"kind":"invoke"}}),
         );
         let resolved = resolve_call(&original, &history(), 1).unwrap();
@@ -538,7 +605,7 @@ mod tests {
             message.text = message.text.replace("2030-01-01T00:00:00Z", "");
         }
         let action = call(
-            "execute_confirmed_ui_action",
+            "execute_ui_actions",
             json!({"application_id":"calendar","element_id":"date","action":{"kind":"invoke"}}),
         );
         let resolved = resolve_call(&action, &messages, 2_000_000_000_000).unwrap();
@@ -613,7 +680,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&request.messages).unwrap(), original);
         for name in [
             "inspect_desktop_ui",
-            "execute_confirmed_ui_action",
+            "execute_ui_actions",
             "read_current_screen",
         ] {
             let tool = projected.tools.iter().find(|t| t.name == name).unwrap();
@@ -624,11 +691,11 @@ mod tests {
         let action = projected
             .tools
             .iter()
-            .find(|t| t.name == "execute_confirmed_ui_action")
+            .find(|t| t.name == "execute_ui_actions")
             .unwrap();
         assert_eq!(
             action.parameters_schema["required"],
-            json!(["application_id", "element_id", "action"])
+            json!(["application_id", "steps"])
         );
         assert_eq!(
             serde_json::to_string(&project_request(&projected).messages).unwrap(),
@@ -701,7 +768,7 @@ mod tests {
     fn application_permission_resolves_on_server_and_keeps_approval_flow() {
         let original = call(
             "request_capability_grants",
-            json!({"items":[{"item_id":"calendar","tool_name":"execute_confirmed_ui_action","application_scope":{"application_id":"calendar","actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":4,"reason":"Create requested event"}]}),
+            json!({"items":[{"item_id":"calendar","tool_name":"execute_ui_actions","application_scope":{"application_id":"calendar","actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":4,"reason":"Create requested event"}]}),
         );
         let resolved = resolve_call(&original, &history(), 1).unwrap();
         let registry = crate::device_assistant::device_assistant_provider_registry();
@@ -756,7 +823,7 @@ mod tests {
         ));
         messages.push(ChatMessage::tool_result("image","capture-call",json!({"ReadContext":{"ScreenCaptureCurrent":{"window":window,"window_geometry":geometry}}}).to_string()));
         let original = call(
-            "execute_background_input",
+            "execute_background_inputs",
             json!({"application_id":"calendar","window_id":"window","action":{"kind":"click","element_id":"date"}}),
         );
         let resolved = resolve_call(&original, &messages, 1).unwrap();
@@ -771,7 +838,7 @@ mod tests {
         ));
         let mut bad: Value = serde_json::from_str(&original.arguments_json).unwrap();
         bad["geometry"] = geometry;
-        assert!(resolve_call(&call("execute_background_input", bad), &messages, 1).is_err());
+        assert!(resolve_call(&call("execute_background_inputs", bad), &messages, 1).is_err());
         let mut tool = crate::background_input::tool().spec;
         project_tool(&mut tool);
         assert!(
@@ -784,5 +851,65 @@ mod tests {
                 .get("geometry")
                 .is_none()
         );
+    }
+    #[test]
+    fn batch_resolves_all_observed_steps_and_binds_every_operation() {
+        let original = call(
+            "execute_ui_actions",
+            json!({"application_id":"calendar","steps":[{"element_id":"date","action":{"kind":"invoke"}},{"element_id":"title","action":{"kind":"set_value","params":{"value":"meeting"}}}]}),
+        );
+        let resolved = resolve_call(&original, &history(), 1).unwrap();
+        assert!(same_call_input(
+            &original.name,
+            &original.arguments_json,
+            &resolved.arguments_json
+        ));
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        for surface in [
+            desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
+            desk_agent_protocol::capability_provider::ProductSurface::ManagerPersonalOwner,
+        ] {
+            let input =
+                crate::provider_preflight::UiCallPreflight::build(&registry, surface, &resolved, 1)
+                    .unwrap();
+            assert_eq!(input.steps().len(), 2);
+            assert_eq!(input.steps()[0].target.snapshot_id, "four");
+            assert_eq!(input.steps()[1].target.snapshot_id, "five");
+            assert_eq!(
+                crate::application_batch::operation_scope(input.steps()),
+                ["ui:invoke", "ui:set_value"]
+            );
+        }
+        let mut broken: Value = serde_json::from_str(&original.arguments_json).unwrap();
+        broken["steps"][1]["element_id"] = json!("unobserved");
+        let error = resolve_call(&call("execute_ui_actions", broken), &history(), 1).unwrap_err();
+        assert!(error.message.contains("step 2"));
+        assert!(error.message.contains("No step was executed"));
+    }
+    #[test]
+    fn batch_rejects_single_shape_nested_steps_and_excessive_length() {
+        for input in [
+            json!({"application_id":"calendar","action":{"kind":"invoke"},"element_id":"date"}),
+            json!({"application_id":"calendar","steps":[]}),
+            json!({"application_id":"calendar","steps":vec![json!({"element_id":"date","action":{"kind":"invoke"}});21]}),
+            json!({"application_id":"calendar","steps":[{"element_id":"date","action":{"kind":"invoke"},"remaining_steps":[]}]}),
+        ] {
+            let direct = ToolCall {
+                id: "bad".into(),
+                name: "execute_ui_actions".into(),
+                arguments_json: input.to_string(),
+            };
+            assert!(resolve_call(&direct, &history(), 1).is_err());
+        }
+    }
+    #[test]
+    fn malformed_model_batch_replay_cannot_panic_or_recurse() {
+        for mut value in [
+            json!({"remaining_steps":7}),
+            json!({"application":{},"remaining_steps":[null]}),
+            json!({"application":{},"remaining_steps":[{"remaining_steps":[{}]}]}),
+        ] {
+            project_arguments("execute_ui_actions", &mut value);
+        }
     }
 }

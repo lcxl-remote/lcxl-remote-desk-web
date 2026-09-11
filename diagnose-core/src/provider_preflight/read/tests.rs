@@ -147,7 +147,7 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
     assert!(preflight.grant_call(&stale).is_err());
     for name in [
         "read_process_list",
-        "execute_confirmed_ui_action",
+        "execute_ui_actions",
         "fetch_public_web_page",
     ] {
         let other = ToolCall {

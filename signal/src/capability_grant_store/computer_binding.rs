@@ -189,6 +189,18 @@ pub(super) fn validate_binding(
     {
         return Err(invalid());
     }
+    if desk_diagnose_core::application_batch::supports(&payload.tool_name) {
+        let call = desk_diagnose_core::chat::ToolCall {
+            id: origin.tool_call_id.clone(),
+            name: payload.tool_name.clone(),
+            arguments_json: payload.canonical_input_json.clone(),
+        };
+        if desk_diagnose_core::application_batch::actions(&call).map_err(|_| invalid())?
+            != plan.actions
+        {
+            return Err(invalid());
+        }
+    }
     Ok(())
 }
 
@@ -229,8 +241,16 @@ impl SignalCapabilityGrantStore {
                     capability.wire.execution_policy,
                     ExecutionPolicy::InlineOnly
                 )
-                || plan.actions.len() != 1
-                || plan.actions[0].action.required_capability() != capability.required_capability
+                || if desk_diagnose_core::application_batch::supports(&call.name) {
+                    desk_diagnose_core::application_batch::actions(call).map_err(|_| invalid())?
+                        != plan.actions
+                } else {
+                    plan.actions.len() != 1
+                }
+                || plan
+                    .actions
+                    .iter()
+                    .any(|step| step.action.required_capability() != capability.required_capability)
             {
                 return Err(invalid());
             }

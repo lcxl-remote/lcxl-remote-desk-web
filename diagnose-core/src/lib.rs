@@ -28,6 +28,7 @@ pub mod agent_loop;
 #[cfg(test)]
 mod agent_loop_acceptance;
 pub mod agentic_prompt;
+pub mod application_batch;
 pub mod application_ui;
 pub mod assistant_policy;
 pub mod background_input;

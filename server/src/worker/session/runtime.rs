@@ -1689,7 +1689,7 @@ impl WorkerSession {
                                         .err()
                                         .map(|error| format!("invalid Computer Use plan: {error}"))
                                         .or_else(|| {
-                                            (plan.actions.len() != 1).then(|| {
+                                            (plan.actions.len() != 1 && !crate::worker::agent::application_batch::supports(&plan.actions)).then(|| {
                                                 "the edge Computer Action broker accepts exactly one action"
                                                     .to_string()
                                             })
@@ -1752,7 +1752,7 @@ impl WorkerSession {
                                             .map(|value| value.with_timezone(&chrono::Utc))
                                             .unwrap_or_else(|_| chrono::Utc::now() - chrono::Duration::seconds(1)),
                                     };
-                                    let action_preflight = match &plan.actions[0].action {
+                                    let action_preflight = if crate::worker::agent::application_batch::supports(&plan.actions) { computer_use_broker.preflight_application_batch(&plan.actions,&ceiling).map_err(|e|e.message) } else { match &plan.actions[0].action {
                                         ComputerActionKind::UiInApplication { application, action } => computer_use_broker
                                             .require_ui_application(&plan.actions[0].target, application)
                                             .and_then(|_| computer_use_broker.preflight_ui_action(&plan.actions[0].target, action, &ceiling))
@@ -1831,6 +1831,7 @@ impl WorkerSession {
                                             }
                                         }
                                         _ => Err("this Computer Action adapter is not enabled".to_string()),
+                                    }
                                     };
                                     let preflight = action_preflight.and_then(|()| {
                                         computer_use_broker
@@ -1896,83 +1897,46 @@ impl WorkerSession {
                                     let application_settings = shared_settings.clone();
                                     tokio::spawn(async move {
                                         let generation = plan.execution_generation.clone();
-                                        let step = plan.actions.into_iter().next().expect("preflight checked one action");
-                                        if let Some((action, application)) = step.action.semantic_ui() {
-                                            let application = application.clone();
-                                            let target = step.target.clone();
-                                            let action = action.clone();
+                                        if crate::worker::agent::application_batch::supports(&plan.actions) {
+                                            let steps = plan.actions.clone();
                                             let broker = action_broker.clone();
                                             let generation_for_call = generation.clone();
-                                            let result = tokio::task::spawn_blocking(move || crate::worker::agent::native_ui_identity::run(move || -> Result<_, desk_agent_protocol::AgentError> {
-                                                // Recheck after entering the native thread, and keep the read lock through
-                                                // the native call so a tightening cannot acknowledge
-                                                // while an older application policy is still in use.
-                                                let settings = application_settings.blocking_read();
-                                                let ceiling = &settings.computer_use;
-                                                broker.require_writer_lease(&generation_for_call)?;
-                                                broker.require_ui_application(&target, &application)?;
-                                                let result = broker.execute_ui_action(
-                                                    &target,
-                                                    &action,
-                                                    ceiling,
-                                                )?;
-                                                // Human/browser input may arrive while the AX call is
-                                                // in flight. Retain the completion fence when
-                                                // the writer lease was preempted.
-                                                broker.require_writer_lease(&generation_for_call)?;
-                                                Ok(result)
-                                            }))
-                                            .await
-                                            .map_err(|error| format!("semantic UI action worker failed to join: {error}"))
-                                            .and_then(|result| result.map_err(|error| error.message));
+                                            let background = matches!(&steps[0].action, ComputerActionKind::BackgroundInput {..});
+                                            let result = tokio::task::spawn_blocking(move || {
+                                                let run = move || {
+                                                Ok(crate::worker::agent::application_batch::execute(&steps, |step| {
+                                                    let settings = application_settings.blocking_read();
+                                                    let ceiling = &settings.computer_use;
+                                                    broker.require_writer_lease(&generation_for_call).map_err(|e|(e,false))?;
+                                                    broker.preflight_application_step(step,ceiling).map_err(|e|(e,false))?;
+                                                    match &step.action {
+                                                        ComputerActionKind::UiInApplication {application,action} => {
+                                                            broker.require_ui_application(&step.target,application).map_err(|e|(e,false))?;
+                                                            broker.execute_ui_action(&step.target,action,ceiling).map_err(|e|(e,true))?;
+                                                        }
+                                                        ComputerActionKind::BackgroundInput {application,input,geometry} => { broker.execute_background_input(&step.target,application,input,geometry.as_ref(),ceiling,&generation_for_call).map_err(|e|(e,true))?; }
+                                                        _ => unreachable!(),
+                                                    }
+                                                    broker.require_writer_lease(&generation_for_call).map_err(|e|(e,true))?;
+                                                    Ok(())
+                                                }))
+                                                };
+                                                if background { run() } else { crate::worker::agent::native_ui_identity::run(run) }
+                                            }).await;
                                             action_broker.release_writer_lease(&generation);
-                                            let (class, facts, message) = match result {
-                                                Ok(result) => (
-                                                    if result.verified {
-                                                        ComputerActionResultClass::Verified
-                                                    } else {
-                                                        ComputerActionResultClass::ChangedButUnverified
-                                                    },
-                                                    vec![ComputerActionStepFact {
-                                                        index: 0,
-                                                        changed: result.changed,
-                                                        verified: result.verified,
-                                                        summary: result.summary,
-                                                    }],
-                                                    Some(if result.verified {
-                                                        "native UI API completed successfully; inspect_desktop_ui must verify the expected application state"
-                                                            .to_string()
-                                                    } else {
-                                                        "semantic UI action may have changed the application without a generic verifier"
-                                                            .to_string()
-                                                    }),
-                                                ),
-                                                Err(reason) => (
-                                                    ComputerActionResultClass::OutcomeUnknown,
-                                                    vec![],
-                                                    Some(reason),
-                                                ),
+                                            let (class,message) = match result {
+                                                Ok(Ok(result)) => result,
+                                                Ok(Err(error)) => (ComputerActionResultClass::OutcomeUnknown,format!("Batch native thread unavailable: {}. Read current state before replanning.",error.message)),
+                                                Err(error) => (ComputerActionResultClass::OutcomeUnknown, format!("Batch worker interrupted: {error}. Effects may have occurred; remaining steps are not replayed. Read current UI before choosing a new operation.")),
                                             };
-                                            let _ = action_writer.send(
-                                                WorkerToService::ComputerActionCompleted(
-                                                    ComputerActionCompletedPayload {
-                                                        request_id: payload.request_id,
-                                                        connection_id: payload.connection_id,
-                                                        completed: ComputerActionCompleted {
-                                                            work_id: plan.work_id,
-                                                            action_request_id: plan.action_request_id,
-                                                            execution_generation: generation,
-                                                            result: class,
-                                                            facts,
-                                                            message,
-                                                            output: None,
-                                                        },
-                                                    },
-                                                ),
-                                            );
+                                            let _ = action_writer.send(WorkerToService::ComputerActionCompleted(ComputerActionCompletedPayload {
+                                                request_id:payload.request_id,connection_id:payload.connection_id,
+                                                completed:ComputerActionCompleted {work_id:plan.work_id,action_request_id:plan.action_request_id,execution_generation:generation,result:class,facts:vec![],message:Some(message),output:None},
+                                            }));
                                             return;
                                         }
-                                        if matches!(&step.action, ComputerActionKind::RawInput(_) | ComputerActionKind::BackgroundInput { .. }) {
+                                        let step = plan.actions.into_iter().next().expect("preflight checked one action");
+                                        if matches!(&step.action, ComputerActionKind::RawInput(_)) {
                                             let target = step.target.clone();
                                             let action = step.action.clone();
                                             let broker = action_broker.clone();
@@ -1984,7 +1948,6 @@ impl WorkerSession {
                                                 broker.require_writer_lease(&generation_for_call)?;
                                                 let result = match &action {
                                                     ComputerActionKind::RawInput(input) => broker.execute_raw_input(&target,input,ceiling,&selected_display)?,
-                                                    ComputerActionKind::BackgroundInput { application, input, geometry } => broker.execute_background_input(&target,application,input,geometry.as_ref(),ceiling,&generation_for_call)?,
                                                     _ => unreachable!(),
                                                 };
                                                 broker.require_writer_lease(&generation_for_call)?;

@@ -410,6 +410,51 @@ impl ComputerUseBroker {
         Ok(())
     }
 
+    pub(crate) fn preflight_application_step(
+        &self,
+        step: &desk_agent_protocol::computer_use::ComputerActionStep,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<(), AgentError> {
+        match &step.action {
+            desk_agent_protocol::computer_use::ComputerActionKind::UiInApplication {
+                application,
+                action,
+            } => self
+                .require_ui_application(&step.target, application)
+                .and_then(|_| self.preflight_ui_action(&step.target, action, ceiling)),
+            desk_agent_protocol::computer_use::ComputerActionKind::BackgroundInput {
+                application,
+                input,
+                geometry,
+            } => self.preflight_background_input(
+                &step.target,
+                application,
+                input,
+                geometry.as_ref(),
+                ceiling,
+            ),
+            _ => unreachable!("application batch checked by caller"),
+        }
+    }
+    pub(crate) fn preflight_application_batch(
+        &self,
+        steps: &[desk_agent_protocol::computer_use::ComputerActionStep],
+        ceiling: &ComputerUseSettings,
+    ) -> Result<(), AgentError> {
+        for (index, step) in steps.iter().enumerate() {
+            self.preflight_application_step(step, ceiling)
+                .map_err(|mut error| {
+                    error.message = format!(
+                        "Batch preflight rejected step {}: {}. No steps were executed.",
+                        index + 1,
+                        error.message
+                    );
+                    error
+                })?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn preflight_ui_action(
         &self,
         target: &ObjectRef,

@@ -11,7 +11,7 @@ import { CommandConfirmationCard, validCommandReview } from './device-assistant-
 import { TextFileConfirmationCard, validTextFileReview, fileApprovalBlocked } from './device-assistant-file-confirmation';
 
 function needsApplicationScope(tool: string) {
-    return ['execute_confirmed_ui_action', 'execute_background_input'].includes(tool);
+    return ['execute_ui_actions', 'execute_background_inputs'].includes(tool);
 }
 
 function formatByteCount(value: number) {
@@ -99,7 +99,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     {t(`pages.deviceAssistant.permissionState.${request.state}`)}
                 </Badge>
             </div>
-            {request.items.some((item) => ['execute_confirmed_ui_action', 'execute_background_input', 'execute_confirmed_raw_input'].includes(item.toolName))
+            {request.items.some((item) => ['execute_ui_actions', 'execute_background_inputs', 'execute_confirmed_raw_input'].includes(item.toolName))
                 && ['inspect_desktop_session', 'inspect_desktop_ui'].every((name) => request.items.some((item) => item.toolName === name)) && (
                 <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.permissionIncludedDesktopReads')}</p>
             )}
@@ -237,6 +237,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                 ))}
                                             </div>
                                         )}
+                                        {needsApplicationScope(item.toolName) && <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.batchGrantUses')}</p>}
                                         {item.operationScope.length > 0 && (
                                             <div className="space-y-1">
                                                 <p className="text-xs font-medium">

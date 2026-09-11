@@ -1448,7 +1448,7 @@ mod tests {
             .filter(|tool| {
                 matches!(
                     tool.name(),
-                    "inspect_desktop_ui" | "execute_confirmed_ui_action" | "read_current_screen"
+                    "inspect_desktop_ui" | "execute_ui_actions" | "read_current_screen"
                 )
             })
             .map(|tool| tool.spec)
