@@ -524,6 +524,156 @@ impl ComputerUseBroker {
         ))
     }
 
+    #[cfg(target_os = "macos")]
+    fn background_target(
+        &self,
+        window: &ObjectRef,
+        application: &ObjectRef,
+        input: &desk_agent_protocol::background_input::BackgroundInputAction,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<super::macos_background_input::Target, AgentError> {
+        if !ceiling.enabled || !ceiling.generic_semantic_ui {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Application input is disabled on this device",
+                false,
+            ));
+        }
+        let ResolvedObject::Application {
+            process_id,
+            image_path,
+            process_started_at,
+            ..
+        } = self.resolve_ref(application)?
+        else {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "Background input requires an application ID",
+                false,
+            ));
+        };
+        let current = super::macos_accessibility_observer::application_by_pid(process_id)?;
+        if process_started_at.is_none()
+            || current.process_started_at != process_started_at
+            || !ceiling.application_allowed(&image_path)
+        {
+            return Err(error(
+                AgentErrorKind::SessionUnavailable,
+                "Application instance changed or is unavailable",
+                false,
+            ));
+        }
+        let ResolvedObject::Window {
+            process_id: wp,
+            image_path: wi,
+            fingerprint,
+        } = self.resolve_ref(window)?
+        else {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "Background input requires a window ID",
+                false,
+            ));
+        };
+        if wp != process_id || wi != image_path {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "Window belongs to another application",
+                false,
+            ));
+        }
+        let element = if let Some((_, Some(element))) = input.locator() {
+            let ResolvedObject::UiElement {
+                process_id: ep,
+                image_path: ei,
+                fingerprint,
+            } = self.resolve_ref(element)?
+            else {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "Mouse element ID is invalid",
+                    false,
+                ));
+            };
+            if ep != process_id || ei != image_path {
+                return Err(error(
+                    AgentErrorKind::InvalidInput,
+                    "Mouse element belongs to another application",
+                    false,
+                ));
+            }
+            Some(fingerprint)
+        } else {
+            None
+        };
+        super::macos_accessibility_observer::background_target(
+            process_id,
+            image_path,
+            fingerprint,
+            element,
+            input.locator().is_none(),
+        )
+    }
+
+    pub(crate) fn preflight_background_input(
+        &self,
+        window: &ObjectRef,
+        application: &ObjectRef,
+        input: &desk_agent_protocol::background_input::BackgroundInputAction,
+        geometry: Option<&desk_agent_protocol::background_input::WindowInputGeometry>,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<(), AgentError> {
+        #[cfg(target_os = "macos")]
+        {
+            let target = self.background_target(window, application, input, ceiling)?;
+            super::macos_background_input::validate(&target, input, geometry)?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (window, application, input, geometry, ceiling);
+            Err(error(
+                AgentErrorKind::UnsupportedCapability,
+                "Background input is available only on macOS",
+                false,
+            ))
+        }
+    }
+    pub(crate) fn execute_background_input(
+        &self,
+        window: &ObjectRef,
+        application: &ObjectRef,
+        input: &desk_agent_protocol::background_input::BackgroundInputAction,
+        geometry: Option<&desk_agent_protocol::background_input::WindowInputGeometry>,
+        ceiling: &ComputerUseSettings,
+        generation: &str,
+    ) -> Result<SemanticActionResult, AgentError> {
+        #[cfg(target_os = "macos")]
+        {
+            let target = self.background_target(window, application, input, ceiling)?;
+            let count = super::macos_background_input::apply(&target, input, geometry, || {
+                self.require_writer_lease(generation).map(|_| ())
+            })?;
+            Ok(SemanticActionResult {
+                changed: false,
+                verified: false,
+                summary: format!(
+                    "Background input events dispatched ({count}). Application state is not verified; read its UI or window screenshot before deciding the next action."
+                ),
+                output: None,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (window, application, input, geometry, ceiling, generation);
+            Err(error(
+                AgentErrorKind::UnsupportedCapability,
+                "Background input is available only on macOS",
+                false,
+            ))
+        }
+    }
+
     pub(crate) fn preflight_raw_input(
         &self,
         target: &ObjectRef,
@@ -881,6 +1031,10 @@ impl ComputerUseBroker {
                 Some(ComputerUseReadinessReason::NoInteractiveSession),
             )
         };
+        #[cfg(target_os = "macos")]
+        let background_post_ready = super::macos_background_input::keyboard_ready();
+        #[cfg(not(target_os = "macos"))]
+        let background_post_ready = false;
         let ui_ready = session_ready && macos_accessibility_ready && application_reason.is_none();
         let office_configured = super::office_bridge_observer::configured();
         let office_document_ref = (session_ready && ceiling.office_semantic && office_configured)
@@ -1234,6 +1388,30 @@ impl ComputerUseBroker {
                                 .or(application_reason)
                                 .unwrap_or(ComputerUseReadinessReason::AdapterUnavailable)
                         }),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::DesktopBackgroundInputConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::MacosBackgroundInput,
+                        version: "macos-background-input/v1".into(),
+                    },
+                    supported: cfg!(target_os = "macos"),
+                    ready: cfg!(target_os = "macos")
+                        && session_ready
+                        && macos_accessibility_ready
+                        && ceiling.generic_semantic_ui
+                        && background_post_ready,
+                    reason: if !cfg!(target_os = "macos") {
+                        Some(ComputerUseReadinessReason::UnsupportedPlatform)
+                    } else if !ceiling.generic_semantic_ui {
+                        Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
+                    } else if !session_ready {
+                        session_reason
+                    } else if !macos_accessibility_ready || !background_post_ready {
+                        Some(ComputerUseReadinessReason::PermissionMissing)
+                    } else {
+                        None
+                    },
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DesktopInputFallbackConfirmed,
@@ -3035,7 +3213,7 @@ impl ComputerUseBroker {
         }
         self.human_input_epoch.fetch_add(1, Ordering::SeqCst);
         self.writer_lease
-            .preempt(InputPreemptionSource::LocalExternal);
+            .preempt(InputPreemptionSource::SessionChanged);
         if let Ok(mut objects) = self.objects.lock() {
             objects.clear();
         }
@@ -3053,7 +3231,7 @@ impl ComputerUseBroker {
         self.snapshot_counter.store(0, Ordering::SeqCst);
         self.human_input_epoch.fetch_add(1, Ordering::SeqCst);
         self.writer_lease
-            .preempt(InputPreemptionSource::LocalExternal);
+            .preempt(InputPreemptionSource::SessionChanged);
         if let Ok(mut identities) = self.ui_identities.lock() {
             identities.clear();
         }
@@ -4938,7 +5116,7 @@ mod tests {
         let observed = chrono::DateTime::parse_from_rfc3339(&readiness.observed_at).unwrap();
         let expires = chrono::DateTime::parse_from_rfc3339(&readiness.expires_at).unwrap();
         assert_eq!((expires - observed).num_seconds(), 60);
-        assert_eq!(readiness.capabilities.len(), 37);
+        assert_eq!(readiness.capabilities.len(), 38);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(
                 entry.capability,
@@ -4981,6 +5159,7 @@ mod tests {
                     | Capability::DesktopSessionInspect
                     | Capability::DesktopUiInspect
                     | Capability::DesktopUiActionConfirmed
+                    | Capability::DesktopBackgroundInputConfirmed
                     | Capability::DesktopInputFallbackConfirmed
                     | Capability::OfficeDocumentInspect
                     | Capability::SpreadsheetLiveInspect

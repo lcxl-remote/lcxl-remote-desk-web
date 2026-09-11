@@ -170,7 +170,7 @@ pub fn capability_authorization_prompt(
     }
     CapabilityAuthorizationPrompt {
         text: format!(
-            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, use its application_id in execute_confirmed_ui_action, use the current observed element_id and an approved action; do not request another exact permission for each control within that scope. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
+            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, use its application_id in the approved UI or background-input tool, use current observed target IDs and an approved action; do not request another exact permission for each control within that scope. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
             serde_json::to_string(&entries).expect("authorization projection is serializable")
         ),
         approved_exact_input_expires_at_unix_ms,
@@ -251,7 +251,8 @@ fn exact_input_matches_current_contract(tool_name: &str, value: &serde_json::Val
     }
 
     match tool_name {
-        crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL => false,
+        crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+        | crate::device_assistant::EXECUTE_BACKGROUND_INPUT_TOOL => false,
         "browser_open_page" => serde_json::from_value::<BrowserOpenInput>(value.clone())
             .is_ok_and(|input| input.target.validate().is_ok()),
         "browser_navigate_page" => serde_json::from_value::<BrowserNavigateInput>(value.clone())
@@ -562,7 +563,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "tool_name": {"type": "string", "maxLength": 128},
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
-                                "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value"]}}},"required":["application","actions"],"additionalProperties":false},
+                                "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
                                 "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
@@ -647,8 +648,10 @@ pub fn build_permission_request(
             ));
         }
         let application_scope = item.application_scope;
-        if capability.required_capability == Capability::DesktopUiActionConfirmed
-            && (application_scope.is_none() || item.exact_input.is_some())
+        if matches!(
+            capability.required_capability,
+            Capability::DesktopUiActionConfirmed | Capability::DesktopBackgroundInputConfirmed
+        ) && (application_scope.is_none() || item.exact_input.is_some())
         {
             return Err(invalid(format!(
                 r#"item_id={} tool_name={}: native UI permission requires application_scope, never exact_input. Required shape: {{"application_scope":{{"application":{{"token":"<observed application token>","snapshot_id":"<observed snapshot>","object_kind":"application","expires_at":"<observed expiry>"}},"actions":["invoke","set_value"]}}}}. Load the tool details first. If no application reference is known, request prerequisite desktop reads and observe the application before requesting actions"#,
@@ -657,14 +660,12 @@ pub fn build_permission_request(
         }
 
         if let Some(scope) = &application_scope {
-            if item.tool_name != crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
-                || item.exact_input.is_some()
-            {
+            if !crate::application_ui::supports(&item.tool_name) || item.exact_input.is_some() {
                 return Err(invalid(
                     "application_scope is only valid for native UI actions and is mutually exclusive with exact_input",
                 ));
             }
-            crate::application_ui::validate(scope)?;
+            crate::application_ui::validate_for_tool(&item.tool_name, scope)?;
         }
         let input_value = application_scope
             .as_ref()
@@ -1079,7 +1080,9 @@ pub fn include_desktop_action_reads(
         .filter(|item| {
             matches!(
                 item.tool_name.as_str(),
-                "execute_confirmed_ui_action" | "execute_confirmed_raw_input"
+                "execute_confirmed_ui_action"
+                    | "execute_background_input"
+                    | "execute_confirmed_raw_input"
             )
         })
         .map(|item| item.suggested_ttl_seconds)

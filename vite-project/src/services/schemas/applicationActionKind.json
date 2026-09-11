@@ -1,0 +1,1 @@
+{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"],"x-readme-ref-name":"ApplicationActionKind"}

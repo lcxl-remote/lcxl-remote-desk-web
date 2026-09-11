@@ -66,8 +66,8 @@ use desk_diagnose_core::capability_grant::{
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::chunk::ByteReassembler;
 use desk_diagnose_core::device_assistant::{
-    EXECUTE_CONFIRMED_RAW_INPUT_TOOL, EXECUTE_CONFIRMED_UI_ACTION_TOOL,
-    PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call,
+    EXECUTE_BACKGROUND_INPUT_TOOL, EXECUTE_CONFIRMED_RAW_INPUT_TOOL,
+    EXECUTE_CONFIRMED_UI_ACTION_TOOL, PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call,
 };
 use desk_diagnose_core::permission_tools::canonical_tool_permission_input_json;
 use desk_diagnose_core::provider_registry::ProviderRegistry;
@@ -2268,6 +2268,18 @@ impl SignalDeviceAssistantTools {
         } else {
             None
         };
+        let shared_background = if call.name == EXECUTE_BACKGROUND_INPUT_TOOL {
+            Some(
+                desk_diagnose_core::provider_preflight::BackgroundInputCallPreflight::build(
+                    &self.provider_registry,
+                    ProductSurface::OssPersonalOwner,
+                    call,
+                    now_unix_ms,
+                )?,
+            )
+        } else {
+            None
+        };
         let shared_raw_input = if call.name == EXECUTE_CONFIRMED_RAW_INPUT_TOOL {
             Some(
                 desk_diagnose_core::provider_preflight::RawInputCallPreflight::build(
@@ -2328,6 +2340,19 @@ impl SignalDeviceAssistantTools {
                     desk_agent_protocol::Capability::DesktopUiActionConfirmed,
                     ui_adapter_kind,
                     action_name,
+                )
+            }
+            EXECUTE_BACKGROUND_INPUT_TOOL => {
+                let input = shared_background
+                    .as_ref()
+                    .expect("background input preflight");
+                (
+                    input.target().clone(),
+                    vec![input.target().clone()],
+                    input.computer_action(),
+                    input.required_capability(),
+                    ComputerUseAdapterKind::MacosBackgroundInput,
+                    "background input dispatch",
                 )
             }
             EXECUTE_CONFIRMED_RAW_INPUT_TOOL => {
@@ -2526,6 +2551,8 @@ impl SignalDeviceAssistantTools {
         };
         let call_authority = if let Some(preflight) = &shared_ui {
             preflight.grant_call(&subject)?
+        } else if let Some(preflight) = &shared_background {
+            preflight.grant_call(&subject)?
         } else if let Some(preflight) = &shared_text {
             preflight.grant_call(&subject)?
         } else if let Some(preflight) = &shared_iwork {
@@ -2713,6 +2740,7 @@ impl SignalDeviceAssistantTools {
             ));
         }
         let generation = dispatch_id.clone();
+        let background_input = required_capability == desk_agent_protocol::Capability::DesktopBackgroundInputConfirmed;
         let raw_input = required_capability
             == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed;
         let plan = SealedComputerActionPlan {
@@ -2740,7 +2768,9 @@ impl SignalDeviceAssistantTools {
                 } else {
                     format!("perform one bounded semantic {action_name} action")
                 },
-                verification: if raw_input {
+                verification: if background_input {
+                    "Report event dispatch only; the assistant must read the target UI or screenshot to verify application state".into()
+                } else if raw_input {
                     "re-observe foreground application and display/DPI, then require a later semantic or screen observation before completion"
                         .into()
                 } else {
@@ -5419,6 +5449,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
         if matches!(
             call.name.as_str(),
             EXECUTE_CONFIRMED_UI_ACTION_TOOL
+                | EXECUTE_BACKGROUND_INPUT_TOOL
                 | EXECUTE_CONFIRMED_RAW_INPUT_TOOL
                 | "patch_live_spreadsheet_cell"
                 | "replace_live_document_body"

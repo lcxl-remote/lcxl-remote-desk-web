@@ -1736,7 +1736,9 @@ impl WorkerSession {
                                     let selected_display = action_settings.desk.video_device_name.clone();
                                     drop(action_settings);
                                     let lease = crate::worker::agent::computer_use_writer::WriterLeaseRequest {
-                                        scope: if cfg!(target_os = "macos") && matches!(&plan.actions[0].action, ComputerActionKind::File(_)) {
+                                        scope: if matches!(&plan.actions[0].action, ComputerActionKind::BackgroundInput { .. }) {
+                                            crate::worker::agent::computer_use_writer::WriterLeaseScope::BackgroundApplication
+                                        } else if cfg!(target_os = "macos") && matches!(&plan.actions[0].action, ComputerActionKind::File(_)) {
                                             crate::worker::agent::computer_use_writer::WriterLeaseScope::FileWorker
                                         } else {
                                             crate::worker::agent::computer_use_writer::WriterLeaseScope::InteractiveSession
@@ -1755,6 +1757,7 @@ impl WorkerSession {
                                             .require_ui_application(&plan.actions[0].target, application)
                                             .and_then(|_| computer_use_broker.preflight_ui_action(&plan.actions[0].target, action, &ceiling))
                                             .map_err(|error| error.message),
+                                        ComputerActionKind::BackgroundInput { application, input, geometry } => computer_use_broker.preflight_background_input(&plan.actions[0].target,application,input,geometry.as_ref(),&ceiling).map_err(|e|e.message),
                                         ComputerActionKind::RawInput(action) => computer_use_broker
                                             .preflight_raw_input(
                                                 &plan.actions[0].target,
@@ -1969,9 +1972,9 @@ impl WorkerSession {
                                             );
                                             return;
                                         }
-                                        if let ComputerActionKind::RawInput(action) = &step.action {
+                                        if matches!(&step.action, ComputerActionKind::RawInput(_) | ComputerActionKind::BackgroundInput { .. }) {
                                             let target = step.target.clone();
-                                            let action = action.clone();
+                                            let action = step.action.clone();
                                             let broker = action_broker.clone();
                                             let generation_for_call = generation.clone();
                                             let selected_display = selected_display.clone();
@@ -1979,17 +1982,16 @@ impl WorkerSession {
                                                 let settings = application_settings.blocking_read();
                                                 let ceiling = &settings.computer_use;
                                                 broker.require_writer_lease(&generation_for_call)?;
-                                                let result = broker.execute_raw_input(
-                                                    &target,
-                                                    &action,
-                                                    ceiling,
-                                                    &selected_display,
-                                                )?;
+                                                let result = match &action {
+                                                    ComputerActionKind::RawInput(input) => broker.execute_raw_input(&target,input,ceiling,&selected_display)?,
+                                                    ComputerActionKind::BackgroundInput { application, input, geometry } => broker.execute_background_input(&target,application,input,geometry.as_ref(),ceiling,&generation_for_call)?,
+                                                    _ => unreachable!(),
+                                                };
                                                 broker.require_writer_lease(&generation_for_call)?;
                                                 Ok(result)
                                             })
                                             .await
-                                            .map_err(|error| format!("raw-input worker failed to join: {error}"))
+                                            .map_err(|error| format!("input worker failed to join: {error}"))
                                             .and_then(|result| result.map_err(|error| error.message));
                                             action_broker.release_writer_lease(&generation);
                                             let (class, facts, message) = match result {
@@ -2001,7 +2003,7 @@ impl WorkerSession {
                                                         verified: false,
                                                         summary: result.summary,
                                                     }],
-                                                    Some("raw input was injected and the foreground/display preconditions were freshly re-observed; inspect application state before deciding completion".to_string()),
+                                                    Some("Input events were dispatched. This is not confirmation of application state; read the target UI or screenshot before deciding completion.".to_string()),
                                                 ),
                                                 Err(reason) => (
                                                     ComputerActionResultClass::OutcomeUnknown,

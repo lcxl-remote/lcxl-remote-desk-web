@@ -22,6 +22,8 @@ pub mod file_reference_store;
 #[cfg(target_os = "macos")]
 pub mod macos_accessibility_observer;
 #[cfg(target_os = "macos")]
+pub mod macos_background_input;
+#[cfg(target_os = "macos")]
 pub mod macos_input_ownership;
 #[cfg(target_os = "macos")]
 pub mod macos_iwork_adapter;

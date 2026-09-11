@@ -5,7 +5,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::time::{Duration, Instant};
 
 use super::native_ui_identity::{IdentityStore, NativeElement};
-use core_graphics::geometry::{CGPoint, CGSize};
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use desk_agent_protocol::computer_use::{UiSemanticAction, UiSemanticActionKind};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use objc2::rc::autoreleasepool;
@@ -1956,3 +1956,185 @@ mod native_value_tests {
         assert!(!native_value_supported(unsafe { kCFBooleanTrue }));
     }
 }
+
+/// Resolve the exact native window and optional control without activating the application.
+pub(super) fn background_target(
+    pid: u32,
+    image_path: String,
+    window_fingerprint: String,
+    element_fingerprint: Option<String>,
+    keyboard: bool,
+) -> Result<super::macos_background_input::Target, AgentError> {
+    super::native_ui_identity::run(move || {
+        let window = locate_action_target(pid, &image_path, &window_fingerprint)?;
+        let bad = || {
+            failure(
+                AgentErrorKind::SessionUnavailable,
+                "Background input window is unavailable; read the application's windows again",
+                false,
+            )
+        };
+        if attribute_string(window.0, "AXRole").as_deref() != Some("AXWindow")
+            || attribute_bool(window.0, "AXMinimized").unwrap_or(false)
+        {
+            return Err(bad());
+        }
+        let app = OwnedCf(unsafe { AXUIElementCreateApplication(pid as i32) });
+        if keyboard {
+            let focused = copy_attribute(app.0, "AXFocusedWindow").ok_or_else(bad)?;
+            if !focused.same_element(&window) {
+                return Err(failure(
+                    AgentErrorKind::SessionUnavailable,
+                    "The requested window is not this application's keyboard input window; inspect its windows before typing. No input was dispatched",
+                    false,
+                ));
+            }
+        }
+        let origin = attribute_point(window.0, "AXPosition").ok_or_else(bad)?;
+        let size = attribute_size(window.0, "AXSize").ok_or_else(bad)?;
+        if ![origin.x, origin.y, size.width, size.height]
+            .iter()
+            .all(|v| v.is_finite())
+            || size.width <= 0.0
+            || size.height <= 0.0
+        {
+            return Err(bad());
+        }
+        // Keyboard delivery needs only the application's input window, not
+        // screen-recording access or a CoreGraphics window number.
+        if keyboard {
+            return Ok(super::macos_background_input::Target {
+                pid,
+                window_id: 0,
+                origin,
+                width: size.width,
+                height: size.height,
+                element_point: None,
+            });
+        }
+        let point = if let Some(fingerprint) = element_fingerprint {
+            let element = locate_action_target(pid, &image_path, &fingerprint)?;
+            let owner = copy_attribute(element.0, "AXWindow").ok_or_else(bad)?;
+            if !owner.same_element(&window) {
+                return Err(failure(
+                    AgentErrorKind::InvalidInput,
+                    "Mouse element belongs to another window; no input was dispatched",
+                    false,
+                ));
+            }
+            let p = attribute_point(element.0, "AXPosition").ok_or_else(bad)?;
+            let s = attribute_size(element.0, "AXSize").ok_or_else(bad)?;
+            let mut left = p.x.max(origin.x);
+            let mut top = p.y.max(origin.y);
+            let mut right = (p.x + s.width).min(origin.x + size.width);
+            let mut bottom = (p.y + s.height).min(origin.y + size.height);
+            let mut parent = copy_attribute(element.0, "AXParent");
+            for _ in 0..32 {
+                let Some(current) = parent else { break };
+                if current.same_element(&window) {
+                    break;
+                }
+                if attribute_string(current.0, "AXRole").as_deref() == Some("AXScrollArea") {
+                    if let (Some(p), Some(s)) = (
+                        attribute_point(current.0, "AXPosition"),
+                        attribute_size(current.0, "AXSize"),
+                    ) {
+                        left = left.max(p.x);
+                        top = top.max(p.y);
+                        right = right.min(p.x + s.width);
+                        bottom = bottom.min(p.y + s.height);
+                    }
+                }
+                parent = copy_attribute(current.0, "AXParent");
+            }
+            if left >= right || top >= bottom {
+                return Err(failure(
+                    AgentErrorKind::InvalidInput,
+                    "Mouse element is outside the visible window; read or scroll before clicking",
+                    false,
+                ));
+            }
+            Some(CGPoint::new((left + right) / 2.0, (top + bottom) / 2.0))
+        } else {
+            None
+        };
+        let title = attribute_string(window.0, "AXTitle").unwrap_or_default();
+        let list = OwnedCf(unsafe { CGWindowListCopyWindowInfo(0, 0) });
+        if list.0.is_null() {
+            return Err(bad());
+        }
+        let mut candidates = Vec::new();
+        for i in 0..unsafe { CFArrayGetCount(list.0) } {
+            let row = unsafe { CFArrayGetValueAtIndex(list.0, i) };
+            let get = |key: &str| -> CfTypeRef {
+                let Some(k) = create_string(key) else {
+                    return std::ptr::null();
+                };
+                unsafe { CFDictionaryGetValue(row, k.0) }
+            };
+            let number = |key: &str| -> Option<i64> {
+                let v = get(key);
+                if v.is_null() {
+                    return None;
+                }
+                let mut n = 0i64;
+                unsafe { CFNumberGetValue(v, 4, (&mut n as *mut i64).cast()) }.then_some(n)
+            };
+            let bounds = get("kCGWindowBounds");
+            let mut rect = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(0.0, 0.0));
+            let same_bounds = !bounds.is_null()
+                && unsafe { CGRectMakeWithDictionaryRepresentation(bounds, &mut rect) }
+                && [
+                    rect.origin.x - origin.x,
+                    rect.origin.y - origin.y,
+                    rect.size.width - size.width,
+                    rect.size.height - size.height,
+                ]
+                .iter()
+                .all(|d| d.abs() < 1.0);
+            // Window names may be redacted without capture permission. PID,
+            // layer and current geometry must still identify exactly one window.
+            let name = cf_string(get("kCGWindowName"));
+            if number("kCGWindowOwnerPID") == Some(i64::from(pid))
+                && number("kCGWindowLayer") == Some(0)
+                && same_bounds
+                && name
+                    .as_ref()
+                    .is_none_or(|name| name.is_empty() || name == &title)
+            {
+                if let Some(id) = number("kCGWindowNumber") {
+                    candidates.push(id as u32);
+                }
+            }
+        }
+        if candidates.len() != 1 {
+            return Err(failure(
+                AgentErrorKind::SessionUnavailable,
+                "Cannot uniquely map the observed window to its native window ID; no input was dispatched",
+                false,
+            ));
+        }
+        Ok(super::macos_background_input::Target {
+            pid,
+            window_id: candidates[0],
+            origin,
+            width: size.width,
+            height: size.height,
+            element_point: point,
+        })
+    })
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGRectMakeWithDictionaryRepresentation(dictionary: CfTypeRef, rect: *mut CGRect) -> bool;
+    fn CGWindowListCopyWindowInfo(options: u32, relative: u32) -> CfTypeRef;
+}
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFDictionaryGetValue(dictionary: CfTypeRef, key: CfTypeRef) -> CfTypeRef;
+}
+
+#[cfg(test)]
+#[path = "macos_background_input_live_tests.rs"]
+mod background_input_live_tests;

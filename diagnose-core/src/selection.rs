@@ -96,6 +96,7 @@ fn is_allowed(cap: Capability, request: &DiagnoseRequestData, policy: &Collectio
         | Capability::AssistantActionPreview
         | Capability::ShellExecReadonly
         | Capability::ShellExecConfirmed
+        | Capability::DesktopBackgroundInputConfirmed
         | Capability::DesktopUiActionConfirmed
         | Capability::DesktopInputFallbackConfirmed
         | Capability::OfficeExcelPatchConfirmed
@@ -180,6 +181,7 @@ pub fn capability_name(cap: Capability) -> Option<&'static str> {
         | Capability::AssistantActionPreview
         | Capability::ShellExecReadonly
         | Capability::ShellExecConfirmed
+        | Capability::DesktopBackgroundInputConfirmed
         | Capability::DesktopUiActionConfirmed
         | Capability::DesktopInputFallbackConfirmed
         | Capability::OfficeExcelPatchConfirmed
@@ -284,6 +286,7 @@ pub fn context_input_for(cap: Capability) -> Option<ReadContextInput> {
         | Capability::AssistantActionPreview
         | Capability::ShellExecReadonly
         | Capability::ShellExecConfirmed
+        | Capability::DesktopBackgroundInputConfirmed
         | Capability::DesktopUiActionConfirmed
         | Capability::DesktopInputFallbackConfirmed
         | Capability::OfficeExcelPatchConfirmed

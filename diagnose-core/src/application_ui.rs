@@ -1,7 +1,8 @@
 //! Reusable application authority; native ownership is checked again at dispatch.
 
+use desk_agent_protocol::background_input::ApplicationActionKind;
 use desk_agent_protocol::computer_use::{
-    ObjectKind, ObjectRef, UiApplicationScope, UiSemanticAction, UiSemanticActionKind,
+    ObjectKind, ObjectRef, UiApplicationScope, UiSemanticAction,
 };
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ pub struct PermissionInput {
 }
 
 pub fn invalid() -> AgentError {
-    AgentError { kind: AgentErrorKind::InvalidInput, message: "Application UI scope requires an observed application reference and 1–5 unique actions (invoke, select, focus, toggle, set_value). No permission or action was created.".into(), retryable: false, safe_for_model: true, error_code: None }
+    AgentError { kind: AgentErrorKind::InvalidInput, message: "Application scope requires an observed application and 1–5 unique actions. UI actions: invoke/select/focus/toggle/set_value. Background input: click/double_click/scroll/type_text/key_press. Do not mix tool action sets. No permission or action was created.".into(), retryable: false, safe_for_model: true, error_code: None }
 }
 
 pub fn validate(scope: &UiApplicationScope) -> Result<(), AgentError> {
@@ -24,9 +25,11 @@ pub fn validate(scope: &UiApplicationScope) -> Result<(), AgentError> {
         || app.snapshot_id.is_empty()
         || scope.actions.is_empty()
         || scope.actions.len() > 5
-        || scope.actions.iter().enumerate().any(|(i, action)| {
-            *action == UiSemanticActionKind::Scroll || scope.actions[..i].contains(action)
-        })
+        || scope
+            .actions
+            .iter()
+            .enumerate()
+            .any(|(i, action)| scope.actions[..i].contains(action))
     {
         return Err(invalid());
     }
@@ -34,12 +37,31 @@ pub fn validate(scope: &UiApplicationScope) -> Result<(), AgentError> {
 }
 
 pub fn from_canonical(tool: &str, canonical: Option<&str>) -> Option<UiApplicationScope> {
-    if tool != crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL {
+    if !supports(tool) {
         return None;
     }
     let input: PermissionInput = serde_json::from_str(canonical?).ok()?;
-    validate(&input.application_scope).ok()?;
+    validate_for_tool(tool, &input.application_scope).ok()?;
     Some(input.application_scope)
+}
+
+pub fn supports(tool: &str) -> bool {
+    matches!(
+        tool,
+        "execute_confirmed_ui_action" | "execute_background_input"
+    )
+}
+pub fn validate_for_tool(tool: &str, scope: &UiApplicationScope) -> Result<(), AgentError> {
+    validate(scope)?;
+    if !supports(tool)
+        || scope
+            .actions
+            .iter()
+            .any(|a| a.is_background() != (tool == "execute_background_input"))
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 pub fn resource(application: &ObjectRef) -> Vec<String> {
@@ -51,18 +73,23 @@ pub fn resource(application: &ObjectRef) -> Vec<String> {
 
 pub fn operation(action: &UiSemanticAction) -> String {
     operation_kind(match action {
-        UiSemanticAction::Invoke => UiSemanticActionKind::Invoke,
-        UiSemanticAction::Select => UiSemanticActionKind::Select,
-        UiSemanticAction::Focus => UiSemanticActionKind::Focus,
-        UiSemanticAction::Toggle { .. } => UiSemanticActionKind::Toggle,
-        UiSemanticAction::SetValue { .. } => UiSemanticActionKind::SetValue,
-        UiSemanticAction::Scroll { .. } => UiSemanticActionKind::Scroll,
+        UiSemanticAction::Invoke => ApplicationActionKind::Invoke,
+        UiSemanticAction::Select => ApplicationActionKind::Select,
+        UiSemanticAction::Focus => ApplicationActionKind::Focus,
+        UiSemanticAction::Toggle { .. } => ApplicationActionKind::Toggle,
+        UiSemanticAction::SetValue { .. } => ApplicationActionKind::SetValue,
+        UiSemanticAction::Scroll { .. } => ApplicationActionKind::Scroll,
     })
 }
 
-pub fn operation_kind(action: UiSemanticActionKind) -> String {
+pub fn operation_kind(action: ApplicationActionKind) -> String {
     format!(
-        "ui:{}",
+        "{}:{}",
+        if action.is_background() {
+            "background_input"
+        } else {
+            "ui"
+        },
         serde_json::to_value(action).unwrap().as_str().unwrap()
     )
 }
@@ -151,8 +178,9 @@ mod tests {
         let mut duplicated = scope.clone();
         duplicated.actions.push(duplicated.actions[0]);
         assert!(validate(&duplicated).is_err());
-        duplicated.actions = vec![UiSemanticActionKind::Scroll];
-        assert!(validate(&duplicated).is_err());
+        duplicated.actions = vec![ApplicationActionKind::Scroll];
+        assert!(validate_for_tool("execute_confirmed_ui_action", &duplicated).is_err());
+        assert!(validate_for_tool("execute_background_input", &duplicated).is_ok());
     }
 
     #[test]

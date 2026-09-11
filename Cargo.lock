@@ -4959,6 +4959,7 @@ dependencies = [
  "desk-wayland-portal",
  "encoding_rs",
  "evdev",
+ "foreign-types 0.5.0",
  "futures",
  "futures-util",
  "hmac",

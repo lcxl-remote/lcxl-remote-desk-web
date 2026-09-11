@@ -434,6 +434,7 @@ mod tests {
             capability: "screen.capture.current".into(),
             outcome: AgentOutcome::Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ScreenCaptureCurrent(desk_agent_protocol::ScreenCaptureOutput {
+                    window_geometry: None,
                     display: r"\\.\DISPLAY1".into(),
                     format: desk_agent_protocol::ImageFormat::Jpeg,
                     width: 32,
@@ -476,6 +477,7 @@ mod tests {
             capability: "screen.capture.current".into(),
             outcome: AgentOutcome::Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ScreenCaptureCurrent(desk_agent_protocol::ScreenCaptureOutput {
+                    window_geometry: None,
                     display: r"\\.\DISPLAY1".into(),
                     format: desk_agent_protocol::ImageFormat::Jpeg,
                     width: 1,

@@ -45,6 +45,15 @@ pub(crate) fn collect(
     let _ = &params.display;
 
     #[cfg(target_os = "macos")]
+    let window_geometry = window_target.as_ref().map(|t| {
+        desk_agent_protocol::background_input::WindowInputGeometry {
+            width_millipoints: (t.width * 1000.0).round() as u64,
+            height_millipoints: (t.height * 1000.0).round() as u64,
+        }
+    });
+    #[cfg(not(target_os = "macos"))]
+    let window_geometry = None;
+    #[cfg(target_os = "macos")]
     let frame = if let Some(target) = window_target {
         desk_capture_engine::image_capture::mac_screencapturekit::capture_independent_window(
             &target,
@@ -86,6 +95,7 @@ pub(crate) fn collect(
         dpi_x,
         dpi_y,
         window: params.window.clone(),
+        window_geometry,
         image: png,
         // The frame is returned whole; if it had exceeded the limit the call
         // would have errored above rather than shipping a partial image.

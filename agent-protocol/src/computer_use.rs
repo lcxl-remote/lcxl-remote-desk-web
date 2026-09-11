@@ -119,6 +119,7 @@ impl std::fmt::Debug for ObjectRef {
 pub enum ComputerUseAdapterKind {
     WindowsUia,
     WindowsRawInput,
+    MacosBackgroundInput,
     MacosAccessibility,
     OfficeExcel,
     OfficePowerPoint,
@@ -744,7 +745,7 @@ pub enum UiSemanticAction {
 #[serde(deny_unknown_fields)]
 pub struct UiApplicationScope {
     pub application: ObjectRef,
-    pub actions: Vec<UiSemanticActionKind>,
+    pub actions: Vec<crate::background_input::ApplicationActionKind>,
     /// Resolved from an observed application by the server, never model authority.
     #[serde(default)]
     pub application_name: Option<String>,
@@ -1169,6 +1170,11 @@ impl FilePatchAction {
 #[serde(tag = "adapter", content = "action", rename_all = "snake_case")]
 pub enum ComputerActionKind {
     RawInput(RawInputAction),
+    BackgroundInput {
+        application: ObjectRef,
+        input: crate::background_input::BackgroundInputAction,
+        geometry: Option<crate::background_input::WindowInputGeometry>,
+    },
     Excel(ExcelPatchAction),
     PowerPoint(PowerPointPatchAction),
     SpreadsheetLive(SpreadsheetLivePatchAction),
@@ -1202,6 +1208,7 @@ impl ComputerActionKind {
         match self {
             Self::UiInApplication { .. } => Capability::DesktopUiActionConfirmed,
             Self::RawInput(_) => Capability::DesktopInputFallbackConfirmed,
+            Self::BackgroundInput { .. } => Capability::DesktopBackgroundInputConfirmed,
             Self::Excel(_) => Capability::OfficeExcelPatchConfirmed,
             Self::PowerPoint(_) => Capability::OfficePowerPointPatchConfirmed,
             Self::SpreadsheetLive(_) => Capability::SpreadsheetLivePatchConfirmed,
@@ -1451,10 +1458,12 @@ fn validate_actions(
             max: MAX_COMPUTER_ACTIONS,
         });
     }
-    if actions
-        .iter()
-        .any(|step| matches!(step.action, ComputerActionKind::RawInput(_)))
-        && actions.len() != 1
+    if actions.iter().any(|step| {
+        matches!(
+            step.action,
+            ComputerActionKind::RawInput(_) | ComputerActionKind::BackgroundInput { .. }
+        )
+    }) && actions.len() != 1
     {
         return Err(ComputerUseValidationError::InvalidContextReference(
             "raw input fallback plans must contain exactly one action",
@@ -1469,6 +1478,9 @@ fn validate_actions(
             (
                 ComputerUseAdapterKind::WindowsUia | ComputerUseAdapterKind::MacosAccessibility,
                 ComputerActionKind::UiInApplication { .. }
+            ) | (
+                ComputerUseAdapterKind::MacosBackgroundInput,
+                ComputerActionKind::BackgroundInput { .. }
             ) | (
                 ComputerUseAdapterKind::WindowsRawInput,
                 ComputerActionKind::RawInput(_)
@@ -1503,11 +1515,30 @@ fn validate_actions(
         if !adapter_matches {
             return Err(ComputerUseValidationError::IncompatibleActionAdapter);
         }
+        if let ComputerActionKind::BackgroundInput {
+            application, input, ..
+        } = &step.action
+        {
+            if application.object_kind != ObjectKind::Application
+                || application.token.is_empty()
+                || application.snapshot_id.is_empty()
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "background input requires an application reference",
+                ));
+            }
+            input
+                .validate()
+                .map_err(ComputerUseValidationError::InvalidContextReference)?;
+        }
         let target_matches = matches!(
             (&step.action, step.target.object_kind),
             (
                 ComputerActionKind::UiInApplication { .. },
                 ObjectKind::UiElement
+            ) | (
+                ComputerActionKind::BackgroundInput { .. },
+                ObjectKind::Window
             ) | (ComputerActionKind::RawInput(_), ObjectKind::Application)
                 | (ComputerActionKind::Excel(_), ObjectKind::Range)
                 | (ComputerActionKind::PowerPoint(_), ObjectKind::Shape)

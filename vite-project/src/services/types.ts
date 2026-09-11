@@ -177,6 +177,23 @@ export type AiProvenance = {
     model_id?: string | null;
 };
 
+export const applicationActionKindEnum = {
+    invoke: "invoke",
+    select: "select",
+    focus: "focus",
+    toggle: "toggle",
+    set_value: "set_value",
+    click: "click",
+    double_click: "double_click",
+    scroll: "scroll",
+    type_text: "type_text",
+    key_press: "key_press"
+} as const;
+
+export type ApplicationActionKindEnumKey = (typeof applicationActionKindEnum)[keyof typeof applicationActionKindEnum];
+
+export type ApplicationActionKind = ApplicationActionKindEnumKey;
+
 export type ApprovalAckParams = {
     /**
      * @type string
@@ -2314,19 +2331,6 @@ export type SnapshotMessageDto = {
     turnId?: string | null;
 };
 
-export const uiSemanticActionKindEnum = {
-    invoke: "invoke",
-    toggle: "toggle",
-    select: "select",
-    set_value: "set_value",
-    scroll: "scroll",
-    focus: "focus"
-} as const;
-
-export type UiSemanticActionKindEnumKey = (typeof uiSemanticActionKindEnum)[keyof typeof uiSemanticActionKindEnum];
-
-export type UiSemanticActionKind = UiSemanticActionKindEnumKey;
-
 export const objectKindEnum = {
     desktop_session: "desktop_session",
     application: "application",
@@ -2350,11 +2354,11 @@ export type ObjectKindEnumKey = (typeof objectKindEnum)[keyof typeof objectKindE
 export type ObjectKind = ObjectKindEnumKey;
 
 /**
- * @description Short-lived, device-issued reference to an observed object.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
+ * @description Device-issued reference to an observed object. Desktop references follow native lifetimes.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
 */
 export type ObjectRef = {
     /**
-     * @description RFC3339 timestamp. Kept as a string to avoid imposing a clock library on\nthis pure protocol crate.
+     * @description Empty for lifecycle-bound desktop objects; RFC3339 for other object types.\nThis field never grants authority.
      * @type string
     */
     expires_at: string;
@@ -2379,9 +2383,9 @@ export type UiApplicationScope = {
     /**
      * @type array
     */
-    actions: UiSemanticActionKind[];
+    actions: ApplicationActionKind[];
     /**
-     * @description Short-lived, device-issued reference to an observed object.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
+     * @description Device-issued reference to an observed object. Desktop references follow native lifetimes.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
      * @type object
     */
     application: ObjectRef;

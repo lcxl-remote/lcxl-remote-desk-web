@@ -5,6 +5,8 @@
 //! unclassified local input, cancellation, expiry, or a generation mismatch
 //! makes further steps fail closed. Invalidating a lease does not prove the
 //! outstanding adapter operation stopped; only its release frees the writer.
+//! Background application input ignores foreground human input, but still obeys
+//! explicit cancellation, session changes and the lease deadline.
 
 use std::sync::Mutex;
 
@@ -15,6 +17,7 @@ use desk_agent_protocol::{AgentError, AgentErrorKind};
 pub enum InputPreemptionSource {
     Browser,
     LocalExternal,
+    SessionChanged,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +35,7 @@ pub struct WriterLeaseRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WriterLeaseScope {
     InteractiveSession,
+    BackgroundApplication,
     FileWorker,
 }
 
@@ -80,7 +84,8 @@ impl WriterLeaseCoordinator {
         if let Some(existing) = slot.as_ref() {
             if existing.status == WriterLeaseStatus::Active
                 && existing.request == request
-                && existing.input_epoch_at_acquire == current_input_epoch
+                && (existing.request.scope == WriterLeaseScope::BackgroundApplication
+                    || existing.input_epoch_at_acquire == current_input_epoch)
             {
                 return Ok(existing.clone());
             }
@@ -127,7 +132,9 @@ impl WriterLeaseCoordinator {
                 false,
             ));
         }
-        if state.input_epoch_at_acquire != current_input_epoch {
+        if state.request.scope != WriterLeaseScope::BackgroundApplication
+            && state.input_epoch_at_acquire != current_input_epoch
+        {
             return Err(error(
                 AgentErrorKind::Cancelled,
                 "Computer Use writer lease was preempted by user input",
@@ -156,6 +163,11 @@ impl WriterLeaseCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(state) = slot.as_mut()
             && state.status == WriterLeaseStatus::Active
+            && !(state.request.scope == WriterLeaseScope::BackgroundApplication
+                && matches!(
+                    source,
+                    InputPreemptionSource::Browser | InputPreemptionSource::LocalExternal
+                ))
         {
             state.status = WriterLeaseStatus::Preempted(source);
         }
@@ -433,5 +445,43 @@ mod tests {
             assert!(!leases.release("generation-1"));
             assert!(leases.require_active("generation-2", epoch).is_ok());
         }
+    }
+    #[test]
+    fn background_input_ignores_foreground_human_input_but_honors_cancel_and_expiry() {
+        let leases = WriterLeaseCoordinator::new();
+        let mut request = request("background");
+        request.scope = WriterLeaseScope::BackgroundApplication;
+        leases.acquire(request.clone(), 0).unwrap();
+        for source in [
+            InputPreemptionSource::Browser,
+            InputPreemptionSource::LocalExternal,
+        ] {
+            leases.preempt(source);
+            assert!(leases.require_active("background", 10).is_ok());
+            assert!(leases.acquire(request.clone(), 10).is_ok());
+        }
+        let cancel = desk_agent_protocol::computer_use::ComputerActionCancel {
+            work_id: request.work_id.clone(),
+            action_request_id: request.action_request_id.clone(),
+            execution_generation: request.execution_generation.clone(),
+            reason: "owner stopped".into(),
+        };
+        assert!(leases.cancel(&cancel, &request.approved_actor_id));
+        assert!(leases.require_active("background", 10).is_err());
+        leases.release("background");
+        leases.acquire(request.clone(), 10).unwrap();
+        leases.preempt(InputPreemptionSource::SessionChanged);
+        assert!(leases.require_active("background", 10).is_err());
+        leases.release("background");
+        leases.acquire(request, 10).unwrap();
+        leases
+            .state
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .request
+            .expires_at = Utc::now() - Duration::seconds(1);
+        assert!(leases.require_active("background", 10).is_err());
     }
 }

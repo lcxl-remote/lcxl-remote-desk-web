@@ -30,6 +30,7 @@ mod agent_loop_acceptance;
 pub mod agentic_prompt;
 pub mod application_ui;
 pub mod assistant_policy;
+pub mod background_input;
 pub mod browser_control;
 pub mod capability_availability;
 pub mod capability_disclosure;

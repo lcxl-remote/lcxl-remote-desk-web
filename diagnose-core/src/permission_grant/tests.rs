@@ -771,3 +771,148 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
         );
     }
 }
+
+#[test]
+fn background_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
+    use crate::capability_grant::match_capability_grant;
+    use crate::provider_preflight::{BackgroundInputCallPreflight, ProviderCallSubject};
+    let (mut session, _, _) = decision_fixture();
+    session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
+    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let app = serde_json::json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
+    let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"execute_background_input", "application_scope":{"application":app,"actions":["key_press","type_text"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
+    let request = crate::permission_tools::build_permission_request(
+        &planning,
+        &registry,
+        "permission-app".into(),
+        1,
+        "2026-09-11T03:09:00Z".into(),
+    )
+    .unwrap();
+    let item = &request.items[0];
+    assert_eq!(item.suggested_max_uses, 12);
+    let inventory = vec![CapabilityAvailability {
+        provider_id: item.provider_id.clone(),
+        capability_id: registry
+            .capability_for_tool(&item.tool_name)
+            .unwrap()
+            .wire
+            .capability_id
+            .clone(),
+        tool_name: item.tool_name.clone(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let decisions = vec![PermissionDecisionItem {
+        item_id: item.item_id.clone(),
+        decision: PermissionItemDecision::Approve {
+            resource_scope: item.resource_scope.clone(),
+            operation_scope: vec!["background_input:type_text".into()],
+            export_destinations: vec![],
+            ttl_seconds: 120,
+            max_uses: 8,
+        },
+    }];
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-11T03:09:00Z")
+        .unwrap()
+        .timestamp_millis() as u64;
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let context = PermissionGrantIssuanceContext {
+            surface,
+            registry: &registry,
+            inventory: &inventory,
+            readiness_revision: 7,
+            now_unix_ms: now,
+            implicit_fresh_object_refs: &[],
+        };
+        let grant = build_permission_grants(&session, &request, &decisions, &context, None)
+            .unwrap()
+            .remove(0);
+        assert_eq!(grant.use_policy, CapabilityGrantUsePolicy::Reusable);
+        assert_eq!(grant.remaining_uses, 8);
+        assert_eq!(grant.expires_at_unix_ms, now + 120_000);
+        assert!(grant.canonical_input_digest_sha256.is_none());
+        // A persisted exact UI grant cannot be re-advertised by a later turn.
+        let mut old_grant = grant.clone();
+        old_grant.canonical_input_digest_sha256 = item.canonical_input_digest_sha256.clone();
+        let mut approved = request.clone();
+        approved.state = crate::dynamic_run::PermissionRequestState::Approved;
+        let prompt = crate::permission_tools::capability_authorization_prompt(
+            &[old_grant.clone()],
+            &[approved.clone()],
+            now,
+            session.input_revision,
+            7,
+        );
+        assert!(prompt.text.contains("schema_incompatible"));
+        assert!(
+            crate::permission_tools::active_exact_authorized_tool_names(
+                &[old_grant],
+                &[approved],
+                now,
+                session.input_revision,
+                7
+            )
+            .is_empty()
+        );
+        let mut input = serde_json::json!({"application":app,"target":{"token":"date-control","snapshot_id":"ui","object_kind":"window","expires_at":"2026-09-11T03:10:00Z"},"action":{"kind":"type_text","text":"09:00"}});
+        let call = |input: &serde_json::Value| crate::chat::ToolCall {
+            id: "call".into(),
+            name: item.tool_name.clone(),
+            arguments_json: input.to_string(),
+        };
+        let subject = ProviderCallSubject {
+            actor_id: &session.actor_id,
+            run_id: &session.conversation_id,
+            input_revision: 99,
+            target_device_id: &session.device_id,
+            policy_revision: session.policy_revision,
+            readiness_revision: 7,
+            now_unix_ms: now + 1000,
+        };
+        let preflight =
+            BackgroundInputCallPreflight::build(&registry, surface, &call(&input), now + 1000)
+                .unwrap();
+        assert!(match_capability_grant(&grant, &preflight.grant_call(&subject).unwrap()).is_ok());
+        input["target"]["token"] = serde_json::json!("another-calendar-control");
+        let other =
+            BackgroundInputCallPreflight::build(&registry, surface, &call(&input), now + 1000)
+                .unwrap();
+        assert!(match_capability_grant(&grant, &other.grant_call(&subject).unwrap()).is_ok());
+        input["application"]["token"] = serde_json::json!("other-app");
+        let other =
+            BackgroundInputCallPreflight::build(&registry, surface, &call(&input), now + 1000)
+                .unwrap();
+        assert!(match_capability_grant(&grant, &other.grant_call(&subject).unwrap()).is_err());
+        input["application"] = app.clone();
+        input["action"] = serde_json::json!({"kind":"key_press","key":"Enter"});
+        let other =
+            BackgroundInputCallPreflight::build(&registry, surface, &call(&input), now + 1000)
+                .unwrap();
+        assert!(match_capability_grant(&grant, &other.grant_call(&subject).unwrap()).is_err());
+        input["action"] = serde_json::json!({"kind":"type_text","text":"meeting"});
+        let later =
+            BackgroundInputCallPreflight::build(&registry, surface, &call(&input), now + 60_000)
+                .unwrap();
+        let still_authorized = ProviderCallSubject {
+            now_unix_ms: now + 60_000,
+            ..subject
+        };
+        assert!(
+            match_capability_grant(&grant, &later.grant_call(&still_authorized).unwrap()).is_ok()
+        );
+        let expired_grant = ProviderCallSubject {
+            now_unix_ms: now + 120_000,
+            ..still_authorized
+        };
+        assert!(
+            match_capability_grant(&grant, &later.grant_call(&expired_grant).unwrap()).is_err()
+        );
+    }
+}

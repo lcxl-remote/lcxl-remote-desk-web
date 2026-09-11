@@ -10,6 +10,10 @@ import { AssistantPermissionDisclosure } from './assistant-permission-disclosure
 import { CommandConfirmationCard, validCommandReview } from './device-assistant-command';
 import { TextFileConfirmationCard, validTextFileReview, fileApprovalBlocked } from './device-assistant-file-confirmation';
 
+function needsApplicationScope(tool: string) {
+    return ['execute_confirmed_ui_action', 'execute_background_input'].includes(tool);
+}
+
 function formatByteCount(value: number) {
     if (value < 1024) return `${value} B`;
     if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
@@ -95,7 +99,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     {t(`pages.deviceAssistant.permissionState.${request.state}`)}
                 </Badge>
             </div>
-            {request.items.some((item) => ['execute_confirmed_ui_action', 'execute_confirmed_raw_input'].includes(item.toolName))
+            {request.items.some((item) => ['execute_confirmed_ui_action', 'execute_background_input', 'execute_confirmed_raw_input'].includes(item.toolName))
                 && ['inspect_desktop_session', 'inspect_desktop_ui'].every((name) => request.items.some((item) => item.toolName === name)) && (
                 <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.permissionIncludedDesktopReads')}</p>
             )}
@@ -108,7 +112,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                         .filter((entry) => (entry.expectedEffect !== 'send_external'
                             || Boolean(entry.externalSendConfirmation))
                             && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
-                            && (entry.toolName !== 'execute_confirmed_ui_action' || Boolean(entry.applicationScope))
+                            && (!needsApplicationScope(entry.toolName) || Boolean(entry.applicationScope))
                             && !fileApprovalBlocked(entry))
                         .map((entry) => entry.itemId);
                     const selected = permissionSelections[request.requestId]
@@ -118,7 +122,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     const sendConfirmation = item.externalSendConfirmation;
                     const commandConfirmation = item.commandConfirmation;
                     const commandBlocked = item.toolName === 'execute_confirmed_command' && !validCommandReview(commandConfirmation);
-                    const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || (item.toolName === 'execute_confirmed_ui_action' && !item.applicationScope) || fileApprovalBlocked(item);
+                    const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || (needsApplicationScope(item.toolName) && !item.applicationScope) || fileApprovalBlocked(item);
                     const edit = permissionEdits[request.requestId]?.[item.itemId]
                         ?? {};
                     const resourceScope = edit.resourceScope
@@ -198,7 +202,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 )}
                                 {approvalBlocked && (
                                     <p className="mt-2 text-xs font-medium text-red-700 dark:text-red-300">
-                                        {t(item.toolName === 'execute_confirmed_ui_action' && !item.applicationScope ? 'pages.deviceAssistant.applicationUiScopeMissing' : fileApprovalBlocked(item) ? 'pages.deviceAssistant.fileConfirmMissing'
+                                        {t(needsApplicationScope(item.toolName) && !item.applicationScope ? 'pages.deviceAssistant.applicationUiScopeMissing' : fileApprovalBlocked(item) ? 'pages.deviceAssistant.fileConfirmMissing'
                                             : commandBlocked ? 'pages.deviceAssistant.commandSummaryMissing' : 'pages.deviceAssistant.externalSendSummaryMissing')}
                                     </p>
                                 )}
@@ -228,7 +232,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                                 item.resourceScope,
                                                             )}
                                                         />
-                                                        <span className="break-all">{item.applicationScope ? (scope.startsWith('ui:') ? t(`pages.deviceAssistant.uiAction_${scope.slice(3)}`) : item.applicationScope.application_name) : scope}</span>
+                                                        <span className="break-all">{item.applicationScope ? (/^(ui|background_input):/.test(scope) ? t(`pages.deviceAssistant.uiAction_${scope.split(':')[1]}`) : item.applicationScope.application_name) : scope}</span>
                                                     </label>
                                                 ))}
                                             </div>
@@ -250,7 +254,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                                 item.operationScope,
                                                             )}
                                                         />
-                                                        <span className="break-all">{item.applicationScope ? (scope.startsWith('ui:') ? t(`pages.deviceAssistant.uiAction_${scope.slice(3)}`) : item.applicationScope.application_name) : scope}</span>
+                                                        <span className="break-all">{item.applicationScope ? (/^(ui|background_input):/.test(scope) ? t(`pages.deviceAssistant.uiAction_${scope.split(':')[1]}`) : item.applicationScope.application_name) : scope}</span>
                                                     </label>
                                                 ))}
                                             </div>
@@ -353,14 +357,14 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                         .filter((entry) => (entry.expectedEffect !== 'send_external'
                                             || Boolean(entry.externalSendConfirmation))
                                             && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
-                                            && (entry.toolName !== 'execute_confirmed_ui_action' || Boolean(entry.applicationScope))
+                                            && (!needsApplicationScope(entry.toolName) || Boolean(entry.applicationScope))
                                             && !fileApprovalBlocked(entry))
                                         .map((entry) => entry.itemId);
                                 if (!selected.includes(item.itemId)
                                     || (item.expectedEffect === 'send_external'
                                         && !item.externalSendConfirmation)
                                     || (item.toolName === 'execute_confirmed_command' && !validCommandReview(item.commandConfirmation))
-                                    || fileApprovalBlocked(item) || (item.toolName === 'execute_confirmed_ui_action' && !item.applicationScope)) {
+                                    || fileApprovalBlocked(item) || (needsApplicationScope(item.toolName) && !item.applicationScope)) {
                                     return {
                                         itemId: item.itemId,
                                         decision: 'deny' as const,

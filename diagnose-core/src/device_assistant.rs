@@ -26,6 +26,7 @@ use crate::read_tools::{device_assistant_read_tool_registry, read_tool_registry}
 use crate::registry::{RegisteredTool, ToolEffect};
 
 pub const PREVIEW_COMPUTER_ACTION_TOOL: &str = "preview_computer_action";
+pub const EXECUTE_BACKGROUND_INPUT_TOOL: &str = "execute_background_input";
 pub const EXECUTE_CONFIRMED_UI_ACTION_TOOL: &str = "execute_confirmed_ui_action";
 pub const EXECUTE_CONFIRMED_RAW_INPUT_TOOL: &str = "execute_confirmed_raw_input";
 
@@ -221,6 +222,7 @@ pub const GMAIL_WEB_ADAPTER_ID: &str = "communication.gmail_web.semantic.edge";
 pub const SLACK_WEB_ADAPTER_ID: &str = "communication.slack_web.semantic.edge";
 pub const DESKTOP_SESSION_ADAPTER_VERSION: &str = "a3-observation-core/v1";
 pub const WINDOWS_UIA_ADAPTER_VERSION: &str = "a4-windows-uia-read/v1";
+pub const MACOS_BACKGROUND_INPUT_ADAPTER_VERSION: &str = "macos-background-input/v1";
 pub const MACOS_ACCESSIBILITY_ADAPTER_VERSION: &str = "macos-accessibility-read/v1";
 pub const WINDOWS_RAW_INPUT_ADAPTER_VERSION: &str = "windows-sendinput-single-step/v1";
 pub const OFFICE_EXCEL_ADAPTER_VERSION: &str = "office-js-bridge-read/v1";
@@ -323,6 +325,7 @@ pub fn retain_selected_context_tools(
             || SYSTEM_DIAGNOSTIC_TOOL_NAMES.contains(&tool.name())
             || tool.name() == "execute_confirmed_command"
             || tool.name() == EXECUTE_CONFIRMED_UI_ACTION_TOOL
+            || tool.name() == EXECUTE_BACKGROUND_INPUT_TOOL
             || tool.name() == EXECUTE_CONFIRMED_RAW_INPUT_TOOL
             || matches!(
                 tool.name(),
@@ -611,6 +614,7 @@ pub fn provider_readiness_reports(
                     _ => WINDOWS_UIA_ADAPTER_ID,
                 },
             ),
+            Capability::DesktopBackgroundInputConfirmed => ("desktop.input.background", "desktop.input.background.confirmed", "macos.background_input"),
             Capability::DesktopInputFallbackConfirmed => (
                 DESKTOP_RAW_INPUT_PROVIDER_ID,
                 DESKTOP_RAW_INPUT_CAPABILITY_ID,
@@ -2372,6 +2376,26 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
         vec![AuthorizationResourceKind::FreshObjectReference],
         execute_confirmed_ui_action_tool(),
     );
+    let mut background_input = provider_for_tool(
+        "desktop.input.background",
+        "desktop.input.background.confirmed",
+        "assistant.capability.desktopBackgroundInput",
+        vec!["macos.background_input".into()],
+        ExecutionLocality::Edge,
+        CapabilityEffect::MutateApplication,
+        1,
+        Vec::new(),
+        vec![CapabilityDataCategory::UiSemanticTree],
+        vec![AuthorizationResourceKind::FreshObjectReference],
+        crate::background_input::tool(),
+    );
+    background_input.wire.capabilities[0]
+        .prerequisites
+        .platforms = vec![CapabilityPlatform::Macos];
+    background_input.capabilities[0]
+        .wire
+        .prerequisites
+        .platforms = vec![CapabilityPlatform::Macos];
     let mut raw_input = provider_for_tool(
         DESKTOP_RAW_INPUT_PROVIDER_ID,
         DESKTOP_RAW_INPUT_CAPABILITY_ID,
@@ -3033,6 +3057,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
         .register(system_command)
         .register(ui)
         .register(ui_action)
+        .register(background_input)
         .register(raw_input)
         .register(office)
         .register(spreadsheet_live)
@@ -3139,6 +3164,11 @@ pub fn device_assistant_edge_adapter_registry() -> EdgeAdapterRegistry {
                 .wire
                 .limits,
         })
+        .register(adapter(
+            "macos.background_input",
+            MACOS_BACKGROUND_INPUT_ADAPTER_VERSION,
+            "desktop.input.background.confirmed",
+        ))
         .register(adapter(
             OFFICE_EXCEL_ADAPTER_ID,
             OFFICE_EXCEL_ADAPTER_VERSION,
@@ -3563,7 +3593,7 @@ mod tests {
     #[test]
     fn registry_contains_reads_preview_and_bounded_artifact_create() {
         let tools = device_assistant_tool_registry();
-        assert_eq!(tools.len(), 51);
+        assert_eq!(tools.len(), 52);
         assert_eq!(
             tools
                 .iter()
@@ -3581,6 +3611,7 @@ mod tests {
                 "create_word_report_from_merge_preview",
                 "create_workbook_from_merge_preview",
                 "delete_text_file",
+                EXECUTE_BACKGROUND_INPUT_TOOL,
                 "execute_confirmed_command",
                 EXECUTE_CONFIRMED_RAW_INPUT_TOOL,
                 EXECUTE_CONFIRMED_UI_ACTION_TOOL,
@@ -3676,7 +3707,7 @@ mod tests {
     #[test]
     fn provider_inventory_is_static_complete_and_secret_free() {
         let registry = device_assistant_provider_registry();
-        assert_eq!(registry.providers().len(), 41);
+        assert_eq!(registry.providers().len(), 42);
         for provider in registry.providers() {
             provider.validate().unwrap();
         }
@@ -3779,6 +3810,7 @@ mod tests {
         legacy.push(search_public_web_tool());
         legacy.push(execute_confirmed_command_tool());
         legacy.push(execute_confirmed_ui_action_tool());
+        legacy.push(crate::background_input::tool());
         legacy.push(execute_confirmed_raw_input_tool());
         legacy.push(browser_open_tool());
         legacy.push(browser_navigate_tool());
@@ -3966,6 +3998,7 @@ mod tests {
                 "create_local_communication_draft",
                 "create_text_artifact_in_selected_directory",
                 "delete_text_file",
+                EXECUTE_BACKGROUND_INPUT_TOOL,
                 "execute_confirmed_command",
                 EXECUTE_CONFIRMED_RAW_INPUT_TOOL,
                 EXECUTE_CONFIRMED_UI_ACTION_TOOL,
@@ -3996,6 +4029,7 @@ mod tests {
                 "create_local_communication_draft",
                 "create_text_artifact_in_selected_directory",
                 "delete_text_file",
+                EXECUTE_BACKGROUND_INPUT_TOOL,
                 "execute_confirmed_command",
                 EXECUTE_CONFIRMED_RAW_INPUT_TOOL,
                 EXECUTE_CONFIRMED_UI_ACTION_TOOL,

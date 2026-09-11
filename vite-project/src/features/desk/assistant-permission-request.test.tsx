@@ -28,6 +28,19 @@ describe('shared permission review', () => {
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', resource_scope: ['ui_application:sha256:opaque'], operation_scope: ['ui:set_value'], max_uses: 8 });
     });
+    it('shows background input scope and narrows actions independently of semantic UI', () => {
+        const onDecide = vi.fn().mockResolvedValue(true);
+        const value = request([item({ itemId: 'app', toolName: 'execute_background_input', expectedEffect: 'mutate_application',
+            resourceScope: ['ui_application:sha256:opaque'], operationScope: ['background_input:click', 'background_input:type_text'], suggestedMaxUses: 8,
+            applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Calendar', actions: ['click', 'type_text'] },
+        })]);
+        render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
+        expect(screen.getByTestId('application-ui-scope')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', { name: 'Calendar' })).toBeChecked();
+        fireEvent.click(screen.getByRole('checkbox', { name: 'pages.deviceAssistant.uiAction_click' }));
+        fireEvent.click(submit());
+        expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', resource_scope: ['ui_application:sha256:opaque'], operation_scope: ['background_input:type_text'], max_uses: 8 });
+    });
     it('rejects native UI approval without an application scope', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         render(<AssistantPermissionRequest request={request([item({ toolName: 'execute_confirmed_ui_action', expectedEffect: 'mutate_application' })])} canDecide onDecide={onDecide} />);

@@ -95,25 +95,31 @@ use desk_diagnose_core::permission_resume::{
     authorized_permission_resume_message, bind_exact_authorization_system_message,
 };
 
-fn extend_fixed_exact_action_capabilities(
+/// Keep action tools in the planning scope without attaching an observation.
+/// The grant store still checks the current application/action or exact grant.
+fn extend_application_and_exact_action_capabilities(
     registry: &[RegisteredTool],
     granted: &mut Vec<desk_agent_protocol::Capability>,
 ) {
-    if registry.iter().any(|tool| {
-        tool.name() == desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
-    }) && !granted.contains(&desk_agent_protocol::Capability::DesktopUiActionConfirmed)
-    {
-        // The model-facing tool remains callable after a context attachment
-        // expires so an owner-approved exact grant can resume. The grant store
-        // still binds the call to the exact object, input, device, actor, TTL,
-        // and one-shot use before the edge sees any action.
-        granted.push(desk_agent_protocol::Capability::DesktopUiActionConfirmed);
-    }
-    if registry.iter().any(|tool| {
-        tool.name() == desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL
-    }) && !granted.contains(&desk_agent_protocol::Capability::DesktopInputFallbackConfirmed)
-    {
-        granted.push(desk_agent_protocol::Capability::DesktopInputFallbackConfirmed);
+    use desk_agent_protocol::Capability;
+    use desk_diagnose_core::device_assistant::*;
+    for (tool, capability) in [
+        (
+            EXECUTE_CONFIRMED_UI_ACTION_TOOL,
+            Capability::DesktopUiActionConfirmed,
+        ),
+        (
+            EXECUTE_BACKGROUND_INPUT_TOOL,
+            Capability::DesktopBackgroundInputConfirmed,
+        ),
+        (
+            EXECUTE_CONFIRMED_RAW_INPUT_TOOL,
+            Capability::DesktopInputFallbackConfirmed,
+        ),
+    ] {
+        if registry.iter().any(|entry| entry.name() == tool) && !granted.contains(&capability) {
+            granted.push(capability);
+        }
     }
 }
 
@@ -121,6 +127,7 @@ fn capability_enables_mutation(capability: &desk_agent_protocol::Capability) -> 
     matches!(
         capability,
         desk_agent_protocol::Capability::DesktopUiActionConfirmed
+            | desk_agent_protocol::Capability::DesktopBackgroundInputConfirmed
             | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
             | desk_agent_protocol::Capability::FileArtifactCreateConfirmed
             | desk_agent_protocol::Capability::FilePatchConfirmed
@@ -1357,6 +1364,8 @@ async fn compose_turn_inner(
         .insert(desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL.into());
     selected_source_tools
         .insert(desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL.into());
+    selected_source_tools
+        .insert(desk_diagnose_core::device_assistant::EXECUTE_BACKGROUND_INPUT_TOOL.into());
     let turn_id = scheduled
         .as_ref()
         .map(|resume| resume.claimed.run.turn_id.clone())
@@ -1720,7 +1729,7 @@ async fn compose_turn_inner(
             granted.push(capability);
         }
     }
-    extend_fixed_exact_action_capabilities(&registry, &mut granted);
+    extend_application_and_exact_action_capabilities(&registry, &mut granted);
     granted.extend(desk_diagnose_core::device_assistant::system_diagnostic_capabilities());
     // The command Provider itself remains a fixed R3 one-shot exact grant.
     // These two edge capabilities only let the daemon accept the server-owned
@@ -2347,7 +2356,7 @@ mod tests {
         let mut granted =
             desk_diagnose_core::device_assistant::selected_context_capabilities(&[]).unwrap();
 
-        extend_fixed_exact_action_capabilities(&tools, &mut granted);
+        extend_application_and_exact_action_capabilities(&tools, &mut granted);
 
         assert!(
             granted.contains(&desk_agent_protocol::Capability::DesktopUiActionConfirmed),
@@ -2357,17 +2366,21 @@ mod tests {
             granted.contains(&desk_agent_protocol::Capability::DesktopInputFallbackConfirmed),
             "an exact approved raw-input fallback must remain callable after its observation attachment expires"
         );
+        assert!(
+            granted.contains(&desk_agent_protocol::Capability::DesktopBackgroundInputConfirmed)
+        );
         assert!(granted.iter().any(capability_enables_mutation));
 
         tools.retain(|tool| {
             !matches!(
                 tool.name(),
                 desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+                    | desk_diagnose_core::device_assistant::EXECUTE_BACKGROUND_INPUT_TOOL
                     | desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL
             )
         });
         let mut unavailable = Vec::new();
-        extend_fixed_exact_action_capabilities(&tools, &mut unavailable);
+        extend_application_and_exact_action_capabilities(&tools, &mut unavailable);
         assert!(unavailable.is_empty());
     }
 

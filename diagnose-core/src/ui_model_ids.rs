@@ -21,6 +21,7 @@ fn fields(tool: &str) -> &'static [(&'static str, &'static str)] {
             &[("application", "application_id"), ("target", "element_id")]
         }
         "inspect_desktop_ui" => &[("root", "root_id")],
+        "execute_background_input" => &[("application", "application_id"), ("target", "window_id")],
         "execute_confirmed_raw_input" => &[("target", "application_id")],
         "read_current_screen" => &[("window", "window_id")],
         _ => &[],
@@ -155,6 +156,60 @@ pub fn resolve_call(
             r#"Required shape: {"application_id":"<application ID>","element_id":"<control ID>","action":{"kind":"invoke"}}. set_value uses {"kind":"set_value","params":{"value":"text"}}. No action was executed."#,
         ));
     }
+    if call.name == "execute_background_input" {
+        if object.contains_key("geometry") {
+            return Err(invalid(
+                "The server supplies window geometry; do not provide geometry",
+            ));
+        }
+        let window = object.get("target").cloned().unwrap_or(Value::Null);
+        let mut geometry = Value::Null;
+        for message in history
+            .iter()
+            .rev()
+            .filter(|m| m.role == crate::chat::ChatRole::Tool)
+        {
+            let from_capture = message.tool_call_id.as_ref().is_some_and(|id| {
+                history
+                    .iter()
+                    .filter(|m| m.role == ChatRole::Assistant)
+                    .flat_map(|m| &m.tool_calls)
+                    .any(|c| &c.id == id && c.name == "read_current_screen")
+            });
+            if !from_capture {
+                continue;
+            }
+            let Ok(output) = serde_json::from_str::<Value>(&message.text) else {
+                continue;
+            };
+            if let Some(frame) = output.pointer("/ReadContext/ScreenCaptureCurrent") {
+                if frame.get("window") == Some(&window) {
+                    geometry = frame.get("window_geometry").cloned().unwrap_or(Value::Null);
+                    break;
+                }
+            }
+        }
+        object.insert("geometry".into(), geometry);
+        if let Some(action) = object.get_mut("action").and_then(Value::as_object_mut) {
+            if action.contains_key("element") {
+                return Err(invalid(
+                    "Use action.element_id, not a full element reference",
+                ));
+            }
+            if let Some(id) = action.remove("element_id") {
+                let reference = resolve(
+                    history,
+                    id.as_str()
+                        .ok_or_else(|| invalid("element_id must be a string"))?,
+                    now_ms,
+                )?;
+                if reference.object_kind != ObjectKind::UiElement {
+                    return Err(invalid("element_id must identify a UI element"));
+                }
+                action.insert("element".into(), json!(reference));
+            }
+        }
+    }
     if call.name == "request_capability_grants" {
         if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
             for item in items {
@@ -172,7 +227,10 @@ pub fn resolve_call(
                     }
                     continue;
                 }
-                if item["tool_name"] != "execute_confirmed_ui_action" {
+                if !matches!(
+                    item["tool_name"].as_str(),
+                    Some("execute_confirmed_ui_action" | "execute_background_input")
+                ) {
                     continue;
                 }
                 let scope = item.get_mut("application_scope").and_then(Value::as_object_mut)
@@ -208,6 +266,17 @@ pub fn resolve_call(
 }
 
 fn project_arguments(tool: &str, value: &mut Value) {
+    if tool == "execute_background_input" {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("geometry");
+        }
+        if let Some(action) = value.get_mut("action").and_then(Value::as_object_mut) {
+            if let Some(element) = action.remove("element") {
+                action.insert("element_id".into(), element["token"].clone());
+            }
+        }
+    }
+
     if let Some(object) = value.as_object_mut() {
         for (internal, model) in fields(tool) {
             if let Some(reference) = object.remove(*internal) {
@@ -660,5 +729,60 @@ mod tests {
             &original.arguments_json,
             &resolved.arguments_json
         ));
+    }
+    #[test]
+    fn background_ids_resolve_and_geometry_is_server_owned() {
+        let mut messages = history();
+        let window = reference("window", "native", "window", "2000-01-01T00:00:00Z");
+        messages.push(ChatMessage::assistant_tool_calls(
+            "windows",
+            "",
+            vec![ToolCallRef {
+                id: "windows-call".into(),
+                name: "inspect_desktop_ui".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        messages.push(ChatMessage::tool_result("windows-result","windows-call",json!({"ReadContext":{"DesktopUiInspect":{"owner_selectable_windows":[window.clone()]}}}).to_string()));
+        let geometry = json!({"width_millipoints":600000,"height_millipoints":400000});
+        messages.push(ChatMessage::assistant_tool_calls(
+            "capture",
+            "",
+            vec![ToolCallRef {
+                id: "capture-call".into(),
+                name: "read_current_screen".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        messages.push(ChatMessage::tool_result("image","capture-call",json!({"ReadContext":{"ScreenCaptureCurrent":{"window":window,"window_geometry":geometry}}}).to_string()));
+        let original = call(
+            "execute_background_input",
+            json!({"application_id":"calendar","window_id":"window","action":{"kind":"click","element_id":"date"}}),
+        );
+        let resolved = resolve_call(&original, &messages, 1).unwrap();
+        let value: Value = serde_json::from_str(&resolved.arguments_json).unwrap();
+        assert_eq!(value["target"], window);
+        assert_eq!(value["geometry"], geometry);
+        assert_eq!(value["action"]["element"]["token"], "date");
+        assert!(same_call_input(
+            &original.name,
+            &original.arguments_json,
+            &resolved.arguments_json
+        ));
+        let mut bad: Value = serde_json::from_str(&original.arguments_json).unwrap();
+        bad["geometry"] = geometry;
+        assert!(resolve_call(&call("execute_background_input", bad), &messages, 1).is_err());
+        let mut tool = crate::background_input::tool().spec;
+        project_tool(&mut tool);
+        assert!(
+            tool.parameters_schema["properties"]
+                .get("window_id")
+                .is_some()
+        );
+        assert!(
+            tool.parameters_schema["properties"]
+                .get("geometry")
+                .is_none()
+        );
     }
 }

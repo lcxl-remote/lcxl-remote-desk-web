@@ -27,6 +27,8 @@ use crate::{
 
 mod browser_input;
 pub use browser_input::browser_action_from_call;
+mod background_input;
+pub use background_input::{BackgroundInputCallPreflight, background_input_from_call};
 mod semantic_ui;
 pub use semantic_ui::{UiCallPreflight, ui_action_from_call, ui_application_from_call};
 mod semantic_raw_input;

@@ -254,9 +254,11 @@ pub fn build_permission_grants(
             &requested.tool_name,
             requested.canonical_input_json.as_deref(),
         );
-        if capability.required_capability
-            == desk_agent_protocol::Capability::DesktopUiActionConfirmed
-            && application_scope.is_none()
+        if matches!(
+            capability.required_capability,
+            desk_agent_protocol::Capability::DesktopUiActionConfirmed
+                | desk_agent_protocol::Capability::DesktopBackgroundInputConfirmed
+        ) && application_scope.is_none()
         {
             return Err(internal(
                 "native UI approval requires application_scope; exact target/action approvals are not supported",
@@ -676,7 +678,7 @@ pub fn permission_request_can_renew(
                         // A renewed action still requires a new owner decision.
                         || (item.item_id == format!("included-{}", item.tool_name)
                             && matches!(item.tool_name.as_str(), "inspect_desktop_session" | "inspect_desktop_ui")
-                            && request.items.iter().any(|item| matches!(item.tool_name.as_str(), "execute_confirmed_ui_action" | "execute_confirmed_raw_input"))))
+                            && request.items.iter().any(|item| matches!(item.tool_name.as_str(), "execute_confirmed_ui_action" | "execute_confirmed_raw_input" | "execute_background_input"))))
             })
         })
 }

@@ -31,6 +31,7 @@ use wincode::{SchemaRead, SchemaWrite};
 pub mod agent_event;
 pub mod audit;
 pub mod authz;
+pub mod background_input;
 pub mod browser_control;
 pub mod capability_grant;
 pub mod capability_provider;
@@ -478,6 +479,8 @@ pub enum Capability {
     ShellExecConfirmed,
     #[serde(rename = "desktop.ui.action.confirmed")]
     DesktopUiActionConfirmed,
+    #[serde(rename = "desktop.input.background.confirmed")]
+    DesktopBackgroundInputConfirmed,
     #[serde(rename = "desktop.input.fallback.confirmed")]
     DesktopInputFallbackConfirmed,
     #[serde(rename = "office.excel.patch.confirmed")]
@@ -976,6 +979,8 @@ pub struct ScreenCaptureOutput {
     /// Present only when the edge captured the exact owner-attached window.
     #[serde(default)]
     pub window: Option<computer_use::ObjectRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_geometry: Option<background_input::WindowInputGeometry>,
     /// Encoded image bytes (per `format`). Truncated outputs set `truncated`.
     pub image: Vec<u8>,
     pub truncated: bool,
