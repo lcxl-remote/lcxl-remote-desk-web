@@ -505,7 +505,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
         }
     }
     match tool.name.as_str() {
-        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. For queries combine localized and English labels/native identifiers/control types, at most 16 alternatives (e.g. 日期, 时间, date, time, input). Or use a control root_id with element_only=true. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
+        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. For queries combine localized and English labels/native identifiers/control types, at most 16 alternatives (e.g. 日期, 时间, date, time, input). Or use a control root_id with element_only=true. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in 0..1000 coordinates relative to location.window.id (the same window space as background input). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
         "execute_confirmed_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
         "read_current_screen" => tool.description = "Capture the current display, or use window_id to capture a background macOS window. To obtain window_id: inspect_desktop_session -> inspect_desktop_ui(root_id=session ID, queries=[localized app name, English app name]) -> inspect_desktop_ui(root_id=returned application ID, queries=[窗口, window]) -> read_current_screen(window_id=owner_selectable_windows[].object_ref.id). The application catalog does not query windows; never infer capture is unsupported from missing window entries there. Do not pass an application ID as window_id. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture.".into(),
         _ => {}
@@ -676,6 +676,38 @@ mod tests {
         assert_eq!(resolve_call(&unscoped, &[], 1).unwrap(), unscoped);
         let screen = call("read_current_screen", json!({}));
         assert_eq!(resolve_call(&screen, &[], 1).unwrap(), screen);
+    }
+
+    #[test]
+    fn location_window_remains_resolvable_and_bounds_survive_model_projection() {
+        let mut messages = history();
+        let message = messages.last_mut().unwrap();
+        let mut value: Value = serde_json::from_str(&message.text).unwrap();
+        value["ReadContext"]["DesktopUiInspect"]["nodes"][0]["location"] = json!({
+            "status":"available", "bounds":{"x":0,"y":100,"width":180,"height":600},
+            "window":reference("calendar-window","five","window","")
+        });
+        message.text = value.to_string();
+        let resolved = resolve_call(
+            &call(
+                "read_current_screen",
+                json!({"window_id":"calendar-window"}),
+            ),
+            &messages,
+            1,
+        )
+        .unwrap();
+        assert!(resolved.arguments_json.contains("calendar-window"));
+        let request =
+            crate::seam::ModelRequest::text_only(messages, crate::prompt::ResponseFormatSpec::None);
+        let projected = project_request(&request);
+        let value: Value = serde_json::from_str(&projected.messages.last().unwrap().text).unwrap();
+        let location = &value["ReadContext"]["DesktopUiInspect"]["nodes"][0]["location"];
+        assert_eq!(
+            location["window"],
+            json!({"id":"calendar-window","kind":"window"})
+        );
+        assert_eq!(location["bounds"]["width"], 180);
     }
 
     #[test]

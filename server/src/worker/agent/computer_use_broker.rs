@@ -2721,6 +2721,7 @@ impl ComputerUseBroker {
                 },
             )?;
             output.nodes.push(UiNodeProjection {
+                location: Default::default(),
                 application_state,
                 element_id: None,
                 matched_queries: Vec::new(),
@@ -2945,7 +2946,7 @@ impl ComputerUseBroker {
         // each projection is measured exactly before insertion.
         let mut encoded_bytes = 512usize;
         let mut truncated = collected.truncated;
-        for node in collected.nodes {
+        for mut node in collected.nodes {
             #[cfg(target_os = "macos")]
             let window_projection = if node.role == "AXWindow" || node.role.starts_with("AXWindow/")
             {
@@ -2966,6 +2967,18 @@ impl ComputerUseBroker {
             } else {
                 None
             };
+            if let Some(fingerprint) = node.window_fingerprint.take() {
+                node.location.window = Some(self.issue_ref(
+                    &snapshot_id,
+                    &incarnation,
+                    ObjectKind::Window,
+                    ResolvedObject::Window {
+                        process_id: application.process_id,
+                        image_path: application.image_path.clone(),
+                        fingerprint,
+                    },
+                )?);
+            }
             let collapsed_children = collapsed.get(&node.fingerprint).copied().unwrap_or(0);
             let element_id = self.register_ui_identity(ResolvedObject::UiElement {
                 process_id: application.process_id,
@@ -2983,6 +2996,7 @@ impl ComputerUseBroker {
                 },
             )?;
             let projection = UiNodeProjection {
+                location: node.location,
                 application_state: None,
                 element_id: Some(element_id),
                 matched_queries: params
@@ -3926,6 +3940,9 @@ pub(super) struct ObservedApplication {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub(super) struct CollectedUiNode {
+    pub location: desk_agent_protocol::computer_use::UiNodeLocation,
+    #[serde(skip)]
+    pub window_fingerprint: Option<String>,
     #[serde(skip)]
     pub(super) is_collection: bool,
     pub native_id: Option<String>,
@@ -4138,6 +4155,8 @@ mod tests {
     #[test]
     fn overview_folds_grid_and_remaps_following_controls() {
         let node = |role: &str, parent, id: &str| CollectedUiNode {
+            location: Default::default(),
+            window_fingerprint: None,
             is_collection: role == "AXGrid",
             native_id: None,
             parent_index: parent,
@@ -4236,6 +4255,8 @@ mod tests {
             .is_empty()
         );
         let node = CollectedUiNode {
+            location: Default::default(),
+            window_fingerprint: None,
             is_collection: false,
             native_id: Some("start-datepicker".into()),
             parent_index: None,
@@ -4260,6 +4281,8 @@ mod tests {
     fn fuzzy_ui_queries_match_any_name_role_or_native_id_case_insensitively() {
         use desk_agent_protocol::computer_use::UiInspectQuery;
         let node = CollectedUiNode {
+            location: Default::default(),
+            window_fingerprint: None,
             is_collection: false,
             native_id: Some("result".into()),
             parent_index: None,
@@ -4281,6 +4304,8 @@ mod tests {
         query.queries = vec!["RESU".into()];
         assert!(ui_query_matches(Some(&query), &node));
         let missing = CollectedUiNode {
+            location: Default::default(),
+            window_fingerprint: None,
             native_id: None,
             ..node
         };

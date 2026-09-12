@@ -168,6 +168,7 @@ mod tests {
                         version: "test".into(),
                     },
                     nodes: vec![UiNodeProjection {
+                        location: Default::default(),
                         application_state: Some(state),
                         element_id: None,
                         matched_queries: vec![],
@@ -239,6 +240,7 @@ mod tests {
     fn compact_receipt_preserves_exact_references_and_non_default_states() {
         let nodes = (0..100)
             .map(|i| UiNodeProjection {
+                location: Default::default(),
                 application_state: None,
                 element_id: (i % 2 == 0).then(|| format!("opaque-token-{i}")),
                 matched_queries: Vec::new(),

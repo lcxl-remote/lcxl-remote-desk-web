@@ -918,6 +918,8 @@ fn read_node(
 
         (
             CollectedUiNode {
+                location: Default::default(),
+                window_fingerprint: None,
                 is_collection: [
                     UIA_DataGridControlTypeId.0,
                     UIA_TableControlTypeId.0,

@@ -1040,7 +1040,7 @@ fn walk(
         return Ok(());
     }
     let (index, fingerprint) = if emit {
-        let (node, strings_truncated) = read_node(
+        let (mut node, strings_truncated) = read_node(
             element,
             identity.clone(),
             parent.as_ref().and_then(|(index, _)| *index),
@@ -1049,6 +1049,7 @@ fn walk(
         if !matches {
             (None, node.fingerprint)
         } else {
+            (node.location, node.window_fingerprint) = read_node_location(element, config);
             let encoded_bytes = serde_json::to_vec(&node)
                 .map_or(config.max_bytes.saturating_add(1), |encoded| encoded.len())
                 .saturating_add(OBJECT_REF_BUDGET);
@@ -1103,6 +1104,124 @@ fn walk(
         )?;
     }
     Ok(())
+}
+
+fn normalized_visible_bounds(
+    rect: CGRect,
+    window: CGRect,
+) -> Option<desk_agent_protocol::computer_use::UiNodeBounds> {
+    use desk_agent_protocol::computer_use::UiNodeBounds;
+    if ![
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+        window.origin.x,
+        window.origin.y,
+        window.size.width,
+        window.size.height,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+        || rect.size.width <= 0.0
+        || rect.size.height <= 0.0
+        || window.size.width <= 0.0
+        || window.size.height <= 0.0
+    {
+        return None;
+    }
+    let x = (((rect.origin.x - window.origin.x) / window.size.width) * 1000.0)
+        .floor()
+        .clamp(0.0, 1000.0) as u16;
+    let y = (((rect.origin.y - window.origin.y) / window.size.height) * 1000.0)
+        .floor()
+        .clamp(0.0, 1000.0) as u16;
+    let right = (((rect.origin.x + rect.size.width - window.origin.x) / window.size.width) * 1000.0)
+        .ceil()
+        .clamp(0.0, 1000.0) as u16;
+    let bottom = (((rect.origin.y + rect.size.height - window.origin.y) / window.size.height)
+        * 1000.0)
+        .ceil()
+        .clamp(0.0, 1000.0) as u16;
+    (right > x && bottom > y).then_some(UiNodeBounds {
+        x,
+        y,
+        width: right.saturating_sub(x),
+        height: bottom.saturating_sub(y),
+    })
+}
+
+fn read_node_location(
+    element: AxUiElementRef,
+    config: &WalkConfig,
+) -> (
+    desk_agent_protocol::computer_use::UiNodeLocation,
+    Option<String>,
+) {
+    use desk_agent_protocol::computer_use::{UiLocationStatus, UiNodeLocation};
+    let mut location = UiNodeLocation::default();
+    let window = if attribute_string(element, "AXRole").as_deref() == Some("AXWindow") {
+        Some(OwnedCf(unsafe { CFRetain(element) }))
+    } else {
+        copy_attribute(element, "AXWindow")
+    };
+    let Some(window) = window else {
+        return (location, None);
+    };
+    let fingerprint = element_identity(window.0, config).ok();
+    if fingerprint.is_none() {
+        return (location, None);
+    }
+    let Some(window_rect) = protection_bounds(window.0) else {
+        return (location, fingerprint);
+    };
+    if attribute_bool(window.0, "AXMinimized") == Some(true)
+        || attribute_bool(window.0, "AXHidden") == Some(true)
+    {
+        location.status = UiLocationStatus::Hidden;
+        return (location, fingerprint);
+    }
+    let Some(mut rect) = protection_bounds(element) else {
+        return (location, fingerprint);
+    };
+    let mut current = Some(OwnedCf(unsafe { CFRetain(element) }));
+    let mut reached_window = false;
+    for _ in 0..32 {
+        if Instant::now() >= config.deadline {
+            return (location, fingerprint);
+        }
+        let Some(node) = current else {
+            break;
+        };
+        if attribute_bool(node.0, "AXHidden") == Some(true) {
+            location.status = UiLocationStatus::Hidden;
+            return (location, fingerprint);
+        }
+        if node.same_element(&window) {
+            reached_window = true;
+            break;
+        }
+        if attribute_string(node.0, "AXRole").as_deref() == Some("AXScrollArea") {
+            let Some(clip) = protection_bounds(node.0) else {
+                return (location, fingerprint);
+            };
+            rect = clip_protection_bounds(rect, Some(clip));
+        }
+        current = copy_attribute(node.0, "AXParent");
+    }
+    if !reached_window {
+        return (location, fingerprint);
+    }
+    rect = clip_protection_bounds(rect, Some(window_rect));
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+        location.status = UiLocationStatus::OutsideVisibleArea;
+        return (location, fingerprint);
+    }
+    location.bounds = normalized_visible_bounds(rect, window_rect);
+    if location.bounds.is_some() {
+        location.status = UiLocationStatus::Available;
+    }
+    (location, fingerprint)
 }
 
 fn read_node(
@@ -1179,6 +1298,8 @@ fn read_node(
 
     (
         CollectedUiNode {
+            location: Default::default(),
+            window_fingerprint: None,
             is_collection: matches!(role.as_str(), "AXGrid" | "AXOutline" | "AXTable"),
             native_id: (!is_protected && !identifier.is_empty() && identifier.len() <= 512)
                 .then(|| identifier.clone()),
@@ -1714,6 +1835,44 @@ fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires running Calendar and macOS Accessibility permission"]
+    fn live_calendar_search_returns_window_relative_location() {
+        let app = running_applications()
+            .unwrap()
+            .into_iter()
+            .find(|app| app.image_path.ends_with("/Calendar"))
+            .expect("Calendar must be running");
+        let query = desk_agent_protocol::computer_use::UiInspectQuery {
+            queries: vec!["AXScrollArea".into()],
+            ..Default::default()
+        };
+        let tree = collect_application_selection(
+            app.process_id,
+            &app.image_path,
+            12,
+            100,
+            65536,
+            UiInspectScope::Content,
+            None,
+            Some(&query),
+            false,
+        )
+        .unwrap();
+        let nodes: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|n| n.location.bounds.is_some())
+            .collect();
+        assert!(!nodes.is_empty(), "expected located scroll areas");
+        for node in nodes {
+            let b = node.location.bounds.as_ref().unwrap();
+            assert!(b.x + b.width <= 1000 && b.y + b.height <= 1000);
+            assert!(node.window_fingerprint.is_some());
+            eprintln!("{} {:?}", node.role, b);
+        }
+    }
+
     #[test]
     #[ignore = "requires running Calendar and macOS Accessibility permission"]
     fn live_calendar_window_sensitive_input_scan() {
@@ -2627,3 +2786,31 @@ unsafe extern "C" {
 #[cfg(test)]
 #[path = "macos_background_input_live_tests.rs"]
 mod background_input_live_tests;
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+    #[test]
+    fn window_relative_bounds_clip_sidebar_and_ignore_desktop_origin() {
+        let window = CGRect::new(&CGPoint::new(-800.0, 25.0), &CGSize::new(1000.0, 600.0));
+        let sidebar = CGRect::new(&CGPoint::new(-800.0, 85.0), &CGSize::new(180.0, 360.0));
+        let b = normalized_visible_bounds(sidebar, window).unwrap();
+        assert_eq!((b.x, b.y, b.width, b.height), (0, 100, 180, 600));
+        let outside = CGRect::new(&CGPoint::new(300.0, 25.0), &CGSize::new(20.0, 20.0));
+        assert!(
+            normalized_visible_bounds(clip_protection_bounds(outside, Some(window)), window)
+                .is_none()
+        );
+        let partial = CGRect::new(&CGPoint::new(-850.0, 25.0), &CGSize::new(100.0, 60.0));
+        let b = normalized_visible_bounds(clip_protection_bounds(partial, Some(window)), window)
+            .unwrap();
+        assert_eq!((b.x, b.y, b.width, b.height), (0, 0, 50, 100));
+    }
+    #[test]
+    fn invalid_geometry_does_not_fabricate_coordinates() {
+        let zero = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(0.0, 0.0));
+        assert!(normalized_visible_bounds(zero, zero).is_none());
+        let invalid = CGRect::new(&CGPoint::new(f64::NAN, 0.0), &CGSize::new(100.0, 100.0));
+        assert!(normalized_visible_bounds(invalid, invalid).is_none());
+    }
+}

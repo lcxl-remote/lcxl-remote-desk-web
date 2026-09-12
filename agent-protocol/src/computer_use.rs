@@ -247,10 +247,54 @@ impl ApplicationState {
     }
 }
 
+/// Window-relative visible bounds in the same 0..1000 space as background input.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct UiNodeBounds {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UiLocationStatus {
+    Available,
+    Hidden,
+    OutsideVisibleArea,
+    Unavailable,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct UiNodeLocation {
+    pub status: UiLocationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<ObjectRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<UiNodeBounds>,
+}
+
+impl Default for UiNodeLocation {
+    fn default() -> Self {
+        Self {
+            status: UiLocationStatus::Unavailable,
+            window: None,
+            bounds: None,
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct UiNodeProjection {
+    pub location: UiNodeLocation,
     /// Present on application catalog nodes when native state is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application_state: Option<ApplicationState>,

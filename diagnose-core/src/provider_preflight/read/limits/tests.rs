@@ -124,6 +124,7 @@ fn desktop_ui_limits_narrow_request_and_count_returned_nodes() {
     assert_eq!((params.max_bytes, params.max_nodes), (512, 1));
 
     let node = UiNodeProjection {
+        location: Default::default(),
         application_state: None,
         element_id: None,
         matched_queries: Vec::new(),
