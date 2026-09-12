@@ -317,6 +317,7 @@ export function useDeviceAssistantChat({
         id: string; question: string; conversation: string; requestId: string;
         payload: Record<string, unknown>; sentAt: number;
     } | null>(null);
+    const deliveryFailure = useRef<string | null>(null);
     const [deliveryState, setDeliveryState] = useState<'sending' | 'unconfirmed' | null>(null);
     const [acceptedInput, setAcceptedInput] = useState<{ id: string; question: string } | null>(null);
     const acknowledgeDelivery = useCallback(() => {
@@ -325,6 +326,7 @@ export function useDeviceAssistantChat({
         console.info('[assistant-input] accepted', { messageId: pending.id, requestId: pending.requestId });
         setAcceptedInput({ id: pending.id, question: pending.question });
         pendingDelivery.current = null;
+        deliveryFailure.current = null;
         setDeliveryState(null);
     }, []);
     useEffect(() => {
@@ -437,11 +439,13 @@ export function useDeviceAssistantChat({
         const expectedEpoch = snapshotEpoch.current;
         const expectedRequestOrder = ++snapshotRequestOrder.current;
         if (showHydrating) setHydrating(true);
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 10_000);
         try {
             const response = await fetch(
             `/api/my/device-assistant-session?connection=${encodeURIComponent(deskId)}` +
                 `&conversation=${encodeURIComponent(expectedConversationId)}`,
-            { credentials: 'include', headers: { Accept: 'application/json' } },
+            { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal },
             );
             const body = response.ok ? await response.json() : null;
             if (reportFailure && !Array.isArray(body?.data?.messages)) throw new Error('Snapshot unavailable');
@@ -536,7 +540,10 @@ export function useDeviceAssistantChat({
                 setDraft(projected.draft);
                 setPartial('');
                 const last = projected.messages.at(-1);
-                if (snapshot.active) {
+                if (deliveryFailure.current) {
+                    setStatus('error');
+                    setError(deliveryFailure.current);
+                } else if (snapshot.active) {
                     setStatus('modeling');
                     setError(null);
                 } else if (snapshot.terminalError) {
@@ -572,6 +579,7 @@ export function useDeviceAssistantChat({
                 setError('history_restore_failed');
             }
         } finally {
+            window.clearTimeout(timeout);
             if (
                 showHydrating
                 && snapshotEpoch.current === expectedEpoch
@@ -648,6 +656,7 @@ export function useDeviceAssistantChat({
         historyWindow.current = null;
         olderRequest.current = null;
         pendingDelivery.current = null;
+        deliveryFailure.current = null;
         setDeliveryState(null);
         setAcceptedInput(null);
         conversationId.current = stored;
@@ -811,6 +820,13 @@ export function useDeviceAssistantChat({
         lastSeq.current = event.seq;
 
         if (event.kind === 'status' && event.status === 'accepted') acknowledgeDelivery();
+        if (event.kind === 'error' && event.seq === 1 && pendingDelivery.current && !stopPending.current) {
+            deliveryFailure.current = event.error?.message ?? 'The AI Assistant turn could not complete.';
+            const rejectedId = pendingDelivery.current.id;
+            pendingDelivery.current = null;
+            setDeliveryState(null);
+            setMessages(current => current.filter(message => message.id !== rejectedId));
+        }
         if ((event.kind === 'error' || event.kind === 'retracted') && pendingDelivery.current) setDeliveryState('unconfirmed');
         switch (event.kind) {
             case 'status':
@@ -1038,6 +1054,13 @@ export function useDeviceAssistantChat({
         // the locally observed request stream with the newest request; the server
         // supersedes the older model turn under its input-revision fence.
         if (!trimmed || hydrating || contextRequest.current || !sessionTargetReady) return false;
+        const selectedObjects = attachments.filter(attachment => attachment.state === 'active' && attachment.kind !== 'interactive_session');
+        if (selectedObjects.some(attachment => attachment.expiresAtUnixMs <= Date.now())) {
+            deliveryFailure.current = 'selected_context_expired';
+            setError(deliveryFailure.current);
+            return false;
+        }
+        deliveryFailure.current = null;
         ensureConversation();
         const clientMessageId = rehearsal?.initial_message_id ?? `user-${v4()}`;
         if (rehearsal) rehearsalSent.current = true;
@@ -1061,8 +1084,7 @@ export function useDeviceAssistantChat({
                 conversation_id: conversationId.current,
                 locale: rehearsal ? rehearsal.locale ?? undefined : locale,
                 selected_capability_ids: [...selectedCapabilityIds],
-                selected_attachment_ids: rehearsal ? [] : attachments
-                    .filter((attachment) => attachment.state === 'active')
+                selected_attachment_ids: rehearsal ? [] : selectedObjects
                     .map((attachment) => attachment.id),
             };
         pendingDelivery.current = { id: clientMessageId, question: trimmed,
@@ -1238,6 +1260,7 @@ export function useDeviceAssistantChat({
     const reset = useCallback(() => {
         if (rehearsal) return;
         pendingDelivery.current = null;
+        deliveryFailure.current = null;
         setDeliveryState(null);
         setAcceptedInput(null);
         activeRequest.current = null;

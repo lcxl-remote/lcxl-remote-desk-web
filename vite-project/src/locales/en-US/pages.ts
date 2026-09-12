@@ -1048,6 +1048,7 @@ export default {
   'pages.deviceAssistant.imageUnavailable': 'Image unavailable. It may have been deleted or access is no longer allowed.',
   'pages.deviceAssistant.imageLoading': 'Loading image…',
   'pages.deviceAssistant.deliverySending': 'Sending; waiting for server confirmation…',
+  'pages.deviceAssistant.selectedContextExpired': 'Selected context has expired. Re-select or remove it before sending again. Your input is retained.',
   'pages.deviceAssistant.deliveryUnconfirmed': 'Receipt is unconfirmed. Your input is retained. Retrying reuses the same message.',
   'pages.deviceAssistant.deliveryRetry': 'Check and retry',
   'pages.deviceAssistant.imageEarlier': 'Earlier screenshots (associated messages are not loaded or have been compacted)',

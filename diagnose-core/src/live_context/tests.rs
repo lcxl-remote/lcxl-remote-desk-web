@@ -318,3 +318,43 @@ fn explicit_selection_for_a_changed_model_keeps_old_metadata_immutable() {
         next.candidates[0].envelope.allowed_destinations
     );
 }
+
+#[test]
+fn desktop_selection_without_context_references_survives_readiness_deadline() {
+    let selection = build(
+        &[
+            "desktop.ui.inspect".into(),
+            "desktop.session.inspect".into(),
+        ],
+        Some(&readiness()),
+        true,
+    )
+    .unwrap();
+    for object in &selection.candidates {
+        assert_eq!(object.expires_at_unix_ms, u64::MAX);
+        assert!(object.is_active_at(now() + 120_000));
+        assert!(
+            object
+                .stale_reason_against(now() + 120_000, &selection.runtime_bindings)
+                .is_none()
+        );
+        let mut changed = selection.runtime_bindings.clone();
+        for binding in &mut changed {
+            binding.object_incarnation = "another-desktop".into();
+        }
+        assert_eq!(
+            object.stale_reason_against(now() + 120_000, &changed),
+            Some(AttachmentStaleReason::WorkerRespawned)
+        );
+        assert!(
+            crate::input_read_context::selected_object_attachment(
+                &selection.candidates,
+                &object.attachment_id,
+                now()
+            )
+            .unwrap_err()
+            .message
+            .contains("selected_capability_ids")
+        );
+    }
+}

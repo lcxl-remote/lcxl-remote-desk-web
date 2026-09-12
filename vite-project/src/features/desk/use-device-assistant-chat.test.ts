@@ -17,6 +17,62 @@ import type { SignalingSubscriber } from './use-desk-signaling';
 import { useDeviceAssistantChat } from './use-device-assistant-chat';
 
 describe('useDeviceAssistantChat', () => {
+    it('does not send live desktop metadata as an explicit object attachment', async () => {
+        localStorage.setItem('device-assistant-conversation:delivery-kinds', 'conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'session', seq: 1, active: false, messages: [],
+            contextAttachments: [{ id: 'desktop-context', kind: 'interactive_session', capabilityId: 'desktop.ui.inspect',
+                providerId: 'desktop.ui', state: 'active', expiresAtUnixMs: 1, createdAtUnixMs: 0, displaySummary: 'desktop' }],
+        } }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'delivery-kinds', subscribe: () => () => undefined, sendMessage }));
+        await waitFor(() => expect(result.current.attachments).toHaveLength(1));
+        act(() => { expect(result.current.start('Continue', 'zh', ['desktop.ui.inspect'])).toBe(true); });
+        const payload = sendMessage.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+        expect(payload.selected_attachment_ids).toEqual([]);
+        expect(payload.selected_capability_ids).toEqual(['desktop.ui.inspect']);
+        unmount();
+    });
+    it('preserves intake rejection across an old successful snapshot and permits a new send', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'session', seq: 10, active: false, messages: [{ id: 'old-answer', role: 'assistant', text: 'Previous success' }],
+        } }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'delivery-reject',
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        act(() => { result.current.start('New requirement'); });
+        const original = sendMessage.mock.calls.at(-1)!;
+        await act(async () => subscriber?.({ request_id: original[3], signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
+            signaling_data: { seq: 1, kind: 'error', error: { message: 'selected attachment is unavailable' } } }));
+        expect(result.current.error).toBe('selected attachment is unavailable');
+        expect(result.current.deliveryState).toBeNull();
+        expect(result.current.acceptedInput).toBeNull();
+        await act(async () => { await result.current.retryDelivery(); });
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        act(() => { expect(result.current.start('Corrected requirement')).toBe(true); });
+        expect(sendMessage.mock.calls.at(-1)?.[3]).not.toBe(original[3]);
+        unmount();
+    });
+    it('bounds the snapshot lookup before retrying an unconfirmed message', async () => {
+        vi.useFakeTimers();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string): string => { throw new Error('offline'); });
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'delivery-query-timeout', subscribe: () => () => undefined, sendMessage }));
+        try {
+            act(() => { result.current.start('Retry after query timeout'); });
+            vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+                init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+            })));
+            await act(async () => {
+                const retry = result.current.retryDelivery();
+                await vi.advanceTimersByTimeAsync(10_000);
+                await retry;
+            });
+            expect(sendMessage).toHaveBeenCalledTimes(2);
+            expect(sendMessage.mock.calls[1]).toEqual(sendMessage.mock.calls[0]);
+        } finally { unmount(); vi.useRealTimers(); }
+    });
     it('shows a retry state when no server receipt arrives and ignores unrelated receipts', async () => {
         vi.useFakeTimers();
         let subscriber: SignalingSubscriber | null = null;
@@ -147,7 +203,7 @@ describe('useDeviceAssistantChat', () => {
             signaling_data: { seq: 1, kind: 'error', error: { message: 'Context authorization expired.' } },
         }));
         await waitFor(() => expect(result.current.messages.at(-1)?.text).toBe('continue'));
-        expect(result.current.deliveryState).toBe('unconfirmed');
+        expect(result.current.deliveryState).toBeNull();
         expect(result.current.error).toBe('Context authorization expired.');
         expect(result.current.status).toBe('error');
         act(() => { expect(result.current.start('another question')).toBe(true); });
@@ -1019,7 +1075,7 @@ describe('useDeviceAssistantChat', () => {
                         capabilityId: 'file.metadata.read',
                         displaySummary: 'selected.txt',
                         createdAtUnixMs: 100,
-                        expiresAtUnixMs: 200,
+                        expiresAtUnixMs: Date.now() + 60_000,
                         state: 'active',
                     }],
                 },

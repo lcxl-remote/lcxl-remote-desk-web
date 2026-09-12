@@ -157,26 +157,37 @@ pub fn build_live_context(
         // Desktop selections have no object deadline. Other adapters retain their
         // reference deadline. Current readiness and authorization are independently
         // validated before every read; this metadata never grants permission.
-        let expires_at_unix_ms = match readiness.and_then(|readiness| {
-            readiness
-                .context_references
-                .iter()
-                .find(|reference| reference.capability == capability.required_capability)
-        }) {
-            Some(reference) if reference.object_ref.object_kind.is_lifecycle_bound() => u64::MAX,
-            Some(reference) => {
-                let expiry = chrono::DateTime::parse_from_rfc3339(&reference.object_ref.expires_at)
-                    .map_err(|_| invalid("invalid selected context reference expiry"))?
-                    .timestamp_millis();
-                let expiry = u64::try_from(expiry).map_err(|_| {
-                    invalid("selected context reference expiry predates Unix epoch")
-                })?;
-                if expiry <= now_unix_ms {
-                    return Err(invalid("selected context reference expired"));
+        let expires_at_unix_ms = if matches!(
+            capability.required_capability,
+            desk_agent_protocol::Capability::DesktopSessionInspect
+                | desk_agent_protocol::Capability::DesktopUiInspect
+        ) {
+            u64::MAX
+        } else {
+            match readiness.and_then(|readiness| {
+                readiness
+                    .context_references
+                    .iter()
+                    .find(|reference| reference.capability == capability.required_capability)
+            }) {
+                Some(reference) if reference.object_ref.object_kind.is_lifecycle_bound() => {
+                    u64::MAX
                 }
-                expiry
+                Some(reference) => {
+                    let expiry =
+                        chrono::DateTime::parse_from_rfc3339(&reference.object_ref.expires_at)
+                            .map_err(|_| invalid("invalid selected context reference expiry"))?
+                            .timestamp_millis();
+                    let expiry = u64::try_from(expiry).map_err(|_| {
+                        invalid("selected context reference expiry predates Unix epoch")
+                    })?;
+                    if expiry <= now_unix_ms {
+                        return Err(invalid("selected context reference expired"));
+                    }
+                    expiry
+                }
+                None => readiness_expires_at_unix_ms,
             }
-            None => readiness_expires_at_unix_ms,
         };
         let attachment_id = format!("context-{}", fresh_id());
         let opaque_token = fresh_id();

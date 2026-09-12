@@ -275,12 +275,12 @@ impl SignalAgentRunEventStore {
             canonical
                 .into_iter()
                 .map(|id| {
-                    session
-                        .context_attachments
-                        .iter()
-                        .find(|object| &object.attachment_id == id && object.is_active_at(now))
-                        .cloned()
-                        .ok_or_else(|| internal("selected attachment is unavailable"))
+                    desk_diagnose_core::input_read_context::selected_object_attachment(
+                        &session.context_attachments,
+                        id,
+                        now,
+                    )
+                    .cloned()
                 })
                 .collect::<Result<Vec<_>, _>>()?
         };

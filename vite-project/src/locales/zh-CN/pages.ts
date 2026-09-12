@@ -1046,6 +1046,7 @@ export default {
   'pages.deviceAssistant.imageUnavailable': '图片无法读取，可能已删除或当前无权访问。',
   'pages.deviceAssistant.imageLoading': '正在加载图片…',
   'pages.deviceAssistant.deliverySending': '正在发送，等待服务端确认…',
+  'pages.deviceAssistant.selectedContextExpired': '所选上下文已过期。请重新选择或移除该上下文后再发送，输入已保留。',
   'pages.deviceAssistant.deliveryUnconfirmed': '尚未确认接收，输入已保留。重试不会重复创建消息。',
   'pages.deviceAssistant.deliveryRetry': '查询并重试',
   'pages.deviceAssistant.imageEarlier': '较早的截图（对应消息尚未加载或已压缩）',

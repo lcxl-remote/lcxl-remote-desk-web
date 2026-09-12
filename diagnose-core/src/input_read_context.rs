@@ -77,6 +77,28 @@ impl ReadContextSelection {
     }
 }
 
+/// Resolve explicit object selections; live capability selections use a separate input field.
+pub fn selected_object_attachment<'a>(
+    objects: &'a [ContextAttachment],
+    id: &str,
+    now: u64,
+) -> Result<&'a ContextAttachment, AgentError> {
+    let object = objects.iter().find(|object| object.attachment_id == id)
+        .ok_or_else(|| invalid(&format!("Selected context attachment {id} was removed or is unavailable. Refresh the conversation and select the intended object again. The message was not accepted.")))?;
+    if object.kind == ContextAttachmentKind::InteractiveSession {
+        return Err(invalid(
+            "Desktop capability selections must use selected_capability_ids, not selected_attachment_ids. The message was not accepted.",
+        ));
+    }
+    if !object.is_active_at(now) {
+        return Err(invalid(&format!(
+            "Selected context attachment {id} ({}) expired, changed or was withdrawn. Re-select this object or explicitly remove it before sending again. The message was not accepted.",
+            object.display_summary
+        )));
+    }
+    Ok(object)
+}
+
 pub fn validate_objects(objects: &[ContextAttachment]) -> Result<(), AgentError> {
     validate_attachment_set(objects).map_err(|_| invalid("invalid original object selection"))?;
     if objects

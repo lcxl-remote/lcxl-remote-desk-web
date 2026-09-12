@@ -876,7 +876,7 @@ export function DeviceAssistantWorkspace({
                     {chat.error && (
                         <Alert variant="destructive">
                             <AlertTitle>{t('pages.deviceAssistant.chatErrorTitle')}</AlertTitle>
-                            <AlertDescription>{chat.error === 'history_restore_failed' ? t('pages.deviceAssistant.history.restoreError') : chat.error}</AlertDescription>
+                            <AlertDescription>{chat.error === 'history_restore_failed' ? t('pages.deviceAssistant.history.restoreError') : chat.error === 'selected_context_expired' ? t('pages.deviceAssistant.selectedContextExpired') : chat.error}</AlertDescription>
                         </Alert>
                     )}
                     {rehearsal && <Alert><AlertDescription>{t('schedules.rehearsal.executionNote')}</AlertDescription></Alert>}
