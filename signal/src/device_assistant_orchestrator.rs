@@ -713,6 +713,12 @@ pub async fn run_turn(
     target_device_id: String,
     ask: DeviceAssistantAsk,
 ) {
+    log::info!(
+        "[assistant-input] received request_id={} message_id={} conversation_id={:?}",
+        request_id,
+        ask.client_message_id,
+        ask.conversation_id
+    );
     let reserved = crate::schedule_store::ScheduleStore::new(db.clone())
         .rehearsal_for_input(actor_user_id, &target_device_id, &ask)
         .await;
@@ -2140,6 +2146,14 @@ async fn compose_turn_inner(
             return Ok(None);
         }
     };
+    log::info!(
+        "[assistant-input] accepted request_id={} message_id={} conversation_id={} input_seq={} already_handled={}",
+        request_id,
+        user.message_id,
+        conversation_id,
+        ack.input_seq,
+        ack.already_handled
+    );
     stream_event(
         connections.as_ref(),
         &browser_connection_id,

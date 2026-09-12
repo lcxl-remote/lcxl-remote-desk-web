@@ -17,6 +17,65 @@ import type { SignalingSubscriber } from './use-desk-signaling';
 import { useDeviceAssistantChat } from './use-device-assistant-chat';
 
 describe('useDeviceAssistantChat', () => {
+    it('shows a retry state when no server receipt arrives and ignores unrelated receipts', async () => {
+        vi.useFakeTimers();
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'delivery-timeout',
+            subscribe: handler => { subscriber = handler; return () => undefined; },
+            sendMessage: (_type, _data, _to, id) => id!,
+        }));
+        try {
+            act(() => { result.current.start('Retain on timeout'); });
+            act(() => subscriber?.({ request_id: 'another-request', signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
+                signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+            expect(result.current.deliveryState).toBe('sending');
+            await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+            expect(result.current.deliveryState).toBe('unconfirmed');
+            expect(result.current.acceptedInput).toBeNull();
+            expect(result.current.messages.at(-1)?.text).toBe('Retain on timeout');
+        } finally { unmount(); vi.useRealTimers(); }
+    });
+    it('retains unconfirmed input and retries the exact payload and message ID', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string): string => {
+            if (sendMessage.mock.calls.length === 1) throw new Error('Disconnected');
+            return id!;
+        });
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'delivery-test',
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        act(() => { expect(result.current.start('Keep this message')).toBe(true); });
+        expect(result.current.deliveryState).toBe('unconfirmed');
+        expect(result.current.messages.at(-1)?.text).toBe('Keep this message');
+        expect(result.current.acceptedInput).toBeNull();
+        const original = sendMessage.mock.calls[0];
+        await act(async () => { await result.current.retryDelivery(); });
+        expect(sendMessage.mock.calls[1]).toEqual(original);
+        expect(result.current.messages.filter(m => m.role === 'user')).toHaveLength(1);
+        act(() => subscriber?.({ request_id: original[3], signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
+            signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+        expect(result.current.deliveryState).toBeNull();
+        expect(result.current.acceptedInput?.question).toBe('Keep this message');
+        unmount();
+    });
+    it('queries the stored message before retrying and does not resend an accepted input', async () => {
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, _id?: string): string => { throw new Error('Receipt lost'); });
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'delivery-stored',
+            subscribe: () => () => undefined, sendMessage }));
+        act(() => { result.current.start('Already stored'); });
+        const payload = sendMessage.mock.calls[0][1] as { client_message_id: string };
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'stored-session', seq: 1, active: false,
+            messages: [{ id: payload.client_message_id, role: 'user', text: 'Already stored' }],
+        } }) }));
+        await act(async () => { await result.current.retryDelivery(); });
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        expect(result.current.deliveryState).toBeNull();
+        expect(result.current.acceptedInput?.id).toBe(payload.client_message_id);
+        unmount();
+    });
     it('accepts directory acknowledgements only for the exact response type and conversation request', async () => {
         let subscriber: SignalingSubscriber | null = null;
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
@@ -87,7 +146,8 @@ describe('useDeviceAssistantChat', () => {
             signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
             signaling_data: { seq: 1, kind: 'error', error: { message: 'Context authorization expired.' } },
         }));
-        await waitFor(() => expect(result.current.messages.at(-1)?.id).toBe('user-1'));
+        await waitFor(() => expect(result.current.messages.at(-1)?.text).toBe('continue'));
+        expect(result.current.deliveryState).toBe('unconfirmed');
         expect(result.current.error).toBe('Context authorization expired.');
         expect(result.current.status).toBe('error');
         act(() => { expect(result.current.start('another question')).toBe(true); });
@@ -1006,6 +1066,7 @@ describe('useDeviceAssistantChat', () => {
             SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT,
             expect.objectContaining({ selected_attachment_ids: ['file-attachment-1'] }),
             'desk-1',
+            expect.any(String),
         );
     });
 
@@ -1037,6 +1098,7 @@ describe('useDeviceAssistantChat', () => {
                 selected_capability_ids: ['desktop.ui.inspect'],
             }),
             'desk-1',
+            expect.any(String),
         );
 
         const draft = {

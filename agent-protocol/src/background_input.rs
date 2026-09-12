@@ -75,7 +75,9 @@ pub enum BackgroundInputAction {
     Scroll {
         position: Option<WindowInputPosition>,
         element: Option<ObjectRef>,
+        #[serde(rename = "horizontal_pixels")]
         horizontal: i32,
+        #[serde(rename = "vertical_pixels")]
         vertical: i32,
     },
     TypeText {
@@ -247,6 +249,24 @@ pub struct WindowInputGeometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scroll_fields_require_explicit_pixel_units() {
+        let action: BackgroundInputAction = serde_json::from_value(serde_json::json!({
+            "kind":"scroll", "position":{"x":550,"y":300},
+            "horizontal_pixels":0,"vertical_pixels":-300
+        }))
+        .unwrap();
+        assert!(action.validate().is_ok());
+        let value = serde_json::to_value(action).unwrap();
+        assert_eq!(value["vertical_pixels"], -300);
+        assert!(value.get("vertical").is_none());
+        assert!(
+            serde_json::from_value::<BackgroundInputAction>(serde_json::json!({
+                "kind":"scroll", "position":{"x":550,"y":300},"horizontal":0,"vertical":-6
+            }))
+            .is_err()
+        );
+    }
     #[test]
     fn pixel_positions_are_not_limited_to_one_thousand() {
         let action: BackgroundInputAction = serde_json::from_value(serde_json::json!({

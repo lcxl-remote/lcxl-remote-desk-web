@@ -16,9 +16,9 @@ pub fn tool() -> RegisteredTool {
         let mut properties = json!({"kind":{"const":kind},"position":position,"element_id":{"type":"string","description":"Observed control ID used to locate mouse coordinates, not an AX action"}});
         let mut required = vec!["kind"];
         if kind == "scroll" {
-            properties["horizontal"] = json!({"type":"integer","minimum":-10000,"maximum":10000});
-            properties["vertical"] = json!({"type":"integer","minimum":-10000,"maximum":10000,"description":"Pixels; positive up, negative down"});
-            required.extend(["horizontal", "vertical"]);
+            properties["horizontal_pixels"] = json!({"type":"integer","minimum":-10000,"maximum":10000,"description":"Pixel distance, not wheel ticks or lines; zero means no horizontal scrolling"});
+            properties["vertical_pixels"] = json!({"type":"integer","minimum":-10000,"maximum":10000,"description":"Pixel distance, NOT wheel ticks or lines. Positive up, negative down. For example -300 scrolls down 300 pixels; -6 moves only 6 pixels."});
+            required.extend(["horizontal_pixels", "vertical_pixels"]);
         }
         actions.push(json!({"type":"object","properties":properties,"required":required,"oneOf":[{"required":["position"]},{"required":["element_id"]}],"additionalProperties":false}));
     }
@@ -52,7 +52,13 @@ mod tests {
                 .unwrap()
                 .contains("Pixel coordinates")
         );
-        assert_eq!(actions[2]["properties"]["vertical"]["maximum"], 10000);
-        assert_eq!(actions[2]["properties"]["horizontal"]["minimum"], -10000);
+        assert_eq!(
+            actions[2]["properties"]["vertical_pixels"]["maximum"],
+            10000
+        );
+        assert_eq!(
+            actions[2]["properties"]["horizontal_pixels"]["minimum"],
+            -10000
+        );
     }
 }

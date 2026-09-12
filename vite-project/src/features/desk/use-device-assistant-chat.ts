@@ -313,6 +313,31 @@ export function useDeviceAssistantChat({
     const [partial, setPartial] = useState('');
     const [status, setStatus] = useState('idle');
     const [error, setError] = useState<string | null>(null);
+    const pendingDelivery = useRef<{
+        id: string; question: string; conversation: string; requestId: string;
+        payload: Record<string, unknown>; sentAt: number;
+    } | null>(null);
+    const [deliveryState, setDeliveryState] = useState<'sending' | 'unconfirmed' | null>(null);
+    const [acceptedInput, setAcceptedInput] = useState<{ id: string; question: string } | null>(null);
+    const acknowledgeDelivery = useCallback(() => {
+        const pending = pendingDelivery.current;
+        if (!pending) return;
+        console.info('[assistant-input] accepted', { messageId: pending.id, requestId: pending.requestId });
+        setAcceptedInput({ id: pending.id, question: pending.question });
+        pendingDelivery.current = null;
+        setDeliveryState(null);
+    }, []);
+    useEffect(() => {
+        if (deliveryState !== 'sending') return;
+        const timer = window.setInterval(() => {
+            const pending = pendingDelivery.current;
+            if (pending && Date.now() - pending.sentAt >= 15_000) {
+                console.warn('[assistant-input] receipt timeout', { messageId: pending.id, requestId: pending.requestId });
+                setDeliveryState('unconfirmed');
+            }
+        }, 1_000);
+        return () => window.clearInterval(timer);
+    }, [deliveryState]);
     const [attachments, setAttachments] = useState<DeviceAssistantContextAttachment[]>([]);
     const [fileScope, setFileScope] = useState<AssistantFileScopeView>({ revision: 0, directories: [] });
     const directorySelectors = useRef<{ conversationId: string; clientRequestId: string } | null>(null);
@@ -426,6 +451,10 @@ export function useDeviceAssistantChat({
                 || !Array.isArray(body?.data?.messages)
             ) return;
             const snapshot = body.data as PersistedSnapshot;
+            if (pendingDelivery.current?.conversation === expectedConversationId
+                && snapshot.messages.some(message => message.id === pendingDelivery.current?.id && message.role === 'user')) {
+                acknowledgeDelivery();
+            }
             if (
                 typeof snapshot.sessionId !== 'string'
                 || snapshot.sessionId.length === 0
@@ -500,7 +529,9 @@ export function useDeviceAssistantChat({
             }));
             setRemoteActive(Boolean(snapshot.active));
             if (!activeRequest.current) {
-                setMessages(windowMessages);
+                const pending = pendingDelivery.current;
+                setMessages(pending && pending.conversation === expectedConversationId && !windowMessages.some(m => m.id === pending.id)
+                    ? [...windowMessages, { id: pending.id, role: 'user', text: pending.question }] : windowMessages);
                 setTools(windowTools);
                 setDraft(projected.draft);
                 setPartial('');
@@ -616,6 +647,9 @@ export function useDeviceAssistantChat({
         snapshotWatermark.current = null;
         historyWindow.current = null;
         olderRequest.current = null;
+        pendingDelivery.current = null;
+        setDeliveryState(null);
+        setAcceptedInput(null);
         conversationId.current = stored;
         rehearsalSent.current = false;
         setMessages([]);
@@ -776,6 +810,8 @@ export function useDeviceAssistantChat({
         if (event.seq <= lastSeq.current) return;
         lastSeq.current = event.seq;
 
+        if (event.kind === 'status' && event.status === 'accepted') acknowledgeDelivery();
+        if ((event.kind === 'error' || event.kind === 'retracted') && pendingDelivery.current) setDeliveryState('unconfirmed');
         switch (event.kind) {
             case 'status':
                 setStatus(event.status ?? 'running');
@@ -864,7 +900,7 @@ export function useDeviceAssistantChat({
                 if (conversationId.current) void loadSnapshot(conversationId.current);
                 break;
         }
-    }), [loadSnapshot, subscribe]);
+    }), [acknowledgeDelivery, loadSnapshot, subscribe]);
 
     const ensureConversation = useCallback(() => {
         if (!conversationId.current) {
@@ -897,7 +933,7 @@ export function useDeviceAssistantChat({
             {
                 conversation_id: currentConversationId,
                 client_request_id: clientRequestId,
-                selected_capability_ids: selectedCapabilityIds,
+                selected_capability_ids: [...selectedCapabilityIds],
             },
             deskId,
         );
@@ -1018,22 +1054,45 @@ export function useDeviceAssistantChat({
         setRemoteActive(true);
         lastSeq.current = -1;
         previewArgs.current.clear();
-        activeRequest.current = sendMessage(
-            SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT,
-            {
+        const requestId = v4();
+        const payload = {
                 question: trimmed,
                 client_message_id: clientMessageId,
                 conversation_id: conversationId.current,
                 locale: rehearsal ? rehearsal.locale ?? undefined : locale,
-                selected_capability_ids: selectedCapabilityIds,
+                selected_capability_ids: [...selectedCapabilityIds],
                 selected_attachment_ids: rehearsal ? [] : attachments
                     .filter((attachment) => attachment.state === 'active')
                     .map((attachment) => attachment.id),
-            },
-            deskId,
-        );
+            };
+        pendingDelivery.current = { id: clientMessageId, question: trimmed,
+            conversation: conversationId.current!, requestId, payload, sentAt: Date.now() };
+        setDeliveryState('sending');
+        activeRequest.current = requestId;
+        console.info('[assistant-input] dispatch', { messageId: clientMessageId, requestId });
+        try {
+            activeRequest.current = sendMessage(SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT, payload, deskId, requestId);
+            if (pendingDelivery.current) pendingDelivery.current.requestId = activeRequest.current;
+        } catch {
+            setDeliveryState('unconfirmed');
+        }
         return true;
     }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady, hydrating, rehearsal]);
+
+    const retryDelivery = useCallback(async () => {
+        const pending = pendingDelivery.current;
+        if (!pending || connected === false || !sessionTargetReady || deliveryState === 'sending') return;
+        setDeliveryState('sending');
+        pending.sentAt = Date.now();
+        await loadSnapshot(pending.conversation);
+        if (pendingDelivery.current !== pending || conversationId.current !== pending.conversation) return;
+        activeRequest.current = pending.requestId;
+        lastSeq.current = -1;
+        console.info('[assistant-input] retry', { messageId: pending.id, requestId: pending.requestId });
+        try {
+            sendMessage(SIGNALING_TYPE_CODE_ASK_DEVICE_ASSISTANT, pending.payload, deskId, pending.requestId);
+        } catch { setDeliveryState('unconfirmed'); }
+    }, [connected, sessionTargetReady, deliveryState, loadSnapshot, sendMessage, deskId]);
 
     const submitPermissionDecision = useCallback(async (
         request: PermissionRequestDto,
@@ -1178,6 +1237,9 @@ export function useDeviceAssistantChat({
 
     const reset = useCallback(() => {
         if (rehearsal) return;
+        pendingDelivery.current = null;
+        setDeliveryState(null);
+        setAcceptedInput(null);
         activeRequest.current = null;
         snapshotActiveRequest.current = null;
         clearStopping();
@@ -1286,6 +1348,9 @@ export function useDeviceAssistantChat({
         turnRunning: activeRequest.current !== null || remoteActive,
         running: activeRequest.current !== null || remoteActive || contextUpdating || permissionUpdating || outcomeDisposing,
         start,
+        deliveryState,
+        acceptedInput,
+        retryDelivery,
         updateContext,
         attachWindow,
         detachAttachment,

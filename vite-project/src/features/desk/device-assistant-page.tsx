@@ -323,17 +323,19 @@ export function DeviceAssistantWorkspace({
         if (chat.updateContext(next)) setSelectedCapabilityIds(next);
     };
 
+    useEffect(() => {
+        const accepted = chat.acceptedInput;
+        if (!accepted) return;
+        setQuestion(current => current.trim() === accepted.question ? '' : current);
+        setSelectedCapabilityIds(current => current.filter(id => id !== CURRENT_SCREEN_CAPABILITY_ID));
+    }, [chat.acceptedInput]);
+
     const submit = (event: FormEvent) => {
         event.preventDefault();
-        if (chat.turnRunning) return;
+        if (chat.turnRunning || chat.deliveryState) return;
         if (!assistantEnabled || !rehearsalCanStart) return;
         const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
-        if (chat.start(question, i18n.language, selectedContext)) {
-            setQuestion('');
-            setSelectedCapabilityIds((current) =>
-                current.filter((id) => id !== CURRENT_SCREEN_CAPABILITY_ID),
-            );
-        }
+        chat.start(question, i18n.language, selectedContext);
     };
 
     const resetConversation = () => {
@@ -890,6 +892,13 @@ export function DeviceAssistantWorkspace({
                     )}
                     </div>
                     <form onSubmit={submit} className="assistant-composer shrink-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm">
+                        {chat.deliveryState && <div role="status" className="flex items-center justify-between gap-2 text-sm">
+                            <span>{t(chat.deliveryState === 'sending' ? 'pages.deviceAssistant.deliverySending' : 'pages.deviceAssistant.deliveryUnconfirmed')}</span>
+                            {chat.deliveryState === 'unconfirmed' && <Button type="button" size="sm" variant="outline"
+                                disabled={!isConnected || !chat.sessionTargetReady} onClick={() => void chat.retryDelivery()}>
+                                {t('pages.deviceAssistant.deliveryRetry')}
+                            </Button>}
+                        </div>}
                         <div className="flex flex-wrap items-center gap-2">
                             <Button type="button" size="sm" variant="ghost" onClick={() => setPanel('context')}>
                                 {t('pages.deviceAssistant.workspace.addContext')}
@@ -924,7 +933,7 @@ export function DeviceAssistantWorkspace({
                                     <span className="assistant-action-label">{t(chat.stopping ? 'pages.deviceAssistant.stopping' : 'pages.deviceAssistant.stop')}</span>
                                 </Button>
                             ) : (
-                                <Button type="submit" className="assistant-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.deviceAssistant.send')} disabled={!rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
+                                <Button type="submit" className="assistant-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.deviceAssistant.send')} disabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
                                     <Send className="h-4 w-4 shrink-0" />
                                     <span className="assistant-action-label">{t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.deviceAssistant.send')}</span>
                                 </Button>
