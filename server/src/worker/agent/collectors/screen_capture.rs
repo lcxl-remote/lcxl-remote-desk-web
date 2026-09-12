@@ -47,12 +47,14 @@ pub(crate) fn collect(
     #[cfg(target_os = "macos")]
     let window_geometry = window_target.as_ref().map(|t| {
         desk_agent_protocol::background_input::WindowInputGeometry {
+            width_pixels: t.width.ceil() as u32,
+            height_pixels: t.height.ceil() as u32,
             width_millipoints: (t.width * 1000.0).round() as u64,
             height_millipoints: (t.height * 1000.0).round() as u64,
         }
     });
     #[cfg(not(target_os = "macos"))]
-    let window_geometry = None;
+    let window_geometry: Option<desk_agent_protocol::background_input::WindowInputGeometry> = None;
     #[cfg(target_os = "macos")]
     let frame = if let Some(target) = window_target {
         desk_capture_engine::image_capture::mac_screencapturekit::capture_independent_window(
@@ -86,6 +88,11 @@ pub(crate) fn collect(
     let (dpi_x, dpi_y) = capture_dpi();
     let (png, width, height) = encode_png_with_dimensions(frame.as_ref())?;
     enforce_size_limit(png.len(), MAX_IMAGE_BYTES)?;
+    let window_geometry = window_geometry.map(|mut geometry| {
+        geometry.width_pixels = width;
+        geometry.height_pixels = height;
+        geometry
+    });
 
     Ok(ScreenCaptureOutput {
         display: desk_settings.video_device_name.clone(),

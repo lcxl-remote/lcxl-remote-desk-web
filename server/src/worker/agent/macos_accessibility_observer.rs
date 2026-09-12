@@ -1106,7 +1106,7 @@ fn walk(
     Ok(())
 }
 
-fn normalized_visible_bounds(
+fn pixel_visible_bounds(
     rect: CGRect,
     window: CGRect,
 ) -> Option<desk_agent_protocol::computer_use::UiNodeBounds> {
@@ -1130,19 +1130,21 @@ fn normalized_visible_bounds(
     {
         return None;
     }
-    let x = (((rect.origin.x - window.origin.x) / window.size.width) * 1000.0)
+    let width = window.size.width.ceil();
+    let height = window.size.height.ceil();
+    let x = ((rect.origin.x - window.origin.x) * width / window.size.width)
         .floor()
-        .clamp(0.0, 1000.0) as u16;
-    let y = (((rect.origin.y - window.origin.y) / window.size.height) * 1000.0)
+        .clamp(0.0, width) as u32;
+    let y = ((rect.origin.y - window.origin.y) * height / window.size.height)
         .floor()
-        .clamp(0.0, 1000.0) as u16;
-    let right = (((rect.origin.x + rect.size.width - window.origin.x) / window.size.width) * 1000.0)
+        .clamp(0.0, height) as u32;
+    let right = ((rect.origin.x + rect.size.width - window.origin.x) * width / window.size.width)
         .ceil()
-        .clamp(0.0, 1000.0) as u16;
-    let bottom = (((rect.origin.y + rect.size.height - window.origin.y) / window.size.height)
-        * 1000.0)
+        .clamp(0.0, width) as u32;
+    let bottom = ((rect.origin.y + rect.size.height - window.origin.y) * height
+        / window.size.height)
         .ceil()
-        .clamp(0.0, 1000.0) as u16;
+        .clamp(0.0, height) as u32;
     (right > x && bottom > y).then_some(UiNodeBounds {
         x,
         y,
@@ -1217,7 +1219,7 @@ fn read_node_location(
         location.status = UiLocationStatus::OutsideVisibleArea;
         return (location, fingerprint);
     }
-    location.bounds = normalized_visible_bounds(rect, window_rect);
+    location.bounds = pixel_visible_bounds(rect, window_rect);
     if location.bounds.is_some() {
         location.status = UiLocationStatus::Available;
     }
@@ -1867,7 +1869,7 @@ mod tests {
         assert!(!nodes.is_empty(), "expected located scroll areas");
         for node in nodes {
             let b = node.location.bounds.as_ref().unwrap();
-            assert!(b.x + b.width <= 1000 && b.y + b.height <= 1000);
+            assert!(b.width > 0 && b.height > 0);
             assert!(node.window_fingerprint.is_some());
             eprintln!("{} {:?}", node.role, b);
         }
@@ -2794,23 +2796,22 @@ mod location_tests {
     fn window_relative_bounds_clip_sidebar_and_ignore_desktop_origin() {
         let window = CGRect::new(&CGPoint::new(-800.0, 25.0), &CGSize::new(1000.0, 600.0));
         let sidebar = CGRect::new(&CGPoint::new(-800.0, 85.0), &CGSize::new(180.0, 360.0));
-        let b = normalized_visible_bounds(sidebar, window).unwrap();
-        assert_eq!((b.x, b.y, b.width, b.height), (0, 100, 180, 600));
+        let b = pixel_visible_bounds(sidebar, window).unwrap();
+        assert_eq!((b.x, b.y, b.width, b.height), (0, 60, 180, 360));
         let outside = CGRect::new(&CGPoint::new(300.0, 25.0), &CGSize::new(20.0, 20.0));
         assert!(
-            normalized_visible_bounds(clip_protection_bounds(outside, Some(window)), window)
-                .is_none()
+            pixel_visible_bounds(clip_protection_bounds(outside, Some(window)), window).is_none()
         );
         let partial = CGRect::new(&CGPoint::new(-850.0, 25.0), &CGSize::new(100.0, 60.0));
-        let b = normalized_visible_bounds(clip_protection_bounds(partial, Some(window)), window)
-            .unwrap();
-        assert_eq!((b.x, b.y, b.width, b.height), (0, 0, 50, 100));
+        let b =
+            pixel_visible_bounds(clip_protection_bounds(partial, Some(window)), window).unwrap();
+        assert_eq!((b.x, b.y, b.width, b.height), (0, 0, 50, 60));
     }
     #[test]
     fn invalid_geometry_does_not_fabricate_coordinates() {
         let zero = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(0.0, 0.0));
-        assert!(normalized_visible_bounds(zero, zero).is_none());
+        assert!(pixel_visible_bounds(zero, zero).is_none());
         let invalid = CGRect::new(&CGPoint::new(f64::NAN, 0.0), &CGSize::new(100.0, 100.0));
-        assert!(normalized_visible_bounds(invalid, invalid).is_none());
+        assert!(pixel_visible_bounds(invalid, invalid).is_none());
     }
 }

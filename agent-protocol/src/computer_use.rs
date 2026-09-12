@@ -247,15 +247,15 @@ impl ApplicationState {
     }
 }
 
-/// Window-relative visible bounds in the same 0..1000 space as background input.
+/// Visible bounds in original window screenshot pixels, with a top-left origin.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct UiNodeBounds {
-    pub x: u16,
-    pub y: u16,
-    pub width: u16,
-    pub height: u16,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(

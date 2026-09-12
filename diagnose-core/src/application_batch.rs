@@ -208,7 +208,7 @@ pub fn project_schema(tool: &mut ToolSpec) {
             "Use observed element_id for each step. Prefer semantic UI over background input."
         },
         if background {
-            "Mouse: action contains exactly one element_id or position {x,y} normalized 0–1000 within the window. type_text supports Unicode. key_press uses named keys/modifiers. TextEdit background Command+A is known ineffective; choose a different approach. Mouse support is experimental."
+            "Mouse: action contains exactly one element_id or position {x,y} in original window screenshot pixels, origin top-left (0,0), x < screenshot width and y < screenshot height; these are pixels, not percentages. type_text supports Unicode. key_press uses named keys/modifiers. TextEdit background Command+A is known ineffective; choose a different approach. Mouse support is experimental."
         } else {
             "set_value uses action {kind: set_value, params: {value: text}}; toggle uses params.desired. invoke/select/focus need only kind."
         }

@@ -10,7 +10,7 @@ pub const GUIDANCE: &str = "Use execute_background_inputs with application_id, w
 
 pub fn tool() -> RegisteredTool {
     let object = |kind: &str| json!({"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":kind},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false});
-    let position = json!({"type":"object","properties":{"x":{"type":"integer","minimum":0,"maximum":1000},"y":{"type":"integer","minimum":0,"maximum":1000}},"required":["x","y"],"additionalProperties":false});
+    let position = json!({"type":"object","description":"Pixel coordinates in the original window screenshot, origin at top-left (0,0). Use x < screenshot width and y < screenshot height. Values are pixels, not percentages or normalized coordinates.","properties":{"x":{"type":"integer","minimum":0,"maximum":u32::MAX},"y":{"type":"integer","minimum":0,"maximum":u32::MAX}},"required":["x","y"],"additionalProperties":false});
     let mut actions = Vec::new();
     for kind in ["click", "double_click", "scroll"] {
         let mut properties = json!({"kind":{"const":kind},"position":position,"element_id":{"type":"string","description":"Observed control ID used to locate mouse coordinates, not an AX action"}});
@@ -32,5 +32,27 @@ pub fn tool() -> RegisteredTool {
         },
         required_capability: Capability::DesktopBackgroundInputConfirmed,
         effect: ToolEffect::Mutating,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pixel_coordinate_schema_preserves_scroll_distance_limits() {
+        let schema = tool().spec.parameters_schema;
+        let actions = &schema["properties"]["action"]["oneOf"];
+        assert_eq!(
+            actions[0]["properties"]["position"]["properties"]["x"]["maximum"],
+            u32::MAX
+        );
+        assert!(
+            actions[0]["properties"]["position"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Pixel coordinates")
+        );
+        assert_eq!(actions[2]["properties"]["vertical"]["maximum"], 10000);
+        assert_eq!(actions[2]["properties"]["horizontal"]["minimum"], -10000);
     }
 }

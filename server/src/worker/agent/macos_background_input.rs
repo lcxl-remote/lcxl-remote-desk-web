@@ -134,9 +134,14 @@ fn mouse_event(
         Ok(event)
     })
 }
-// Endpoints name the outermost interior point, never the next window's pixel.
-fn normalized_axis(origin: f64, size: f64, value: u16) -> f64 {
-    origin + (size * f64::from(value) / 1000.0).min((size - 0.5).max(0.0))
+// Screenshot pixels map to Quartz points only at the native input boundary.
+fn pixel_axis(origin: f64, size: f64, pixels: u32, value: u32) -> Result<f64, AgentError> {
+    if pixels == 0 || value >= pixels {
+        return Err(failure(
+            "Mouse position is outside the screenshot pixel dimensions; use 0 <= x < width and 0 <= y < height",
+        ));
+    }
+    Ok(origin + size * f64::from(value) / f64::from(pixels))
 }
 
 pub(super) fn validate(
@@ -166,8 +171,8 @@ pub(super) fn validate(
             ));
         }
         CGPoint::new(
-            normalized_axis(target.origin.x, target.width, p.x),
-            normalized_axis(target.origin.y, target.height, p.y),
+            pixel_axis(target.origin.x, target.width, g.width_pixels, p.x)?,
+            pixel_axis(target.origin.y, target.height, g.height_pixels, p.y)?,
         )
     } else {
         target
@@ -294,10 +299,12 @@ pub(super) fn apply(
 mod tests {
     use super::*;
     #[test]
-    fn background_input_coordinates_follow_window_origin_and_keep_endpoints_inside() {
-        assert_eq!(normalized_axis(-1000.0, 640.0, 0), -1000.0);
-        assert_eq!(normalized_axis(-1000.0, 640.0, 500), -680.0);
-        assert_eq!(normalized_axis(-1000.0, 640.0, 1000), -360.5);
-        assert_eq!(normalized_axis(500.0, 640.0, 500), 820.0);
+    fn screenshot_pixels_convert_without_normalized_coordinate_assumptions() {
+        assert_eq!(pixel_axis(-1000.0, 640.0, 640, 0).unwrap(), -1000.0);
+        assert_eq!(pixel_axis(-1000.0, 640.0, 640, 500).unwrap(), -500.0);
+        assert_eq!(pixel_axis(200.0, 935.0, 935, 85).unwrap(), 285.0);
+        assert_eq!(pixel_axis(200.0, 640.0, 1280, 1000).unwrap(), 700.0);
+        assert!(pixel_axis(0.0, 640.0, 640, 640).is_err());
+        assert!(pixel_axis(0.0, 640.0, 0, 0).is_err());
     }
 }

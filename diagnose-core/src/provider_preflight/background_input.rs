@@ -35,7 +35,7 @@ pub fn background_input_from_call(
     let input: Input = serde_json::from_str(&call.arguments_json).map_err(|_| {
         error(
             AgentErrorKind::InvalidInput,
-            r#"Invalid background input. Required: {"application_id":"<app>","window_id":"<window>","action":{"kind":"type_text","text":"hello"}}. Mouse: action {"kind":"click","position":{"x":500,"y":500}} or {"kind":"click","element_id":"<control>"}, exactly one locator. Coordinates are 0–1000 within the observed window. Keys: {"kind":"key_press","key":"ArrowLeft","modifiers":["Command"]}. No input was dispatched."#,
+            r#"Invalid background input. Required: {"application_id":"<app>","window_id":"<window>","action":{"kind":"type_text","text":"hello"}}. Mouse: action {"kind":"click","position":{"x":500,"y":500}} or {"kind":"click","element_id":"<control>"}, exactly one locator. Coordinates are pixels in the original window screenshot, origin top-left (0,0), x < screenshot width and y < screenshot height. They are not percentages or normalized coordinates. Keys: {"kind":"key_press","key":"ArrowLeft","modifiers":["Command"]}. No input was dispatched."#,
             false,
             true,
         )

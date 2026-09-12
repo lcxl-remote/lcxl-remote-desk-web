@@ -49,14 +49,14 @@ pub enum InputModifier {
     Shift,
 }
 
-/// Fixed normalized window coordinates, with a top-left origin.
+/// Pixel coordinates in the original window screenshot, with a top-left origin.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct WindowInputPosition {
-    pub x: u16,
-    pub y: u16,
+    pub x: u32,
+    pub y: u32,
 }
 
 #[derive(
@@ -111,9 +111,6 @@ impl BackgroundInputAction {
         if let Some((position, element)) = self.locator() {
             if position.is_some() == element.is_some() {
                 return Err("Provide exactly one position {x,y} or element_id for mouse input");
-            }
-            if position.as_ref().is_some_and(|p| p.x > 1000 || p.y > 1000) {
-                return Err("Window coordinates must be between 0 and 1000");
             }
             if element.as_ref().is_some_and(|e| {
                 e.object_kind != crate::computer_use::ObjectKind::UiElement
@@ -241,6 +238,8 @@ pub fn key_code(key: &str) -> Option<u16> {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct WindowInputGeometry {
+    pub width_pixels: u32,
+    pub height_pixels: u32,
     pub width_millipoints: u64,
     pub height_millipoints: u64,
 }
@@ -249,10 +248,17 @@ pub struct WindowInputGeometry {
 mod tests {
     use super::*;
     #[test]
+    fn pixel_positions_are_not_limited_to_one_thousand() {
+        let action: BackgroundInputAction = serde_json::from_value(serde_json::json!({
+            "kind":"click","position":{"x":1920,"y":1080}
+        }))
+        .unwrap();
+        assert!(action.validate().is_ok());
+    }
+    #[test]
     fn closed_actions_reject_ambiguous_locators_and_bad_keys() {
         for value in [
             serde_json::json!({"kind":"click"}),
-            serde_json::json!({"kind":"click","position":{"x":1001,"y":0}}),
             serde_json::json!({"kind":"key_press","key":"launch_shell"}),
             serde_json::json!({"kind":"key_press","key":"a","modifiers":["Command","Command"]}),
             serde_json::json!({"kind":"type_text","text":""}),

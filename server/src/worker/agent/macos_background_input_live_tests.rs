@@ -142,12 +142,14 @@ fn production_background_input_textedit() {
     std::fs::write("/tmp/lrdm-bg-production-window.png", shot.image).unwrap();
     let point = target.element_point.unwrap();
     let geometry = WindowInputGeometry {
+        width_pixels: shot.width,
+        height_pixels: shot.height,
         width_millipoints: (target.width * 1000.0).round() as u64,
         height_millipoints: (target.height * 1000.0).round() as u64,
     };
     let position = WindowInputPosition {
-        x: ((point.x - target.origin.x) / target.width * 1000.0).round() as u16,
-        y: ((point.y - target.origin.y) / target.height * 1000.0).round() as u16,
+        x: ((point.x - target.origin.x) / target.width * f64::from(shot.width)).round() as u32,
+        y: ((point.y - target.origin.y) / target.height * f64::from(shot.height)).round() as u32,
     };
     let click = Action::Click {
         position: Some(position.clone()),
