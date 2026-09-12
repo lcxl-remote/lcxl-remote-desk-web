@@ -178,11 +178,18 @@ impl CommandPolicyContext {
                 "confirmed command execution is unavailable under current policy",
             ));
         }
-        let proposal: CommandDraft =
-            serde_json::from_str(canonical).map_err(|_| denied("invalid exact command input"))?;
-        proposal
-            .validate()
-            .map_err(|_| denied("invalid exact command input"))?;
+        let proposal: CommandDraft = serde_json::from_str(canonical).map_err(|e| {
+            denied(&crate::model_input::describe_error(
+                COMMAND_TOOL,
+                &format!("Invalid exact command input: {e}"),
+            ))
+        })?;
+        proposal.validate().map_err(|e| {
+            denied(&crate::model_input::describe_error(
+                COMMAND_TOOL,
+                &format!("Invalid exact command input: {e}"),
+            ))
+        })?;
         let shell = crate::exec_tools::canonical_exec_shell(&proposal.shell)
             .ok_or_else(|| denied("exact command shell is not supported"))?;
         if !crate::exec_tools::exec_shell_is_available(shell, &self.available_shells) {

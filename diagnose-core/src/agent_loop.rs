@@ -2507,7 +2507,7 @@ async fn run_inner_impl(
                                 turn.provider_meta.data_envelope.as_ref(),
                                 mint(),
                                 &call.id,
-                                format!("tool error: {}", error.message),
+                                crate::model_input::describe_error(&call.name, &error.message),
                                 "invalid_desktop_id",
                             )?;
                             deps.session_seam.save(session).await?;
@@ -2602,7 +2602,9 @@ async fn run_inner_impl(
                                     Err(e) => (
                                         crate::seam::ToolRunOutput {
                                             content: if e.safe_for_model {
-                                                format!("tool error: {}", e.message)
+                                                crate::model_input::describe_error(
+                                                    &call.name, &e.message,
+                                                )
                                             } else {
                                                 "tool error: the tool could not complete".into()
                                             },
@@ -2828,7 +2830,10 @@ async fn run_inner_impl(
                                     finish_tool(session, &call.id, true, sink);
                                 }
                                 Err(error) => {
-                                    let content = format!("tool error: {}", error.message);
+                                    let content = crate::model_input::describe_error(
+                                        &call.name,
+                                        &error.message,
+                                    );
                                     let envelope = derive_internal_tool_result_envelope(
                                         turn.provider_meta.data_envelope.as_ref(),
                                         &call.id,
@@ -2857,7 +2862,7 @@ async fn run_inner_impl(
                                     turn.provider_meta.data_envelope.as_ref(),
                                     mint(),
                                     &call.id,
-                                    format!("tool error: {}", error.message),
+                                    crate::model_input::describe_error(&call.name, &error.message),
                                     "schedule_proposal_failed",
                                 )?;
                                 deps.session_seam.save(session).await?;
@@ -2904,7 +2909,10 @@ async fn run_inner_impl(
                                         turn.provider_meta.data_envelope.as_ref(),
                                         mint(),
                                         &call.id,
-                                        format!("tool error: {}", error.message),
+                                        crate::model_input::describe_error(
+                                            &call.name,
+                                            &error.message,
+                                        ),
                                         "directory_resolution_failed",
                                     )?;
                                     deps.session_seam.save(session).await?;
@@ -3246,7 +3254,10 @@ async fn run_inner_impl(
                                     });
                                 }
                                 Err(error) => {
-                                    let content = format!("tool error: {}", error.message);
+                                    let content = crate::model_input::describe_error(
+                                        &call.name,
+                                        &error.message,
+                                    );
                                     let envelope = derive_internal_tool_result_envelope(
                                         turn.provider_meta.data_envelope.as_ref(),
                                         &call.id,
@@ -3307,7 +3318,10 @@ async fn run_inner_impl(
                             );
                             let (content, ok) = match result {
                                 Ok(content) => (content, true),
-                                Err(error) => (format!("tool error: {}", error.message), false),
+                                Err(error) => (
+                                    crate::model_input::describe_error(&call.name, &error.message),
+                                    false,
+                                ),
                             };
                             let envelope = derive_internal_tool_result_envelope(
                                 turn.provider_meta.data_envelope.as_ref(),
@@ -3339,7 +3353,10 @@ async fn run_inner_impl(
                                         (message, true)
                                     }
                                     Err(error) => {
-                                        let content = format!("tool error: {}", error.message);
+                                        let content = crate::model_input::describe_error(
+                                            &call.name,
+                                            &error.message,
+                                        );
                                         let envelope = crate::model_message_labels::conversation_history_result_envelope(
                                             turn.provider_meta.data_envelope.as_ref(), &[], &call.id, &content)?;
                                         let mut message =
@@ -3375,9 +3392,11 @@ async fn run_inner_impl(
                             });
                             let (content, source_messages, ok) = match result {
                                 Ok(result) => (result.content, result.source_messages, true),
-                                Err(error) => {
-                                    (format!("tool error: {}", error.message), Vec::new(), false)
-                                }
+                                Err(error) => (
+                                    crate::model_input::describe_error(&call.name, &error.message),
+                                    Vec::new(),
+                                    false,
+                                ),
                             };
                             let envelope =
                                 crate::model_message_labels::conversation_history_result_envelope(

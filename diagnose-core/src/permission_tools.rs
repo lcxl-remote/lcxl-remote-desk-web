@@ -532,6 +532,7 @@ pub fn canonical_tool_permission_input_json(
     tool_name: &str,
     mut value: serde_json::Value,
 ) -> Result<String, serde_json::Error> {
+    crate::model_input::fill_versions(tool_name, &mut value);
     if tool_name == "search_public_web"
         && let serde_json::Value::Object(input) = &mut value
     {
@@ -584,7 +585,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
-                                "exact_input": {"type": "object", "description": "Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
+                                "exact_input": {"type": "object", "description": "First load the target tool with load_capability_details and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
@@ -692,7 +693,18 @@ pub fn build_permission_request(
             .map(|scope| serde_json::json!({"application_scope":scope}))
             .or(item.exact_input);
         let (canonical_input_json, canonical_input_digest_sha256) = match input_value {
-            Some(input) => {
+            Some(mut input) => {
+                if application_scope.is_none() {
+                    crate::model_input::fill_versions(&item.tool_name, &mut input);
+                    if !crate::ui_model_ids::needs_resolution(&item.tool_name) {
+                        crate::model_input::validate_format_with_schema(
+                            &item.tool_name,
+                            &capability.tool_spec.parameters_schema,
+                            &input,
+                        )
+                        .map_err(invalid)?;
+                    }
+                }
                 let canonical = if application_scope.is_some() {
                     canonical_permission_input_json(input)
                 } else {
@@ -1453,11 +1465,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(
-            error
-                .message
-                .contains("does not match the current closed tool contract")
-        );
+        assert!(error.message.contains("Structural example"));
     }
 
     #[test]
@@ -1605,10 +1613,42 @@ mod tests {
     #[test]
     fn input_fallback_permission_is_narrowed_to_one_shot_before_pending() {
         let registry = crate::device_assistant::device_assistant_provider_registry();
+        let page = serde_json::json!({
+            "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
+            "adapter": {
+                "engine": "chrome_extension",
+                "device_id": "device-1",
+                "os_session_id": "session-1",
+                "browser_major_version": 151,
+                "browser_version": "151.0.0.0",
+                "adapter_id": "lcxl-browser-extension",
+                "adapter_version": "1.7.0",
+                "profile_incarnation": "profile-1",
+                "connection_revision": 7
+            },
+            "account_id": "gmail-web:alice@example.com",
+            "page_id": "page-1",
+            "page_incarnation": "page-incarnation-1",
+            "origin": {"kind": "https", "host_ascii": "mail.google.com", "port": 443},
+            "document_revision": 2,
+            "url_sha256": "a".repeat(64),
+            "observed_at_unix_ms": 42
+        });
+        let field = |element_id: &str, accessible_name: &str, role: &str| {
+            serde_json::json!({
+                "page_id": "page-1",
+                "page_incarnation": "page-incarnation-1",
+                "document_revision": 2,
+                "element_id": element_id,
+                "role": role,
+                "accessible_name": accessible_name,
+                "value": null,
+                "element_revision": 1
+            })
+        };
+        let arguments = serde_json::json!({"items":[{"item_id":"activate","provider_id":"browser.element.activate","tool_name":"browser_activate_element","expected_effect":"input_fallback","exact_input":{"page":page,"element":field("button-1", "Open", "button")},"suggested_ttl_seconds":300,"suggested_max_uses":2,"reason":"Activate the selected semantic element once"}]}).to_string();
         let request = build_permission_request(
-            &call(
-                r#"{"items":[{"item_id":"activate","provider_id":"browser.element.activate","tool_name":"browser_activate_element","expected_effect":"input_fallback","exact_input":{"page":"provider-owned-page","element":"provider-owned-element"},"suggested_ttl_seconds":300,"suggested_max_uses":2,"reason":"Activate the selected semantic element once"}]}"#,
-            ),
+            &call(&arguments),
             &registry,
             "permission-browser-activate".into(),
             1,
@@ -2331,11 +2371,7 @@ mod tests {
             "2026-08-27T00:00:00Z".into(),
         )
         .unwrap_err();
-        assert!(
-            invalid
-                .message
-                .contains("decode Outlook (new) handoff input")
-        );
+        assert!(invalid.message.contains("Structural example"));
     }
 
     #[test]

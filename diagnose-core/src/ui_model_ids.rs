@@ -124,7 +124,20 @@ pub(crate) fn resolve_single_call(
     now_ms: u64,
 ) -> Result<ToolCall, AgentError> {
     if !needs_resolution(&call.name) {
-        return Ok(call.clone());
+        let mut value: Value = serde_json::from_str(&call.arguments_json).map_err(|e| {
+            invalid(&crate::model_input::describe_error(
+                &call.name,
+                &e.to_string(),
+            ))
+        })?;
+        crate::model_input::fill_versions(&call.name, &mut value);
+        if call.name == crate::command_confirmation::COMMAND_TOOL {
+            crate::model_input::validate_format(&call.name, &value).map_err(|e| invalid(&e))?;
+        }
+        return Ok(ToolCall {
+            arguments_json: value.to_string(),
+            ..call.clone()
+        });
     }
     let mut value: Value = serde_json::from_str(&call.arguments_json)
         .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
@@ -371,12 +384,14 @@ fn project_scope(value: &mut Value) {
 /// Compare a server-resolved call with the original ID-only model proposal.
 /// All non-reference inputs, including the action, must still match exactly.
 pub fn same_call_input(tool: &str, original: &str, resolved: &str) -> bool {
-    let (Ok(left), Ok(mut right)) = (
+    let (Ok(mut left), Ok(mut right)) = (
         serde_json::from_str::<Value>(original),
         serde_json::from_str::<Value>(resolved),
     ) else {
         return false;
     };
+    crate::model_input::fill_versions(tool, &mut left);
+    crate::model_input::fill_versions(tool, &mut right);
     if left == right {
         return true;
     }
@@ -474,6 +489,7 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
 }
 
 pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
+    crate::model_input::hide_versions(&mut tool.parameters_schema);
     if crate::application_batch::supports(&tool.name)
         && tool
             .parameters_schema

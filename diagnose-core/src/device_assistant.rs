@@ -1540,7 +1540,7 @@ fn prepare_gmail_web_handoff_tool() -> RegisteredTool {
                         "additionalProperties": false
                     }
                 },
-                "required": ["schema_version", "page", "to_field", "subject_field", "body_field", "attachment", "draft"],
+                "required": ["schema_version", "page", "to_field", "subject_field", "body_field", "draft"],
                 "additionalProperties": false
             }),
         },
@@ -1979,7 +1979,7 @@ fn execute_confirmed_command_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "execute_confirmed_command".into(),
-            description: "Execute one exact owner-confirmed command on the current device. Owner policy allows non-blacklisted template-free commands, pipelines and multi-line scripts, classified as Critical and potentially mutating. First request an R3 one-shot grant for the identical complete structured input and wait for owner approval. The server freezes the plan; the shell interprets the approved script. This is not a sandbox and does not grant elevation.".into(),
+            description: "Execute one exact owner-confirmed command on the current device. Owner policy allows non-blacklisted template-free commands, pipelines and multi-line scripts, classified as Critical and potentially mutating. First load this tool definition with load_capability_details. Request an R3 one-shot grant with exact_input containing shell, command, timeout_ms and optional cwd; do not provide schema_version. Use a shell available on this device. Request the grant for the identical complete structured input and wait for owner approval. The server freezes the plan; the shell interprets the approved script. This is not a sandbox and does not grant elevation.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
