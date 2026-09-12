@@ -393,7 +393,7 @@ fn protection_scan_error(detail: &str) -> AgentError {
     )
 }
 
-struct ProtectionElement(OwnedCf);
+struct ProtectionElement(OwnedCf, Option<CGRect>);
 
 impl PartialEq for ProtectionElement {
     fn eq(&self, other: &Self) -> bool {
@@ -549,6 +549,54 @@ fn log_protection_attribute_failure(
     );
 }
 
+// AXHidden and native window/scroll clipping describe the captured content.
+// Do not use application activation or desktop occlusion: a background window
+// is captured independently of other applications covering it.
+fn protection_bounds(element: AxUiElementRef) -> Option<CGRect> {
+    let origin = attribute_point(element, "AXPosition")?;
+    let size = attribute_size(element, "AXSize")?;
+    [origin.x, origin.y, size.width, size.height]
+        .iter()
+        .all(|v| v.is_finite())
+        .then(|| CGRect::new(&origin, &size))
+}
+
+fn clip_protection_bounds(bounds: CGRect, clip: Option<CGRect>) -> CGRect {
+    let Some(clip) = clip else {
+        return bounds;
+    };
+    let left = bounds.origin.x.max(clip.origin.x);
+    let top = bounds.origin.y.max(clip.origin.y);
+    let right = (bounds.origin.x + bounds.size.width).min(clip.origin.x + clip.size.width);
+    let bottom = (bounds.origin.y + bounds.size.height).min(clip.origin.y + clip.size.height);
+    CGRect::new(
+        &CGPoint::new(left, top),
+        &CGSize::new((right - left).max(0.0), (bottom - top).max(0.0)),
+    )
+}
+
+fn protected_input_visible(hidden: bool, bounds: Option<CGRect>, clip: Option<CGRect>) -> bool {
+    if hidden {
+        return false;
+    }
+    if clip.is_some_and(|clip| clip.size.width <= 0.0 || clip.size.height <= 0.0) {
+        return false;
+    }
+    bounds.is_none_or(|bounds| {
+        let visible = clip_protection_bounds(bounds, clip);
+        visible.size.width > 0.0 && visible.size.height > 0.0
+    })
+}
+
+fn role_can_contain_sensitive_value(role: Option<&str>) -> bool {
+    matches!(
+        role,
+        None | Some(
+            "AXUnknown" | "AXTextField" | "AXTextArea" | "AXComboBox" | "AXSecureTextField"
+        )
+    )
+}
+
 fn scan_protected_controls(
     root: OwnedCf,
     process_id: u32,
@@ -560,8 +608,13 @@ fn scan_protected_controls(
     let started = Instant::now();
     let mut visited_nodes = 0_usize;
     set_messaging_timeout(root.0)?;
+    let root_clip = if scope == "selected_window" {
+        protection_bounds(root.0)
+    } else {
+        None
+    };
     let result = scan_protection_graph(
-        ProtectionElement(root),
+        ProtectionElement(root, root_clip),
         Instant::now() + Duration::from_secs(10),
         |element, position| {
             visited_nodes += 1;
@@ -570,14 +623,40 @@ fn scan_protected_controls(
                 depth = position.depth, child_index = position.child_index,
                 native_hash = unsafe { CFHash(element.0.0) });
             let _entered = span.enter();
-            let subrole =
-                protection_attribute(element.0.0, "AXSubrole", process_id == std::process::id())?;
-            if let Some(subrole) = subrole {
-                let subrole = cf_string(subrole.0)
-                    .ok_or_else(|| protection_scan_error("invalid Accessibility subrole"))?;
-                if subrole == "AXSecureTextField" {
+            let hidden = attribute_bool(element.0.0, "AXHidden") == Some(true);
+            let role = attribute_string(element.0.0, "AXRole");
+            if hidden
+                || (role.as_deref() == Some("AXWindow")
+                    && attribute_bool(element.0.0, "AXMinimized") == Some(true))
+            {
+                return Ok((false, Vec::new()));
+            }
+            // Groups/buttons do not expose sensitive input values themselves;
+            // continue through their children without querying optional subroles.
+            if role_can_contain_sensitive_value(role.as_deref())
+                && protected_input_visible(false, protection_bounds(element.0.0), element.1)
+            {
+                let subrole = protection_attribute(
+                    element.0.0,
+                    "AXSubrole",
+                    process_id == std::process::id(),
+                )?;
+                let protected = role.as_deref() == Some("AXSecureTextField")
+                    || subrole.as_ref().and_then(|v| cf_string(v.0)).as_deref()
+                        == Some("AXSecureTextField");
+                if protected {
                     return Ok((true, Vec::new()));
                 }
+            }
+            let clip = if matches!(role.as_deref(), Some("AXWindow" | "AXScrollArea")) {
+                protection_bounds(element.0.0)
+                    .map(|bounds| clip_protection_bounds(bounds, element.1))
+                    .or(element.1)
+            } else {
+                element.1
+            };
+            if clip.is_some_and(|bounds| bounds.size.width <= 0.0 || bounds.size.height <= 0.0) {
+                return Ok((false, Vec::new()));
             }
             let Some(children) =
                 protection_attribute(element.0.0, "AXChildren", process_id == std::process::id())?
@@ -594,7 +673,7 @@ fn scan_protected_controls(
                 if child.is_null() {
                     return Err(protection_scan_error("invalid Accessibility child"));
                 }
-                pending.push(ProtectionElement(OwnedCf(unsafe { CFRetain(child) })));
+                pending.push(ProtectionElement(OwnedCf(unsafe { CFRetain(child) }), clip));
             }
             Ok((false, pending))
         },
@@ -1635,6 +1714,79 @@ fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires running Calendar and macOS Accessibility permission"]
+    fn live_calendar_window_sensitive_input_scan() {
+        let app = running_applications()
+            .unwrap()
+            .into_iter()
+            .find(|app| app.image_path.ends_with("/Calendar"))
+            .expect("Calendar must already be running");
+        super::super::native_ui_identity::run(move || {
+            let root =
+                OwnedCf(unsafe { AXUIElementCreateApplication(app.process_id as libc::pid_t) });
+            let windows = copy_attribute(root.0, "AXWindows").expect("Calendar windows");
+            let count = unsafe { CFArrayGetCount(windows.0) };
+            assert!(count > 0);
+            for index in 0..count {
+                let window = OwnedCf(unsafe { CFRetain(CFArrayGetValueAtIndex(windows.0, index)) });
+                let protected = scan_protected_controls(window, app.process_id, "selected_window")?;
+                assert!(
+                    !protected,
+                    "Calendar test window must not contain visible secure input"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn sensitive_input_visibility_tracks_hidden_and_clipped_content() {
+        let rect = |x, y, w, h| CGRect::new(&CGPoint::new(x, y), &CGSize::new(w, h));
+        let window = Some(rect(0.0, 0.0, 100.0, 100.0));
+        let input = Some(rect(10.0, 10.0, 20.0, 10.0));
+        assert!(protected_input_visible(false, input, window));
+        assert!(!protected_input_visible(true, input, window));
+        assert!(!protected_input_visible(
+            false,
+            Some(rect(100.0, 10.0, 20.0, 10.0)),
+            window
+        ));
+        assert!(!protected_input_visible(
+            false,
+            Some(rect(10.0, 10.0, 0.0, 10.0)),
+            window
+        ));
+        assert!(protected_input_visible(
+            false,
+            Some(rect(90.0, 10.0, 20.0, 10.0)),
+            window
+        ));
+        let scroll = clip_protection_bounds(rect(0.0, 40.0, 100.0, 30.0), window);
+        assert!(!protected_input_visible(false, input, Some(scroll)));
+        // Unavailable visibility metadata is not proof that input is hidden.
+        assert!(protected_input_visible(false, None, window));
+    }
+
+    #[test]
+    fn ordinary_controls_do_not_require_optional_subrole_reads() {
+        assert!(!role_can_contain_sensitive_value(Some("AXGroup")));
+        assert!(!role_can_contain_sensitive_value(Some("AXButton")));
+        assert!(role_can_contain_sensitive_value(Some("AXTextField")));
+        assert!(role_can_contain_sensitive_value(None));
+        let result =
+            scan_protection_graph(0_u32, Instant::now() + Duration::from_secs(5), |id, _| {
+                match id {
+                    0 => Ok((false, vec![1, 2])),
+                    2 => Ok((false, vec![])), // Hidden input does not stop sibling scanning.
+                    _ => Ok((true, vec![])),
+                }
+            })
+            .unwrap();
+        assert!(result);
+    }
+
     #[test]
     fn host_menu_exception_does_not_hide_other_scan_failures() {
         assert!(ignore_host_menu_children_error(
