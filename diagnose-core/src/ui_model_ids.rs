@@ -174,6 +174,14 @@ pub(crate) fn resolve_single_call(
             ));
         }
         let window = object.get("target").cloned().unwrap_or(Value::Null);
+        if object["action"]["kind"] == "scroll"
+            && (object["action"].get("element_id").is_some()
+                || !object["action"]["position"].is_object())
+        {
+            return Err(invalid(
+                r#"Scroll requires action {"kind":"scroll","position":{"x":400,"y":300},"horizontal_pixels":0,"vertical_pixels":-400}. Choose pixels inside the intended content in a current window screenshot; element_id is not accepted. No input was dispatched."#,
+            ));
+        }
         let mut geometry = Value::Null;
         for message in history
             .iter()
@@ -895,6 +903,18 @@ mod tests {
             "\n{}",
             crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER
         ));
+        let scroll = call(
+            "execute_background_inputs",
+            json!({"application_id":"calendar","window_id":"window","action":{"kind":"scroll","element_id":"date","horizontal_pixels":0,"vertical_pixels":-400}}),
+        );
+        let error = resolve_call(&scroll, &messages, 1).unwrap_err();
+        assert!(error.message.contains("Scroll requires action"));
+        assert!(error.message.contains("No input was dispatched"));
+        let scroll = call(
+            "execute_background_inputs",
+            json!({"application_id":"calendar","window_id":"window","action":{"kind":"scroll","position":{"x":400,"y":300},"horizontal_pixels":0,"vertical_pixels":-400}}),
+        );
+        assert!(resolve_call(&scroll, &messages, 1).is_ok());
         let original = call(
             "execute_background_inputs",
             json!({"application_id":"calendar","window_id":"window","action":{"kind":"click","element_id":"date"}}),

@@ -699,21 +699,15 @@ impl ComputerUseBroker {
         geometry: Option<&desk_agent_protocol::background_input::WindowInputGeometry>,
         ceiling: &ComputerUseSettings,
         generation: &str,
-    ) -> Result<SemanticActionResult, AgentError> {
+    ) -> Result<Option<serde_json::Value>, AgentError> {
         #[cfg(target_os = "macos")]
         {
             let target = self.background_target(window, application, input, ceiling)?;
-            let count = super::macos_background_input::apply(&target, input, geometry, || {
-                self.require_writer_lease(generation).map(|_| ())
-            })?;
-            Ok(SemanticActionResult {
-                changed: false,
-                verified: false,
-                summary: format!(
-                    "Background input events dispatched ({count}). Application state is not verified; read its UI or window screenshot before deciding the next action."
-                ),
-                output: None,
-            })
+            let (_count, last_scroll) =
+                super::macos_background_input::apply(&target, input, geometry, || {
+                    self.require_writer_lease(generation).map(|_| ())
+                })?;
+            Ok(last_scroll)
         }
         #[cfg(not(target_os = "macos"))]
         {

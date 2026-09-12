@@ -536,17 +536,14 @@ async fn batch_completion_projects_only_compact_failure_or_success() {
     let mut native = failed(&plan);
     native.facts.clear();
     native.result = ComputerActionResultClass::ChangedButUnverified;
-    native.message = Some(
-        json!({"status":"completed","completed_steps":2,"application_state_verified":false})
-            .to_string(),
-    );
+    native.message = Some(json!({"status":"completed","completed_steps":2}).to_string());
     let result = project(&plan, "execute_ui_actions", "run", "{}", &native)
         .unwrap()
         .unwrap();
     assert_eq!(result.outcome, CapabilityDispatchOutcome::Succeeded);
     assert!(!result.content.contains("work_id"));
     native.result = ComputerActionResultClass::Failed;
-    native.message=Some(json!({"status":"stopped_on_error","failed_step_number":2,"effect":"no_effect","application_state_verified":false,"error":{"message":"window closed"}}).to_string());
+    native.message=Some(json!({"status":"stopped_on_error","failed_step_number":2,"effect":"no_effect","error":{"message":"window closed"}}).to_string());
     let result = project(&plan, "execute_ui_actions", "run", "{}", &native)
         .unwrap()
         .unwrap();

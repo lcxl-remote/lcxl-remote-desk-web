@@ -18,21 +18,32 @@ pub(crate) fn supports(steps: &[ComputerActionStep]) -> bool {
 
 pub(crate) fn execute(
     steps: &[ComputerActionStep],
-    mut action: impl FnMut(&ComputerActionStep) -> Result<(), (AgentError, bool)>,
+    mut action: impl FnMut(&ComputerActionStep) -> Result<Option<serde_json::Value>, (AgentError, bool)>,
 ) -> (ComputerActionResultClass, String) {
+    let mut last_scroll = None;
     for (index, step) in steps.iter().enumerate() {
-        if let Err((error, may_have_effect)) = action(step) {
+        let result = action(step);
+        if let Ok(Some(receipt)) = &result {
+            last_scroll = Some(receipt.clone());
+        }
+        if let Err((error, may_have_effect)) = result {
             tracing::warn!(step_number=index+1,total_steps=steps.len(),error_kind=?error.kind,may_have_effect,"application batch stopped at step");
             return (ComputerActionResultClass::Failed, json!({
                 "status":"stopped_on_error", "failed_step_number":index+1,
                 "effect":if may_have_effect {"may_have_effect"} else {"no_effect"},
                 "error":{"kind":error.kind,"code":error.error_code,"message":error.message},
-                "application_state_verified":false,
                 "recovery":"Earlier steps completed native dispatch; later steps were not executed. Read the current UI/window screenshot before replanning unfinished work. Do not replay the whole batch. Other authorized writes remain available; no user acknowledgement is required."
             }).to_string());
         }
     }
-    (ComputerActionResultClass::ChangedButUnverified,json!({"status":"completed","completed_steps":steps.len(),"application_state_verified":false,"next":"Read the target UI/window screenshot to verify the intended application state."}).to_string())
+    let mut receipt = json!({"status":"completed","completed_steps":steps.len(),"next":"Read the target UI/window screenshot and compare identifiable content before claiming success. If unchanged, reconsider the target position before increasing scroll distance."});
+    if let Some(scroll) = last_scroll {
+        receipt["last_scroll"] = scroll;
+    }
+    (
+        ComputerActionResultClass::ChangedButUnverified,
+        receipt.to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -64,11 +75,30 @@ mod tests {
             .collect()
     }
     #[test]
+    fn only_last_dispatched_scroll_is_returned_without_step_history() {
+        let mut index = 0;
+        let (_, message) = execute(&steps(), |_| {
+            index += 1;
+            Ok(if index < 3 {
+                Some(
+                    json!({"position":{"x":index * 100,"y":300},"horizontal_pixels":0,"vertical_pixels":-400}),
+                )
+            } else {
+                None
+            })
+        });
+        let value: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(value["last_scroll"]["position"]["x"], 200);
+        assert_eq!(value["completed_steps"], 3);
+        assert!(value.get("application_state_verified").is_none());
+        assert!(value.get("steps").is_none());
+    }
+    #[test]
     fn successful_batch_has_only_count_and_no_steps() {
         let mut calls = 0;
         let (_, message) = execute(&steps(), |_| {
             calls += 1;
-            Ok(())
+            Ok(None)
         });
         let value: serde_json::Value = serde_json::from_str(&message).unwrap();
         assert_eq!(calls, 3);
@@ -93,7 +123,7 @@ mod tests {
                         may_have_effect,
                     ))
                 } else {
-                    Ok(())
+                    Ok(None)
                 }
             });
             let value: serde_json::Value = serde_json::from_str(&message).unwrap();

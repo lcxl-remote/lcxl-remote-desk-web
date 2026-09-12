@@ -73,8 +73,7 @@ pub enum BackgroundInputAction {
         element: Option<ObjectRef>,
     },
     Scroll {
-        position: Option<WindowInputPosition>,
-        element: Option<ObjectRef>,
+        position: WindowInputPosition,
         #[serde(rename = "horizontal_pixels")]
         horizontal: i32,
         #[serde(rename = "vertical_pixels")]
@@ -99,13 +98,12 @@ impl BackgroundInputAction {
             Self::KeyPress { .. } => ApplicationActionKind::KeyPress,
         }
     }
-    pub fn locator(&self) -> Option<(&Option<WindowInputPosition>, &Option<ObjectRef>)> {
+    pub fn locator(&self) -> Option<(Option<&WindowInputPosition>, Option<&ObjectRef>)> {
         match self {
-            Self::Click { position, element }
-            | Self::DoubleClick { position, element }
-            | Self::Scroll {
-                position, element, ..
-            } => Some((position, element)),
+            Self::Click { position, element } | Self::DoubleClick { position, element } => {
+                Some((position.as_ref(), element.as_ref()))
+            }
+            Self::Scroll { position, .. } => Some((Some(position), None)),
             _ => None,
         }
     }
@@ -249,6 +247,16 @@ pub struct WindowInputGeometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scroll_rejects_element_locators_and_missing_pixel_position() {
+        for action in [
+            serde_json::json!({"kind":"scroll","horizontal_pixels":0,"vertical_pixels":-400}),
+            serde_json::json!({"kind":"scroll","position":{"x":400,"y":300},"element":null,"horizontal_pixels":0,"vertical_pixels":-400}),
+            serde_json::json!({"kind":"scroll","element_id":"sidebar","horizontal_pixels":0,"vertical_pixels":-400}),
+        ] {
+            assert!(serde_json::from_value::<BackgroundInputAction>(action).is_err());
+        }
+    }
     #[test]
     fn scroll_fields_require_explicit_pixel_units() {
         let action: BackgroundInputAction = serde_json::from_value(serde_json::json!({

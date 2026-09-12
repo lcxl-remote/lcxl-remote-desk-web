@@ -162,12 +162,12 @@ pub(super) fn validate(
         ));
     }
     let point = if let Some(p) = position {
-        let g=geometry.ok_or_else(|| failure("Read this window's screenshot before coordinate input, or use an observed element_id"))?;
+        let g=geometry.ok_or_else(|| failure("Read this window's screenshot before coordinate input. Scroll requires screenshot position {x,y}"))?;
         if g.width_millipoints != (target.width * 1000.0).round() as u64
             || g.height_millipoints != (target.height * 1000.0).round() as u64
         {
             return Err(failure(
-                "Window size changed since the screenshot; capture it again before clicking",
+                "Window size changed since the screenshot; capture it again before coordinate input",
             ));
         }
         CGPoint::new(
@@ -196,7 +196,7 @@ pub(super) fn apply(
     input: &BackgroundInputAction,
     geometry: Option<&WindowInputGeometry>,
     check: impl Fn() -> Result<(), AgentError>,
-) -> Result<usize, AgentError> {
+) -> Result<(usize, Option<serde_json::Value>), AgentError> {
     let point = validate(target, input, geometry)?;
     tracing::debug!(pid=target.pid, window_id=target.window_id, action=?input.kind(), "dispatching macOS background input");
     let source = source()?;
@@ -292,12 +292,62 @@ pub(super) fn apply(
     })();
     let sent = sent.get();
     result.map_err(|mut e:AgentError|{e.message=format!("{}; {sent} input events dispatched. Read the current UI before deciding the next action.",e.message);e})?;
-    Ok(sent)
+    let last_scroll = match input {
+        BackgroundInputAction::Scroll {
+            horizontal,
+            vertical,
+            ..
+        } => {
+            let p = point.unwrap();
+            let g = geometry.unwrap();
+            Some(scroll_receipt(target, p, g, *horizontal, *vertical))
+        }
+        _ => None,
+    };
+    Ok((sent, last_scroll))
+}
+
+fn scroll_receipt(
+    target: &Target,
+    point: CGPoint,
+    geometry: &WindowInputGeometry,
+    horizontal: i32,
+    vertical: i32,
+) -> serde_json::Value {
+    // Convert the dispatched native point back to the original screenshot pixel space.
+    serde_json::json!({
+        "position": {
+            "x": ((point.x - target.origin.x) * f64::from(geometry.width_pixels) / target.width).round() as u32,
+            "y": ((point.y - target.origin.y) * f64::from(geometry.height_pixels) / target.height).round() as u32
+        },
+        "horizontal_pixels": horizontal,
+        "vertical_pixels": vertical
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scroll_receipt_uses_dispatched_native_point_in_screenshot_pixels() {
+        let target = Target {
+            pid: 1,
+            window_id: 2,
+            origin: CGPoint::new(-1000.0, 100.0),
+            width: 640.0,
+            height: 400.0,
+            element_point: None,
+        };
+        let geometry = WindowInputGeometry {
+            width_pixels: 1280,
+            height_pixels: 800,
+            width_millipoints: 640000,
+            height_millipoints: 400000,
+        };
+        let receipt = scroll_receipt(&target, CGPoint::new(-800.0, 250.0), &geometry, 0, -400);
+        assert_eq!(receipt["position"], serde_json::json!({"x":400,"y":300}));
+        assert_eq!(receipt["vertical_pixels"], -400);
+    }
     #[test]
     fn screenshot_pixels_convert_without_normalized_coordinate_assumptions() {
         assert_eq!(pixel_axis(-1000.0, 640.0, 640, 0).unwrap(), -1000.0);

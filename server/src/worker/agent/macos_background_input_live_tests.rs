@@ -187,8 +187,7 @@ fn production_background_input_textedit() {
             modifiers: vec![InputModifier::Command],
         },
         Action::Scroll {
-            position: Some(position),
-            element: None,
+            position,
             horizontal: 0,
             vertical: -600,
         },

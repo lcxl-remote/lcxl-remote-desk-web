@@ -1909,16 +1909,17 @@ impl WorkerSession {
                                                     let ceiling = &settings.computer_use;
                                                     broker.require_writer_lease(&generation_for_call).map_err(|e|(e,false))?;
                                                     broker.preflight_application_step(step,ceiling).map_err(|e|(e,false))?;
+                                                    let mut last_scroll = None;
                                                     match &step.action {
                                                         ComputerActionKind::UiInApplication {application,action} => {
                                                             broker.require_ui_application(&step.target,application).map_err(|e|(e,false))?;
                                                             broker.execute_ui_action(&step.target,action,ceiling).map_err(|e|(e,true))?;
                                                         }
-                                                        ComputerActionKind::BackgroundInput {application,input,geometry} => { broker.execute_background_input(&step.target,application,input,geometry.as_ref(),ceiling,&generation_for_call).map_err(|e|(e,true))?; }
+                                                        ComputerActionKind::BackgroundInput {application,input,geometry} => { last_scroll = broker.execute_background_input(&step.target,application,input,geometry.as_ref(),ceiling,&generation_for_call).map_err(|e|(e,true))?; }
                                                         _ => unreachable!(),
                                                     }
                                                     broker.require_writer_lease(&generation_for_call).map_err(|e|(e,true))?;
-                                                    Ok(())
+                                                    Ok(last_scroll)
                                                 }))
                                                 };
                                                 if background { run() } else { crate::worker::agent::native_ui_identity::run(run) }

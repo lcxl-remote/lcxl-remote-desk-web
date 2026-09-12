@@ -208,7 +208,7 @@ pub fn project_schema(tool: &mut ToolSpec) {
             "Use observed element_id for each step. Prefer semantic UI over background input."
         },
         if background {
-            "Mouse: action contains exactly one element_id or position {x,y} in original window screenshot pixels, origin top-left (0,0), x < screenshot width and y < screenshot height; these are pixels, not percentages. type_text supports Unicode. key_press uses named keys/modifiers. Scroll uses horizontal_pixels/vertical_pixels distances (e.g. vertical_pixels=-300 for 300 pixels down; -6 is only 6 pixels). TextEdit background Command+A is known ineffective; choose a different approach. Mouse support is experimental."
+            "Click/double_click: action contains exactly one element_id or position {x,y} in original window screenshot pixels, origin top-left (0,0), x < screenshot width and y < screenshot height; these are pixels, not percentages. type_text supports Unicode. key_press uses named keys/modifiers. Scroll requires position {x,y}; element_id is not accepted. Choose a point inside the intended content using a current screenshot, avoiding sidebars, toolbars and dividers. AXScrollArea is only a candidate, not proof of the target region. The last_scroll receipt reports the dispatched pixel position, not verified content movement. After scrolling, read UI or a screenshot and compare identifiable content before claiming success. If unchanged, reconsider the target and choose a clearer point before increasing distance or changing direction. If repeated attempts fail, report that accurately and consider semantic alternatives; do not replay the whole batch. Scroll uses horizontal_pixels/vertical_pixels distances (e.g. vertical_pixels=-300 for 300 pixels down; -6 is only 6 pixels). TextEdit background Command+A is known ineffective; choose a different approach. Mouse support is experimental."
         } else {
             "set_value uses action {kind: set_value, params: {value: text}}; toggle uses params.desired. invoke/select/focus need only kind."
         }
@@ -240,7 +240,6 @@ pub fn completion_receipt(
     if message.len() > 4096
         || !completed.facts.is_empty()
         || completed.output.is_some()
-        || value["application_state_verified"] != false
         || number == 0
         || number > MAX_STEPS
         || expected_steps.is_some_and(|n| if failed { number > n } else { number != n })
@@ -261,9 +260,6 @@ pub fn completion_receipt(
 }
 
 pub fn compact_failed(value: &Value) -> Option<bool> {
-    if value["application_state_verified"] != false {
-        return None;
-    }
     match value["status"].as_str() {
         Some("completed")
             if value["completed_steps"]
@@ -290,7 +286,15 @@ mod receipt_tests {
     use desk_agent_protocol::computer_use::*;
     #[test]
     fn compact_completion_checks_counts_class_and_has_no_step_list() {
-        let mut completed=ComputerActionCompleted { work_id:"1".into(),action_request_id:"action".into(),execution_generation:"generation".into(),result:ComputerActionResultClass::ChangedButUnverified,facts:vec![],message:Some(json!({"status":"completed","completed_steps":2,"application_state_verified":false}).to_string()),output:None };
+        let mut completed = ComputerActionCompleted {
+            work_id: "1".into(),
+            action_request_id: "action".into(),
+            execution_generation: "generation".into(),
+            result: ComputerActionResultClass::ChangedButUnverified,
+            facts: vec![],
+            message: Some(json!({"status":"completed","completed_steps":2}).to_string()),
+            output: None,
+        };
         assert_eq!(
             completion_receipt(&completed, Some(2)).unwrap().unwrap().0,
             false
@@ -298,7 +302,7 @@ mod receipt_tests {
         assert!(completion_receipt(&completed, Some(3)).is_err());
         completed.result = ComputerActionResultClass::Failed;
         assert!(completion_receipt(&completed, Some(2)).is_err());
-        completed.message=Some(json!({"status":"stopped_on_error","failed_step_number":2,"effect":"may_have_effect","application_state_verified":false,"error":{"message":"AX rejected"}}).to_string());
+        completed.message=Some(json!({"status":"stopped_on_error","failed_step_number":2,"effect":"may_have_effect","error":{"message":"AX rejected"}}).to_string());
         assert_eq!(
             completion_receipt(&completed, Some(2)).unwrap().unwrap().0,
             true

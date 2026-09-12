@@ -6,7 +6,7 @@ use crate::{
 use desk_agent_protocol::Capability;
 use serde_json::json;
 
-pub const GUIDANCE: &str = "Use execute_background_inputs with application_id, window_id and 1–20 steps. Prefer execute_ui_actions; use background input only when semantic UI is impractical, combining it with a current application-window screenshot. Steps are sequential, stop at first failure and never roll back or automatically retry. No fixed inter-step delay; if a step depends on asynchronous UI changes, end the batch and read UI before continuing. Reuse application_scope for all background actions in the batch. Native dispatch success is not application-state verification. Read the target UI/window screenshot afterward. Never activate the app or move the real cursor. TextEdit background Command+A is known ineffective; choose an alternative. Private mouse routing is experimental.";
+pub const GUIDANCE: &str = "Use execute_background_inputs with application_id, window_id and 1–20 steps. Prefer execute_ui_actions; use background input only when semantic UI is impractical, combining it with a current application-window screenshot. Steps are sequential, stop at first failure and never roll back or automatically retry. No fixed inter-step delay; if a step depends on asynchronous UI changes, end the batch and read UI before continuing. Reuse application_scope for all background actions in the batch. Scroll requires an explicit position in current window screenshot pixels; element_id is not accepted. Choose a point inside the intended content, avoiding sidebars, toolbars and dividers. Native dispatch success is not application-state verification. Read the target UI/window screenshot afterward. Never activate the app or move the real cursor. TextEdit background Command+A is known ineffective; choose an alternative. Private mouse routing is experimental.";
 
 pub fn tool() -> RegisteredTool {
     let object = |kind: &str| json!({"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":kind},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false});
@@ -18,9 +18,14 @@ pub fn tool() -> RegisteredTool {
         if kind == "scroll" {
             properties["horizontal_pixels"] = json!({"type":"integer","minimum":-10000,"maximum":10000,"description":"Pixel distance, not wheel ticks or lines; zero means no horizontal scrolling"});
             properties["vertical_pixels"] = json!({"type":"integer","minimum":-10000,"maximum":10000,"description":"Pixel distance, NOT wheel ticks or lines. Positive up, negative down. For example -300 scrolls down 300 pixels; -6 moves only 6 pixels."});
-            required.extend(["horizontal_pixels", "vertical_pixels"]);
+            properties.as_object_mut().unwrap().remove("element_id");
+            required.extend(["position", "horizontal_pixels", "vertical_pixels"]);
         }
-        actions.push(json!({"type":"object","properties":properties,"required":required,"oneOf":[{"required":["position"]},{"required":["element_id"]}],"additionalProperties":false}));
+        let mut schema = json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
+        if kind != "scroll" {
+            schema["oneOf"] = json!([{"required":["position"]},{"required":["element_id"]}]);
+        }
+        actions.push(schema);
     }
     actions.push(json!({"type":"object","properties":{"kind":{"const":"type_text"},"text":{"type":"string","minLength":1,"maxLength":16384}},"required":["kind","text"],"additionalProperties":false}));
     actions.push(json!({"type":"object","properties":{"kind":{"const":"key_press"},"key":{"type":"string","description":"Letter/digit, Enter, Tab, Escape, Backspace, Delete, Space, ArrowLeft/Right/Up/Down, Home, End, PageUp/Down, F1–F12"},"modifiers":{"type":"array","maxItems":4,"uniqueItems":true,"items":{"enum":["Command","Control","Option","Shift"]}}},"required":["kind","key"],"additionalProperties":false}));
@@ -42,6 +47,14 @@ mod tests {
     fn pixel_coordinate_schema_preserves_scroll_distance_limits() {
         let schema = tool().spec.parameters_schema;
         let actions = &schema["properties"]["action"]["oneOf"];
+        assert!(actions[2]["properties"].get("element_id").is_none());
+        assert!(
+            actions[2]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("position"))
+        );
+        assert!(actions[0]["properties"].get("element_id").is_some());
         assert_eq!(
             actions[0]["properties"]["position"]["properties"]["x"]["maximum"],
             u32::MAX
