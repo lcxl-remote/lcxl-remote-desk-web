@@ -3,26 +3,14 @@ import zh from '@/locales/zh-CN/pages';
 import en from '@/locales/en-US/pages';
 
 describe('assistant capability disclosure', () => {
-    it('removes the redundant composer notice without removing detailed approval guidance', () => {
+    it('removes redundant general notices', () => {
         for (const locale of [zh, en]) {
             expect(Object.keys(locale)).not.toContain('pages.deviceAssistant.workspace.reviewNotice');
-            expect(locale['pages.deviceAssistant.disclosure']).toBeTruthy();
+            expect(Object.keys(locale)).not.toContain('pages.deviceAssistant.disclosure');
+            expect(Object.keys(locale)).not.toContain('pages.deviceAssistant.disclosureTitle');
         }
     });
-    it('distinguishes draft handoff from separately confirmed sending in both languages', () => {
-        expect(zh['pages.deviceAssistant.disclosure']).toContain('不能用草稿授权代替发送授权');
-        expect(en['pages.deviceAssistant.disclosure']).toContain('draft authorization does not authorize sending');
-        for (const locale of [zh, en]) {
-            const disclosure = locale['pages.deviceAssistant.disclosure'];
-            for (const app of ['Numbers', 'Pages', 'Keynote', 'Gmail', 'Slack']) expect(disclosure).toContain(app);
-        }
-    });
-
-    it('retains command risk and avoids obsolete layout and developer wording', () => {
-        expect(zh['pages.deviceAssistant.disclosure']).toContain('不保证只读');
-        expect(en['pages.deviceAssistant.disclosure']).toContain('not guaranteed to be read-only');
-        expect(zh['pages.deviceAssistant.disclosure']).not.toContain('下方显示');
-        expect(en['pages.deviceAssistant.disclosure']).not.toContain('shown below');
+    it('avoids obsolete layout and developer wording', () => {
         for (const locale of [zh, en]) {
             expect(locale['pages.deviceAssistant.sessionDescription']).not.toContain('daemon/worker');
             expect(locale['pages.deviceAssistant.providerBoundary']).toContain('{{model}}');

@@ -243,6 +243,8 @@ export function useDeviceAssistantObservation({
         if (root && (!root.token || !root.snapshot_id)) return null;
         return invoke('desktop_ui_inspect', {
         root,
+        // An explicit owner preview requests bounded enumeration, without model search terms.
+        allow_unfiltered: true,
         scope: 'content',
         max_depth: 12,
         max_nodes: 300,

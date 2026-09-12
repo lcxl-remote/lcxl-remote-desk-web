@@ -34,7 +34,7 @@ describe('delayed observation', () => {
         act(() => vi.advanceTimersByTime(1));
         expect(sendMessage).toHaveBeenCalledTimes(1);
         expect(sendMessage.mock.calls[0]).toEqual([expect.any(Number), expect.objectContaining({
-            operation: { risk_hint: null, input: { kind: 'read_context', params: { kind: { kind: 'desktop_ui_inspect', params: { root: null, scope: 'content', max_depth: 12, max_nodes: 300, max_bytes: 262144 } } } } },
+            operation: { risk_hint: null, input: { kind: 'read_context', params: { kind: { kind: 'desktop_ui_inspect', params: { root: null, allow_unfiltered: true, scope: 'content', max_depth: 12, max_nodes: 300, max_bytes: 262144 } } } } },
         }), 'device-1']);
         act(() => result.current.scheduleUi());
         act(() => vi.advanceTimersByTime(5_000));
@@ -117,12 +117,12 @@ describe('background application selection', () => {
         act(() => subscriber({ signaling_type: SIGNALING_TYPE_CODE_AGENT_CAPABILITY_COMPLETED, request_id: 'request-1',
             signaling_data: { Ok: { ReadContext: { DesktopSessionInspect: { session: root, os: 'macos' } } } },
         } as Parameters<SignalingSubscriber>[0]));
-        expect(sendMessage.mock.calls[1][1]).toMatchObject({ operation: { input: { params: { kind: { params: { root } } } } } });
+        expect(sendMessage.mock.calls[1][1]).toMatchObject({ operation: { input: { params: { kind: { params: { root, allow_unfiltered: true } } } } } });
         const output = { ReadContext: { DesktopUiInspect: { nodes: [{ role: 'application', name: 'Calculator', object_ref: app }] } } };
         act(() => subscriber({ signaling_type: SIGNALING_TYPE_CODE_AGENT_CAPABILITY_COMPLETED, request_id: 'request-2', signaling_data: { Ok: output } } as Parameters<SignalingSubscriber>[0]));
         expect(result.current.applications[0].name).toBe('Calculator');
         act(() => result.current.inspectUi(result.current.applications[0].objectRef));
-        expect(sendMessage.mock.calls[2][1]).toMatchObject({ operation: { input: { params: { kind: { params: { root: app } } } } } });
+        expect(sendMessage.mock.calls[2][1]).toMatchObject({ operation: { input: { params: { kind: { params: { root: app, allow_unfiltered: true } } } } } });
         unmount();
     });
     it('rejects incomplete application references but leaves lifecycle validation to the server', () => {

@@ -1,3 +1,4 @@
+import { AssistantObservationResult } from './assistant-observation-result';
 import { AssistantToolCall } from './assistant-tool-call';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
 import './assistant-responsive.css';
@@ -189,12 +190,7 @@ function ObservationCard({
                     </div>
                 )}
                 {entry.outcome?.status === 'ok' && (
-                    <pre
-                        data-testid="observation-output"
-                        className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-3 text-xs"
-                    >
-                        {JSON.stringify(entry.outcome.data, null, 2)}
-                    </pre>
+                    <AssistantObservationResult data={entry.outcome.data} />
                 )}
             </CardContent>
         </Card>
@@ -580,11 +576,7 @@ export function DeviceAssistantWorkspace({
             </Card>
             )}
 </>,
-                connection: <>            <Alert>
-                <ShieldCheck className="h-4 w-4" />
-                <AlertTitle>{t('pages.deviceAssistant.disclosureTitle')}</AlertTitle>
-                <AlertDescription className="whitespace-pre-line">{t('pages.deviceAssistant.disclosure')}</AlertDescription>
-            </Alert>
+                connection: <>
             {localPairingAvailable && (
                 <Card data-testid="browser-extension-pairing">
                     <CardHeader>
