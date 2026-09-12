@@ -265,7 +265,7 @@ impl ComputerUseBroker {
         selected_display: &str,
     ) -> Result<ScreenCapturePermit, AgentError> {
         validate_screen_selection(params, selected_display)?;
-        ensure_screen_capture_safe()?;
+        check_capture_foreground(params, ensure_screen_capture_safe)?;
         let window_target = if let Some(window) = params.window.as_ref() {
             if window.object_kind != ObjectKind::Window {
                 return Err(error(
@@ -286,6 +286,13 @@ impl ComputerUseBroker {
                     false,
                 ));
             };
+            if screen_capture_application_blocked(&image_path) {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "the selected application is blocked from screen capture",
+                    false,
+                ));
+            }
             #[cfg(target_os = "macos")]
             {
                 Some(
@@ -3657,6 +3664,19 @@ fn screen_target_eq(left: &str, right: &str) -> bool {
     left == right
 }
 
+// Window capture contains only the selected window, so unrelated foreground
+// surfaces must not gate it. The window branch checks the selected application.
+fn check_capture_foreground(
+    params: &ScreenCaptureParams,
+    check: impl FnOnce() -> Result<(), AgentError>,
+) -> Result<(), AgentError> {
+    if params.window.is_none() {
+        check()
+    } else {
+        Ok(())
+    }
+}
+
 fn ensure_screen_capture_safe() -> Result<(), AgentError> {
     let observed = observe_interactive_desktop()?;
     let Some(application) = observed.foreground_application else {
@@ -5412,6 +5432,29 @@ mod tests {
             .expect("the old reference must be rejected before native dispatch");
         assert_eq!(error.kind, AgentErrorKind::PermissionDenied);
         assert!(error.message.contains("allowlist"));
+    }
+
+    #[test]
+    fn window_capture_ignores_unrelated_foreground_failure_but_display_does_not() {
+        let mut params = ScreenCaptureParams::default();
+        let blocked = || {
+            Err(error(
+                AgentErrorKind::PermissionDenied,
+                "unrelated foreground blocked",
+                false,
+            ))
+        };
+        assert!(check_capture_foreground(&params, blocked).is_err());
+        params.window = Some(ObjectRef {
+            token: "selected-window".into(),
+            snapshot_id: "snapshot".into(),
+            object_kind: ObjectKind::Window,
+            expires_at: String::new(),
+        });
+        check_capture_foreground(&params, || {
+            panic!("window capture must not inspect foreground")
+        })
+        .unwrap();
     }
 
     #[test]

@@ -331,3 +331,7 @@ Collapsed tool records show status icons: a green check for success, a cross for
 Screenshot safety checks on macOS scan reachable Accessibility children independently of model UI response limits. The scan reads control subroles and child relationships without collecting text or adding a UI tree to model context. Protected controls block capture; an unreadable tree or a 10-second scan timeout reports an incomplete safety check instead of claiming a protected control was found.
 
 For a macOS application screenshot, the assistant first searches the running application catalog, then queries the returned application ID with `queries=["窗口", "window"]` to discover windows, and passes the returned window ID to the screenshot tool. Application catalogs do not query windows: model results omit empty window lists and explicitly explain the next lookup.
+
+Failed macOS screenshot safety scans log a scan ID, PID, scan scope, node position, role/subrole, AX status and timing. Failure-only probes report whether the attribute is advertised and the child-count API result. Logs exclude control titles, values and calendar text; diagnostic probes do not bypass protection or retry capture.
+
+Window screenshots check the selected application and window rather than the unrelated foreground application. Full-display screenshots retain foreground checks. The host application menu bar’s `AXChildren` error `-25200` is logged and that branch is skipped; other controls remain scanned and other read failures still block capture.

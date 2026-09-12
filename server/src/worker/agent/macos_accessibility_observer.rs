@@ -48,6 +48,12 @@ unsafe extern "C" {
         attribute: CfStringRef,
         value: *mut CfTypeRef,
     ) -> i32;
+    fn AXUIElementCopyAttributeNames(element: AxUiElementRef, names: *mut CfArrayRef) -> i32;
+    fn AXUIElementGetAttributeValueCount(
+        element: AxUiElementRef,
+        attribute: CfStringRef,
+        count: *mut isize,
+    ) -> i32;
     fn AXUIElementCopyActionNames(element: AxUiElementRef, names: *mut CfArrayRef) -> i32;
     fn AXUIElementIsAttributeSettable(
         element: AxUiElementRef,
@@ -358,7 +364,8 @@ pub(super) fn foreground_contains_protected_control(
                 "application has no Accessibility root",
             ));
         }
-        let protected = scan_protected_controls(OwnedCf(root))?;
+        let protected =
+            scan_protected_controls(OwnedCf(root), expected_process_id, "foreground_application")?;
         let after = frontmost_application()?;
         if after.process_id != before.process_id
             || after.image_path != before.image_path
@@ -400,21 +407,38 @@ impl std::hash::Hash for ProtectionElement {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProtectionScanPosition {
+    node_index: usize,
+    parent_index: Option<usize>,
+    depth: usize,
+    child_index: usize,
+}
+
 fn scan_protection_graph<T: Eq + std::hash::Hash>(
     root: T,
     deadline: Instant,
-    mut inspect: impl FnMut(&T) -> Result<(bool, Vec<T>), AgentError>,
+    mut inspect: impl FnMut(&T, ProtectionScanPosition) -> Result<(bool, Vec<T>), AgentError>,
 ) -> Result<bool, AgentError> {
-    let mut pending = vec![root];
+    let mut pending = vec![(root, None, 0, 0)];
     let mut visited = std::collections::HashSet::new();
-    while let Some(element) = pending.pop() {
+    while let Some((element, parent_index, depth, child_index)) = pending.pop() {
         if Instant::now() >= deadline {
             return Err(protection_scan_error("Accessibility traversal timed out"));
         }
         if visited.contains(&element) {
             continue;
         }
-        let (protected, children) = inspect(&element)?;
+        let node_index = visited.len();
+        let (protected, children) = inspect(
+            &element,
+            ProtectionScanPosition {
+                node_index,
+                parent_index,
+                depth,
+                child_index,
+            },
+        )?;
         if protected {
             return Ok(true);
         }
@@ -422,37 +446,132 @@ fn scan_protection_graph<T: Eq + std::hash::Hash>(
             return Err(protection_scan_error("Accessibility traversal timed out"));
         }
         visited.insert(element);
-        pending.extend(children);
+        pending.extend(
+            children
+                .into_iter()
+                .enumerate()
+                .map(|(index, child)| (child, Some(node_index), depth + 1, index)),
+        );
     }
     Ok(false)
+}
+
+// The host's native menu bar may advertise AXChildren but fail both children
+// APIs with kAXErrorFailure. Skip only this known branch; scan other controls.
+fn ignore_host_menu_children_error(
+    is_host_application: bool,
+    attribute: &str,
+    status: i32,
+    role: Option<&str>,
+) -> bool {
+    is_host_application
+        && attribute == "AXChildren"
+        && status == -25200
+        && role == Some("AXMenuBar")
 }
 
 fn protection_attribute(
     element: AxUiElementRef,
     name: &str,
+    is_host_application: bool,
 ) -> Result<Option<OwnedCf>, AgentError> {
     let attribute = create_string(name)
         .ok_or_else(|| protection_scan_error("could not allocate Accessibility attribute"))?;
     let mut value = std::ptr::null();
+    let started = Instant::now();
     let status = unsafe { AXUIElementCopyAttributeValue(element, attribute.0, &mut value) };
+    let elapsed = started.elapsed();
     let value = (!value.is_null()).then_some(OwnedCf(value));
     match status {
         AX_SUCCESS if value.is_some() => Ok(value),
         // Optional attributes: kAXErrorAttributeUnsupported / kAXErrorNoValue.
         -25205 | -25212 => Ok(None),
-        _ => Err(protection_scan_error(&format!(
-            "reading {name} failed (AX error {status})"
-        ))),
+        _ => {
+            log_protection_attribute_failure(element, name, status, elapsed, value.is_some());
+            if ignore_host_menu_children_error(
+                is_host_application,
+                name,
+                status,
+                attribute_string(element, "AXRole").as_deref(),
+            ) {
+                tracing::warn!(
+                    attribute = name,
+                    ax_status = status,
+                    "skipping unavailable host application menu children during screenshot safety scan"
+                );
+                return Ok(None);
+            }
+            Err(protection_scan_error(&format!(
+                "reading {name} failed (AX error {status})"
+            )))
+        }
     }
 }
 
-fn scan_protected_controls(root: OwnedCf) -> Result<bool, AgentError> {
+// Probe structure only on failure. Never read titles, identifiers, values or text.
+// These diagnostics must not change the original scan result or retry capture.
+fn log_protection_attribute_failure(
+    element: AxUiElementRef,
+    name: &str,
+    status: i32,
+    elapsed: Duration,
+    had_value: bool,
+) {
+    let diagnostic_started = Instant::now();
+    let role = attribute_string(element, "AXRole");
+    let subrole = attribute_string(element, "AXSubrole");
+    let mut names = std::ptr::null();
+    let names_status = unsafe { AXUIElementCopyAttributeNames(element, &mut names) };
+    let names = (!names.is_null()).then_some(OwnedCf(names));
+    let advertised = names
+        .as_ref()
+        .filter(|value| {
+            names_status == AX_SUCCESS && unsafe { CFGetTypeID(value.0) == CFArrayGetTypeID() }
+        })
+        .map(|value| {
+            (0..unsafe { CFArrayGetCount(value.0) }).any(|index| {
+                cf_string(unsafe { CFArrayGetValueAtIndex(value.0, index) }).as_deref()
+                    == Some(name)
+            })
+        });
+    let mut count = 0_isize;
+    let attribute = create_string("AXChildren");
+    let count_status = attribute.as_ref().map(|attribute| unsafe {
+        AXUIElementGetAttributeValueCount(element, attribute.0, &mut count)
+    });
+    let children_count = (count_status == Some(AX_SUCCESS)).then_some(count);
+    tracing::warn!(
+        attribute = name, ax_status = status, read_elapsed_ms = elapsed.as_millis() as u64,
+        had_value, role = ?role, subrole = ?subrole, attribute_names_status = names_status,
+        attribute_advertised = ?advertised, children_count_status = ?count_status,
+        children_count = ?children_count, diagnostics_elapsed_ms = diagnostic_started.elapsed().as_millis() as u64,
+        "screenshot safety attribute read failed"
+    );
+}
+
+fn scan_protected_controls(
+    root: OwnedCf,
+    process_id: u32,
+    scope: &str,
+) -> Result<bool, AgentError> {
+    let scan_id = uuid::Uuid::new_v4().to_string();
+    let span = tracing::warn_span!("screenshot_safety_scan", %scan_id, process_id, scope);
+    let _entered = span.enter();
+    let started = Instant::now();
+    let mut visited_nodes = 0_usize;
     set_messaging_timeout(root.0)?;
-    scan_protection_graph(
+    let result = scan_protection_graph(
         ProtectionElement(root),
         Instant::now() + Duration::from_secs(10),
-        |element| {
-            let subrole = protection_attribute(element.0.0, "AXSubrole")?;
+        |element, position| {
+            visited_nodes += 1;
+            let span = tracing::warn_span!("screenshot_safety_node",
+                node_index = position.node_index, parent_index = ?position.parent_index,
+                depth = position.depth, child_index = position.child_index,
+                native_hash = unsafe { CFHash(element.0.0) });
+            let _entered = span.enter();
+            let subrole =
+                protection_attribute(element.0.0, "AXSubrole", process_id == std::process::id())?;
             if let Some(subrole) = subrole {
                 let subrole = cf_string(subrole.0)
                     .ok_or_else(|| protection_scan_error("invalid Accessibility subrole"))?;
@@ -460,7 +579,9 @@ fn scan_protected_controls(root: OwnedCf) -> Result<bool, AgentError> {
                     return Ok((true, Vec::new()));
                 }
             }
-            let Some(children) = protection_attribute(element.0.0, "AXChildren")? else {
+            let Some(children) =
+                protection_attribute(element.0.0, "AXChildren", process_id == std::process::id())?
+            else {
                 return Ok((false, Vec::new()));
             };
             if unsafe { CFGetTypeID(children.0) != CFArrayGetTypeID() } {
@@ -477,7 +598,18 @@ fn scan_protected_controls(root: OwnedCf) -> Result<bool, AgentError> {
             }
             Ok((false, pending))
         },
-    )
+    );
+    if result.is_err() {
+        tracing::warn!(
+            visited_nodes,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "screenshot safety scan aborted before capture"
+        );
+    } else {
+        tracing::debug!(visited_nodes, elapsed_ms = started.elapsed().as_millis() as u64,
+            protected = ?result.as_ref().ok(), "screenshot safety scan completed");
+    }
+    result
 }
 
 pub(super) fn preflight_action(
@@ -548,7 +680,11 @@ fn resolve_window_capture_target_inner(
             true,
         ));
     }
-    if scan_protected_controls(OwnedCf(unsafe { CFRetain(element.0) }))? {
+    if scan_protected_controls(
+        OwnedCf(unsafe { CFRetain(element.0) }),
+        expected_process_id,
+        "selected_window",
+    )? {
         return Err(failure(
             AgentErrorKind::PermissionDenied,
             "the selected window contains a protected UI control",
@@ -1500,11 +1636,56 @@ fn failure(kind: AgentErrorKind, message: &str, retryable: bool) -> AgentError {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn host_menu_exception_does_not_hide_other_scan_failures() {
+        assert!(ignore_host_menu_children_error(
+            true,
+            "AXChildren",
+            -25200,
+            Some("AXMenuBar")
+        ));
+        for (host, attribute, status, role) in [
+            (false, "AXChildren", -25200, Some("AXMenuBar")),
+            (true, "AXSubrole", -25200, Some("AXMenuBar")),
+            (true, "AXChildren", -25204, Some("AXMenuBar")),
+            (true, "AXChildren", -25200, Some("AXTextField")),
+            (true, "AXChildren", -25200, None),
+        ] {
+            assert!(!ignore_host_menu_children_error(
+                host, attribute, status, role
+            ));
+        }
+    }
+
+    #[test]
+    fn protection_scan_diagnostics_identify_the_failed_child() {
+        let mut failed_position = None;
+        let result = scan_protection_graph(
+            0_u32,
+            Instant::now() + Duration::from_secs(5),
+            |id, position| {
+                if *id == 2 {
+                    failed_position = Some(position);
+                    return Err(protection_scan_error(
+                        "reading AXChildren failed (AX error -25200)",
+                    ));
+                }
+                Ok((false, vec![1, 2]))
+            },
+        );
+        assert!(result.is_err());
+        let position = failed_position.unwrap();
+        assert_eq!(position.node_index, 1);
+        assert_eq!(position.parent_index, Some(0));
+        assert_eq!(position.depth, 1);
+        assert_eq!(position.child_index, 1);
+    }
+
+    #[test]
     fn protection_scan_exceeds_projection_limits_and_handles_cycles() {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut visits = 0;
         assert!(
-            scan_protection_graph(0_u32, deadline, |id| {
+            scan_protection_graph(0_u32, deadline, |id, _| {
                 visits += 1;
                 Ok((*id == 5000, vec![id + 1]))
             })
@@ -1513,7 +1694,7 @@ mod tests {
         assert_eq!(visits, 5001);
         let mut visits = 0;
         assert!(
-            !scan_protection_graph(0_u32, deadline, |id| {
+            !scan_protection_graph(0_u32, deadline, |id, _| {
                 visits += 1;
                 Ok((
                     false,
@@ -1531,13 +1712,14 @@ mod tests {
 
     #[test]
     fn protection_scan_reports_read_failure_and_timeout() {
-        let error = scan_protection_graph(0_u32, Instant::now() + Duration::from_secs(5), |_| {
-            Err(protection_scan_error("reading AXChildren failed"))
-        })
-        .unwrap_err();
+        let error =
+            scan_protection_graph(0_u32, Instant::now() + Duration::from_secs(5), |_, _| {
+                Err(protection_scan_error("reading AXChildren failed"))
+            })
+            .unwrap_err();
         assert!(error.message.contains("could not complete"));
         assert!(error.retryable);
-        assert!(scan_protection_graph(0_u32, Instant::now(), |_| Ok((false, vec![]))).is_err());
+        assert!(scan_protection_graph(0_u32, Instant::now(), |_, _| Ok((false, vec![]))).is_err());
     }
 
     use super::*;
