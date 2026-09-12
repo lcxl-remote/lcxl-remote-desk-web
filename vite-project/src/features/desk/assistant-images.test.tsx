@@ -21,6 +21,32 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 describe('durable assistant images', () => {
+    it('inserts each screenshot after its tool record and before the next reply', async () => {
+        render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'question', role: 'user', text: 'Capture the window' },
+            { id: 'capture', role: 'tool_call', toolCallId: 'capture-call', text: 'Screenshot tool' },
+            { id: 'answer', role: 'assistant', text: 'The result is visible' },
+        ]} renderMessage={message => <p>{message.text}</p>} />);
+        const image = await screen.findByRole('img');
+        expect(screen.getByText('Screenshot tool').compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(image.compareDocumentPosition(screen.getByText('The result is visible')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(screen.queryByText('pages.deviceAssistant.imageEarlier')).toBeNull();
+    });
+    it('moves an older screenshot to its tool when earlier messages are loaded without duplicating it', async () => {
+        const renderMessage = (message: { text: string }) => <p>{message.text}</p>;
+        const view = render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'answer', role: 'assistant', text: 'Later reply' },
+        ]} renderMessage={renderMessage} />);
+        await screen.findByRole('img');
+        expect(screen.getByText('pages.deviceAssistant.imageEarlier')).toBeTruthy();
+        view.rerender(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'capture', role: 'tool_call', toolCallId: 'capture-call', text: 'Earlier capture' },
+            { id: 'answer', role: 'assistant', text: 'Later reply' },
+        ]} renderMessage={renderMessage} />);
+        await waitFor(() => expect(screen.queryByText('pages.deviceAssistant.imageEarlier')).toBeNull());
+        expect(screen.getAllByRole('img')).toHaveLength(1);
+        expect(screen.getByText('Earlier capture').compareDocumentPosition(screen.getByRole('img')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
     it('loads persisted images without any live preview and releases pixel URLs', async () => {
         const view = render(<AssistantImages sessionId="stored-run" evidence={[]} />);
         const image = await screen.findByRole('img');

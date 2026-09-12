@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import type { DeviceAssistantMessage } from './use-device-assistant-chat';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
@@ -55,7 +56,12 @@ function StoredImage({ frame, onDelete }: { frame: DeviceAssistantVisualEvidence
     </div>;
 }
 
-export function AssistantImages({ sessionId, evidence }: { sessionId?: string; evidence: DeviceAssistantVisualEvidence[] }) {
+export function AssistantImages({ sessionId, evidence, messages, renderMessage }: {
+    sessionId?: string;
+    evidence: DeviceAssistantVisualEvidence[];
+    messages?: DeviceAssistantMessage[];
+    renderMessage?: (message: DeviceAssistantMessage) => ReactNode;
+}) {
     const { t } = useTranslation();
     const [stored, setStored] = useState<DeviceAssistantVisualEvidence[]>([]);
     const [deleted, setDeleted] = useState<Set<string>>(new Set());
@@ -92,13 +98,37 @@ export function AssistantImages({ sessionId, evidence }: { sessionId?: string; e
             setFailed(false);
         } catch { setFailed(true); } finally { setLoading(false); }
     };
-    if (!frames.length && !failed) return null;
-    return <div className="space-y-2">
-        <div data-testid="device-assistant-visual-evidence" className="grid gap-3 sm:grid-cols-2">
-            {frames.map((frame) => <StoredImage key={frame.evidence_id} frame={frame}
+    const renderImages = (items: DeviceAssistantVisualEvidence[]) => items.length > 0 ? (
+        <div data-testid="device-assistant-visual-evidence" className="grid max-w-[90%] gap-3 sm:grid-cols-2">
+            {items.map((frame) => <StoredImage key={frame.evidence_id} frame={frame}
                 onDelete={(id) => setDeleted((previous) => new Set([...previous, id]))} />)}
         </div>
+    ) : null;
+    const controls = <>
         {failed && <p className="text-xs text-destructive">{t('pages.deviceAssistant.imageUnavailable')}</p>}
         {cursor && <Button type="button" variant="outline" size="sm" disabled={loading} onClick={() => void more()}>{t('pages.deviceAssistant.imageMore')}</Button>}
-    </div>;
+    </>;
+    if (messages && renderMessage) {
+        // Link to the final record for the call, so its result precedes its images.
+        const anchors = new Map(messages.flatMap((message, index) => message.toolCallId ? [[message.toolCallId, index] as const] : []));
+        const earlier = frames.filter(frame => !anchors.has(frame.tool_call_id));
+        const byMessage = new Map<number, DeviceAssistantVisualEvidence[]>();
+        for (const frame of frames) {
+            const index = anchors.get(frame.tool_call_id);
+            if (index !== undefined) byMessage.set(index, [...(byMessage.get(index) ?? []), frame]);
+        }
+        return <>
+            {controls}
+            {earlier.length > 0 && <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.imageEarlier')}</p>
+                {renderImages(earlier)}
+            </div>}
+            {messages.map((message, index) => <Fragment key={message.id}>
+                {renderMessage(message)}
+                {renderImages(byMessage.get(index) ?? [])}
+            </Fragment>)}
+        </>;
+    }
+    if (!frames.length && !failed) return null;
+    return <div className="space-y-2">{renderImages(frames)}{controls}</div>;
 }

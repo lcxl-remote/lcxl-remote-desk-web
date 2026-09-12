@@ -1045,6 +1045,7 @@ export default {
   'pages.deviceAssistant.imageDelete': '删除图片',
   'pages.deviceAssistant.imageUnavailable': '图片无法读取，可能已删除或当前无权访问。',
   'pages.deviceAssistant.imageLoading': '正在加载图片…',
+  'pages.deviceAssistant.imageEarlier': '较早的截图（对应消息尚未加载或已压缩）',
   'pages.deviceAssistant.imageMore': '加载更多图片',
   'pages.deviceAssistant.visualEvidenceAlt': 'AI 助手观察到的屏幕',
   'pages.deviceAssistant.visualEvidenceExpired': '这条视觉证据已过期。',

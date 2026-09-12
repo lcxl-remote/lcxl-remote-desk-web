@@ -782,7 +782,8 @@ export function DeviceAssistantWorkspace({
                             </div>
                         )}
                         <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running} deviceId={stableDeviceId} connectionId={deskId} />
-                        {chat.messages.map((message) => (
+                        <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence}
+                            messages={chat.messages} renderMessage={(message) => (
                             <Fragment key={message.id}>
                             <div
                                 key={message.id}
@@ -798,7 +799,7 @@ export function DeviceAssistantWorkspace({
                             </div>
                             <AssistantContextNotices notices={chat.contextNotices.filter(notice => noticeMessageId(notice, chat.messages) === message.id)} />
                             </Fragment>
-                        ))}
+                        )} />
                         <AssistantContextNotices historical notices={chat.contextNotices.filter(notice => !noticeMessageId(notice, chat.messages))} />
                         {chat.partial && (
                             <MarkdownContent disableLinks className="max-w-[90%] rounded-lg bg-muted px-3 py-2 text-sm">
@@ -870,7 +871,6 @@ export function DeviceAssistantWorkspace({
                             </div>
                         );
                     })}
-                    <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence} />
                     {chat.error && (
                         <Alert variant="destructive">
                             <AlertTitle>{t('pages.deviceAssistant.chatErrorTitle')}</AlertTitle>

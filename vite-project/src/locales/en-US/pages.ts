@@ -1047,6 +1047,7 @@ export default {
   'pages.deviceAssistant.imageDelete': 'Delete image',
   'pages.deviceAssistant.imageUnavailable': 'Image unavailable. It may have been deleted or access is no longer allowed.',
   'pages.deviceAssistant.imageLoading': 'Loading image…',
+  'pages.deviceAssistant.imageEarlier': 'Earlier screenshots (associated messages are not loaded or have been compacted)',
   'pages.deviceAssistant.imageMore': 'Load more images',
   'pages.deviceAssistant.visualEvidenceAlt': 'Screen observed by the AI assistant',
   'pages.deviceAssistant.visualEvidenceExpired': 'This visual evidence has expired.',
