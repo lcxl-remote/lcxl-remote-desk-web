@@ -144,6 +144,17 @@ pub(crate) fn resolve_single_call(
     let object = value
         .as_object_mut()
         .ok_or_else(|| invalid("Tool arguments must be a JSON object."))?;
+    if call.name == "inspect_desktop_ui"
+        && object.get("element_only") == Some(&Value::Bool(true))
+        && object
+            .get("queries")
+            .and_then(Value::as_array)
+            .is_some_and(|queries| !queries.is_empty())
+    {
+        return Err(invalid(
+            r#"element_only=true reads only the identified element itself, never its children. Do not combine it with search queries. To find a display/result inside a window use {"root_id":"<observed window ID>","queries":["显示","结果","display","result","text"],"max_depth":12}. To read a known result control use {"element_id":"<observed result control ID>","element_only":true}. No UI was read."#,
+        ));
+    }
     for (internal, model) in fields(&call.name) {
         if object.contains_key(*internal) {
             return Err(invalid(format!(
@@ -529,7 +540,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
         }
     }
     match tool.name.as_str() {
-        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. For queries combine localized and English labels/native identifiers/control types, at most 16 alternatives (e.g. 日期, 时间, date, time, input). Or use a control root_id with element_only=true. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in original window screenshot pixels relative to the top-left (0,0) of location.window.id (the same pixel space as background input, not percentages or normalized coordinates). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
+        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. For queries combine localized and English labels/native identifiers/control types, at most 16 alternatives (e.g. 日期, 时间, date, time, input). Use element_only=true only for a known result control itself, without queries; it never searches descendants. To find a display inside a window, use root_id=window ID with queries and max_depth=12 or greater. When truncated=true, increase read bounds or narrow the root before concluding that text is unavailable. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in original window screenshot pixels relative to the top-left (0,0) of location.window.id (the same pixel space as background input, not percentages or normalized coordinates). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
         "execute_confirmed_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
         "read_current_screen" => tool.description = "Capture the current display, or use window_id to capture a background macOS window. To obtain window_id: inspect_desktop_session -> inspect_desktop_ui(root_id=session ID, queries=[localized app name, English app name]) -> inspect_desktop_ui(root_id=returned application ID, queries=[窗口, window]) -> read_current_screen(window_id=owner_selectable_windows[].object_ref.id). The application catalog does not query windows; never infer capture is unsupported from missing window entries there. Do not pass an application ID as window_id. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture. Returned width/height are original image pixel dimensions. For window screenshots, background position and UI bounds use these pixel coordinates with top-left origin (0,0); do not convert to percentages.".into(),
         _ => {}
@@ -541,6 +552,32 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
 mod tests {
     use super::*;
     use crate::chat::ToolCallRef;
+    #[test]
+    fn self_only_search_returns_actionable_correction() {
+        let error = resolve_call(
+            &call(
+                "inspect_desktop_ui",
+                json!({"element_id":"date","element_only":true,"queries":["result"]}),
+            ),
+            &history(),
+            1,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("never its children"));
+        assert!(error.message.contains("max_depth"));
+        assert!(
+            resolve_call(
+                &call(
+                    "inspect_desktop_ui",
+                    json!({"element_id":"date","element_only":true})
+                ),
+                &history(),
+                1
+            )
+            .is_ok()
+        );
+    }
+
     #[test]
     fn screenshot_tools_explain_application_to_window_discovery() {
         let tools = crate::read_tools::read_tool_registry()

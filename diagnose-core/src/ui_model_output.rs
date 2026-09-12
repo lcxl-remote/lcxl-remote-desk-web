@@ -17,7 +17,7 @@ pub fn serialize(output: &OperationOutput) -> Result<String, serde_json::Error> 
     }
     if ui.truncated {
         body["truncation_hint"] = json!(
-            "This bounded UI tree is incomplete. Missing display text does not mean no result. Inspect the exact window with a larger max_depth (at least 12) and adequate max_nodes/max_bytes before deciding the next action."
+            "This bounded UI tree is incomplete; do not conclude that the display/result is unreadable or the capability unsupported. Next call inspect_desktop_ui with root_id=<observed window ID>, queries=[显示,结果,display,result,text], max_depth at least 12 (increase further if still depth-limited), and adequate max_nodes/max_bytes. Do not use element_only=true to search children. If bounds remain insufficient, narrow to an observed container or use an authorized window screenshot. Continue under active grants; no additional conversational confirmation is needed."
         );
     }
     if let Some(first) = ui.nodes.first() {

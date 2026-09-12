@@ -203,7 +203,7 @@ pub fn project_schema(tool: &mut ToolSpec) {
             "semantic UI"
         },
         if background {
-            "Prefer execute_ui_actions. Only use background input when semantic UI is impractical; combine with a current read_current_screen window_id screenshot. Target window must be the application's input window for keyboard; never activate the app or move the real cursor."
+            "Before choosing background clicks, inspect the target controls by localized/English names or button roles. If the intended control exposes invoke/select/set_value, use execute_ui_actions with its observed element_id. A window-only query is not a control inspection. Only use background input when inspected semantic actions are absent or an actual semantic attempt is impractical; combine with a current read_current_screen window_id screenshot. Target window must be the application's input window for keyboard; never activate the app or move the real cursor."
         } else {
             "Use observed element_id for each step. Prefer semantic UI over background input."
         },

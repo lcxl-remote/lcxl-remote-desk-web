@@ -359,3 +359,5 @@ AI tool inputs omit fixed schema_version fields, including nested communication 
 Manual semantic UI previews under observation and troubleshooting, including delayed previews, application listing and application selection, explicitly request bounded enumeration without requiring user-entered search terms. AI tools still require search conditions or an explicit opt-in to unfiltered results.
 
 Under observation and troubleshooting, Desktop status shows the operating system and foreground application. Semantic UI previews list application or control names, types, values and supported actions, with a notice for truncated results. Raw results for both previews are available in collapsed Technical details. Viewing results does not authorize actions.
+
+AI inspects controls before choosing background clicks and prefers supported semantic actions. Self-only UI reads cannot be combined with search queries; invalid calls return corrected examples. Truncated searches prompt a deeper or narrower read rather than a claim of unsupported UI. Batch receipts confirm dispatch; AI checks the actual result and continues corrections within approved scope.
