@@ -1560,7 +1560,8 @@ async fn run_inner_impl(
             &session.execution_state,
             session.trigger_origin,
         );
-        exposed.retain(|tool| !crate::visual_evidence::blocks_targeting(session, tool.name()));
+        // The model can consume the preceding screenshot in this request.
+        // Only targeting in the screenshot-producing batch is fenced below.
         let raw_provider_exposed = exposed
             .iter()
             .filter(|tool| {
@@ -2405,18 +2406,6 @@ async fn run_inner_impl(
                         return Err(error);
                     }
 
-                    if crate::visual_evidence::blocks_targeting(session, &call.name) {
-                        append_internal_tool_result(
-                            session,
-                            turn.provider_meta.data_envelope.as_ref(),
-                            mint(),
-                            &call.id,
-                            "Computer Use targeting is unavailable until a later model step obtains a fresh semantic UI or screen observation".into(),
-                            "fresh_visual_verification_required",
-                        )?;
-                        continue;
-                    }
-
                     // Same-tool repeat circuit breaker.
                     let count = same_tool.entry(call.name.clone()).or_insert(0);
                     *count += 1;
@@ -2442,6 +2431,18 @@ async fn run_inner_impl(
                         return Ok(LoopOutcome::CircuitBreak(
                             CircuitBreakReason::SameToolRepeat,
                         ));
+                    }
+
+                    if crate::visual_evidence::blocks_targeting(session, &call.name) {
+                        append_internal_tool_result(
+                            session,
+                            turn.provider_meta.data_envelope.as_ref(),
+                            mint(),
+                            &call.id,
+                            "Screenshot and targeting cannot run in the same assistant batch. Read the screenshot result, then submit the action in the next model step; no additional screenshot is required.".into(),
+                            "fresh_visual_verification_required",
+                        )?;
+                        continue;
                     }
 
                     // A call naming a tool not exposed under the current scope/state

@@ -18,8 +18,8 @@ pub const MAX_VISUAL_EVIDENCE_ITEMS: usize = 64;
 pub const MAX_VISUAL_EVIDENCE_SNAPSHOT_ITEMS: usize = 32;
 
 /// A screenshot may inform a target proposal, but it is never target authority.
-/// This durable fence withdraws Computer Use targeting tools until a later model
-/// step obtains a fresh semantic UI tree or a second screen observation.
+/// This durable fence blocks targeting in the screenshot-producing batch.
+/// A later model step can act after consuming that screenshot without another read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisualVerificationFence {
     pub focus_input_revision: u64,
@@ -28,7 +28,18 @@ pub struct VisualVerificationFence {
 }
 
 pub fn blocks_targeting(session: &PersistedAgentSession, tool_name: &str) -> bool {
-    session.pending_visual_verification.is_some()
+    session
+        .pending_visual_verification
+        .as_ref()
+        .is_some_and(|pending| {
+            pending.focus_input_revision != session.input_revision
+                || session
+                    .conversation
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == ChatRole::Assistant)
+                    .is_none_or(|message| message.message_id == pending.source_assistant_message_id)
+        })
         && matches!(
             tool_name,
             "preview_computer_action"
@@ -40,8 +51,8 @@ pub fn blocks_targeting(session: &PersistedAgentSession, tool_name: &str) -> boo
 
 /// Advance the visual verification fence after an accepted, successful read.
 /// Calls in the same assistant batch cannot verify one another: the model has
-/// not yet observed either result. A later assistant step may verify the first
-/// screenshot with bounded semantic UI or with one fresh screen frame.
+/// not yet observed either result. Each screenshot fences its own assistant batch;
+/// subsequent model steps may target without a redundant observation.
 pub fn note_successful_observation(
     session: &mut PersistedAgentSession,
     call_id: &str,
@@ -63,14 +74,10 @@ pub fn note_successful_observation(
         .map(|message| message.message_id.clone())
         .ok_or("visual observation has no assistant tool-call message")?;
 
-    if let Some(pending) = &session.pending_visual_verification {
-        if pending.focus_input_revision != session.input_revision {
-            return Err("visual verification fence is bound to another input revision");
-        }
-        if pending.source_assistant_message_id != assistant_message_id {
-            session.pending_visual_verification = None;
-        }
-        return Ok(());
+    if let Some(pending) = &session.pending_visual_verification
+        && pending.focus_input_revision != session.input_revision
+    {
+        return Err("visual verification fence is bound to another input revision");
     }
     if tool_name == "read_current_screen" {
         session.pending_visual_verification = Some(VisualVerificationFence {
@@ -78,6 +85,12 @@ pub fn note_successful_observation(
             source_tool_call_id: call_id.to_string(),
             source_assistant_message_id: assistant_message_id,
         });
+    } else if session
+        .pending_visual_verification
+        .as_ref()
+        .is_some_and(|pending| pending.source_assistant_message_id != assistant_message_id)
+    {
+        session.pending_visual_verification = None;
     }
     Ok(())
 }
@@ -355,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn targeting_requires_a_later_assistant_steps_fresh_observation() {
+    fn targeting_waits_for_model_to_consume_image_not_an_extra_observation() {
         let mut session = session_with_observation();
         session.conversation.push(ChatMessage::assistant_tool_calls(
             "assistant-1",
@@ -389,8 +402,12 @@ mod tests {
                 arguments_json: "{}".into(),
             }],
         ));
+        assert!(!blocks_targeting(&session, "execute_background_inputs"));
         note_successful_observation(&mut session, "screen-2", "read_current_screen").unwrap();
-        assert!(session.pending_visual_verification.is_none());
+        assert!(blocks_targeting(&session, "execute_background_inputs"));
+        session
+            .conversation
+            .push(ChatMessage::assistant_tool_calls("assistant-3", "", vec![]));
         assert!(!blocks_targeting(&session, "execute_confirmed_raw_input"));
     }
 }

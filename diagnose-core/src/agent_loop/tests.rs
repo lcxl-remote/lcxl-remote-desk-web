@@ -2807,7 +2807,7 @@ async fn runs_read_tool_then_answers() {
 }
 
 #[tokio::test]
-async fn pending_visual_verification_withdraws_targeting_but_keeps_observation() {
+async fn next_model_step_exposes_targeting_after_screenshot() {
     let visual_scope = AgentScope {
         granted: vec![
             Capability::ScreenCaptureCurrent,
@@ -2877,7 +2877,7 @@ async fn pending_visual_verification_withdraws_targeting_but_keeps_observation()
         .collect::<Vec<_>>();
     assert!(names.contains(&"read_current_screen"));
     assert!(names.contains(&"inspect_desktop_ui"));
-    assert!(!names.contains(&"preview_computer_action"));
+    assert!(names.contains(&"preview_computer_action"));
 }
 
 /// A failed selected read still produces model-visible data. The information-
@@ -3112,6 +3112,55 @@ async fn tight_step_budget_circuit_breaks_at_two() {
 
 /// Repeatedly calling the *same* tool trips the same-tool cap before the step
 /// budget.
+#[tokio::test]
+async fn repeated_visual_fence_rejections_hit_repeat_limit() {
+    let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t");
+    seeded.pending_visual_verification = Some(crate::visual_evidence::VisualVerificationFence {
+        focus_input_revision: u64::MAX,
+        source_tool_call_id: "old-screen".into(),
+        source_assistant_message_id: "old-assistant".into(),
+    });
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new(
+            (0..=crate::MAX_SAME_TOOL_PER_TURN)
+                .map(|i| tool_use(&format!("c{i}"), "execute_background_inputs"))
+                .collect(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let reg = vec![read_tool(
+        "execute_background_inputs",
+        Capability::SystemInfo,
+    )];
+    let clock = || "t".to_string();
+    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let config = LoopDeps {
+        max_steps_per_turn: crate::MAX_SAME_TOOL_PER_TURN + 2,
+        ..deps(&sess, &model, &tools, &reg, &clock)
+    };
+    let outcome = run_agent_turn(
+        &config,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "q"),
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        LoopOutcome::CircuitBreak(CircuitBreakReason::SameToolRepeat)
+    );
+    assert!(tools.calls.borrow().is_empty());
+}
+
 #[tokio::test]
 async fn same_tool_repeat_circuit_breaks() {
     let sess = MemSession::default();

@@ -17,6 +17,17 @@ pub const MAX_REQUEST_IMAGE_DECODED_BYTES: usize = MAX_IMAGE_DECODED_BYTES * MAX
 pub const ALLOWED_IMAGE_MEDIA_TYPES: [&str; 3] = ["image/jpeg", "image/png", "image/webp"];
 pub const IMAGE_NOT_RETAINED_PLACEHOLDER: &str = "[image omitted from model history; use read_conversation_image with this result's original tool_call_id to retrieve a stored attachment if available]";
 
+/// Parse persisted tool JSON while accepting only our exact trailing image
+/// placeholder. Arbitrary trailing text remains invalid.
+pub fn structured_tool_result(text: &str) -> Result<serde_json::Value, serde_json::Error> {
+    let text = text.trim_end();
+    let text = text
+        .strip_suffix(IMAGE_NOT_RETAINED_PLACEHOLDER)
+        .unwrap_or(text)
+        .trim_end();
+    serde_json::from_str(text)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageDataUrlInfo {
     pub media_type: String,
@@ -254,6 +265,21 @@ mod tests {
             "data:image/jpeg;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(bytes)
         )
+    }
+
+    #[test]
+    fn persisted_tool_json_accepts_only_the_known_image_suffix() {
+        let raw = r#"{"window_geometry":{"width_millipoints":935000}}"#;
+        let stored = format!("{raw}\n{IMAGE_NOT_RETAINED_PLACEHOLDER}");
+        assert_eq!(
+            structured_tool_result(raw).unwrap(),
+            structured_tool_result(&stored).unwrap()
+        );
+        assert!(structured_tool_result(&format!("{raw}\nuntrusted suffix")).is_err());
+        assert!(
+            structured_tool_result(&format!("{{invalid}}\n{IMAGE_NOT_RETAINED_PLACEHOLDER}"))
+                .is_err()
+        );
     }
 
     #[test]

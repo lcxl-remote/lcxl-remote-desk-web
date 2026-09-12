@@ -190,7 +190,7 @@ pub(crate) fn resolve_single_call(
             if !from_capture {
                 continue;
             }
-            let Ok(output) = serde_json::from_str::<Value>(&message.text) else {
+            let Ok(output) = crate::image_input::structured_tool_result(&message.text) else {
                 continue;
             };
             if let Some(frame) = output.pointer("/ReadContext/ScreenCaptureCurrent") {
@@ -859,6 +859,10 @@ mod tests {
             }],
         ));
         messages.push(ChatMessage::tool_result("image","capture-call",json!({"ReadContext":{"ScreenCaptureCurrent":{"window":window,"window_geometry":geometry}}}).to_string()));
+        messages.last_mut().unwrap().text.push_str(&format!(
+            "\n{}",
+            crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER
+        ));
         let original = call(
             "execute_background_inputs",
             json!({"application_id":"calendar","window_id":"window","action":{"kind":"click","element_id":"date"}}),
