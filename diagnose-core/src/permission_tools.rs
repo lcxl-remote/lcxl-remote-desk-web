@@ -524,8 +524,8 @@ pub fn canonical_permission_input_json(
     serde_json::to_string(&sort_json(value))
 }
 
-/// Canonicalize one tool input after expanding server-owned JSON-schema
-/// defaults whose omission is semantically identical to the explicit value.
+/// Canonicalize semantically equivalent defaults and server-resolved references
+/// for exact-grant matching. Native reference validity is checked at dispatch.
 /// Keep this list closed: adding an entry changes exact-grant matching and must
 /// be backed by a matching runtime default and regression test.
 pub fn canonical_tool_permission_input_json(
@@ -538,6 +538,26 @@ pub fn canonical_tool_permission_input_json(
         input
             .entry("max_results".to_string())
             .or_insert_with(|| serde_json::json!(5));
+    }
+    if tool_name == "read_current_screen"
+        && let Some(input) = value.as_object_mut()
+        && !input.contains_key("window_id")
+        && let Some(window) = input.get("window").and_then(serde_json::Value::as_object)
+        && window.len() == 4
+        && let Ok(reference) = serde_json::from_value::<desk_agent_protocol::computer_use::ObjectRef>(
+            serde_json::Value::Object(window.clone()),
+        )
+        && reference.object_kind == desk_agent_protocol::computer_use::ObjectKind::Window
+        && !reference.token.is_empty()
+    {
+        // The model approves an observed ID; the server later expands it into
+        // a native reference. Bind permission to the same ID on both paths.
+        // Do not collapse conflicting selectors, wrong kinds or extra fields.
+        input.remove("window");
+        input.insert(
+            "window_id".into(),
+            serde_json::Value::String(reference.token),
+        );
     }
     canonical_permission_input_json(value)
 }
@@ -1194,6 +1214,43 @@ mod tests {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
             arguments_json: arguments_json.into(),
         }
+    }
+
+    #[test]
+    fn screenshot_exact_permission_matches_server_resolved_window_only() {
+        let canonical =
+            |value| canonical_tool_permission_input_json("read_current_screen", value).unwrap();
+        let approved = canonical(json!({"window_id":"window-1"}));
+        let reference = json!({"token":"window-1","snapshot_id":"identity-1","object_kind":"window","expires_at":""});
+        assert_eq!(approved, canonical(json!({"window":reference.clone()})));
+        let mut refreshed = reference.clone();
+        refreshed["snapshot_id"] = json!("identity-2");
+        assert_eq!(approved, canonical(json!({"window":refreshed})));
+        let mut other = reference.clone();
+        other["token"] = json!("window-2");
+        let mut wrong_kind = reference.clone();
+        wrong_kind["object_kind"] = json!("application");
+        let mut extra = reference.clone();
+        extra["unexpected"] = json!(true);
+        for unapproved in [
+            json!({}),
+            json!({"window":other}),
+            json!({"window":wrong_kind}),
+            json!({"window":extra}),
+            json!({"window":reference,"window_id":"window-1"}),
+            json!({"window":reference,"display":"other-display"}),
+        ] {
+            assert_ne!(approved, canonical(unapproved));
+        }
+        assert_eq!(
+            canonical(json!({"window_id":"window-1","display":"1"})),
+            canonical(json!({"window":reference,"display":"1"}))
+        );
+        assert_ne!(
+            canonical_tool_permission_input_json("another_tool", json!({"window":reference}))
+                .unwrap(),
+            approved
+        );
     }
 
     #[test]

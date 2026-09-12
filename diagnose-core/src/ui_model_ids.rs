@@ -749,6 +749,20 @@ mod tests {
             serde_json::from_str::<Value>(&screenshot.arguments_json).unwrap()["window"],
             window
         );
+        let approved = crate::permission_tools::canonical_tool_permission_input_json(
+            "read_current_screen",
+            json!({"window_id":"window"}),
+        )
+        .unwrap();
+        let dispatched = crate::permission_tools::canonical_tool_permission_input_json(
+            "read_current_screen",
+            serde_json::from_str(&screenshot.arguments_json).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            approved, dispatched,
+            "resolving the approved window ID must preserve exact-grant input"
+        );
         let exact = json!({"application_id":"calendar","action":{"screen":{"display":"1","width":100,"height":100,"dpi_x":96,"dpi_y":96},"step":{"kind":"key","params":{"key":"enter"}}}});
         let execution = resolve_call(
             &call("execute_confirmed_raw_input", exact.clone()),
