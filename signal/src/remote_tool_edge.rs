@@ -5319,6 +5319,46 @@ impl SignalDeviceAssistantTools {
 
 #[async_trait(?Send)]
 impl ToolSeam for SignalDeviceAssistantTools {
+    async fn current_grant_disclosure(
+        &self,
+    ) -> Result<Option<desk_diagnose_core::grant_disclosure::GrantDisclosureSnapshot>, AgentError>
+    {
+        let grants = SignalCapabilityGrantStore::new(self.db.clone())
+            .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+            .await
+            .map_err(|e| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to refresh Provider grants: {e}"),
+                    true,
+                    false,
+                )
+            })?;
+        let current = crate::computer_use_readiness::global_computer_use_readiness_cache()
+            .get_fresh(&self.target_connection_id, chrono::Utc::now());
+        let revision = current
+            .as_ref()
+            .map_or(0, |current| current.readiness.revision);
+        let ready_capabilities = current
+            .into_iter()
+            .flat_map(|current| current.readiness.capabilities)
+            .filter(|item| item.supported && item.ready)
+            .map(|item| item.capability)
+            .collect();
+        Ok(Some(
+            desk_diagnose_core::grant_disclosure::GrantDisclosureSnapshot {
+                grants,
+                surface: ProductSurface::OssPersonalOwner,
+                readiness_revision: revision,
+                ready_capabilities,
+                policy_read_capabilities: if self.selected_browser_surface.is_some() {
+                    vec![desk_agent_protocol::Capability::BrowserPageObserve]
+                } else {
+                    Vec::new()
+                },
+            },
+        ))
+    }
     async fn resolve_directory_candidate(
         &self,
         path: &str,
@@ -5884,7 +5924,7 @@ mod tests {
     fn background_batch_preflight_targets_pass_signal_semantic_gate() {
         let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
         for input in [
-            serde_json::json!({"kind":"scroll","position":{"x":300,"y":450},"horizontal":0,"vertical":-400}),
+            serde_json::json!({"kind":"scroll","position":{"x":300,"y":450},"horizontal_pixels":0,"vertical_pixels":-400}),
             serde_json::json!({"kind":"type_text","text":"hello"}),
             serde_json::json!({"kind":"key_press","key":"ArrowDown","modifiers":[]}),
             serde_json::json!({"kind":"click","position":{"x":300,"y":450}}),

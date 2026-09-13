@@ -72,7 +72,9 @@ pub fn capability_authorization_prompt(
     let mut entries = Vec::with_capacity(grants.len());
     // Approved scope remains valid across ordinary conversation inputs.
     for grant in grants {
-        let mut state = if grant.revoked_at_unix_ms.is_some() {
+        let mut state = if grant.issued_at_unix_ms > now_unix_ms {
+            "not_yet_active"
+        } else if grant.revoked_at_unix_ms.is_some() {
             "revoked"
         } else if grant.expires_at_unix_ms <= now_unix_ms {
             "expired"
@@ -192,7 +194,8 @@ pub fn active_exact_authorized_tool_names(
     grants
         .iter()
         .filter(|grant| {
-            grant.revoked_at_unix_ms.is_none()
+            grant.issued_at_unix_ms <= now_unix_ms
+                && grant.revoked_at_unix_ms.is_none()
                 && grant.expires_at_unix_ms > now_unix_ms
                 && grant.remaining_uses > 0
                 && grant.readiness_revision == current_readiness_revision
@@ -569,7 +572,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-            description: "Create one bounded approval request by actually calling this tool. First load missing capability details with load_capability_details; loading alone creates no request. Only report an approval card as submitted after a successful result contains request_id and status=pending_user_decision. An error creates no card; correct the input and call again. Never invent a submitted request or tell the user to refresh to find one without a successful receipt. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
+            description: "Create one bounded approval request by actually calling this tool. Use load_capability_details only for missing parameter formats; application_scope approval does not require loading individual action definitions; loading alone creates no request. Only report an approval card as submitted after a successful result contains request_id and status=pending_user_decision. An error creates no card; correct the input and call again. Never invent a submitted request or tell the user to refresh to find one without a successful receipt. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -585,7 +588,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
-                                "exact_input": {"type": "object", "description": "First load the target tool with load_capability_details and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
+                                "exact_input": {"type": "object", "description": "Use the target tool definition (load_capability_details if missing) and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}

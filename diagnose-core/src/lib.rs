@@ -58,6 +58,7 @@ pub mod exec_classify;
 pub mod exec_tools;
 pub mod file_scope;
 pub mod focus_epoch;
+pub mod grant_disclosure;
 pub mod image_input;
 pub mod input_read_context;
 pub mod live_context;

@@ -23,14 +23,7 @@ pub const LOAD_CAPABILITY_DETAILS_TOOL_NAME: &str = "load_capability_details";
 /// room while making registry growth fail loudly rather than silently hiding a
 /// capability.
 pub const MAX_CAPABILITY_INDEX_BYTES: usize = 8 * 1024;
-/// PR0 measured p95 descriptor size at 3,260 bytes and max at 8,104 bytes.
-/// Eight p95 descriptors fit; twelve do not. Actual serialized bytes remain the
-/// final authority, so an unusually large set is rejected as a whole.
-pub const MAX_LOADED_CAPABILITY_COUNT: usize = 8;
-/// Reserve half the working set for explicit task-specific discovery.
-pub const MAX_PRELOADED_CAPABILITY_COUNT: usize = 4;
 pub const MAX_LOADED_CAPABILITY_DETAIL_BYTES: usize = 32 * 1024;
-pub const MAX_REQUIRED_CAPABILITY_PIN_COUNT: usize = 16;
 pub const MAX_ADVERTISED_PROVIDER_TOOL_BYTES: usize = 128 * 1024;
 pub const DETAIL_CONTEXT_RATIO_DENOMINATOR: usize = 4;
 
@@ -55,6 +48,7 @@ impl Default for CapabilityDisclosureState {
 
 impl CapabilityDisclosureState {
     pub fn reset_for_input(&mut self, input_revision: u64) {
+        self.loaded_tool_names.clear();
         self.schema_version = CAPABILITY_DISCLOSURE_SCHEMA_VERSION;
         self.focus_input_revision = input_revision;
         self.updated_input_revision = input_revision;
@@ -68,9 +62,6 @@ impl CapabilityDisclosureState {
             || self.updated_input_revision > session_input_revision
         {
             return Err("capability disclosure is ahead of input revision");
-        }
-        if self.loaded_tool_names.len() > MAX_LOADED_CAPABILITY_COUNT {
-            return Err("too many loaded capability names");
         }
         let mut names = self.loaded_tool_names.clone();
         names.sort();
@@ -96,7 +87,7 @@ pub enum CapabilityDisclosureError {
     IndexTooLarge { actual: usize, maximum: usize },
     DetailTooLarge { actual: usize, maximum: usize },
     AdvertisedToolsTooLarge { actual: usize, maximum: usize },
-    TooManyNames { actual: usize, maximum: usize },
+    InvalidLoad(String),
     UnknownOrOutOfSurface(String),
 }
 
@@ -111,9 +102,9 @@ fn invalid(error: CapabilityDisclosureError) -> AgentError {
         CapabilityDisclosureError::AdvertisedToolsTooLarge { actual, maximum } => {
             format!("advertised Provider tools are too large ({actual} > {maximum} bytes)")
         }
-        CapabilityDisclosureError::TooManyNames { actual, maximum } => {
-            format!("too many capability names ({actual} > {maximum})")
-        }
+        CapabilityDisclosureError::InvalidLoad(reason) => format!(
+            "Invalid load_capability_details input: {reason}. Required: tool_names, a non-empty array of exact Provider names. Complete example: {{\"tool_names\":[\"inspect_desktop_ui\"]}}. No permission or focus was changed."
+        ),
         CapabilityDisclosureError::UnknownOrOutOfSurface(name) => {
             if matches!(
                 name.as_str(),
@@ -125,7 +116,7 @@ fn invalid(error: CapabilityDisclosureError) -> AgentError {
                     | "request_conversation_directory"
             ) {
                 format!(
-                    "`{name}` is a built-in conversation tool, not a Provider capability. It does not need capability loading and does not count toward the 8-name limit. Use it directly when present in the current tool list. Remove ALL built-in tools from tool_names and retry with Provider names from the capability index only. No working set or permission was changed; no approval card was created."
+                    "`{name}` is a built-in conversation tool, not a Provider capability. It does not need capability loading. Use it directly when present in the current tool list. Remove ALL built-in tools from tool_names and retry with Provider names from the capability index only. No working set or permission was changed; no approval card was created."
                 )
             } else {
                 format!(
@@ -154,7 +145,6 @@ fn canonical_names(
     names: impl IntoIterator<Item = impl AsRef<str>>,
     registry: &ProviderRegistry,
     inventory: &[CapabilityAvailability],
-    maximum: usize,
 ) -> Result<Vec<String>, CapabilityDisclosureError> {
     let current = current_names(inventory);
     let mut canonical = names
@@ -163,12 +153,6 @@ fn canonical_names(
         .collect::<Vec<_>>();
     canonical.sort();
     canonical.dedup();
-    if canonical.len() > maximum {
-        return Err(CapabilityDisclosureError::TooManyNames {
-            actual: canonical.len(),
-            maximum,
-        });
-    }
     if let Some(name) = canonical.iter().find(|name| {
         !current.contains(name.as_str()) || registry.capability_for_tool(name).is_none()
     }) {
@@ -230,7 +214,7 @@ pub fn capability_name_index_prompt(
         "unavailable_now": unavailable_now,
     });
     let prompt = format!(
-        "This server-authored capability index contains names only. Tools already advertised by the model API are omitted. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names to add to the current working set before planning a capability that is not already advertised. Use replace=true with the complete desired set only when the working set budget requires it. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
+        "This server-authored capability index contains names only. Already advertised tools are omitted. Active authorized tools are provided automatically. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names only when you need missing parameter details or a budget-hidden tool. Application-scope approval does not require loading individual action schemas first. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
         serde_json::to_string(&index).expect("name index is serializable")
     );
     if prompt.len() > MAX_CAPABILITY_INDEX_BYTES {
@@ -259,7 +243,7 @@ fn detail_entries(
             let provider = registry.provider_for_capability(&capability.wire.capability_id)?;
             let availability = inventory.iter().find(|item| item.tool_name == *name)?;
             if advertised_tool_names.contains(name.as_str()) {
-                return Some(json!({"tool_name": name, "state": "advertised_callable"}));
+                return None;
             }
             if availability.callable() && callable.contains(name.as_str()) {
                 return Some(json!({"tool_name": name, "state": "callable_when_loaded"}));
@@ -301,22 +285,67 @@ fn detail_budget(max_context_bytes: usize) -> usize {
 
 fn validate_advertised_tool_bytes<'a>(
     tools: impl IntoIterator<Item = &'a RegisteredTool>,
+    maximum: usize,
 ) -> Result<(), CapabilityDisclosureError> {
-    let specs = tools.into_iter().map(|tool| &tool.spec).collect::<Vec<_>>();
+    let specs = tools
+        .into_iter()
+        .map(|tool| {
+            let mut spec = tool.spec.clone();
+            crate::ui_model_ids::project_tool(&mut spec);
+            spec
+        })
+        .collect::<Vec<_>>();
     let actual = serde_json::to_vec(&specs)
         .map(|bytes| bytes.len())
         .unwrap_or(usize::MAX);
-    if actual > MAX_ADVERTISED_PROVIDER_TOOL_BYTES {
-        return Err(CapabilityDisclosureError::AdvertisedToolsTooLarge {
-            actual,
-            maximum: MAX_ADVERTISED_PROVIDER_TOOL_BYTES,
-        });
+    if actual > maximum {
+        return Err(CapabilityDisclosureError::AdvertisedToolsTooLarge { actual, maximum });
     }
     Ok(())
 }
 
-/// Project one model step. The loaded set uses replace semantics and the actual
-/// serialized detail block is checked against the resolved model's budget.
+/// Required continuation tools cannot be evicted. Explicit focus precedes
+/// optional grants; remaining names are deterministic across runtime nodes.
+pub fn select_advertised_tools(
+    tools: &[RegisteredTool],
+    focus: &[String],
+    required: &[String],
+    max_context_bytes: usize,
+) -> Result<Vec<String>, CapabilityDisclosureError> {
+    let maximum = MAX_ADVERTISED_PROVIDER_TOOL_BYTES
+        .min(max_context_bytes / DETAIL_CONTEXT_RATIO_DENOMINATOR);
+    let mut selected = tools
+        .iter()
+        .filter(|t| required.iter().any(|n| n == t.name()))
+        .collect::<Vec<_>>();
+    validate_advertised_tool_bytes(selected.iter().copied(), maximum)?;
+    let mut optional = tools
+        .iter()
+        .filter(|t| !required.iter().any(|n| n == t.name()))
+        .collect::<Vec<_>>();
+    optional.sort_by_key(|t| (!focus.iter().any(|n| n == t.name()), t.name()));
+    for tool in optional {
+        selected.push(tool);
+        if validate_advertised_tool_bytes(selected.iter().copied(), maximum).is_err() {
+            selected.pop();
+            if focus.iter().any(|n| n == tool.name()) {
+                // A load call must not acknowledge a definition it cannot expose.
+                let mut required_and_focus = selected.clone();
+                required_and_focus.push(tool);
+                validate_advertised_tool_bytes(required_and_focus, maximum)?;
+            }
+        }
+    }
+    let mut names = selected
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// Project one model step from authorized candidates and current detail focus.
 pub fn project_capability_disclosure(
     registry: &ProviderRegistry,
     inventory: &[CapabilityAvailability],
@@ -326,32 +355,10 @@ pub fn project_capability_disclosure(
     state: &CapabilityDisclosureState,
     max_context_bytes: usize,
 ) -> Result<CapabilityDisclosureProjection, CapabilityDisclosureError> {
-    let loaded = canonical_names(
-        state.loaded_tool_names.iter(),
-        registry,
-        inventory,
-        MAX_LOADED_CAPABILITY_COUNT,
-    )?;
-    let pins = canonical_names(
-        required_pins.iter(),
-        registry,
-        inventory,
-        MAX_REQUIRED_CAPABILITY_PIN_COUNT,
-    )?;
-    let callable = names_of(callable_tools);
-    let mut active_working_set = loaded
-        .iter()
-        .filter(|name| callable.contains(name.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    active_working_set.extend(pins);
-    active_working_set.sort();
-    active_working_set.dedup();
-    validate_advertised_tool_bytes(callable_tools.iter().filter(|tool| {
-        active_working_set
-            .binary_search_by(|name| name.as_str().cmp(tool.name()))
-            .is_ok()
-    }))?;
+    let loaded = canonical_names(state.loaded_tool_names.iter(), registry, inventory)?;
+    let pins = canonical_names(required_pins.iter(), registry, inventory)?;
+    let active_working_set =
+        select_advertised_tools(callable_tools, &loaded, &pins, max_context_bytes)?;
     let advertised = active_working_set
         .iter()
         .map(String::as_str)
@@ -399,23 +406,19 @@ pub fn project_capability_disclosure(
 #[serde(deny_unknown_fields)]
 struct LoadCapabilityDetailsInput {
     tool_names: Vec<String>,
-    #[serde(default)]
-    replace: bool,
 }
 
 pub fn capability_discovery_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-            description: "Add exact tool names from the server-authored capability index to the current focus epoch's bounded working set. Existing names remain loaded. Use replace=true to explicitly replace the set when its count or byte budget is full. Only Provider names from the capability index belong here: request_capability_grants, update_task_status and other built-in conversation tools are used directly when present, never loaded or counted toward the limit. Do not retain unrelated tools just to fill eight slots. This reveals current details on the next model step but grants no permission and executes nothing.".into(),
+            description: "Get missing parameter details for exact Provider tool_names from the capability index, or focus an authorized tool hidden by the byte budget. Active granted tools are provided automatically without loading. Specify the tools needed now; the server retires older details automatically. Built-in conversation tools are used directly, never loaded. This reveals details on the next model step, grants no permission, creates no approval card and executes nothing.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
-                    "replace": {"type": "boolean", "default": false},
                     "tool_names": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": MAX_LOADED_CAPABILITY_COUNT,
                         "items": {"type": "string", "maxLength": 128}
                     }
                 },
@@ -426,57 +429,6 @@ pub fn capability_discovery_tool_registry() -> Vec<RegisteredTool> {
         required_capability: Capability::SystemInfo,
         effect: ToolEffect::CapabilityDiscovery,
     }]
-}
-
-fn discovery_priority(name: &str) -> u8 {
-    match name {
-        "inspect_desktop_session" => 0,
-        "inspect_desktop_ui" => 1,
-        "read_process_list" => 2,
-        "read_system_info" => 3,
-        _ => 4,
-    }
-}
-
-/// Deterministic preload from server-owned structured context. Already
-/// authorized read tools come first, then read permission candidates. Writes require explicit
-/// task-specific discovery so unrelated mutations do not occupy the working set. No user
-/// text or semantic classifier participates.
-pub fn deterministic_preload_names(
-    registry: &ProviderRegistry,
-    callable_tools: &[RegisteredTool],
-    permission_candidates: &[RegisteredTool],
-) -> Vec<String> {
-    let mut callable = callable_tools
-        .iter()
-        .filter(|tool| {
-            tool.effect == ToolEffect::ReadOnly
-                && registry.capability_for_tool(tool.name()).is_some()
-        })
-        .map(|tool| tool.name().to_string())
-        .collect::<Vec<_>>();
-    callable.sort_by_key(|name| (discovery_priority(name), name.clone()));
-    callable.dedup();
-
-    let callable_set = callable.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let mut requestable = permission_candidates
-        .iter()
-        .filter(|tool| {
-            tool.effect == ToolEffect::ReadOnly
-                && registry.capability_for_tool(tool.name()).is_some()
-                && !callable_set.contains(tool.name())
-        })
-        .map(|tool| tool.name().to_string())
-        .collect::<Vec<_>>();
-    requestable.sort_by_key(|name| (discovery_priority(name), name.clone()));
-    requestable.dedup();
-
-    let mut names = callable;
-    names.extend(requestable);
-    names.truncate(MAX_PRELOADED_CAPABILITY_COUNT);
-    // Durable state is canonical regardless of the priority used to select it.
-    names.sort();
-    names
 }
 
 pub struct CapabilityLoadContext<'a> {
@@ -494,8 +446,7 @@ fn load_error(
 ) -> AgentError {
     let capacity_error = matches!(
         error,
-        CapabilityDisclosureError::TooManyNames { .. }
-            | CapabilityDisclosureError::DetailTooLarge { .. }
+        CapabilityDisclosureError::DetailTooLarge { .. }
             | CapabilityDisclosureError::AdvertisedToolsTooLarge { .. }
     );
     let mut result = invalid(error);
@@ -508,9 +459,8 @@ fn load_error(
         let recovery = json!({
             "current_loaded_tools": current,
             "current_count": current.len(),
-            "maximum_count": MAX_LOADED_CAPABILITY_COUNT,
             "working_set_changed": false,
-            "recovery": "Do not repeat the unchanged request. Call load_capability_details with replace=true and tool_names containing the complete set you want to retain, at most 8 names. Preserve tools still needed for this task. For a byte-limit error, choose fewer tools or smaller descriptors. Replacement changes disclosure only and grants no permission."
+            "recovery": "The requested details exceed the byte budget. Request only the tools needed for the next step; older details are retired automatically. Existing permissions remain valid. Do not repeat the unchanged request."
         });
         result.message.push_str("; ");
         result.message.push_str(&recovery.to_string());
@@ -529,29 +479,15 @@ pub fn apply_load_call(
             call.name.clone(),
         )));
     }
-    let input: LoadCapabilityDetailsInput =
-        serde_json::from_str(&call.arguments_json).map_err(|_| {
-            invalid(CapabilityDisclosureError::UnknownOrOutOfSurface(
-                "invalid load request".into(),
-            ))
-        })?;
+    let input: LoadCapabilityDetailsInput = serde_json::from_str(&call.arguments_json)
+        .map_err(|error| invalid(CapabilityDisclosureError::InvalidLoad(error.to_string())))?;
     if input.tool_names.is_empty() {
-        return Err(invalid(CapabilityDisclosureError::TooManyNames {
-            actual: 0,
-            maximum: MAX_LOADED_CAPABILITY_COUNT,
-        }));
+        return Err(invalid(CapabilityDisclosureError::InvalidLoad(
+            "tool_names cannot be empty".into(),
+        )));
     }
-    let mut requested = input.tool_names;
-    if !input.replace && state.focus_input_revision == input_revision {
-        requested.extend(state.loaded_tool_names.iter().cloned());
-    }
-    let names = canonical_names(
-        requested,
-        context.registry,
-        context.inventory,
-        MAX_LOADED_CAPABILITY_COUNT,
-    )
-    .map_err(|error| load_error(error, state, input_revision))?;
+    let names = canonical_names(input.tool_names, context.registry, context.inventory)
+        .map_err(|error| load_error(error, state, input_revision))?;
     let candidate = CapabilityDisclosureState {
         schema_version: CAPABILITY_DISCLOSURE_SCHEMA_VERSION,
         focus_input_revision: input_revision,
@@ -638,51 +574,6 @@ mod tests {
     }
 
     #[test]
-    fn discovery_preloads_reads_and_explains_all_builtin_names_without_mutation() {
-        let (registry, inventory, callable) = every_capability_ready();
-        let preload = deterministic_preload_names(&registry, &[], &callable);
-        assert_eq!(
-            preload,
-            vec![
-                "inspect_desktop_session",
-                "inspect_desktop_ui",
-                "read_process_list",
-                "read_system_info"
-            ]
-        );
-        let mut state = CapabilityDisclosureState::default();
-        for name in [
-            "load_capability_details",
-            "request_capability_grants",
-            "update_task_status",
-        ] {
-            let error =
-                apply_load_call(
-                    &ToolCall {
-                        id: "load".into(),
-                        name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-                        arguments_json:
-                            json!({"replace":true,"tool_names":["inspect_desktop_ui",name]})
-                                .to_string(),
-                    },
-                    &mut state,
-                    1,
-                    &CapabilityLoadContext {
-                        registry: &registry,
-                        inventory: &inventory,
-                        max_context_bytes: 262_144,
-                        callable_tools: &callable,
-                        permission_candidates: &[],
-                    },
-                )
-                .unwrap_err();
-            assert!(error.message.contains("Remove ALL built-in tools"));
-            assert!(error.message.contains("does not need capability loading"));
-            assert_eq!(state, CapabilityDisclosureState::default());
-        }
-    }
-
-    #[test]
     fn index_is_stable_names_only_and_bounded() {
         let (registry, inventory, callable) = all_ready();
         let one =
@@ -752,240 +643,6 @@ mod tests {
     }
 
     #[test]
-    fn full_working_set_error_explains_append_and_recovers_by_explicit_replacement() {
-        let (registry, inventory, callable) = every_capability_ready();
-        let context = CapabilityLoadContext {
-            registry: &registry,
-            inventory: &inventory,
-            max_context_bytes: 262_144,
-            callable_tools: &callable,
-            permission_candidates: &[],
-        };
-        let mut names = callable
-            .iter()
-            .filter(|tool| tool.name() != "inspect_desktop_session")
-            .take(MAX_LOADED_CAPABILITY_COUNT)
-            .map(|tool| tool.name().to_string())
-            .collect::<Vec<_>>();
-        names.sort();
-        let mut state = CapabilityDisclosureState {
-            loaded_tool_names: names.clone(),
-            focus_input_revision: 1,
-            updated_input_revision: 1,
-            ..Default::default()
-        };
-        let before = state.clone();
-        let mut call = ToolCall {
-            id: "load".into(),
-            name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-            arguments_json: json!({"tool_names": ["inspect_desktop_session"]}).to_string(),
-        };
-        let error = apply_load_call(&call, &mut state, 1, &context).unwrap_err();
-        assert!(
-            error
-                .message
-                .starts_with("too many capability names (9 > 8)")
-        );
-        let recovery: serde_json::Value =
-            serde_json::from_str(error.message.split_once("; ").unwrap().1).unwrap();
-        assert_eq!(recovery["current_loaded_tools"], json!(names));
-        assert_eq!(recovery["current_count"], 8);
-        assert_eq!(recovery["maximum_count"], 8);
-        assert_eq!(recovery["working_set_changed"], false);
-        assert!(
-            recovery["recovery"]
-                .as_str()
-                .unwrap()
-                .contains("replace=true")
-        );
-        assert_eq!(state, before);
-        call.arguments_json =
-            json!({"replace": true, "tool_names": ["inspect_desktop_session"]}).to_string();
-        apply_load_call(&call, &mut state, 1, &context).unwrap();
-        assert_eq!(state.loaded_tool_names, vec!["inspect_desktop_session"]);
-        let byte_error = load_error(
-            CapabilityDisclosureError::DetailTooLarge {
-                actual: 40_000,
-                maximum: 32_768,
-            },
-            &state,
-            1,
-        );
-        assert!(byte_error.message.contains("40000 > 32768 bytes"));
-        assert!(byte_error.message.contains("choose fewer tools"));
-        let stale = load_error(
-            CapabilityDisclosureError::TooManyNames {
-                actual: 9,
-                maximum: 8,
-            },
-            &state,
-            2,
-        );
-        assert!(stale.message.contains("\"current_loaded_tools\":[]"));
-    }
-
-    #[test]
-    fn loading_an_action_preserves_reads_until_explicit_replacement() {
-        let (registry, inventory, callable) = every_capability_ready();
-        let context = CapabilityLoadContext {
-            registry: &registry,
-            inventory: &inventory,
-            max_context_bytes: 262_144,
-            callable_tools: &callable,
-            permission_candidates: &[],
-        };
-        let mut state = CapabilityDisclosureState::default();
-        for name in ["inspect_desktop_ui", "execute_ui_actions"] {
-            apply_load_call(
-                &ToolCall {
-                    id: "load".into(),
-                    name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-                    arguments_json: json!({"tool_names": [name]}).to_string(),
-                },
-                &mut state,
-                1,
-                &context,
-            )
-            .unwrap();
-        }
-        assert_eq!(
-            state.loaded_tool_names,
-            vec!["execute_ui_actions", "inspect_desktop_ui"]
-        );
-        apply_load_call(
-            &ToolCall {
-                id: "replace".into(),
-                name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-                arguments_json: json!({"tool_names": ["inspect_desktop_session"], "replace": true})
-                    .to_string(),
-            },
-            &mut state,
-            1,
-            &context,
-        )
-        .unwrap();
-        assert_eq!(state.loaded_tool_names, vec!["inspect_desktop_session"]);
-        let before = state.clone();
-        let names = callable
-            .iter()
-            .filter(|tool| tool.name() != "inspect_desktop_session")
-            .take(MAX_LOADED_CAPABILITY_COUNT)
-            .map(|tool| tool.name())
-            .collect::<Vec<_>>();
-        assert!(
-            apply_load_call(
-                &ToolCall {
-                    id: "overflow".into(),
-                    name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-                    arguments_json: json!({"tool_names": names}).to_string()
-                },
-                &mut state,
-                1,
-                &context
-            )
-            .is_err()
-        );
-        assert_eq!(state, before);
-    }
-
-    #[test]
-    fn count_detail_and_required_pin_limits_fail_closed() {
-        let (registry, inventory, callable) = every_capability_ready();
-        let names = callable
-            .iter()
-            .take(MAX_LOADED_CAPABILITY_COUNT + 1)
-            .map(|tool| tool.name().to_string())
-            .collect::<Vec<_>>();
-        let mut state = CapabilityDisclosureState::default();
-        let call = ToolCall {
-            id: "too-many".into(),
-            name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-            arguments_json: serde_json::to_string(&json!({"tool_names": names})).unwrap(),
-        };
-        assert!(
-            apply_load_call(
-                &call,
-                &mut state,
-                1,
-                &CapabilityLoadContext {
-                    registry: &registry,
-                    inventory: &inventory,
-                    max_context_bytes: 131_072,
-                    callable_tools: &[],
-                    permission_candidates: &callable,
-                },
-            )
-            .is_err()
-        );
-        assert!(state.loaded_tool_names.is_empty());
-
-        let large = callable
-            .iter()
-            .max_by_key(|tool| serde_json::to_vec(&tool.spec).unwrap().len())
-            .unwrap()
-            .name()
-            .to_string();
-        state.loaded_tool_names = vec![large];
-        state.focus_input_revision = 1;
-        state.updated_input_revision = 1;
-        assert!(matches!(
-            project_capability_disclosure(
-                &registry,
-                &inventory,
-                &[],
-                &callable,
-                &[],
-                &state,
-                crate::MIN_MODEL_CONTEXT_BYTES,
-            ),
-            Err(CapabilityDisclosureError::DetailTooLarge { .. })
-        ));
-
-        state.loaded_tool_names.clear();
-        let pins = callable
-            .iter()
-            .take(MAX_REQUIRED_CAPABILITY_PIN_COUNT + 1)
-            .map(|tool| tool.name().to_string())
-            .collect::<Vec<_>>();
-        assert!(matches!(
-            project_capability_disclosure(
-                &registry,
-                &inventory,
-                &callable,
-                &[],
-                &pins,
-                &state,
-                131_072,
-            ),
-            Err(CapabilityDisclosureError::TooManyNames { .. })
-        ));
-    }
-
-    #[test]
-    fn preload_selects_authorized_callable_tools_before_permission_candidates() {
-        let (registry, _, callable) = every_capability_ready();
-        let mut sorted = callable
-            .iter()
-            .filter(|tool| tool.effect == ToolEffect::ReadOnly)
-            .cloned()
-            .collect::<Vec<_>>();
-        sorted.sort_by(|left, right| left.name().cmp(right.name()));
-        let authorized = sorted.last().unwrap().clone();
-        let candidates = sorted
-            .iter()
-            .take(MAX_LOADED_CAPABILITY_COUNT)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        let preload =
-            deterministic_preload_names(&registry, std::slice::from_ref(&authorized), &candidates);
-
-        assert_eq!(preload.len(), MAX_PRELOADED_CAPABILITY_COUNT);
-        assert_eq!(MAX_LOADED_CAPABILITY_COUNT - preload.len(), 4);
-        assert!(preload.iter().any(|name| name == authorized.name()));
-    }
-
-    #[test]
     fn advertised_provider_tool_byte_limit_fails_closed() {
         let oversized = RegisteredTool {
             spec: ToolSpec {
@@ -998,9 +655,145 @@ mod tests {
         };
 
         assert!(matches!(
-            validate_advertised_tool_bytes([&oversized]),
+            validate_advertised_tool_bytes([&oversized], MAX_ADVERTISED_PROVIDER_TOOL_BYTES),
             Err(CapabilityDisclosureError::AdvertisedToolsTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn granted_tools_are_automatic_and_not_limited_to_eight() {
+        let (registry, inventory, callable) = every_capability_ready();
+        let tools = &callable[..12];
+        let projection = project_capability_disclosure(
+            &registry,
+            &inventory,
+            tools,
+            &[],
+            &[],
+            &CapabilityDisclosureState::default(),
+            262_144,
+        )
+        .unwrap();
+        assert_eq!(projection.active_working_set.len(), 12);
+        assert!(projection.detail_prompt.is_empty());
+        let mut state = CapabilityDisclosureState::default();
+        apply_load_call(
+            &ToolCall {
+                id: "load".into(),
+                name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+                arguments_json:
+                    json!({"tool_names": tools.iter().map(|t| t.name()).collect::<Vec<_>>()})
+                        .to_string(),
+            },
+            &mut state,
+            1,
+            &CapabilityLoadContext {
+                registry: &registry,
+                inventory: &inventory,
+                max_context_bytes: 262_144,
+                callable_tools: tools,
+                permission_candidates: &[],
+            },
+        )
+        .unwrap();
+        state.validate(1).unwrap();
+        assert_eq!(state.loaded_tool_names.len(), 12);
+    }
+
+    #[test]
+    fn focus_retires_old_details_without_revoking_callable_tools() {
+        let (registry, inventory, callable) = every_capability_ready();
+        let context = CapabilityLoadContext {
+            registry: &registry,
+            inventory: &inventory,
+            max_context_bytes: 262_144,
+            callable_tools: &callable,
+            permission_candidates: &[],
+        };
+        let mut state = CapabilityDisclosureState::default();
+        for name in ["inspect_desktop_session", "inspect_desktop_ui"] {
+            apply_load_call(
+                &ToolCall {
+                    id: "load".into(),
+                    name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+                    arguments_json: json!({"tool_names": [name]}).to_string(),
+                },
+                &mut state,
+                1,
+                &context,
+            )
+            .unwrap();
+        }
+        assert_eq!(state.loaded_tool_names, ["inspect_desktop_ui"]);
+        state.reset_for_input(2);
+        assert!(state.loaded_tool_names.is_empty());
+        let projection = project_capability_disclosure(
+            &registry,
+            &inventory,
+            &callable[..12],
+            &[],
+            &[],
+            &state,
+            262_144,
+        )
+        .unwrap();
+        assert_eq!(projection.active_working_set.len(), 12);
+    }
+
+    #[test]
+    fn byte_budget_prioritizes_focus_and_never_drops_required_silently() {
+        let tool = |name: &str| RegisteredTool {
+            spec: ToolSpec {
+                name: name.into(),
+                description: "x".repeat(70 * 1024),
+                parameters_schema: json!({"type":"object"}),
+            },
+            required_capability: Capability::SystemInfo,
+            effect: ToolEffect::ReadOnly,
+        };
+        let tools = [tool("a"), tool("b")];
+        assert_eq!(
+            select_advertised_tools(&tools, &["b".into()], &[], 1_048_576).unwrap(),
+            ["b"]
+        );
+        assert_eq!(
+            select_advertised_tools(&tools, &[], &["b".into()], 1_048_576).unwrap(),
+            ["b"]
+        );
+        assert!(matches!(
+            select_advertised_tools(&tools, &[], &["a".into(), "b".into()], 1_048_576),
+            Err(CapabilityDisclosureError::AdvertisedToolsTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_load_has_complete_example_and_preserves_focus() {
+        let (registry, inventory, callable) = every_capability_ready();
+        let mut state = CapabilityDisclosureState::default();
+        for args in [
+            r#"{"tool_names":[]}"#,
+            r#"{"tool_names":["inspect_desktop_ui"],"replace":true}"#,
+        ] {
+            let error = apply_load_call(
+                &ToolCall {
+                    id: "load".into(),
+                    name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+                    arguments_json: args.into(),
+                },
+                &mut state,
+                1,
+                &CapabilityLoadContext {
+                    registry: &registry,
+                    inventory: &inventory,
+                    max_context_bytes: 262_144,
+                    callable_tools: &callable,
+                    permission_candidates: &[],
+                },
+            )
+            .unwrap_err();
+            assert!(error.message.contains("Complete example"));
+            assert!(state.loaded_tool_names.is_empty());
+        }
     }
 
     #[test]
@@ -1036,7 +829,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(projection.active_working_set.is_empty());
+        assert!(!projection.active_working_set.contains(&loaded_name));
         assert!(
             projection
                 .detail_prompt

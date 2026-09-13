@@ -600,6 +600,13 @@ pub struct ExecContext {
 /// approval + real execution via [`confirm_and_exec`](ToolSeam::confirm_and_exec).
 #[async_trait(?Send)]
 pub trait ToolSeam {
+    /// Durable Provider runtimes refresh balances before every model request.
+    /// Non-Provider seams have no grant projection.
+    async fn current_grant_disclosure(
+        &self,
+    ) -> Result<Option<crate::grant_disclosure::GrantDisclosureSnapshot>, AgentError> {
+        Ok(None)
+    }
     /// Resolve directory identity without enumerating it. Used only by the
     /// internal proposal tool; no file read or mutation grant is created.
     async fn resolve_directory_candidate(

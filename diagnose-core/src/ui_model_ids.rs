@@ -152,7 +152,7 @@ pub(crate) fn resolve_single_call(
             .is_some_and(|queries| !queries.is_empty())
     {
         return Err(invalid(
-            r#"element_only=true reads only the identified element itself, never its children. Do not combine it with search queries. To find a display/result inside a window use {"root_id":"<observed window ID>","queries":["显示","结果","display","result","text"],"max_depth":12}. To read a known result control use {"element_id":"<observed result control ID>","element_only":true}. No UI was read."#,
+            r#"element_only=true reads only the identified element itself, never its children. Do not combine it with search queries. To find a display/result inside a window use {"root_id":"<observed window ID>","queries":["显示","结果","display","result"]}. To read a known result control use {"element_id":"<observed result control ID>","element_only":true}. No UI was read."#,
         ));
     }
     for (internal, model) in fields(&call.name) {
@@ -443,7 +443,30 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
     let mut request = request.clone();
     for message in &mut request.messages {
         if message.role == ChatRole::Tool {
-            if let Some(mut value) = observation_value(&message.text) {
+            if let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
+                && (value.pointer("/ReadContext/DesktopUiInspect").is_some()
+                    || value
+                        .pointer("/ReadContext/DesktopSessionInspect")
+                        .is_some())
+            {
+                // Expansion is needed to resolve compact internal references, but
+                // must not discard model guidance or duplicate fields on the wire.
+                let hints: Vec<_> = ["search_hint", "truncation_hint", "window_discovery_hint"]
+                    .into_iter()
+                    .filter_map(|key| {
+                        value
+                            .pointer("/ReadContext/DesktopUiInspect")
+                            .and_then(|body| body.get(key))
+                            .cloned()
+                            .map(|v| (key, v))
+                    })
+                    .collect();
+                crate::ui_model_output::expand_value(&mut value);
+                if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
+                    for (key, hint) in hints {
+                        body[key] = hint;
+                    }
+                }
                 crate::ui_model_output::add_window_discovery_hint(&mut value);
                 hide_references(&mut value);
                 // Omit default node fields without removing useful semantic IDs.
@@ -452,13 +475,27 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
                     .and_then(Value::as_array_mut)
                 {
                     for node in nodes {
-                        let fields = node.as_object_mut().unwrap();
+                        let Some(fields) = node.as_object_mut() else {
+                            continue;
+                        };
+                        if fields.get("element_id").is_some_and(|id| {
+                            !id.is_null()
+                                && fields.get("object_ref")
+                                    == Some(&json!({"id":id,"kind":"ui_element"}))
+                        }) {
+                            fields.remove("object_ref");
+                        }
                         fields.retain(|key, value| {
                             !value.is_null()
+                                && !(key == "enabled" && value == &Value::Bool(true))
+                                && !(key == "is_protected" && value == &Value::Bool(false))
                                 && !(key == "supported_actions"
                                     && value.as_array().is_some_and(Vec::is_empty))
                         });
                     }
+                }
+                if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
+                    body["node_defaults"] = json!({"enabled":true,"is_protected":false});
                 }
                 message.text = value.to_string();
             }
@@ -540,7 +577,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
         }
     }
     match tool.name.as_str() {
-        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. For queries combine localized and English labels/native identifiers/control types, at most 16 alternatives (e.g. 日期, 时间, date, time, input). Use element_only=true only for a known result control itself, without queries; it never searches descendants. To find a display inside a window, use root_id=window ID with queries and max_depth=12 or greater. When truncated=true, increase read bounds or narrow the root before concluding that text is unavailable. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in original window screenshot pixels relative to the top-left (0,0) of location.window.id (the same pixel space as background input, not percentages or normalized coordinates). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
+        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. Queries are substring OR matches, up to 16 alternatives. First locate the target window and, when available, its dialog/popover/editor; search inside that observed root using task-specific localized/English labels or native_id (e.g. 标题, title-field, 完成, Done). Group needed controls together. If no separate container exists, use the window root. Only after targeted misses add control types such as AXTextField/input. Broad text/date/time queries are fallbacks: text can match every AXStaticText date and weekday. Use element_only=true only for a known result control itself, without queries; it never searches descendants. To find descendants use root_id for the smallest relevant observed region with targeted queries. When truncated=true, narrow the root first when possible; increase depth/node/byte bounds only as needed to complete that search. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in original window screenshot pixels relative to the top-left (0,0) of location.window.id (the same pixel space as background input, not percentages or normalized coordinates). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
         "execute_confirmed_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
         "read_current_screen" => tool.description = "Capture the current display, or use window_id to capture a background macOS window. To obtain window_id: inspect_desktop_session -> inspect_desktop_ui(root_id=session ID, queries=[localized app name, English app name]) -> inspect_desktop_ui(root_id=returned application ID, queries=[窗口, window]) -> read_current_screen(window_id=owner_selectable_windows[].object_ref.id). The application catalog does not query windows; never infer capture is unsupported from missing window entries there. Do not pass an application ID as window_id. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture. Returned width/height are original image pixel dimensions. For window screenshots, background position and UI bounds use these pixel coordinates with top-left origin (0,0); do not convert to percentages.".into(),
         _ => {}
@@ -564,7 +601,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("never its children"));
-        assert!(error.message.contains("max_depth"));
+        assert!(error.message.contains("root_id"));
         assert!(
             resolve_call(
                 &call(
@@ -816,6 +853,61 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&project_request(&projected).messages).unwrap(),
             text
+        );
+    }
+
+    #[test]
+    fn compact_ui_stays_compact_on_model_wire_and_ids_still_resolve() {
+        let mut messages = history();
+        let message = messages.last_mut().unwrap();
+        let compact = json!({"ReadContext":{"DesktopUiInspect":{
+            "snapshot_id":"four", "reference_defaults":{
+                "snapshot_id":"four", "object_kind":"ui_element", "expires_at":""},
+            "element_id_is_reference_token":true,
+            "node_defaults":{"enabled":true,"is_protected":false},
+            "search_hint":"Keep search guidance", "truncation_hint":"Keep truncation guidance",
+            "nodes":[
+                {"element_id":"date","object_ref":{},"role":"AXButton","name":"Date"},
+                {"element_id":"disabled","object_ref":{},"role":"AXButton",
+                 "enabled":false,"is_protected":true,"supported_actions":["invoke"]}
+            ],"truncated":true
+        }}});
+        message.text = compact.to_string();
+        let resolved = resolve_call(
+            &call(
+                "inspect_desktop_ui",
+                json!({"root_id":"date","element_only":true}),
+            ),
+            &messages,
+            1,
+        )
+        .unwrap();
+        assert!(resolved.arguments_json.contains("four"));
+        let original = serde_json::to_string(&messages).unwrap();
+        let request =
+            crate::seam::ModelRequest::text_only(messages, crate::prompt::ResponseFormatSpec::None);
+        let projected = project_request(&request);
+        let output: Value = serde_json::from_str(&projected.messages.last().unwrap().text).unwrap();
+        let body = &output["ReadContext"]["DesktopUiInspect"];
+        assert_eq!(
+            body["node_defaults"],
+            json!({"enabled":true,"is_protected":false})
+        );
+        assert_eq!(body["search_hint"], "Keep search guidance");
+        assert_eq!(body["truncation_hint"], "Keep truncation guidance");
+        assert_eq!(
+            body["nodes"][0],
+            json!({"element_id":"date","role":"AXButton","name":"Date"})
+        );
+        assert_eq!(body["nodes"][1]["enabled"], false);
+        assert_eq!(body["nodes"][1]["is_protected"], true);
+        assert_eq!(body["nodes"][1]["supported_actions"], json!(["invoke"]));
+        assert!(body.get("reference_defaults").is_none());
+        assert!(projected.messages.last().unwrap().text.len() < compact.to_string().len());
+        assert_eq!(serde_json::to_string(&request.messages).unwrap(), original);
+        assert_eq!(
+            serde_json::to_string(&project_request(&projected).messages).unwrap(),
+            serde_json::to_string(&projected.messages).unwrap()
         );
     }
 

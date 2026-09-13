@@ -1554,12 +1554,107 @@ async fn run_inner_impl(
                 .capability_disclosure
                 .reset_for_input(session.input_revision);
         }
+        let authority = if disclosure_enabled {
+            deps.tools.current_grant_disclosure().await?
+        } else {
+            None
+        };
+        let mut step_inventory = deps.capability_inventory.map(|items| items.to_vec());
+        if let Some((snapshot, inventory)) = authority.as_ref().zip(step_inventory.as_mut()) {
+            snapshot.narrow_inventory(
+                deps.provider_registry.expect("disclosure registry"),
+                inventory,
+            );
+        }
+        let authority_grants = authority.as_ref().map(|snapshot| {
+            snapshot.subject_grants(
+                session,
+                deps.provider_registry.expect("disclosure registry"),
+            )
+        });
+        let projection_now = if authority.is_some() {
+            current_unix_ms(deps.clock)?
+        } else {
+            0
+        };
+        let authority_names =
+            authority
+                .as_ref()
+                .zip(authority_grants.as_ref())
+                .map(|(snapshot, grants)| {
+                    crate::grant_disclosure::active_tool_names(
+                        grants,
+                        session,
+                        projection_now,
+                        snapshot.readiness_revision,
+                    )
+                });
         let mut exposed = exposed_tools(
             deps.registry,
             &session.scope_snapshot,
             &session.execution_state,
             session.trigger_origin,
         );
+        let policy_read_names = if let Some(snapshot) = &authority {
+            exposed
+                .iter()
+                .filter(|tool| {
+                    tool.effect == ToolEffect::ReadOnly
+                        && step_inventory.as_deref().is_some_and(|items| {
+                            items
+                                .iter()
+                                .any(|item| item.tool_name == tool.name() && item.callable())
+                        })
+                        && deps
+                            .provider_registry
+                            .and_then(|r| r.capability_for_tool(tool.name()))
+                            .is_some_and(|capability| {
+                                crate::capability_risk::classify_provider_descriptor_floor(
+                                    capability.wire.effect,
+                                    &capability.wire.data_policy,
+                                ) == desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
+                                    || snapshot
+                                        .policy_read_capabilities
+                                        .contains(&tool.required_capability)
+                            })
+                })
+                .map(|tool| tool.name().to_string())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if let Some(names) = &authority_names {
+            exposed.retain(|tool| {
+                let Some(capability) = deps
+                    .provider_registry
+                    .and_then(|r| r.capability_for_tool(tool.name()))
+                else {
+                    return true;
+                };
+                if capability.wire.execution_locality
+                    != desk_agent_protocol::capability_provider::ExecutionLocality::Central
+                    && !authority.as_ref().is_some_and(|snapshot| {
+                        snapshot
+                            .ready_capabilities
+                            .contains(&tool.required_capability)
+                    })
+                {
+                    return false;
+                }
+                // Frozen tasks derive per-call grants at dispatch. Current
+                // readiness still applies; task admission remains authoritative.
+                if session.trigger_origin == crate::session::TriggerOrigin::ScheduledTask {
+                    return true;
+                }
+                names.contains(tool.name())
+                    || (session
+                        .capability_disclosure
+                        .loaded_tool_names
+                        .iter()
+                        .any(|name| name == tool.name())
+                        && policy_read_names.iter().any(|name| name == tool.name()))
+            });
+        }
         // The model can consume the preceding screenshot in this request.
         // Only targeting in the screenshot-producing batch is fenced below.
         let raw_provider_exposed = exposed
@@ -1579,7 +1674,7 @@ async fn run_inner_impl(
                         && !raw_provider_exposed
                             .iter()
                             .any(|exposed| exposed.name() == tool.name())
-                        && deps.capability_inventory.is_some_and(|inventory| {
+                        && step_inventory.as_deref().is_some_and(|inventory| {
                             inventory
                                 .iter()
                                 .any(|item| item.tool_name == tool.name() && item.callable())
@@ -1595,35 +1690,43 @@ async fn run_inner_impl(
         } else {
             deps.capability_permission_candidates
         };
-        if disclosure_enabled
-            && session.capability_disclosure.loaded_tool_names.is_empty()
-            && let Some(provider_registry) = deps.provider_registry
-        {
-            session.capability_disclosure.loaded_tool_names =
-                crate::capability_disclosure::deterministic_preload_names(
-                    provider_registry,
-                    &raw_provider_exposed,
-                    permission_candidates,
-                );
-            session.capability_disclosure.updated_input_revision = session.input_revision;
-        }
+        let tool_requirements = crate::model_capability::ModelRequirements::for_registered_tools(
+            exposed.iter().copied(),
+        );
+        let completion_messages = deps
+            .model
+            .command_completion_event_id()
+            .map(|event_id| {
+                crate::command_completion::project_request(
+                    ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
+                    session,
+                    event_id,
+                )
+                .map(|request| request.messages)
+            })
+            .transpose()?;
+        let request_requirements =
+            tool_requirements.union(crate::model_capability::ModelRequirements::for_messages(
+                completion_messages
+                    .as_deref()
+                    .unwrap_or(&session.conversation),
+            ));
+        let pinned_context = deps.model.context_policy(request_requirements).await?;
         if disclosure_enabled {
-            let loaded = session
-                .capability_disclosure
-                .loaded_tool_names
-                .iter()
-                .map(String::as_str)
-                .collect::<HashSet<_>>();
-            let pins = deps
-                .permission_continuation_exact_tools
-                .iter()
-                .map(String::as_str)
-                .collect::<HashSet<_>>();
+            let selected = crate::capability_disclosure::select_advertised_tools(
+                &raw_provider_exposed,
+                &session.capability_disclosure.loaded_tool_names,
+                if permission_continuation_pending { deps.permission_continuation_exact_tools } else { &[] },
+                pinned_context.max_context_bytes,
+            ).map_err(|error| AgentError {
+                kind: AgentErrorKind::InvalidInput,
+                message: format!("Provider definition byte budget exceeded: {error:?}; request fewer tools for the next step. Existing permissions are unchanged."),
+                retryable: false, safe_for_model: true, error_code: None,
+            })?;
             exposed.retain(|tool| {
-                let provider_tool = deps
-                    .provider_registry
-                    .is_some_and(|registry| registry.capability_for_tool(tool.name()).is_some());
-                !provider_tool || loaded.contains(tool.name()) || pins.contains(tool.name())
+                deps.provider_registry
+                    .is_none_or(|r| r.capability_for_tool(tool.name()).is_none())
+                    || selected.iter().any(|name| name == tool.name())
             });
         }
         // Approval cannot override execution-state or scope restrictions. Keep
@@ -1646,33 +1749,57 @@ async fn run_inner_impl(
                     || tool.effect == ToolEffect::RunProjection
             });
         }
-        let tool_requirements = crate::model_capability::ModelRequirements::for_registered_tools(
-            exposed.iter().copied(),
-        );
         let specs = exposed
             .iter()
             .map(|tool| tool.spec.clone())
             .collect::<Vec<_>>();
-        let completion_messages = deps
-            .model
-            .command_completion_event_id()
-            .map(|event_id| {
-                crate::command_completion::project_request(
-                    ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
-                    session,
-                    event_id,
-                )
-                .map(|request| request.messages)
-            })
-            .transpose()?;
-        let request_requirements =
-            tool_requirements.union(crate::model_capability::ModelRequirements::for_messages(
-                completion_messages
-                    .as_deref()
-                    .unwrap_or(&session.conversation),
-            ));
-        let pinned_context = deps.model.context_policy(request_requirements).await?;
         let mut system_prompt = deps.system_prompt.clone();
+        if let Some((snapshot, grants)) = authority.as_ref().zip(authority_grants.as_ref()) {
+            let fresh = crate::permission_tools::capability_authorization_prompt(
+                grants,
+                &session.permission_requests,
+                current_unix_ms(deps.clock)?,
+                session.input_revision,
+                snapshot.readiness_revision,
+            );
+            // Replace the old payload before removing its old retention label.
+            // No raw device receipt or persisted conversation is modified.
+            crate::grant_disclosure::replace_authorization_payload(
+                &mut system_prompt.text,
+                &fresh.text,
+            )?;
+            if system_prompt
+                .data_envelope
+                .as_ref()
+                .is_some_and(|envelope| {
+                    envelope.provenance.source_tool_name == "capability-authorization"
+                })
+            {
+                system_prompt.data_envelope = None;
+            }
+            if let Some(expiry) = fresh.approved_exact_input_expires_at_unix_ms {
+                let destination = deps
+                    .model
+                    .model_egress_policy()?
+                    .ok_or_else(|| AgentError {
+                        kind: AgentErrorKind::PermissionDenied,
+                        message: "Current authorization cannot be bound to the selected model"
+                            .into(),
+                        retryable: false,
+                        safe_for_model: true,
+                        error_code: None,
+                    })?
+                    .destination;
+                system_prompt = crate::permission_resume::bind_exact_authorization_system_message(
+                    system_prompt,
+                    destination,
+                    expiry,
+                )?;
+            }
+        }
+        if !policy_read_names.is_empty() {
+            system_prompt.text.push_str(&format!("\nPOLICY-ELIGIBLE READS: {}. These existing read policies can issue authority at invocation. Load missing parameter details to use them; do not request approval solely because no grant is listed yet. Sensitive arguments can still require approval; the server checks the complete input. Other capabilities need current grants.", policy_read_names.join(", ")));
+        }
         if session.surface == crate::session::AgentSessionSurface::DeviceAssistant {
             system_prompt
                 .text
@@ -1720,19 +1847,35 @@ async fn run_inner_impl(
                 safe_for_model: false,
                 error_code: None,
             })?;
-            let inventory = deps.capability_inventory.ok_or_else(|| AgentError {
+            let inventory = step_inventory.as_deref().ok_or_else(|| AgentError {
                 kind: AgentErrorKind::Internal,
                 message: "Device Assistant capability disclosure has no live inventory".into(),
                 retryable: false,
                 safe_for_model: false,
                 error_code: None,
             })?;
+            let continuation_tools = raw_provider_exposed
+                .iter()
+                .filter(|tool| {
+                    !permission_continuation_pending
+                        || deps.permission_continuation_exact_tools.is_empty()
+                        || deps
+                            .permission_continuation_exact_tools
+                            .iter()
+                            .any(|name| name == tool.name())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             let projection = crate::capability_disclosure::project_capability_disclosure(
                 providers,
                 inventory,
-                &raw_provider_exposed,
+                &continuation_tools,
                 permission_candidates,
-                deps.permission_continuation_exact_tools,
+                if permission_continuation_pending {
+                    deps.permission_continuation_exact_tools
+                } else {
+                    &[]
+                },
                 &session.capability_disclosure,
                 pinned_context.max_context_bytes,
             )
@@ -2478,7 +2621,7 @@ async fn run_inner_impl(
                             mint(),
                             &call.id,
                             format!(
-                                "tool `{}` is not loaded in the current focus. Call load_capability_details to load it; this does not itself grant permission. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
+                                "tool `{}` is not advertised in this request. Check current authorization; request missing permission, or use load_capability_details for a budget-hidden authorized tool. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
                                 call.name,
                                 exposed
                                     .iter()
@@ -3011,21 +3154,6 @@ async fn run_inner_impl(
                                     created_at.clone(),
                                 )
                             }).and_then(|mut request| {
-                                let loaded = session
-                                    .capability_disclosure
-                                    .loaded_tool_names
-                                    .iter()
-                                    .map(String::as_str)
-                                    .collect::<HashSet<_>>();
-                                if disclosure_enabled && request.items.iter().any(|item| !loaded.contains(item.tool_name.as_str())) {
-                                    return Err(AgentError {
-                                        kind: AgentErrorKind::InvalidInput,
-                                        message: "No request or approval card was created: the batch contains a capability whose details are not loaded. Call load_capability_details with the requested tool_names, then retry request_capability_grants. Do not report submission before receiving a successful request_id and pending_user_decision result".into(),
-                                        retryable: false,
-                                        safe_for_model: true,
-                                        error_code: None,
-                                    });
-                                }
                                 let providers = deps.provider_registry.ok_or_else(|| AgentError {
                                     kind: AgentErrorKind::Internal,
                                     message: "permission planning has no Provider catalog".into(),
@@ -3033,7 +3161,7 @@ async fn run_inner_impl(
                                     safe_for_model: false,
                                     error_code: None,
                                 })?;
-                                let inventory = deps.capability_inventory.ok_or_else(|| AgentError {
+                                let inventory = step_inventory.as_deref().ok_or_else(|| AgentError {
                                     kind: AgentErrorKind::Internal,
                                     message: "permission planning has no live capability inventory".into(),
                                     retryable: false,
@@ -3073,6 +3201,17 @@ async fn run_inner_impl(
                             };
                             match request {
                                 Ok(request) => {
+                                    // The proposal now owns its complete input. Retire
+                                    // preparatory schemas; approval will expose tools
+                                    // from grants, including separately approved reads.
+                                    session.capability_disclosure.loaded_tool_names.retain(
+                                        |name| {
+                                            !request
+                                                .items
+                                                .iter()
+                                                .any(|item| item.tool_name == *name)
+                                        },
+                                    );
                                     let existing = session
                                         .permission_requests
                                         .iter()
@@ -3297,7 +3436,7 @@ async fn run_inner_impl(
                                 error_code: None,
                             })?;
                             let inventory =
-                                deps.capability_inventory.ok_or_else(|| AgentError {
+                                step_inventory.as_deref().ok_or_else(|| AgentError {
                                     kind: AgentErrorKind::Internal,
                                     message: "capability discovery has no live inventory".into(),
                                     retryable: false,

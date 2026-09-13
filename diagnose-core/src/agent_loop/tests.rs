@@ -1,3 +1,4 @@
+mod grant_exposure;
 mod schedule_review;
 mod scheduled_continuation;
 use super::*;
@@ -989,7 +990,7 @@ async fn capability_discovery_replaces_working_set_without_persisting_schema() {
                 tool_use_args(
                     "load-1",
                     crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME,
-                    r#"{"tool_names":["read_system_info"],"replace":true}"#,
+                    r#"{"tool_names":["read_system_info"]}"#,
                 ),
                 answer("ready"),
             ]
@@ -1047,7 +1048,7 @@ async fn capability_discovery_replaces_working_set_without_persisting_schema() {
         requests[0]
             .tools
             .iter()
-            .all(|tool| tool.name != "read_system_info")
+            .any(|tool| tool.name == "read_system_info")
     );
     assert!(
         requests[1]
@@ -1753,7 +1754,7 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
 }
 
 #[tokio::test]
-async fn permission_planning_rejects_a_candidate_not_loaded_in_the_current_focus() {
+async fn permission_planning_accepts_valid_request_without_prior_loading() {
     let providers = crate::device_assistant::device_assistant_provider_registry();
     let target = providers
         .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
@@ -1856,20 +1857,11 @@ async fn permission_planning_rejects_a_candidate_not_loaded_in_the_current_focus
     .await
     .unwrap();
 
-    assert_eq!(
-        outcome,
-        LoopOutcome::Answered("I need to load that capability first.".into())
-    );
+    assert!(matches!(outcome, LoopOutcome::PermissionRequested { .. }));
     let stored = sess.inner.borrow();
     let stored = stored.as_ref().unwrap();
-    assert!(stored.permission_requests.is_empty());
-    assert!(stored.conversation.iter().any(|message| {
-        message.role == ChatRole::Tool
-            && message
-                .text
-                .contains("No request or approval card was created")
-            && message.text.contains("load_capability_details")
-    }));
+    assert_eq!(stored.permission_requests.len(), 1);
+    assert!(tools.calls.borrow().is_empty());
 }
 
 #[tokio::test]
@@ -3628,7 +3620,7 @@ async fn projection_metrics_capture_long_session_growth_but_bounded_model_input(
         assert_eq!(metric.permission_request_count, 1);
         assert_eq!(metric.pending_work_trigger_count, 1);
         assert_eq!(metric.unresolved_execution_fact_count, 1);
-        assert!(metric.loaded_capability_count <= 8);
+        assert_eq!(metric.loaded_capability_count, 0);
         assert!(metric.capability_index_utf8_bytes <= 8 * 1024);
         assert!(metric.loaded_capability_detail_utf8_bytes <= 32 * 1024);
         let stored = sess.inner.borrow();

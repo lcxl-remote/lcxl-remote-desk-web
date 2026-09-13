@@ -2322,10 +2322,7 @@ mod tests {
         assert_eq!(value.focus_epoch.task_status_input_revision, None);
         assert!(value.focus_epoch.selected_attachment_ids.is_empty());
         assert_eq!(value.capability_disclosure.focus_input_revision, 2);
-        assert_eq!(
-            value.capability_disclosure.loaded_tool_names,
-            vec!["read_system_info"]
-        );
+        assert!(value.capability_disclosure.loaded_tool_names.is_empty());
         assert!(value.task_status_projection.is_none());
         assert_eq!(
             value.permission_requests[0].state,
