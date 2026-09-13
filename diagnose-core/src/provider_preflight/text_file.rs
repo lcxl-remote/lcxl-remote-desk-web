@@ -71,9 +71,9 @@ pub fn registered_tools() -> Vec<crate::registry::RegisteredTool> {
             spec: ToolSpec {
                 name: if delete { DELETE_TEXT_TOOL } else { UPDATE_TEXT_TOOL }.into(),
                 description: if delete {
-                    "Move exactly one verified text file to a private recovery directory on macOS. Requires a currently approved conversation directory and one exact user confirmation. Never recursive, never permanent deletion. Preserve the recovery receipt; an unknown result must not be retried."
+                    "Move exactly one verified text file to a private recovery directory on macOS. Requires a currently approved conversation directory and one exact user confirmation. Reuse a verified creation/read/update result and its full SHA-256; a separate read is not required just to obtain a version. Text files only (UTF-8, at most 64 KiB), not installers or arbitrary binary files. Never recursive, never permanent deletion. Preserve the recovery receipt; an unknown result must not be retried."
                 } else {
-                    "Update exactly one verified UTF-8 text file on macOS using full replacement or exactly one unambiguous text match, within 64 KiB. Requires a currently approved conversation directory and one exact user confirmation. The device checks the original identity and full SHA-256, retains recovery material and verifies the new bytes. Conflict means read again and request new approval, never retry automatically."
+                    "Update exactly one verified UTF-8 text file on macOS using full replacement or exactly one unambiguous text match, within 64 KiB. Requires a currently approved conversation directory and one exact user confirmation. Reuse a verified creation/read/update result: copy its file_result_call_id and full SHA-256. If the content needed for the edit is already known, request this update directly; do not list the directory or read again merely to obtain a version. The device checks the original identity and full SHA-256, retains recovery material and verifies the new bytes. Conflict means read again and request new approval, never retry automatically."
                 }.into(),
                 parameters_schema: serde_json::json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
             },
@@ -457,7 +457,7 @@ pub fn validate_read_permission_input(
     let invalid = || {
         error(
             AgentErrorKind::InvalidInput,
-            "File permission requires a current selected attachment or exact_input naming an approved directory_request_id (metadata), or a real tool call id in file_result_call_id (not snapshot_id) and entry_name for a directory child. Obtain fresh metadata if the source expired.",
+            r#"File read permission needs an exact source. For metadata use exact_input={"directory_request_id":"<approved directory ID>"}. For a creation/read/update receipt use exact_input={"file_result_call_id":"<receipt tool call ID>"}, without entry_name. For a directory child use exact_input={"file_result_call_id":"<metadata tool call ID>","entry_name":"<exact child name>"}. An owner-selected attachment is another supported source. This validation failure does not establish expiry. Directory metadata grants do not authorize file-content reading; request read_selected_text_file separately when needed."#,
             false,
             true,
         )
@@ -467,6 +467,7 @@ pub fn validate_read_permission_input(
         name: tool_name.into(),
         arguments_json: exact_input.unwrap_or("{}").into(),
     };
+    validate_read_selector(session, &call)?;
     if uses_session_file_read(&call).map_err(|_| invalid())? {
         let destinations = crate::permission_resume::latest_user_requirement(&session.conversation)
             .and_then(|m| m.data_envelope.as_ref())
@@ -475,9 +476,73 @@ pub fn validate_read_permission_input(
         let [destination] = destinations else {
             return Err(invalid());
         };
-        ResultFileRead::build(session, &call, destination, now).map_err(|_| invalid())?;
+        ResultFileRead::build(session, &call, destination, now)?;
     } else if session.context_attachments.is_empty() {
         return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Explain the two source shapes before authorization or reference resolution.
+/// This inspects recorded call identities only and never confers read authority.
+fn validate_read_selector(
+    session: &crate::session::PersistedAgentSession,
+    call: &ToolCall,
+) -> Result<(), AgentError> {
+    let Some(id) = read_result_id(call)? else {
+        return Ok(());
+    };
+    let args: serde_json::Value =
+        serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+    let mut sources = session
+        .conversation
+        .iter()
+        .filter(|m| m.role == crate::chat::ChatRole::Assistant)
+        .flat_map(|m| &m.tool_calls)
+        .filter(|c| c.id == id);
+    let source = sources.next().ok_or_else(|| error(AgentErrorKind::InvalidInput,
+        "file_result_call_id is not a recorded tool call ID in this conversation. Copy the ID of a real creation/read/update or metadata result, not a snapshot ID. Do not infer expiry from this selector error.", false, true))?;
+    if sources.next().is_some() {
+        return Err(unavailable());
+    }
+    let has_entry = args.get("entry_name").is_some_and(|v| !v.is_null());
+    let metadata = source.name == "inspect_selected_file_metadata";
+    let direct_file = matches!(
+        source.name.as_str(),
+        "create_text_artifact_in_selected_directory"
+            | "create_local_communication_draft"
+            | "read_selected_text_file"
+            | UPDATE_TEXT_TOOL
+    );
+    if direct_file && has_entry {
+        let example = serde_json::json!({"file_result_call_id":id});
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            &format!(
+                "Invalid entry_name: this call ID identifies a creation/read/update result for one file, not a directory listing. Remove entry_name. Required fields: [file_result_call_id]. Corrected tool arguments (also use as permission exact_input): {example}. This is a parameter mismatch, not evidence of expiry; do not refresh directory metadata. If the existing content and verified SHA-256 already suffice for the requested update, request update_text_file directly instead of this read."
+            ),
+            false,
+            true,
+        ));
+    }
+    if metadata && !has_entry {
+        let example = serde_json::json!({"file_result_call_id":id,"entry_name":"<exact regular-file name from this metadata result>"});
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            &format!(
+                "Missing entry_name for a metadata-result source. Required fields: [file_result_call_id, entry_name]. Tool arguments (also use as permission exact_input): {example}. Choose the exact child name from that result; do not repeat the directory listing merely to fix this missing field."
+            ),
+            false,
+            true,
+        ));
+    }
+    if !metadata && !direct_file {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "file_result_call_id must identify a verified text creation/read/update result or inspect_selected_file_metadata result, not an unrelated tool call.",
+            false,
+            true,
+        ));
     }
     Ok(())
 }
@@ -488,6 +553,7 @@ fn read_evidence(
     call: &ToolCall,
     now: u64,
 ) -> Result<VerifiedTextFile, AgentError> {
+    validate_read_selector(session, call)?;
     let id = read_result_id(call)?.ok_or_else(unavailable)?;
     let args: serde_json::Value =
         serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
@@ -1301,6 +1367,24 @@ mod tests {
                 serde_json::json!({"file_result_call_id":"metadata","entry_name":"notes.txt"})
                     .to_string(),
         };
+        let missing_name = validate_read_permission_input(
+            &session,
+            &call.name,
+            Some(r#"{"file_result_call_id":"metadata"}"#),
+            1000,
+        )
+        .unwrap_err();
+        assert!(missing_name.message.contains("Missing entry_name"));
+        assert!(
+            missing_name
+                .message
+                .contains("Required fields: [file_result_call_id, entry_name]")
+        );
+        assert!(
+            missing_name
+                .message
+                .contains("do not repeat the directory listing")
+        );
         let resolved = ResultFileRead::build(&session, &call, &destination, 1000).unwrap();
         assert_eq!(resolved.reference(), &evidence.reference);
         assert!(
@@ -1365,6 +1449,127 @@ mod tests {
             .unwrap();
         session.file_scope.revoke(&subject, 2, "directory").unwrap();
         assert!(ResultFileRead::build(&session, &call, &destination, 1000).is_err());
+    }
+
+    #[test]
+    fn created_receipt_supports_exact_update_without_metadata_or_content_read() {
+        use crate::chat::{ChatMessage, ToolCallRef};
+        use desk_agent_protocol::computer_use::{
+            ComputerActionCompleted, ComputerActionOutput, ComputerActionResultClass,
+        };
+        use desk_agent_protocol::data_lineage::{ContentRef, DestinationIdentity};
+        let (mut session, evidence, call) = fixture();
+        let tool = "create_text_artifact_in_selected_directory";
+        let destination = DestinationIdentity::Model {
+            connection_id: "test".into(),
+            connection_revision: 1,
+            model_id: "test".into(),
+            profile_revision: 1,
+        };
+        let owner = crate::model_message_labels::model_bound_user_message(
+            "owner".into(),
+            "Change the created file to new".into(),
+            destination.clone(),
+        )
+        .unwrap();
+        let artifact = CreatedFileArtifactOutput {
+            file: evidence.reference.clone(),
+            file_name: "notes.txt".into(),
+            media_type: TEXT_ARTIFACT_MEDIA_TYPE.into(),
+            size_bytes: 3,
+            digest_sha256: evidence.sha256.clone(),
+            content: ContentRef::Artifact {
+                artifact_id: evidence.reference.token.clone(),
+                sha256: evidence.sha256.clone(),
+                size_bytes: 3,
+                media_type: TEXT_ARTIFACT_MEDIA_TYPE.into(),
+            },
+        };
+        let completed = ComputerActionCompleted {
+            work_id: "work".into(),
+            action_request_id: "create".into(),
+            execution_generation: "generation".into(),
+            result: ComputerActionResultClass::Verified,
+            facts: vec![],
+            message: None,
+            output: Some(ComputerActionOutput::FileArtifact(artifact)),
+        };
+        let text = serde_json::to_string(&completed).unwrap();
+        let mut receipt = ChatMessage::tool_result("receipt", "read-call", text.clone());
+        receipt.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            owner.data_envelope.as_ref(),
+            "read-call",
+            &text,
+            tool,
+        )
+        .unwrap();
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let descriptor = registry.capability_for_tool(tool).unwrap();
+        receipt
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .provenance
+            .source_provider_id = registry
+            .provider_for_capability(&descriptor.wire.capability_id)
+            .unwrap()
+            .wire
+            .provider_id
+            .clone();
+        session.conversation = vec![
+            ChatMessage::assistant_tool_calls(
+                "creation",
+                "",
+                vec![ToolCallRef {
+                    id: "read-call".into(),
+                    name: tool.into(),
+                    arguments_json: r#"{"file_name":"notes.txt","content_utf8":"old"}"#.into(),
+                }],
+            ),
+            receipt,
+            owner,
+        ];
+        let verified = resolve_file_result(&session, "read-call", 1000).unwrap();
+        assert!(TextMutationPreflight::build(&session, &call, &verified, 1000).is_ok());
+        assert_exact_mutation_grants(&session);
+        assert!(session.scope_snapshot.granted.is_empty());
+        assert!(
+            session
+                .conversation
+                .iter()
+                .flat_map(|m| &m.tool_calls)
+                .all(|c| c.name != "read_selected_text_file"
+                    && c.name != "inspect_selected_file_metadata")
+        );
+        let bad = r#"{"file_result_call_id":"read-call","entry_name":"notes.txt"}"#;
+        let failure =
+            validate_read_permission_input(&session, "read_selected_text_file", Some(bad), 1000)
+                .unwrap_err();
+        assert!(failure.message.contains("Remove entry_name"));
+        assert!(failure.message.contains("not evidence of expiry"));
+        assert!(
+            failure
+                .message
+                .contains(r#"{"file_result_call_id":"read-call"}"#)
+        );
+        let corrected = r#"{"file_result_call_id":"read-call"}"#;
+        assert!(
+            validate_read_permission_input(
+                &session,
+                "read_selected_text_file",
+                Some(corrected),
+                1000
+            )
+            .is_ok()
+        );
+        let mut altered = call.clone();
+        let mut arguments: serde_json::Value =
+            serde_json::from_str(&altered.arguments_json).unwrap();
+        arguments["expected_sha256"] = serde_json::json!("0".repeat(64));
+        altered.arguments_json = arguments.to_string();
+        assert!(TextMutationPreflight::build(&session, &altered, &verified, 1000).is_err());
+        session.conversation[1].text.push(' ');
+        assert!(resolve_file_result(&session, "read-call", 1000).is_err());
     }
 
     fn assert_new_mutation_result_window(original: &PersistedAgentSession) {

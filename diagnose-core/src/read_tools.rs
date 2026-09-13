@@ -285,7 +285,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_selected_text_file",
             Capability::FileContentRead,
-            "Read one owner-selected regular file, or a verified text file result from this conversation, as bounded UTF-8. For a previous creation/read/update result, provide file_result_call_id and request separate read permission with these exact arguments. A creation grant never authorizes reading or model egress. Never provide a path or object reference.",
+            "Read one owner-selected regular file, or a verified text file result from this conversation, as bounded UTF-8. For a creation/read/update result, provide only file_result_call_id (omit entry_name). For a child from inspect_selected_file_metadata, provide file_result_call_id plus entry_name. Request read_selected_text_file permission with these exact arguments; metadata permission is insufficient. Do not read just to prepare an update when verified creation/update content and SHA-256 are already known. A creation grant never authorizes reading or model egress. Never provide a path or object reference.",
             json!({
                 "type": "object",
                 "properties": {"file_result_call_id": {"type":"string", "minLength":1, "maxLength":256}, "entry_name": {"type":"string", "minLength":1, "maxLength":512, "description":"Exact immediate regular-file name from the identified metadata result; omit for a creation/read/update result."}},
