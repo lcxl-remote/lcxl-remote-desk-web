@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 import { useTranslation } from 'react-i18next';
 import type { ContextNoticeDto } from '@/services/types';
 import type { DeviceAssistantMessage } from './use-device-assistant-chat';
@@ -21,9 +22,9 @@ export function AssistantContextNotices({ notices, historical = false }: { notic
             {t(`pages.deviceAssistant.contextNotice.${notice.kind}`)}
         </p>;
     });
-    if (historical) return <details className="text-xs text-muted-foreground">
-        <summary className="cursor-pointer">{t('pages.deviceAssistant.contextNotice.earlier')}</summary>
+    if (historical) return <Disclosure className="text-xs text-muted-foreground" title={<>{t('pages.deviceAssistant.contextNotice.earlier')}</>} summaryClassName="cursor-pointer">
+
         <div className="max-h-32 space-y-2 overflow-auto pt-2">{rows}</div>
-    </details>;
+    </Disclosure>;
     return <div className="space-y-2">{rows}</div>;
 }

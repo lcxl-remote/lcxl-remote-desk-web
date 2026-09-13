@@ -18,7 +18,7 @@ describe('tool call transcript', () => {
         expect(container.querySelector('.animate-spin')).toBeNull();
         rerender(<AssistantToolCall tool={{ ...tool, status: 'failed', output: 'access denied' }} running />);
         expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.failure' })).toBeTruthy();
-        expect(container.querySelector('details')?.open).toBe(false);
+        expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
         expect(container.querySelector('pre')).toBeNull();
         rerender(<AssistantToolCall tool={tool} running={false} />);
         expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.missing' })).toBeTruthy();
@@ -28,14 +28,14 @@ describe('tool call transcript', () => {
 
     it('starts folded, lazily renders payloads, and keeps expansion when output arrives', async () => {
         const { container, rerender } = render(<AssistantToolCall tool={tool} running />);
-        expect(container.querySelector('details')?.open).toBe(false);
+        expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
         expect(container.querySelector('pre')).toBeNull();
         fireEvent.click(screen.getByText(/inspect_desktop_ui/));
         await waitFor(() => expect(container.querySelectorAll('pre')).toHaveLength(2));
         expect(container.querySelector('pre')?.textContent).toBe(JSON.stringify(JSON.parse(tool.argumentsJson), null, 2));
         expect(screen.getByText('pages.deviceAssistant.toolCall.waiting')).toBeTruthy();
         rerender(<AssistantToolCall tool={{ ...tool, status: 'failed', output: 'tool error: access denied <script>alert(1)</script>' }} running={false} />);
-        expect(container.querySelector('details')?.open).toBe(true);
+        expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(true);
         expect(screen.getByText(/tool error: access denied/)).toBeTruthy();
         expect(container.querySelector('script')).toBeNull();
     });

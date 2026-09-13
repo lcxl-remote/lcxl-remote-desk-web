@@ -34,12 +34,12 @@ function LegalDocDialog({ doc, label }: { doc: LegalDoc; label: string }) {
     return (
         <Dialog>
             <DialogTrigger asChild>
-                <button
+                <Button variant="unstyled"
                     type="button"
                     className="text-primary font-medium hover:underline focus:outline-none focus-visible:underline"
                 >
                     {label}
-                </button>
+                </Button>
             </DialogTrigger>
             <DialogContent className="max-w-2xl">
                 <DialogHeader>

@@ -1,3 +1,5 @@
+import { SelectItem } from '@/components/ui/select';
+import { SelectField } from '@/components/ui/select-field';
 import { lazy, Suspense, useCallback, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { ArrowLeft, Loader2, TerminalSquare } from "lucide-react"
@@ -115,26 +117,26 @@ export default function TerminalSessionLauncher({
                         <Label htmlFor="shell">
                             {t('pages.deskTerminal.shellCommand')}
                         </Label>
-                        <select
+                        <SelectField
                             id="shell"
                             className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                             value={selectedCommand}
-                            onChange={(event) =>
-                                setSelectedCommand(event.target.value)
+                            onValueChange={nextValue =>
+                                setSelectedCommand(nextValue)
                             }
                         >
-                            <option value="" disabled>
+                            <SelectItem value="__empty__" disabled>
                                 {t('pages.deskTerminal.shellPlaceholder')}
-                            </option>
+                            </SelectItem>
                             {commands.map((command: string[]) => {
                                 const value = command.join(',')
                                 return (
-                                    <option key={value} value={value}>
+                                    <SelectItem key={value} value={value}>
                                         {command[0]}
-                                    </option>
+                                    </SelectItem>
                                 )
                             })}
-                        </select>
+                        </SelectField>
                     </div>
                     <Button disabled={!selectedCommand}>
                         {t('pages.deskTerminal.connect')}

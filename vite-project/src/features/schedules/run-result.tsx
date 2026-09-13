@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 import { RunUnknownOutcome } from './run-unknown-outcome';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -68,7 +69,7 @@ export function RunResult({ scheduleId, runId, connected, onBack, client, connec
             <p className="text-sm font-medium">{t(['user', 'assistant', 'tool'].includes(message.role) ? `schedules.result.role.${message.role}` : 'schedules.result.role.other')}
                 {message.turnId === `${runId}-turn` && <span className="ml-2">{t('schedules.result.thisRun')}</span>}</p>
             {message.text && <div className="whitespace-pre-wrap break-words text-sm">{message.text}</div>}
-            {message.toolCalls?.map(call => <details key={call.id}><summary>{call.name}</summary><pre className="overflow-x-auto whitespace-pre-wrap text-xs">{call.argumentsJson}</pre></details>)}
+            {message.toolCalls?.map(call => <Disclosure key={call.id} title={<>{call.name}</>}><pre className="overflow-x-auto whitespace-pre-wrap text-xs">{call.argumentsJson}</pre></Disclosure>)}
         </article>)}
     </div>;
 }

@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 import { ContractArtifacts } from './contract-artifacts';
 import { ContractAttachments } from './contract-attachments';
 import { ContractEditor } from './contract-editor';
@@ -84,7 +85,7 @@ export function ContractReview({ client, scheduleId, connected, onPublished }: {
                 <h3>{t('schedules.diff.title')}</h3>
                 {contractChanges.filter(key => canonicalValue(contract[key]) !== canonicalValue(review.previous_contract![key])).map(key =>
                     <p key={key}>{t(`schedules.diff.${key}`)}</p>)}
-                <details><summary>{t('schedules.diff.previous')}</summary><ContractContents contract={review.previous_contract} /></details>
+                <Disclosure title={<>{t('schedules.diff.previous')}</>}><ContractContents contract={review.previous_contract} /></Disclosure>
             </section>}
         </>}
         {review && !editing && !regenerating && !loading && <ContractPublication key={`${review.task.revision}:${review.contract_sha256}:${connected}`} client={client} review={review} connected={connected}

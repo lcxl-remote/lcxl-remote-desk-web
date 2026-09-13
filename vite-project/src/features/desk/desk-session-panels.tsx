@@ -107,13 +107,13 @@ export function DeskSessionStats({
                 <div className="text-sm font-bold text-white/90">
                     {t("pages.desk.statsPanel.title")}
                 </div>
-                <button
+                <Button variant="unstyled"
                     aria-label={t("pages.desk.closeStats")}
                     className="text-gray-400 transition-colors hover:text-white"
                     onClick={onClose}
                 >
                     <XSquare className="h-4 w-4" />
-                </button>
+                </Button>
             </div>
 
             <StatRow label={t("pages.desk.statsPanel.fps")}>
@@ -255,9 +255,9 @@ export function ClipboardFallbackToast({
         <div className="pointer-events-auto absolute right-4 bottom-24 z-[60] flex min-w-[300px] flex-col gap-3 rounded-lg bg-amber-500/90 p-4 text-white shadow-xl animate-in slide-in-from-bottom-4">
             <div className="flex items-start justify-between">
                 <span className="text-sm font-semibold">Action Required</span>
-                <button className="text-white/80 hover:text-white" onClick={onClose}>
+                <Button variant="unstyled" className="text-white/80 hover:text-white" onClick={onClose}>
                     <XSquare className="h-4 w-4" />
-                </button>
+                </Button>
             </div>
             <p className="text-xs text-amber-100">
                 {text || "Clipboard update received, please click to sync."}

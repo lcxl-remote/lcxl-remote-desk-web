@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { RefreshCw } from 'lucide-react';
@@ -80,14 +81,14 @@ export function AssistantCapabilityList({ entries, loading, error, refreshDisabl
                                     defaultValue: t('pages.deviceAssistant.workspace.descriptionUnavailable'),
                                 })}
                             </p>
-                            <details className="mt-2 text-xs text-muted-foreground">
-                                <summary className="cursor-pointer py-1">{t('pages.deviceAssistant.workspace.technicalDetails')}</summary>
+                            <Disclosure className="mt-2 text-xs text-muted-foreground" title={<>{t('pages.deviceAssistant.workspace.technicalDetails')}</>} summaryClassName="cursor-pointer py-1">
+
                                 <p className="mt-2 break-all">{entry.capability.tool_name}</p>
                                 <p className="break-all">{entry.capability.display_name_key}</p>
                                 <p>{entry.capability.effect} · {entry.capability.execution_locality}</p>
                                 <p>{group.providerId} · v{group.version}</p>
                                 <p>{t('pages.deviceAssistant.providerBuiltIn')}: {t(`pages.deviceAssistant.boolean.${String(entry.compiled)}`)} · {t('pages.deviceAssistant.providerConnected')}: {t(`pages.deviceAssistant.boolean.${String(entry.connected)}`)}</p>
-                            </details>
+                            </Disclosure>
                         </div>
                     ))}
                 </section>

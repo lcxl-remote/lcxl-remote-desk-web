@@ -1,3 +1,5 @@
+import { SelectItem } from '@/components/ui/select';
+import { ScheduleSelect } from './select-field';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ResumeConversationSource } from '@/services/types';
@@ -42,10 +44,10 @@ export function ResumeSourcePicker({ client, devices, connected, onSelect }: {
     return <div className="space-y-3">
         <p>{t('schedules.chooseConversationNote')}</p>
         <label>{t('schedules.device')}
-            <select className="block w-full rounded border bg-background p-2" value={device} disabled={!connected || busy}
-                onChange={event => setDevice(event.target.value)}>
-                {devices.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
+            <ScheduleSelect className="block w-full rounded border bg-background p-2" value={device} disabled={!connected || busy}
+                onValueChange={value => setDevice(value)}>
+                {devices.map(item => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}
+            </ScheduleSelect>
         </label>
         {error && <p role="alert">{t('schedules.requestFailed')}</p>}
         {!busy && !sources.length && <p>{t('schedules.noConversations')}</p>}

@@ -1,3 +1,4 @@
+import { Checkbox } from '@/components/ui/checkbox';
 import { useState, type Dispatch, type SetStateAction } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -32,8 +33,8 @@ export function ContractSteps({ draft, setDraft }: { draft: Contract; setDraft: 
             <p>{index + 1}. {step.step_id} · {draft.permissions.find(rule => rule.rule_id === step.rule_id)?.tool_name}</p>
             <p>{t('schedules.editor.dependencies')}</p>
             {draft.steps.slice(0, index).map(previous => <label className="flex items-center gap-2" key={previous.step_id}>
-                <input type="checkbox" checked={step.depends_on.includes(previous.step_id)} onChange={event => {
-                    const checked = event.target.checked;
+                <Checkbox  checked={step.depends_on.includes(previous.step_id)} onCheckedChange={nextChecked => {
+                    const checked = (nextChecked === true);
                     setRemoving(null);
                     setDraft(current => ({ ...current, steps: current.steps.map(item => item.step_id !== step.step_id ? item : {
                         ...item, depends_on: checked ? [...item.depends_on, previous.step_id] : item.depends_on.filter(id => id !== previous.step_id),

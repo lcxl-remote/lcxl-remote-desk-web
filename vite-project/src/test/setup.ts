@@ -9,3 +9,8 @@ if (!('ResizeObserver' in globalThis)) {
         disconnect() {}
     };
 }
+// Radix Select uses scrolling and pointer capture; jsdom has no layout/pointers.
+if (!HTMLElement.prototype.scrollIntoView) HTMLElement.prototype.scrollIntoView = () => {};
+if (!HTMLElement.prototype.hasPointerCapture) HTMLElement.prototype.hasPointerCapture = () => false;
+if (!HTMLElement.prototype.setPointerCapture) HTMLElement.prototype.setPointerCapture = () => {};
+if (!HTMLElement.prototype.releasePointerCapture) HTMLElement.prototype.releasePointerCapture = () => {};

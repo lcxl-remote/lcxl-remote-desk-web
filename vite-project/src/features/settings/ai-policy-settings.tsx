@@ -240,8 +240,8 @@ export function AiPolicySettings() {
                 </CardContent>
             </Card>
 
-            <ComputerUseApplicationPolicySettings />
             <ComputerUseCommunicationPolicySettings />
+            <ComputerUseApplicationPolicySettings />
             <Card>
                 <CardHeader>
                     <CardTitle>{t("pages.aiPolicy.title")}</CardTitle>

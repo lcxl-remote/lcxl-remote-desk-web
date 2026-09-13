@@ -846,6 +846,16 @@ pub trait SessionSeam {
     ) -> Result<(), AgentError> {
         Err(crate::directory_tools::unavailable())
     }
+    /// Wait one bounded tick for directory consent on the held turn. Implementations
+    /// may adopt only file-scope changes; a new input, stop or lease change must fail.
+    async fn poll_directory_review(
+        &self,
+        _session: &mut PersistedAgentSession,
+        _request_id: &str,
+    ) -> Result<Option<bool>, AgentError> {
+        Err(crate::directory_tools::unavailable())
+    }
+
     /// Atomically load-or-create the session for `conversation_id` and claim a
     /// turn (settled → `Running`), recomputing scope at the turn boundary,
     /// resetting the turn-level counters, and rotating the lease token. An

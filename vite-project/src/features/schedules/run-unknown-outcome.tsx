@@ -1,3 +1,5 @@
+import { Textarea } from '@/components/ui/textarea';
+import { Checkbox } from '@/components/ui/checkbox';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -48,12 +50,12 @@ export function RunUnknownOutcome({ client, scheduleId, runId, snapshot, connect
     return <section className="space-y-2 rounded-lg border p-3" aria-busy={busy}>
         <p>{t('schedules.unknown.note')}</p>
         <label className="flex items-start gap-2 text-sm">
-            <input type="checkbox" checked={checked} disabled={!connected || busy || loading}
-                onChange={event => setChecked(event.target.checked)} />
+            <Checkbox  checked={checked} disabled={!connected || busy || loading}
+                onCheckedChange={nextChecked => setChecked((nextChecked === true))} />
             {t('schedules.unknown.checked')}
         </label>
         <label className="block text-sm">{t('schedules.review.description')}
-            <textarea className="mt-1 block w-full rounded border bg-background p-2" value={note}
+            <Textarea className="mt-1 block w-full rounded border bg-background p-2" value={note}
                 disabled={!connected || busy || loading} maxLength={2048} onChange={event => setNote(event.target.value)} />
         </label>
         {failed && <p role="alert">{t('schedules.unknown.failed')}</p>}

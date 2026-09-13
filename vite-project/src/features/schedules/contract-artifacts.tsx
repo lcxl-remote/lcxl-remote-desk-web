@@ -1,3 +1,5 @@
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
 import { useTranslation } from 'react-i18next';
 import type { Dispatch, SetStateAction } from 'react';
 import type { ScheduleManagementResponse } from '@/services/types';
@@ -22,7 +24,7 @@ export function ContractArtifacts({ contract, original, setDraft }: {
             {setDraft ? <>
                 <p className="text-sm">{t('schedules.artifact.fixed')}</p>
                 <label className="block">{t('schedules.artifact.maxBytes')}
-                    <input className="ml-2 rounded border bg-background p-2" type="number" min={1} max={65536} step={1} required
+                    <Input className="ml-2 rounded border bg-background p-2" type="number" min={1} max={65536} step={1} required
                         value={input.max_content_bytes || ''} onChange={event => {
                             const value = Number(event.target.value);
                             setDraft(current => ({ ...current, permissions: current.permissions.map(item =>
@@ -32,8 +34,8 @@ export function ContractArtifacts({ contract, original, setDraft }: {
                 </label>
                 <p>{t('schedules.contract.sources')}</p>
                 {previous?.kind === 'produce_text_artifact' && previous.allowed_source_scopes.map(source => <label className="flex items-center gap-2 break-all" key={source}>
-                    <input type="checkbox" checked={binding.allowed_source_scopes.includes(source)} onChange={event => {
-                        const checked = event.target.checked;
+                    <Checkbox  checked={binding.allowed_source_scopes.includes(source)} onCheckedChange={nextChecked => {
+                        const checked = (nextChecked === true);
                         setDraft(current => ({ ...current, steps: current.steps.map(item =>
                             item.step_id === step.step_id && item.binding.kind === 'produce_text_artifact'
                                 ? { ...item, binding: { ...item.binding, allowed_source_scopes: checked

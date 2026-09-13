@@ -1,4 +1,5 @@
-import { fireEvent, render, waitFor } from "@testing-library/react"
+import { selectOption } from '@/test-utils/select-option';
+import { render, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 vi.mock("react-i18next", () =>
@@ -61,13 +62,13 @@ describe("ModelSelector persistence queue", () => {
         const onChange = vi.fn()
         const { container } = render(<ModelSelector role="agent" onChange={onChange} />)
         const select = await waitFor(() => {
-            const element = container.querySelector("select")
+            const element = container.querySelector('[role="combobox"]')
             expect(element).not.toBeNull()
-            return element as HTMLSelectElement
+            return element as HTMLElement
         })
 
-        fireEvent.change(select, { target: { value: "2" } })
-        fireEvent.change(select, { target: { value: "3" } })
+        await selectOption(select, /Two/)
+        await selectOption(select, /Three/)
 
         expect(putBodies).toEqual([{ model_id: 2, role: "agent" }])
         firstPut.resolve(jsonResponse({ success: true, code: 0 }))

@@ -1,3 +1,5 @@
+import { SelectItem } from '@/components/ui/select';
+import { SelectField } from '@/components/ui/select-field';
 import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { cn } from "@/lib/utils"
@@ -63,7 +65,7 @@ type ModelSelectorProps = {
     onChange: (modelId: number | null) => void
     /** Optional richer selection callback for hosts that gate capability-specific UI. */
     onModelChange?: (model: AiModelDto | null) => void
-    /** Extra classes for the `<select>`, so each host (a dark assistant overlay vs.
+    /** Extra classes for the select trigger, so each host (a dark assistant overlay vs.
      *  the themed terminal card) can blend it in. */
     className?: string
     /**
@@ -246,8 +248,8 @@ export function ModelSelector({
         }
     }
 
-    const onSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
-        const id = Number(e.target.value)
+    const onSelect = (value: string) => {
+        const id = Number(value)
         if (Number.isNaN(id)) return
         setSelectedId(id)
         onChangeRef.current(id)
@@ -288,16 +290,16 @@ export function ModelSelector({
                     </span>
                 )}
             </div>
-            <select
+            <SelectField
                 value={selectedId}
-                onChange={onSelect}
+                onValueChange={onSelect}
                 className={cn(
                     "w-full rounded-md border px-2 py-1 text-xs outline-none",
                     className,
                 )}
             >
                 {models.map((m) => (
-                    <option key={m.model_id} value={m.model_id} className="bg-neutral-800 text-white">
+                    <SelectItem key={m.model_id} value={String(m.model_id)} >
                         {m.display_name} · {priceHint(m)}
                         {" · "}
                         {t(
@@ -305,9 +307,9 @@ export function ModelSelector({
                                 ? "pages.desk.modelSelector.imageInput"
                                 : "pages.desk.modelSelector.textOnly",
                         )}
-                    </option>
+                    </SelectItem>
                 ))}
-            </select>
+            </SelectField>
         </div>
     )
 }

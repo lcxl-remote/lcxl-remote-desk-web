@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 import { useTranslation } from 'react-i18next';
 
 function record(value: unknown): Record<string, unknown> {
@@ -45,9 +46,9 @@ export function AssistantObservationResult({ data }: { data: unknown }) {
                 })}
             </ul>
         </> : <p>{label('unrecognized')}</p>}
-        <details className="rounded-md border p-3">
-            <summary className="cursor-pointer text-muted-foreground">{t('pages.deviceAssistant.workspace.technicalDetails')}</summary>
+        <Disclosure className="rounded-md border p-3" title={<>{t('pages.deviceAssistant.workspace.technicalDetails')}</>} summaryClassName="cursor-pointer text-muted-foreground">
+
             <pre data-testid="observation-output" className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(data, null, 2)}</pre>
-        </details>
+        </Disclosure>
     </div>;
 }

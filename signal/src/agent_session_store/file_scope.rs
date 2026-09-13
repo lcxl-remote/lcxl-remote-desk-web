@@ -336,5 +336,45 @@ impl SignalAgentSessionStore {
     }
 }
 
+impl SignalAgentSessionStore {
+    pub(crate) async fn poll_file_scope_review(
+        &self,
+        session: &mut PersistedAgentSession,
+        request_id: &str,
+    ) -> Result<Option<bool>, AgentError> {
+        use crate::entity::agent_session as session_entity;
+        let row = session_entity::Entity::find()
+            .filter(session_entity::Column::ConversationId.eq(&session.conversation_id))
+            .filter(session_entity::Column::ActorId.eq(&session.actor_id))
+            .filter(session_entity::Column::DeviceId.eq(&session.device_id))
+            .one(&self.db)
+            .await
+            .map_err(storage)?
+            .ok_or_else(failure)?;
+        let now = crate::schedule_store::ScheduleStore::new(self.db.clone())
+            .database_time()
+            .await
+            .map_err(|_| failure())?;
+        if row.lease_token != i64::try_from(session.lease_token).map_err(|_| failure())?
+            || row
+                .lease_deadline
+                .is_none_or(|deadline| deadline.timestamp_millis() <= now)
+        {
+            return Err(failure());
+        }
+        let current = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| failure())?;
+        if current.version != row.version {
+            return Err(failure());
+        }
+        let decision = desk_diagnose_core::directory_tools::adopt_review_snapshot(
+            session, current, request_id,
+        )?;
+        if decision.is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        Ok(decision)
+    }
+}
+
 #[cfg(test)]
 mod tests;

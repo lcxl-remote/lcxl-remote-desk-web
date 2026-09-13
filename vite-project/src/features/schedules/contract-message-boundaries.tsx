@@ -1,3 +1,5 @@
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
 import { ContractAttachments } from './contract-attachments';
 import { useTranslation } from 'react-i18next';
 import type { Dispatch, SetStateAction } from 'react';
@@ -16,7 +18,7 @@ export function ContractMessageBoundaries({ draft, original, setDraft }: {
                     ? { ...item, input: { ...item.input, attachment_policy: policy } } : item) }))} />
             {(['max_subject_bytes', 'max_body_bytes'] as const).map(field => <label className="block" key={field}>
                 {t(`schedules.editor.${field}`)}
-                <input className="ml-2 rounded border bg-background p-2" type="number" min={field === 'max_subject_bytes' ? 0 : 1} step={1} required
+                <Input className="ml-2 rounded border bg-background p-2" type="number" min={field === 'max_subject_bytes' ? 0 : 1} step={1} required
                     value={rule.input.kind === 'generated_message' ? rule.input[field] : 0}
                     onChange={event => {
                         const value = Number(event.target.value);
@@ -39,8 +41,8 @@ export function ContractMessageBoundaries({ draft, original, setDraft }: {
                 <p className="text-sm">{t('schedules.editor.destinationFixed')}</p>
                 <p>{t('schedules.contract.sources')}</p>
                 {previous?.kind === 'send_message' && previous.allowed_source_scopes.map(source => <label className="flex items-center gap-2 break-all" key={source}>
-                    <input type="checkbox" checked={binding.allowed_source_scopes.includes(source)} onChange={event => {
-                        const checked = event.target.checked;
+                    <Checkbox  checked={binding.allowed_source_scopes.includes(source)} onCheckedChange={nextChecked => {
+                        const checked = (nextChecked === true);
                         setDraft(current => ({ ...current, steps: current.steps.map(item => item.step_id === step.step_id && item.binding.kind === 'send_message'
                             ? { ...item, binding: { ...item.binding, allowed_source_scopes: checked
                                 ? [...item.binding.allowed_source_scopes, source]

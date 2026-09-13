@@ -1,3 +1,5 @@
+import { Slider } from '@/components/ui/slider';
+import { Button } from '@/components/ui/button';
 import type { WhiteboardTool } from './use-desk-whiteboard';
 
 type WhiteboardToolbarProps = {
@@ -27,26 +29,26 @@ export default function WhiteboardToolbar({
             boxShadow: '0 4px 24px rgba(0,0,0,0.4)', color: '#fff', fontSize: 13,
         }}>
             {/* Tool buttons */}
-            <button
+            <Button variant="unstyled"
                 onClick={() => setTool('pen')}
                 style={toolBtn(tool === 'pen')}
                 title="Pen"
             >
                 ✏️
-            </button>
-            <button
+            </Button>
+            <Button variant="unstyled"
                 onClick={() => setTool('text')}
                 style={toolBtn(tool === 'text')}
                 title="Text"
             >
                 T
-            </button>
+            </Button>
 
             <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.2)' }} />
 
             {/* Color picker */}
             {COLORS.map(c => (
-                <button
+                <Button variant="unstyled"
                     key={c}
                     onClick={() => setColor(c)}
                     style={{
@@ -62,9 +64,9 @@ export default function WhiteboardToolbar({
             {/* Stroke width */}
             <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <span style={{ fontSize: 11, opacity: 0.7 }}>Size</span>
-                <input
-                    type="range" min={1} max={12} value={strokeWidth}
-                    onChange={e => setStrokeWidth(Number(e.target.value))}
+                <Slider
+                    aria-label="Size" min={1} max={12} value={[strokeWidth]}
+                    onValueChange={values => setStrokeWidth(values[0])}
                     style={{ width: 60 }}
                 />
             </label>
@@ -72,9 +74,9 @@ export default function WhiteboardToolbar({
             <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.2)' }} />
 
             {/* Actions */}
-            <button onClick={onUndo} style={actionBtn} title="Undo">↩</button>
-            <button onClick={onClear} style={actionBtn} title="Clear All">🗑️</button>
-            <button onClick={onClose} style={{ ...actionBtn, color: '#ff6b6b' }} title="Close Whiteboard">✕</button>
+            <Button variant="unstyled" onClick={onUndo} style={actionBtn} title="Undo">↩</Button>
+            <Button variant="unstyled" onClick={onClear} style={actionBtn} title="Clear All">🗑️</Button>
+            <Button variant="unstyled" onClick={onClose} style={{ ...actionBtn, color: '#ff6b6b' }} title="Close Whiteboard">✕</Button>
         </div>
     );
 }

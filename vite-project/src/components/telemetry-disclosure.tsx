@@ -1,3 +1,4 @@
+import { Button } from '@/components/ui/button';
 import { useTranslation } from "react-i18next";
 import { Info } from "lucide-react";
 import {
@@ -12,7 +13,7 @@ export function TelemetryDisclosure() {
     return (
         <Popover>
             <PopoverTrigger asChild>
-                <button
+                <Button variant="unstyled"
                     type="button"
                     className="inline-flex items-center gap-1 text-primary hover:underline focus:outline-none transition-all"
                 >
@@ -20,7 +21,7 @@ export function TelemetryDisclosure() {
                     <span className="text-xs font-medium">
                         {t("pages.init.telemetry.learnMore")}
                     </span>
-                </button>
+                </Button>
             </PopoverTrigger>
             <PopoverContent className="w-80 p-4 shadow-xl border-slate-200 dark:border-slate-800 bg-white/95 backdrop-blur-md dark:bg-slate-950/95">
                 <div className="space-y-3">

@@ -220,3 +220,109 @@ async fn terminal_history_does_not_exhaust_a_long_lived_conversation() {
     );
     assert!(state(&store).await.file_scope.records().is_empty());
 }
+
+#[tokio::test]
+async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn() {
+    for approve in [true, false] {
+        let store = setup().await;
+        let now = chrono::Utc::now();
+        store.update_file_scope(&update(), now).await.unwrap();
+        let mut held = state(&store).await;
+        held.turn_state = desk_diagnose_core::session::TurnState::Running;
+        let deadline = now + chrono::Duration::minutes(5);
+        agent_session::Entity::update_many()
+            .col_expr(
+                agent_session::Column::StateJson,
+                Expr::value(held.encode_json_for_storage().unwrap()),
+            )
+            .col_expr(
+                agent_session::Column::LeaseDeadline,
+                Expr::value(Some(deadline)),
+            )
+            .exec(&store.db)
+            .await
+            .unwrap();
+        let FileScopeMutation::Select { mut proposal } = update().mutation else {
+            panic!()
+        };
+        proposal.request_id = "waiting-directory".into();
+        proposal.source = DirectoryConsentSource::ModelProposal;
+        store
+            .propose_file_scope_for_turn(&mut held, proposal, now)
+            .await
+            .unwrap();
+        let before = held.clone();
+        for change in ["input", "lease", "authority", "transcript"] {
+            let mut changed = held.clone();
+            match change {
+                "input" => changed.input_revision += 1,
+                "lease" => changed.lease_token += 1,
+                "authority" => changed.policy_revision += 1,
+                _ => changed
+                    .conversation
+                    .push(desk_diagnose_core::chat::ChatMessage::text(
+                        "new",
+                        desk_diagnose_core::chat::ChatRole::User,
+                        "new requirement",
+                    )),
+            }
+            assert!(
+                desk_diagnose_core::directory_tools::adopt_review_snapshot(
+                    &mut held,
+                    changed,
+                    "waiting-directory"
+                )
+                .is_err()
+            );
+            assert_eq!(held, before);
+        }
+
+        assert_eq!(
+            store
+                .poll_file_scope_review(&mut held, "waiting-directory")
+                .await
+                .unwrap(),
+            None
+        );
+        let decision = FileScopeUpdate {
+            client_request_id: "owner-decision".into(),
+            expected_revision: held.file_scope.revision(),
+            mutation: FileScopeMutation::Decide {
+                directory_request_id: "waiting-directory".into(),
+                approve,
+            },
+            ..update()
+        };
+        store.update_file_scope(&decision, now).await.unwrap();
+        assert_eq!(
+            store
+                .poll_file_scope_review(&mut held, "waiting-directory")
+                .await
+                .unwrap(),
+            Some(approve)
+        );
+        assert_eq!(held.version, before.version + 1);
+        assert_eq!(held.scope_snapshot, before.scope_snapshot);
+        let settled = held.clone();
+        // HTTP/signaling retries replay the receipt; there is no second turn.
+        store.update_file_scope(&decision, now).await.unwrap();
+        assert_eq!(state(&store).await, settled);
+        let mut stopped = held.clone();
+        stopped.turn_state = desk_diagnose_core::session::TurnState::Idle;
+        agent_session::Entity::update_many()
+            .col_expr(
+                agent_session::Column::StateJson,
+                Expr::value(stopped.encode_json_for_storage().unwrap()),
+            )
+            .exec(&store.db)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .poll_file_scope_review(&mut held, "waiting-directory")
+                .await
+                .is_err()
+        );
+        assert_eq!(held, settled);
+    }
+}

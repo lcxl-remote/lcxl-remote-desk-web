@@ -1,3 +1,5 @@
+import { Textarea } from '@/components/ui/textarea';
+import { Disclosure } from '@/components/ui/disclosure';
 import { AssistantObservationResult } from './assistant-observation-result';
 import { AssistantToolCall } from './assistant-tool-call';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
@@ -444,12 +446,12 @@ export function DeviceAssistantWorkspace({
 
             {chat.tools.length === 0 && <p className="text-sm text-muted-foreground">{t('pages.deviceAssistant.workspace.emptyActivity')}</p>}
             {chat.tools.map((tool) => (
-                <details key={tool.callId} className="rounded-lg border p-3">
-                    <summary className="cursor-pointer text-sm">{tool.name} · {t(`pages.deviceAssistant.workspace.toolState.${tool.status}`)}</summary>
+                <Disclosure key={tool.callId} className="rounded-lg border p-3" title={<>{tool.name} · {t(`pages.deviceAssistant.workspace.toolState.${tool.status}`)}</>} summaryClassName="cursor-pointer text-sm">
+
                     <p className="mt-2 text-sm">{tool.permissionReason && t('pages.deviceAssistant.permissionReasonLabel', { reason: tool.permissionReason })}</p>
                     <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{tool.argumentsJson}</pre>
                     {tool.output && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{tool.output}</pre>}
-                </details>
+                </Disclosure>
             ))}
                                 {chat.draft && (
                         <Card data-testid="computer-action-draft-preview" className="border-violet-500/40">
@@ -497,7 +499,7 @@ export function DeviceAssistantWorkspace({
                         const id = entry.capability.capability_id;
                         const selected = selectedCapabilityIds.includes(id);
                         return (
-                            <button
+                            <Button variant="unstyled"
                                 key={id}
                                 type="button"
                                 disabled={!assistantEnabled || !entry.ready || chat.running}
@@ -524,7 +526,7 @@ export function DeviceAssistantWorkspace({
                                         ? t('pages.deviceAssistant.contextSelected')
                                         : t('pages.deviceAssistant.contextNotSelected')}
                                 </Badge>
-                            </button>
+                            </Button>
                         );
                     })}
                     {chat.attachments.length > 0 && (
@@ -899,7 +901,7 @@ export function DeviceAssistantWorkspace({
                                 count: new Set([...selectedCapabilityIds, ...chat.attachments.filter((item) => item.state === 'active').map((item) => item.capabilityId)]).size,
                             })}</span>
                         </div>
-                        <textarea
+                        <Textarea
                             value={question}
                             readOnly={!!rehearsal}
                             onChange={(event) => setQuestion(event.target.value)}

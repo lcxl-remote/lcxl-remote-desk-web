@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 /**
  * Why file transfers are unavailable, and the evidence behind it.
  *
@@ -80,10 +81,10 @@ export function TransferUnavailableAlert({
                 <p className="mt-1">{t("pages.fileManager.transferUnavailable.browsingStillWorks")}</p>
                 <p className="mt-1 font-medium">{t(diagnosisKey(diagnostics))}</p>
 
-                <details className="mt-2">
-                    <summary className="cursor-pointer text-sm">
+                <Disclosure className="mt-2" title={<>
                         {t("pages.fileManager.diagnostics.title")}
-                    </summary>
+                    </>} summaryClassName="cursor-pointer text-sm">
+
                     <dl className="mt-2 space-y-1 text-xs font-mono">
                         <div>
                             <dt className="inline font-sans">
@@ -111,7 +112,7 @@ export function TransferUnavailableAlert({
                             </dd>
                         </div>
                     </dl>
-                </details>
+                </Disclosure>
 
                 <div className="mt-3 flex items-center gap-2">
                     <Button size="sm" variant="outline" onClick={onRetry}>

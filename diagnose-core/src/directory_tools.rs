@@ -54,7 +54,7 @@ pub fn scope_prompt(session: &crate::session::PersistedAgentSession, now_unix_ms
 pub fn registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec { name: REQUEST_DIRECTORY.into(),
-            description: "Request the owner's consent for one existing absolute directory on the controlled device in this conversation. Supply the path and purpose. Resolves directory identity only, without listing or reading contents. The owner must confirm the canonical path in Conversation directories; a request or directory approval does not authorize any file operation.".into(),
+            description: "Request the owner's consent for one existing absolute directory on the controlled device in this conversation. Supply the path and purpose. Resolves directory identity only, without listing or reading contents. In interactive conversations, this call waits for the owner to approve or reject the canonical path in Conversation directories, then returns the decision. Continue the existing requirement after approval; do not ask for another directory confirmation. Directory consent does not grant file read, write or export permissions; request those separately when required.".into(),
             parameters_schema: json!({"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"purpose":{"type":"string","minLength":1,"maxLength":2048}},"required":["path","purpose"],"additionalProperties":false}) },
         required_capability: Capability::SystemInfo,
         effect: ToolEffect::DirectoryPlanning,
@@ -150,4 +150,60 @@ mod tests {
 pub fn task_approved_result(request_id: &str) -> serde_json::Value {
     json!({"directory_request_id":request_id, "state":"approved", "authority":"task_contract",
         "file_operation_authorized":false})
+}
+
+/// Accept only directory-scope updates on this exact executing turn. In particular,
+/// never overwrite a stop, new user input, another lease, or changed tool authority.
+pub fn adopt_review_snapshot(
+    held: &mut crate::session::PersistedAgentSession,
+    current: crate::session::PersistedAgentSession,
+    request_id: &str,
+) -> Result<Option<bool>, AgentError> {
+    use crate::file_scope::DirectoryConsentState;
+    if !held.turn_state.is_active()
+        || held.version < 0
+        || !held
+            .file_scope
+            .records()
+            .iter()
+            .any(|r| r.proposal.request_id == request_id)
+        || current.version < held.version
+        || current.last_event_seq < held.last_event_seq
+        || current.file_scope.revision() < held.file_scope.revision()
+        || u64::try_from(current.version - held.version).ok()
+            != Some(current.last_event_seq - held.last_event_seq)
+    {
+        return Err(unavailable());
+    }
+    let mut expected = held.clone();
+    expected.file_scope = current.file_scope.clone();
+    expected.last_event_seq = current.last_event_seq;
+    expected.version = current.version;
+    expected.updated_at = current.updated_at.clone();
+    if expected != current {
+        return Err(unavailable());
+    }
+    let decision = match current
+        .file_scope
+        .records()
+        .iter()
+        .find(|r| r.proposal.request_id == request_id)
+        .map(|r| r.state)
+    {
+        Some(DirectoryConsentState::Pending) => None,
+        Some(DirectoryConsentState::Approved) => Some(true),
+        _ => Some(false),
+    };
+    *held = current;
+    Ok(decision)
+}
+
+pub fn decision_result(request_id: &str, approved: bool) -> serde_json::Value {
+    json!({"directory_request_id": request_id,
+    "state": if approved { "approved" } else { "rejected" },
+    "message": if approved {
+        "The owner approved this conversation directory. Continue the existing user requirement using CURRENT CONVERSATION DIRECTORIES. This grants no file read, write or export permission; request the required tool permission if missing. Do not request the same directory confirmation again."
+    } else {
+        "The owner rejected or removed this directory. Do not access it or request the same directory again unless the user asks. Explain the blocker or continue with an already approved alternative."
+    }})
 }

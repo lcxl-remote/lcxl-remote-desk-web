@@ -19,28 +19,28 @@ describe('command receipt presentation', () => {
     it.each(['execution failed: timeout', '{bad json', 'null', '[]', '{}', '{"Exec":null}', wire({ ...receipt, duration_ms: -1 }), wire({ ...receipt, exit_code: '0' }), wire({ ...receipt, streams: { type: 'unknown' } }), wire({ ...receipt, redactions: [123] })])('preserves unrecognized content: %s', text => {
         expect(parseCommandReceipt(text)).toBeNull();
         const { container } = render(<AssistantCommandResult text={text} />);
-        expect(container.querySelector('details')?.open).toBe(false);
+        expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
         expect(container.querySelector('pre')?.textContent).toBe(text);
     });
 
     it('is collapsed initially and expands into labeled fields with independently collapsed raw data', () => {
         const text = wire(receipt);
         const { container, rerender } = render(<AssistantCommandResult text={text} />);
-        const details = container.querySelector('details')!;
-        expect(details.open).toBe(false);
-        fireEvent.click(details.querySelector('summary')!);
-        expect(details.open).toBe(true);
+        const details = container.querySelector('[data-slot="disclosure"]')!;
+        expect(details.getAttribute('data-state') === 'open').toBe(false);
+        fireEvent.click(details.querySelector('button[aria-expanded]')!);
+        expect(details.getAttribute('data-state') === 'open').toBe(true);
         expect(screen.getByText('pages.deviceAssistant.commandReceipt.exitCode')).toBeTruthy();
         expect(screen.getByText('1')).toBeTruthy();
         expect(screen.getByText('pages.deviceAssistant.commandReceipt.milliseconds: 1,234')).toBeTruthy();
         expect(screen.getByText('Permission denied')).toBeTruthy();
         expect(screen.getByText('pages.deviceAssistant.commandReceipt.truncated')).toBeTruthy();
         expect(screen.getByText('secret removed')).toBeTruthy();
-        expect(details.querySelector('details')?.open).toBe(false);
+        expect(details.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
         rerender(<AssistantCommandResult text={text} />);
-        expect(details.open).toBe(true);
-        fireEvent.click(details.querySelector('summary')!);
-        expect(details.open).toBe(false);
+        expect(details.getAttribute('data-state') === 'open').toBe(true);
+        fireEvent.click(details.querySelector('button[aria-expanded]')!);
+        expect(details.getAttribute('data-state') === 'open').toBe(false);
     });
 
     it('keeps PTY output combined and renders device text without interpreting HTML or Markdown', () => {

@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 import { useTranslation } from 'react-i18next';
 
 type FileReceipt = { operation: 'create' | 'update' | 'delete'; verified: boolean; fileName?: string; bytes?: number; digest: string; recoveryPath?: string };
@@ -33,8 +34,8 @@ export function parseFileReceipt(text: string): FileReceipt | null {
 
 export function AssistantFileResult({ receipt, text }: { receipt: FileReceipt; text: string }) {
     const { t } = useTranslation();
-    return <details className="min-w-0">
-        <summary className="cursor-pointer font-medium">{t('pages.deviceAssistant.fileReceipt.title')} · {t(`pages.deviceAssistant.fileReceipt.${receipt.operation}`)} · {t(`pages.deviceAssistant.fileReceipt.${receipt.verified ? 'verified' : 'unknown'}`)}</summary>
+    return <Disclosure className="min-w-0" title={<>{t('pages.deviceAssistant.fileReceipt.title')} · {t(`pages.deviceAssistant.fileReceipt.${receipt.operation}`)} · {t(`pages.deviceAssistant.fileReceipt.${receipt.verified ? 'verified' : 'unknown'}`)}</>} summaryClassName="cursor-pointer font-medium">
+
         <dl className="mt-3 space-y-2 break-words">
             {receipt.fileName && <div><dt>{t('pages.deviceAssistant.fileReceipt.name')}</dt><dd>{receipt.fileName}</dd></div>}
             {receipt.bytes !== undefined && <div><dt>{t('pages.deviceAssistant.fileReceipt.bytes')}</dt><dd>{receipt.bytes}</dd></div>}
@@ -42,6 +43,6 @@ export function AssistantFileResult({ receipt, text }: { receipt: FileReceipt; t
             {receipt.recoveryPath && <div><dt>{t('pages.deviceAssistant.fileReceipt.recovery')}</dt><dd className="break-all font-mono text-xs">{receipt.recoveryPath}</dd><p className="mt-1 text-xs text-muted-foreground">{t('pages.deviceAssistant.fileReceipt.recoveryHint')}</p></div>}
             {!receipt.verified && <p className="text-amber-700 dark:text-amber-300">{t('pages.deviceAssistant.fileReceipt.unknownHint')}</p>}
         </dl>
-        <details className="mt-3"><summary className="cursor-pointer text-xs">{t('pages.deviceAssistant.commandReceipt.raw')}</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{text}</pre></details>
-    </details>;
+        <Disclosure className="mt-3" title={<>{t('pages.deviceAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs"><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{text}</pre></Disclosure>
+    </Disclosure>;
 }

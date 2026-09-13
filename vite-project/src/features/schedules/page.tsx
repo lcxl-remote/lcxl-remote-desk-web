@@ -1,3 +1,11 @@
+import { ChevronDown, Plus, RefreshCw } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Textarea } from '@/components/ui/textarea';
+import { Checkbox } from '@/components/ui/checkbox';
+import { SelectItem } from '@/components/ui/select';
+import { ScheduleSelect } from './select-field';
 import { ResumeSourcePicker } from './resume-source-picker';
 import { ProposalReview } from './proposal-review';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
@@ -105,72 +113,74 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
     const visible = tasks.filter(task => task.kind === tab);
     const allDevices = [...devices];
     for (const task of tasks) if (task.target_device_id && !allDevices.some(d => d.id === task.target_device_id)) allDevices.push({ id: task.target_device_id, name: task.target_device_id });
-    return <section className="space-y-5">
+    return <section className="mx-auto w-full max-w-5xl space-y-5 p-2 sm:p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
             <h1 className="text-2xl font-semibold">{t('schedules.title')}</h1>
-            <div className="flex gap-2">
-                <Button variant="outline" disabled={!available} onClick={() => void load()}>{t('schedules.refresh')}</Button>
-                <Button disabled={!available || loadingDevices || !allDevices.length} onClick={() => setChoosingConversation(true)}>{t('schedules.chooseConversation')}</Button>
+            <div className="flex flex-wrap gap-2">
+                <Button variant="outline" disabled={!available} onClick={() => void load()}><RefreshCw className="mr-2 h-4 w-4" />{t('schedules.refresh')}</Button>
+                {tab === 'conversation_resume' && <Button disabled={!available || loadingDevices || !allDevices.length} onClick={() => setChoosingConversation(true)}>{t('schedules.chooseConversation')}</Button>}
                 {resumeSource && <Button disabled={!available || !devices.some(device => device.id === resumeSource.device)} onClick={() => { setTab('conversation_resume'); setEditor({ kind: 'create', resume: resumeSource, key: v4() }); }}>{t('schedules.createResume')}</Button>}
-                <Button disabled={!available || loadingDevices || !allDevices.length} onClick={() => { setTab('fresh_task'); setEditor({ kind: 'create', key: v4() }); }}>{t('schedules.create')}</Button>
+                {tab === 'fresh_task' && <Button disabled={!available || loadingDevices || !allDevices.length} onClick={() => { setTab('fresh_task'); setEditor({ kind: 'create', key: v4() }); }}><Plus className="mr-2 h-4 w-4" />{t('schedules.create')}</Button>}
             </div>
         </div>
-        <p className="text-sm text-muted-foreground">{t('schedules.draftNote')}</p>
-        <div className="max-w-sm space-y-1"><Label htmlFor="schedule-zone">{t('schedules.timezone')}</Label><Input id="schedule-zone" value={zone} onChange={e => setZone(e.target.value)} /></div>
-        {!validZone && <p role="alert">{t('schedules.invalidZone')}</p>}
-        <p className="text-sm text-muted-foreground">{t('schedules.utcNote')}</p>
+        <Tabs value={tab} onValueChange={value => setTab(value as typeof tab)}>
+            <TabsList className="grid w-full grid-cols-2">{(['fresh_task', 'conversation_resume'] as const).map(kind =>
+                <TabsTrigger key={kind} value={kind} onClick={() => setTab(kind)}>{t(`schedules.${kind}`)}</TabsTrigger>)}</TabsList>
+        </Tabs>
+        <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
+            <h2 className="font-medium">{t(`schedules.guide.${tab}.title`)}</h2>
+            <p className="text-sm text-muted-foreground">{t(`schedules.guide.${tab}.description`)}</p>
+            <p className="text-sm">{t(`schedules.guide.${tab}.steps`)}</p>
+        </div>
+        <Collapsible className="rounded-lg border p-3">
+            <CollapsibleTrigger asChild><Button variant="ghost" className="w-full justify-between"><span className="min-w-0 truncate">{t('schedules.timezone')}: {zone}</span><ChevronDown className="h-4 w-4" /></Button></CollapsibleTrigger>
+            <CollapsibleContent className="space-y-2 pt-3">
+                <Label htmlFor="schedule-zone">{t('schedules.timezone')}</Label><Input id="schedule-zone" value={zone} onChange={e => setZone(e.target.value)} />
+                <p className="text-sm text-muted-foreground">{t('schedules.utcNote')}</p>
+            </CollapsibleContent>
+        </Collapsible>
+        {!validZone && <p role="alert" className="text-destructive">{t('schedules.invalidZone')}</p>}
         {!isConnected && <p role="status">{t('schedules.connecting')}</p>}
         {invalidHistoryLink && <p role="alert">{t('schedules.result.invalidLink')}</p>}
         {error && <p role="alert" className="text-destructive">{error}</p>}
-        <div className="flex gap-2" role="tablist" aria-label={t('schedules.title')}>
-            {(['fresh_task', 'conversation_resume'] as const).map(kind => <Button key={kind} role="tab" aria-selected={tab === kind} variant={tab === kind ? 'default' : 'outline'} onClick={() => setTab(kind)}>{t(`schedules.${kind}`)}</Button>)}
-        </div>
         <div className="grid gap-3 sm:grid-cols-3">
             <label className="space-y-1">{t('schedules.filters.name')}
                 <Input value={filterTitle} maxLength={256} onChange={event => setFilterTitle(event.target.value)} />
             </label>
             <label className="space-y-1">{t('schedules.filters.device')}
-                <select className={selectClass} value={filterDevice} onChange={event => setFilterDevice(event.target.value)}>
-                    <option value="">{t('schedules.filters.allDevices')}</option>
-                    {devices.map(device => <option key={device.id} value={device.id}>{device.name}</option>)}
-                </select>
+                <ScheduleSelect className={selectClass} value={filterDevice} onValueChange={value => setFilterDevice(value)}>
+                    <SelectItem value="__empty__">{t('schedules.filters.allDevices')}</SelectItem>
+                    {devices.map(device => <SelectItem key={device.id} value={device.id}>{device.name}</SelectItem>)}
+                </ScheduleSelect>
             </label>
             <label className="space-y-1">{t('schedules.filters.status')}
-                <select className={selectClass} value={filterStatus} onChange={event => setFilterStatus(event.target.value as ScheduleView['status'] | '')}>
-                    <option value="">{t('schedules.filters.allStatuses')}</option>
+                <ScheduleSelect className={selectClass} value={filterStatus} onValueChange={value => setFilterStatus(value as ScheduleView['status'] | '')}>
+                    <SelectItem value="__empty__">{t('schedules.filters.allStatuses')}</SelectItem>
                     {(['draft', 'rehearsing', 'awaiting_authorization', 'active', 'paused', 'triggered', 'completed'] as const).map(status =>
-                        <option key={status} value={status}>{t(`schedules.status.${status}`)}</option>)}
-                </select>
+                        <SelectItem key={status} value={status}>{t(`schedules.status.${status}`)}</SelectItem>)}
+                </ScheduleSelect>
             </label>
-            <label className="flex items-center gap-2"><input type="checkbox" checked={attentionOnly} onChange={event => setAttentionOnly(event.target.checked)} />{t('schedules.filters.attention')}{counts && ` (${counts.attention})`}</label>
+            <label className="flex items-center gap-2"><Checkbox  checked={attentionOnly} onCheckedChange={nextChecked => setAttentionOnly((nextChecked === true))} />{t('schedules.filters.attention')}{counts && ` (${counts.attention})`}</label>
         </div>
         {counts && <p className="text-sm text-muted-foreground">{t('schedules.filters.total', { count: counts.total })}</p>}
         <div role="tabpanel" className="space-y-3" aria-busy={busy}>
             {!visible.length && <p className="py-8 text-muted-foreground">{t(busy ? 'schedules.loading' : 'schedules.empty')}</p>}
             {visible.map(task => <article key={task.schedule_id} className="space-y-3 rounded-xl border p-4">
-                <div className="flex flex-wrap justify-between gap-2"><h2 className="font-semibold">{task.title}</h2><span className="text-sm">{t(`schedules.status.${task.status}`)}</span></div>
+                <div className="flex flex-wrap justify-between gap-2"><h2 className="font-semibold">{task.title}</h2><Badge variant="secondary">{t(`schedules.status.${task.status}`)}</Badge></div>
                 <p className="whitespace-pre-wrap text-sm">{task.prompt}</p>
                 <p className="text-sm text-muted-foreground">{allDevices.find(d => d.id === task.target_device_id)?.name ?? t('schedules.targetUnavailable')}</p>
                 {validZone && <p className="text-sm">{task.spec.rule.kind === 'after_confirmation' ? t('schedules.proposal.afterConfirmation', { seconds: task.spec.rule.delay_seconds }) : task.spec.rule.kind === 'interval' ? t('schedules.everySeconds', { count: task.spec.rule.every_seconds }) : `${t(`schedules.rule.${task.spec.rule.kind}`)} · ${ruleTimes(task.spec, zone, i18n.language, task.next_run_at ? new Date(task.next_run_at) : undefined).join(' / ')}`}</p>}
                 <p className="text-sm">{t('schedules.next')}: {validZone && task.next_run_at ? formatTime(task.next_run_at, zone, i18n.language) : t('schedules.notScheduled')}</p>
-                {validZone && task.upcoming_runs.length > 0 && <details className="text-sm"><summary>{t('schedules.timePreview.upcoming')}</summary>
+                {validZone && task.upcoming_runs.length > 0 && <Collapsible className="text-sm"><CollapsibleTrigger asChild><Button variant="ghost" size="sm">{t('schedules.timePreview.upcoming')}<ChevronDown className="ml-2 h-4 w-4" /></Button></CollapsibleTrigger><CollapsibleContent>
                     <p>{t('schedules.timePreview.projection')}</p>
                     {task.upcoming_runs.map(at => <p key={at}>{formatTime(at, zone, i18n.language)}</p>)}
-                </details>}
-                <p className="text-sm">{t('schedules.failureCount', { failures: task.consecutive_failures, threshold: task.failure_threshold })}</p>
+                </CollapsibleContent></Collapsible>}
+                <p className="text-sm text-muted-foreground">{t('schedules.failureCount', { failures: task.consecutive_failures, threshold: task.failure_threshold })}</p>
                 {task.pause_reasons.map(reason => <p key={reason} className="text-sm">{t(`schedules.pause.${reason}`)}</p>)}
                 <div className="flex flex-wrap gap-2">
                     <Button variant="outline" disabled={!available} onClick={() => openHistory(task.schedule_id)}>{t('schedules.history.title')}</Button>
                     {task.kind === 'fresh_task' && <Button variant="outline" disabled={!available} onClick={() => setContractTask(task.schedule_id)}>{t('schedules.contract.title')}</Button>}
-                    {task.kind === 'fresh_task' && ['active', 'triggered', 'paused', 'completed'].includes(task.status)
-                        && !task.pause_reasons.includes('authorization_invalid') && <Button variant="outline" disabled={!available}
-                            onClick={() => setEditor({ kind: 'revoke', task, key: v4() })}>{t('schedules.revoke')}</Button>}
                     {task.kind === 'fresh_task' && <Button variant="outline" disabled={!available} onClick={() => setRehearsalTask(task)}>{t('schedules.rehearsal.view')}</Button>}
-                    {!['completed', 'deleted'].includes(task.status) && <Button variant="outline" disabled={!available || !!task.active_run_id}
-                        onClick={() => setEditor({ kind: 'failureThreshold', task, key: v4() })}>{t('schedules.failureThreshold')}</Button>}
-                    {!['completed', 'deleted'].includes(task.status) && <Button variant="outline" disabled={!available || (task.kind === 'conversation_resume' && !!task.active_run_id)}
-                        onClick={() => setEditor({ kind: 'editPrompt', task, key: v4() })}>{t('schedules.editPrompt')}</Button>}
-                    {(['rename', 'time', 'delete'] as const).filter(kind => kind !== 'time' || !['completed', 'deleted'].includes(task.status)).map(kind => <Button key={kind} variant="outline" disabled={!available} onClick={() => setEditor({ kind, task, key: v4() })}>{t(`schedules.${kind}`)}</Button>)}
                     {task.kind === 'fresh_task' && task.status === 'active' && <Button variant="outline"
                         disabled={!available || !!task.active_run_id || task.pause_reasons.length > 0}
                         onClick={() => void mutate({ operation: 'run_task_now', schedule_id: task.schedule_id, expected_revision: task.revision, client_request_key: v4() }).catch(() => {})}>{t('schedules.runNow')}</Button>}
@@ -178,6 +188,20 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
                         disabled={!available || !!task.active_run_id || task.pause_reasons.includes('unknown_side_effect') || task.pause_reasons.includes('schedule_upgrade_required')}
                         onClick={() => void mutate({ operation: 'resume_task', schedule_id: task.schedule_id, expected_revision: task.revision }).catch(() => {})}>{t('schedules.resumeTask')}</Button>}
                     {['active', 'triggered'].includes(task.status) && <Button variant="outline" disabled={!available} onClick={() => void mutate({ operation: 'pause', schedule_id: task.schedule_id, expected_revision: task.revision }).catch(() => {})}>{t('schedules.pauseTask')}</Button>}
+                    <Collapsible className="w-full">
+                        <CollapsibleTrigger asChild><Button variant="ghost">{t('schedules.moreActions')}<ChevronDown className="ml-2 h-4 w-4" /></Button></CollapsibleTrigger>
+                        <CollapsibleContent className="flex flex-wrap gap-2 pt-2">
+                            {task.kind === 'fresh_task' && ['active', 'triggered', 'paused', 'completed'].includes(task.status)
+                                && !task.pause_reasons.includes('authorization_invalid') && <Button variant="outline" disabled={!available}
+                                    onClick={() => setEditor({ kind: 'revoke', task, key: v4() })}>{t('schedules.revoke')}</Button>}
+
+                            {!['completed', 'deleted'].includes(task.status) && <Button variant="outline" disabled={!available || !!task.active_run_id}
+                                onClick={() => setEditor({ kind: 'failureThreshold', task, key: v4() })}>{t('schedules.failureThreshold')}</Button>}
+                            {!['completed', 'deleted'].includes(task.status) && <Button variant="outline" disabled={!available || (task.kind === 'conversation_resume' && !!task.active_run_id)}
+                                onClick={() => setEditor({ kind: 'editPrompt', task, key: v4() })}>{t('schedules.editPrompt')}</Button>}
+                            {(['rename', 'time', 'delete'] as const).filter(kind => kind !== 'time' || !['completed', 'deleted'].includes(task.status)).map(kind => <Button key={kind} variant="outline" disabled={!available} onClick={() => setEditor({ kind, task, key: v4() })}>{t(`schedules.${kind}`)}</Button>)}
+                        </CollapsibleContent>
+                    </Collapsible>
                 </div>
             </article>)}
         </div>
@@ -301,8 +325,8 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
         {editor.kind === 'revoke' ? <p>{t('schedules.revokeConfirm', { title: editor.task?.title })}</p> : editor.kind === 'delete' ? <p>{t('schedules.deleteConfirm', { title: editor.task?.title })}</p> : <fieldset disabled={locked} className="space-y-3">
             {['create', 'rename'].includes(editor.kind) && <div><Label htmlFor="schedule-title">{t('schedules.name')}</Label><Input id="schedule-title" required maxLength={240} value={title} onChange={e => setTitle(e.target.value)} /></div>}
             {editor.kind === 'create' && <>
-                <div><Label htmlFor="schedule-device">{t('schedules.device')}</Label><select id="schedule-device" disabled={!!editor.resume} className={selectClass} value={device} onChange={e => setDevice(e.target.value)}>{devices.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></div>
-                <div><Label htmlFor="schedule-prompt">{t('schedules.prompt')}</Label><textarea id="schedule-prompt" required maxLength={32768} className="min-h-24 w-full rounded-md border bg-background p-2" value={prompt} onChange={e => setPrompt(e.target.value)} /></div>
+                <div><Label htmlFor="schedule-device">{t('schedules.device')}</Label><ScheduleSelect id="schedule-device" disabled={!!editor.resume} className={selectClass} value={device} onValueChange={value => setDevice(value)}>{devices.map(d => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}</ScheduleSelect></div>
+                <div><Label htmlFor="schedule-prompt">{t('schedules.prompt')}</Label><Textarea id="schedule-prompt" required maxLength={32768} className="min-h-24 w-full rounded-md border bg-background p-2" value={prompt} onChange={e => setPrompt(e.target.value)} /></div>
             </>}
             {editor.kind === 'failureThreshold' && <>
                 <p>{t('schedules.failureThresholdNote')}</p>
@@ -312,26 +336,26 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
             {editor.kind === 'editPrompt' && <>
                 <p>{t(editor.task?.kind === 'conversation_resume' ? 'schedules.editPromptResumeNote' : 'schedules.editPromptFreshNote')}</p>
                 <Label htmlFor="schedule-prompt">{t('schedules.prompt')}</Label>
-                <textarea id="schedule-prompt" required maxLength={16384} className="min-h-32 w-full rounded-md border bg-background p-2" value={prompt} onChange={e => setPrompt(e.target.value)} />
+                <Textarea id="schedule-prompt" required maxLength={16384} className="min-h-32 w-full rounded-md border bg-background p-2" value={prompt} onChange={e => setPrompt(e.target.value)} />
             </>}
             {timeForm && <>
-                <div><Label htmlFor="schedule-rule">{t('schedules.frequency')}</Label><select id="schedule-rule" className={selectClass} value={kind} onChange={e => setKind(e.target.value as typeof kind)}>{(editor.resume || editor.task?.kind === 'conversation_resume' ? ['once'] as const : ['once', 'daily', 'weekly', 'interval'] as const).map(value => <option key={value} value={value}>{t(`schedules.rule.${value}`)}</option>)}</select></div>
+                <div><Label htmlFor="schedule-rule">{t('schedules.frequency')}</Label><ScheduleSelect id="schedule-rule" className={selectClass} value={kind} onValueChange={value => setKind(value as typeof kind)}>{(editor.resume || editor.task?.kind === 'conversation_resume' ? ['once'] as const : ['once', 'daily', 'weekly', 'interval'] as const).map(value => <SelectItem key={value} value={value}>{t(`schedules.rule.${value}`)}</SelectItem>)}</ScheduleSelect></div>
                 <p className="text-sm text-muted-foreground">{t('schedules.dateNote', { zone })}</p>
                 <div className="grid grid-cols-2 gap-3"><div><Label htmlFor="schedule-date">{t('schedules.date')}</Label><Input id="schedule-date" type="date" required value={date} onChange={e => setDate(e.target.value)} /></div><div><Label htmlFor="schedule-time">{t('schedules.clock')}</Label><Input id="schedule-time" type="time" step="1" required value={time} onChange={e => setTime(e.target.value)} /></div></div>
-                {kind === 'weekly' && <div className="flex flex-wrap gap-3">{[1, 2, 3, 4, 5, 6, 7].map(day => <label key={day} className="flex items-center gap-1"><input type="checkbox" checked={days.includes(day)} onChange={e => setDays(old => e.target.checked ? [...old, day] : old.filter(d => d !== day))} />{t(`schedules.day.${day}`)}</label>)}</div>}
+                {kind === 'weekly' && <div className="flex flex-wrap gap-3">{[1, 2, 3, 4, 5, 6, 7].map(day => <label key={day} className="flex items-center gap-1"><Checkbox  checked={days.includes(day)} onCheckedChange={nextChecked => setDays(old => (nextChecked === true) ? [...old, day] : old.filter(d => d !== day))} />{t(`schedules.day.${day}`)}</label>)}</div>}
                 {kind === 'interval' && <div><Label htmlFor="schedule-seconds">{t('schedules.seconds')}</Label><Input id="schedule-seconds" type="number" min="60" required value={seconds} onChange={e => setSeconds(Number(e.target.value))} /></div>}
-                <div><Label htmlFor="schedule-fold">{t('schedules.fold')}</Label><select id="schedule-fold" className={selectClass} value={fold} onChange={e => setFold(e.target.value as typeof fold)}><option value="">{t('schedules.foldAsk')}</option><option value="earlier">{t('schedules.foldEarlier')}</option><option value="later">{t('schedules.foldLater')}</option></select></div>
+                <div><Label htmlFor="schedule-fold">{t('schedules.fold')}</Label><ScheduleSelect id="schedule-fold" className={selectClass} value={fold} onValueChange={value => setFold(value as typeof fold)}><SelectItem value="__empty__">{t('schedules.foldAsk')}</SelectItem><SelectItem value="earlier">{t('schedules.foldEarlier')}</SelectItem><SelectItem value="later">{t('schedules.foldLater')}</SelectItem></ScheduleSelect></div>
             </>}
         </fieldset>}
         {timeForm && previewMatches && timePreview && <section className="rounded-md border p-3 space-y-2">
             <p>{t('schedules.timePreview.note')}</p>
             <p>{t('schedules.timePreview.upcoming')}</p>
             {timePreview.upcoming.map(at => <p key={at}>{formatTime(at, zone, i18n.language)}</p>)}
-            <details>
-                <summary className="cursor-pointer">{t('schedules.timePreview.utcDetails')}</summary>
+            <Collapsible>
+                <CollapsibleTrigger asChild><Button variant="ghost" size="sm">{t('schedules.timePreview.utcDetails')}<ChevronDown className="ml-2 h-4 w-4" /></Button></CollapsibleTrigger><CollapsibleContent>
                 {timePreview.spec.rule.kind === 'interval' ? <p>{formatTime(timePreview.spec.rule.anchor_at, 'UTC', i18n.language)} · {t('schedules.seconds')}: {timePreview.spec.rule.every_seconds}</p> :
                     ruleTimes(timePreview.spec, 'UTC', i18n.language).map(value => <p key={value}>UTC · {value}</p>)}
-            </details>
+            </CollapsibleContent></Collapsible>
             <p>{t('schedules.utcNote')}</p>
         </section>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}

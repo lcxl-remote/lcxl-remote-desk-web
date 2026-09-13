@@ -1,3 +1,4 @@
+import { selectOption } from '@/test-utils/select-option';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ComputerUseApplicationPolicySettings } from './computer-use-application-policy';
@@ -26,9 +27,9 @@ async function openPolicy() {
 describe('local application policy', () => {
     it('preserves an existing restriction until explicitly removed with its observed revision', async () => {
         await openPolicy();
-        expect(screen.getByRole('combobox')).toHaveValue('restricted');
+        expect(screen.getByRole('combobox')).toHaveTextContent('Only specified applications');
         expect(screen.getByRole('textbox')).toHaveValue('/Applications/Test.app/Contents/MacOS/Test');
-        fireEvent.change(screen.getByRole('combobox'), { target: { value: 'unrestricted' } });
+        await selectOption(screen.getByRole('combobox'), 'No additional restriction');
         fireEvent.click(screen.getByRole('button', { name: 'Save application policy' }));
         await waitFor(() => expect(api.save).toHaveBeenCalledWith({ expected_revision: 7, allowed_application_paths: [] }));
         await screen.findByText('Application policy saved and applied.');

@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 import { useState } from 'react';
 import { CheckCircle2, CircleHelp, Loader2, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -29,14 +30,14 @@ export function AssistantToolCall({ tool, running }: { tool?: DeviceAssistantToo
     const StatusIcon = status === 'ok' ? CheckCircle2 : status === 'failed' ? XCircle : status === 'running' ? Loader2 : CircleHelp;
     const statusLabel = t(`${prefix}${status === 'ok' ? 'success' : status === 'failed' ? 'failure' : status === 'running' ? 'waiting' : 'missing'}`);
     const statusClass = status === 'ok' ? 'text-green-600 dark:text-green-400' : status === 'failed' ? 'text-destructive' : 'text-muted-foreground';
-    return <details open={open} onToggle={event => setOpen(event.currentTarget.open)} className="min-w-0 rounded-md border bg-muted/30 px-3 py-2">
-        <summary className="cursor-pointer select-none break-words text-sm [overflow-wrap:anywhere]">
+    return <Disclosure open={open} onOpenChange={setOpen} className="min-w-0 rounded-md border bg-muted/30 px-3 py-2" title={<>
             <span role="img" aria-label={statusLabel} title={statusLabel} className={`mr-2 inline-flex align-middle ${statusClass}`}>
                 <StatusIcon aria-hidden="true" className={`size-4 shrink-0${status === 'running' ? ' animate-spin motion-reduce:animate-none' : ''}`} />
             </span>
             {t(`${prefix}title`)} · {tool.name === 'unknown' ? t(`${prefix}unknown`) : tool.name}
             {batch && <> · {t(`${prefix}${batch.key}`, { count: batch.count })}</>}
-        </summary>
+        </>} summaryClassName="cursor-pointer select-none break-words text-sm [overflow-wrap:anywhere]">
+
         {open && <div className="mt-3 min-w-0 space-y-3 text-xs">
             {tool.permissionReason && <p className="whitespace-pre-wrap break-words">{t('pages.deviceAssistant.permissionReasonLabel', { reason: tool.permissionReason })}</p>}
             <div><p className="mb-1 font-medium">{t(`${prefix}input`)}</p>
@@ -46,5 +47,5 @@ export function AssistantToolCall({ tool, running }: { tool?: DeviceAssistantToo
                     ? t(`${prefix}${running && tool.status === 'running' ? 'waiting' : 'missing'}`)
                     : tool.output === '' ? t(`${prefix}empty`) : formatPayload(tool.output)}</pre></div>
         </div>}
-    </details>;
+    </Disclosure>;
 }

@@ -3105,6 +3105,39 @@ async fn run_inner_impl(
                                 finish_tool(session, &call.id, true, sink);
                                 continue;
                             }
+                            // Fresh automation approvals belong to the scheduler's durable
+                            // contract review flow. Interactive directory requests wait in
+                            // this turn, like schedule reviews, without another model call.
+                            if session.trigger_origin
+                                != crate::session::TriggerOrigin::ScheduledTask
+                            {
+                                // Session snapshots expose the pending directory. The
+                                // permission-required stream frame is terminal and must
+                                // not close this still-running synchronous tool call.
+                                let approved = loop {
+                                    ensure_lease_healthy(deps).await?;
+                                    if let Some(approved) = deps
+                                        .session_seam
+                                        .poll_directory_review(session, &request_id)
+                                        .await?
+                                    {
+                                        break approved;
+                                    }
+                                };
+                                ensure_lease_healthy(deps).await?;
+                                append_internal_tool_result(
+                                    session,
+                                    turn.provider_meta.data_envelope.as_ref(),
+                                    mint(),
+                                    &call.id,
+                                    crate::directory_tools::decision_result(&request_id, approved)
+                                        .to_string(),
+                                    "directory_owner_decision",
+                                )?;
+                                deps.session_seam.save(session).await?;
+                                finish_tool(session, &call.id, true, sink);
+                                continue;
+                            }
                             append_internal_tool_result(
                                 session,
                                 turn.provider_meta.data_envelope.as_ref(),

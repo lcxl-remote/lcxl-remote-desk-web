@@ -1,4 +1,12 @@
 export default {
+    "schedules.moreActions": "更多操作",
+    "schedules.guide.fresh_task.title": "每次独立执行的自动任务",
+    "schedules.guide.fresh_task.description": "每次运行使用全新上下文，按你审核的权限自动执行。",
+    "schedules.guide.fresh_task.steps": "1. 创建任务并设置时间 → 2. 进入「录制记录与权限」跑一遍 → 3. 进入「任务契约」审核权限并启用",
+    "schedules.guide.conversation_resume.title": "在指定时间继续已有会话",
+    "schedules.guide.conversation_resume.description": "保留原会话上下文，到时间后继续处理指定事项。",
+    "schedules.guide.conversation_resume.steps": "1. 选择已有会话 → 2. 填写续跑要求与时间 → 3. 预览并确认时间",
+
     "schedules.proposal.afterConfirmation": "确认后 {{seconds}} 秒执行（从点击启用时开始计时）",
     "schedules.timePreview.utcDetails": "UTC 存储详情",
     "schedules.timePreview.upcoming": "未来执行时间（所选时区）",

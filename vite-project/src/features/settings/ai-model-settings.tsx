@@ -1,3 +1,4 @@
+import { Textarea } from '@/components/ui/textarea';
 import { useEffect, useRef, useState } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
@@ -580,7 +581,7 @@ export function AiModelSettings() {
                                     <FormItem>
                                         <FormLabel>{t("pages.aiModel.settings.requestOptions")}</FormLabel>
                                         <FormControl>
-                                            <textarea
+                                            <Textarea
                                                 className="min-h-32 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs"
                                                 {...field}
                                                 onChange={event => {

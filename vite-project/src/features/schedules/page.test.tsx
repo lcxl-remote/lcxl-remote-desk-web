@@ -37,6 +37,7 @@ describe('scheduled task management page', () => {
     it('closes an unchanged time edit without conversion or mutation', async () => {
         render(<MemoryRouter><SchedulePage devices={[]} /></MemoryRouter>);
         await screen.findByText('Original');
+        fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
         fireEvent.click(screen.getByRole('button', { name: 'Change time' }));
         const dialog = screen.getByRole('dialog');
         fireEvent.click(within(dialog).getByRole('button', { name: 'Save', exact: true }));
@@ -51,6 +52,7 @@ describe('scheduled task management page', () => {
         render(<MemoryRouter><SchedulePage devices={[]} /></MemoryRouter>);
         if (kind === 'conversation_resume') fireEvent.click(screen.getByRole('tab', { name: 'Conversation continuations' }));
         await screen.findByText('Original');
+        fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
         expect(screen.queryByRole('button', { name: 'Change time' })).not.toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Rename' })).toBeEnabled();
         expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
@@ -138,6 +140,7 @@ describe('scheduled task management page', () => {
     it('opens guided run history by task without starting or publishing anything', async () => {
         render(<MemoryRouter><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }]} /></MemoryRouter>);
         await screen.findByText('Original');
+        fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
         fireEvent.click(screen.getByRole('button', { name: 'Guided run and permissions' }));
         await waitFor(() => expect(operations()).toEqual(['search', 'get_task_rehearsal']));
         const request = transport.send.mock.calls[1][0];
@@ -150,6 +153,7 @@ describe('scheduled task management page', () => {
     it('shows a rejected edit inside the dialog and retries the same request', async () => {
         render(<MemoryRouter><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }]} /></MemoryRouter>);
         await screen.findByText('Original');
+        fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
         expect(screen.getByRole('button', { name: 'Change time' })).toBeEnabled();
         fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
         fireEvent.change(within(screen.getByRole('dialog')).getByLabelText('Task name'), { target: { value: 'New title' } });
@@ -168,6 +172,8 @@ describe('scheduled task management page', () => {
     it('changing display timezone and switching tabs never changes the persisted schedule', async () => {
         render(<MemoryRouter><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }]} /></MemoryRouter>);
         await screen.findByText('Original');
+        fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+        fireEvent.click(screen.getByRole('button', { name: /Display and input time zone:/ }));
         fireEvent.change(screen.getByLabelText('Display and input time zone'), { target: { value: 'Asia/Shanghai' } });
         fireEvent.click(screen.getByRole('tab', { name: 'Conversation continuations' }));
         expect(screen.queryByText('Original')).not.toBeInTheDocument();
@@ -176,6 +182,7 @@ describe('scheduled task management page', () => {
     it('renames without converting or resaving the time rule', async () => {
         render(<MemoryRouter><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }]} /></MemoryRouter>);
         await screen.findByText('Original');
+        fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
         expect(screen.getByRole('button', { name: 'Change time' })).toBeEnabled();
         fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
         fireEvent.change(within(screen.getByRole('dialog')).getByLabelText('Task name'), { target: { value: 'New title' } });
@@ -189,6 +196,7 @@ describe('scheduled task management page', () => {
     it('closing an editor during time conversion prevents a late draft creation', async () => {
         render(<MemoryRouter><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }]} /></MemoryRouter>);
         await screen.findByText('Original');
+        fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
         fireEvent.click(screen.getByRole('button', { name: 'New automation draft' }));
         fireEvent.change(within(screen.getByRole('dialog')).getByLabelText('Task name'), { target: { value: 'New draft' } });
         fireEvent.change(screen.getByLabelText('What should this task do?'), { target: { value: 'Read status' } });

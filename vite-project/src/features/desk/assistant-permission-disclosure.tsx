@@ -1,3 +1,4 @@
+import { Button } from '@/components/ui/button';
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight } from 'lucide-react';
@@ -24,12 +25,12 @@ function PermissionDisclosure({ state, tools, children }: { state: string; tools
         <Badge variant={completed ? 'outline' : 'default'}>{t(`pages.deviceAssistant.permissionState.${state}`)}</Badge>
     </>;
     return <div className="space-y-3 rounded-md bg-muted/50 p-3">
-        {completed ? <button type="button" className="flex w-full items-center gap-2 text-left"
+        {completed ? <Button variant="unstyled" type="button" className="flex w-full items-center gap-2 text-left"
             aria-expanded={visible} onClick={() => setExpanded((value) => !value)}>
             {visible ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
             {summary}
             <span className="sr-only">{t('pages.deviceAssistant.permissionDetails')}</span>
-        </button> : <div className="flex items-center gap-2">{summary}</div>}
+        </Button> : <div className="flex items-center gap-2">{summary}</div>}
         {visible && children}
     </div>;
 }

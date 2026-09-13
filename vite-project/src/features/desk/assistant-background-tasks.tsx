@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LoaderCircle } from 'lucide-react';
@@ -62,11 +63,11 @@ export function AssistantBackgroundTasks({ open, onOpenChange, commands, provide
                     </div>
                     <p className="break-all text-xs text-muted-foreground">{task.reference}</p>
                     <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.backgroundUpdated', { time: formatLocalTime(task.updatedAt) })}</p>
-                    {task.result != null ? <details>
-                        <summary className="cursor-pointer text-sm">{t('pages.deviceAssistant.tasks.result')}</summary>
+                    {task.result != null ? <Disclosure title={<>{t('pages.deviceAssistant.tasks.result')}</>} summaryClassName="cursor-pointer text-sm">
+
                         <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">{task.result}</pre>
                         {task.truncated && <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.tasks.truncated')}</p>}
-                    </details> : <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.tasks.noResult')}</p>}
+                    </Disclosure> : <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.tasks.noResult')}</p>}
                     {task.supportsCancel && ['running', 'outcome_unknown'].includes(task.state) && <Button type="button" size="sm" variant="outline"
                         disabled={cancelling !== null} onClick={() => void cancel(task.kind, task.id)}>
                         {cancelling === `${task.kind}:${task.id}` && <LoaderCircle className="mr-1 h-4 w-4 animate-spin" aria-hidden="true" />}

@@ -1,3 +1,4 @@
+import { Disclosure } from '@/components/ui/disclosure';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AssistantFileResult, parseFileReceipt } from './assistant-file-result';
@@ -49,10 +50,10 @@ export function AssistantCommandResult({ text }: { text: string }) {
         </div>
     );
     return (
-        <details className="min-w-0">
-            <summary className="cursor-pointer rounded font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <Disclosure className="min-w-0" title={<>
                 {t('pages.deviceAssistant.commandResultTitle')}
-            </summary>
+            </>} summaryClassName="cursor-pointer rounded font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+
             <div className="mt-3 space-y-3">
                 {receipt ? <>
                     <dl className="flex flex-wrap gap-x-6 gap-y-2">
@@ -64,13 +65,13 @@ export function AssistantCommandResult({ text }: { text: string }) {
                         {output(t('pages.deviceAssistant.commandReceipt.stderr'), receipt.streams.stderr, receipt.streams.stderr_truncated)}
                     </> : output(t('pages.deviceAssistant.commandReceipt.terminal'), receipt.streams.terminal, receipt.streams.truncated)}
                     {!!receipt.redactions?.length && output(t('pages.deviceAssistant.commandReceipt.redactions'), receipt.redactions.join('\n'), false)}
-                    <details>
-                        <summary className="cursor-pointer text-xs text-muted-foreground">{t('pages.deviceAssistant.commandReceipt.raw')}</summary>
+                    <Disclosure title={<>{t('pages.deviceAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs text-muted-foreground">
+
                         <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{text}</pre>
-                    </details>
+                    </Disclosure>
                 </> : <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{text}</pre>}
                 <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.commandResultHint')}</p>
             </div>
-        </details>
+        </Disclosure>
     );
 }

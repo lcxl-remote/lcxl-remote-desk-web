@@ -1,4 +1,12 @@
 export default {
+    "schedules.moreActions": "More actions",
+    "schedules.guide.fresh_task.title": "Automations with a fresh context",
+    "schedules.guide.fresh_task.description": "Each run starts with a fresh context and uses the permissions you review.",
+    "schedules.guide.fresh_task.steps": "1. Create a task and set its time → 2. Open recording details and run it once → 3. Review permissions and enable",
+    "schedules.guide.conversation_resume.title": "Continue an existing conversation later",
+    "schedules.guide.conversation_resume.description": "Keep the conversation context and continue the requested work at the scheduled time.",
+    "schedules.guide.conversation_resume.steps": "1. Choose a conversation → 2. Enter instructions and time → 3. Preview and confirm",
+
     "schedules.proposal.afterConfirmation": "Run {{seconds}} seconds after confirmation (counted from activation)",
     "schedules.timePreview.utcDetails": "UTC storage details",
     "schedules.timePreview.upcoming": "Upcoming times in the selected time zone",

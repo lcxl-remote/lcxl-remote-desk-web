@@ -1,3 +1,7 @@
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
+import { SelectItem } from '@/components/ui/select';
+import { ScheduleSelect } from './select-field';
 import { ContractArtifacts } from './contract-artifacts';
 import { validAttachmentPolicy } from './attachment-policy';
 import { ContractSteps } from './contract-steps';
@@ -63,15 +67,15 @@ export function ContractEditor({ client, review, connected, onSaved, onClose }: 
         <p>{t('schedules.editor.note')}</p>
         <fieldset disabled={!connected || busy} className="space-y-3">
             <label className="block">{t('schedules.editor.exception')}
-                <select className="ml-2 rounded border bg-background p-2" value={draft.exception_mode}
-                    onChange={event => setDraft(current => ({ ...current, exception_mode: event.target.value as Contract['exception_mode'] }))}>
-                    <option value="deny">{t('schedules.contract.exception.deny')}</option>
-                    <option value="request_approval">{t('schedules.contract.exception.request_approval')}</option>
-                </select>
+                <ScheduleSelect className="ml-2 rounded border bg-background p-2" value={draft.exception_mode}
+                    onValueChange={value => setDraft(current => ({ ...current, exception_mode: value as Contract['exception_mode'] }))}>
+                    <SelectItem value="deny">{t('schedules.contract.exception.deny')}</SelectItem>
+                    <SelectItem value="request_approval">{t('schedules.contract.exception.request_approval')}</SelectItem>
+                </ScheduleSelect>
             </label>
             {(Object.keys(draft.budget) as (keyof Contract['budget'])[]).map(key => <label className="block" key={key}>
                 {t(`schedules.editor.${key}`)}
-                <input className="ml-2 rounded border bg-background p-2" type="number" min={1} step={1} required value={draft.budget[key] || ''}
+                <Input className="ml-2 rounded border bg-background p-2" type="number" min={1} step={1} required value={draft.budget[key] || ''}
                     onChange={event => setDraft(current => ({ ...current, budget: { ...current.budget, [key]: positive(event.target.value) } }))} />
             </label>)}
             {draft.permissions.map((rule, index) => <section key={rule.rule_id} className="space-y-2 rounded border p-3">
@@ -81,9 +85,9 @@ export function ContractEditor({ client, review, connected, onSaved, onClose }: 
                     {(['resources', 'operations'] as const).map(field => <div key={field}>
                         <p>{t(`schedules.rehearsal.${field}`)}</p>
                         {review.contract!.permissions.find(original => original.rule_id === rule.rule_id)![kind][field].map(value => <label className="mr-3 inline-flex items-center gap-2 break-all" key={value}>
-                            <input type="checkbox" disabled={field === 'resources' && (rule.input.kind === 'generated_message' || rule.input.kind === 'generated_text_artifact')} checked={rule[kind][field].includes(value)} onChange={event => setDraft(current => ({ ...current,
+                            <Checkbox  disabled={field === 'resources' && (rule.input.kind === 'generated_message' || rule.input.kind === 'generated_text_artifact')} checked={rule[kind][field].includes(value)} onCheckedChange={nextChecked => setDraft(current => ({ ...current,
                                 permissions: current.permissions.map((item, position) => position !== index ? item : { ...item,
-                                    [kind]: { ...item[kind], [field]: event.target.checked ? [...item[kind][field], value] : item[kind][field].filter(existing => existing !== value) } }) }))} />
+                                    [kind]: { ...item[kind], [field]: (nextChecked === true) ? [...item[kind][field], value] : item[kind][field].filter(existing => existing !== value) } }) }))} />
                             {value}
                         </label>)}
                     </div>)}
@@ -92,8 +96,8 @@ export function ContractEditor({ client, review, connected, onSaved, onClose }: 
                         {review.contract!.permissions.find(original => original.rule_id === rule.rule_id)![kind].export_destinations.map(destination => {
                             const identity = JSON.stringify(destination);
                             return <label className="flex items-center gap-2 break-all" key={identity}>
-                                <input type="checkbox" disabled={rule.input.kind === 'generated_message'} checked={rule[kind].export_destinations.some(value => JSON.stringify(value) === identity)} onChange={event => {
-                                    const checked = event.target.checked;
+                                <Checkbox  disabled={rule.input.kind === 'generated_message'} checked={rule[kind].export_destinations.some(value => JSON.stringify(value) === identity)} onCheckedChange={nextChecked => {
+                                    const checked = (nextChecked === true);
                                     setDraft(current => ({ ...current, permissions: current.permissions.map(item => item.rule_id !== rule.rule_id ? item : {
                                         ...item, [kind]: { ...item[kind], export_destinations: checked ? [...item[kind].export_destinations, destination]
                                             : item[kind].export_destinations.filter(value => JSON.stringify(value) !== identity) },
@@ -104,7 +108,7 @@ export function ContractEditor({ client, review, connected, onSaved, onClose }: 
                     </div>
                     {(Object.keys(rule[kind].limits) as (keyof typeof rule.automatic.limits)[]).map(limit => <label className="block" key={limit}>
                         {t(`schedules.editor.${limit}`)}
-                        <input className="ml-2 rounded border bg-background p-2" type="number" min={1} step={1} required value={rule[kind].limits[limit] || ''}
+                        <Input className="ml-2 rounded border bg-background p-2" type="number" min={1} step={1} required value={rule[kind].limits[limit] || ''}
                             onChange={event => setDraft(current => ({ ...current, permissions: current.permissions.map((item, position) => position !== index ? item : {
                                 ...item, [kind]: { ...item[kind], limits: { ...item[kind].limits, [limit]: positive(event.target.value) } },
                             }) }))} />

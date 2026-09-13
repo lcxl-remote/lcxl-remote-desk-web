@@ -68,13 +68,13 @@ export function AssistantHistory({ deskId, disabled, onSelect, onDeleted }: {
                     </div>}
                     {!loading && !error && sessions.length === 0 && <p>{t('pages.deviceAssistant.history.empty')}</p>}
                     {sessions.map((session) => <div key={session.sessionId} className="flex items-start gap-2 rounded-lg border p-3">
-                        <button type="button" disabled={disabled || busy || !session.conversationId}
+                        <Button variant="unstyled" type="button" disabled={disabled || busy || !session.conversationId}
                             onClick={() => { if (session.conversationId && onSelect(session.conversationId)) setOpen(false); }}
                             className="min-w-0 flex-1 text-left hover:text-primary disabled:opacity-50">
                             <span className="block whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{session.firstQuestion || t('pages.deviceAssistant.history.untitled')}</span>
                             <span className="mt-1 block text-xs text-muted-foreground">{formatLocalTime(session.updatedAt)}</span>
                             {!session.conversationId && <span className="block text-xs">{t('pages.deviceAssistant.history.unavailable')}</span>}
-                        </button>
+                        </Button>
                         {session.active && <Loader2 className="mt-2 size-4 shrink-0 animate-spin" role="status" aria-label={t('pages.deviceAssistant.history.running')} />}
                         <Button type="button" variant="ghost" size="icon" disabled={disabled || busy}
                             aria-label={t('pages.deviceAssistant.history.delete')}

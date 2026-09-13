@@ -1,3 +1,5 @@
+import { SelectItem } from '@/components/ui/select';
+import { SelectField } from '@/components/ui/select-field';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -79,20 +81,20 @@ export function WebSearchForm({ api }: { api: WebSearchSettingsApi }) {
                 {config && <>
                     <label className="block space-y-2">
                         <span>{t('pages.webSearch.provider')}</span>
-                        <select className="block w-full rounded border bg-background p-2" value={provider} disabled={busy} onChange={(event) => {
-                            setProvider(event.target.value as SearchProvider); setKey(''); setKeyMode('replace'); setStatus(''); setTestResult(null);
+                        <SelectField className="block w-full rounded border bg-background p-2" value={provider} disabled={busy} onValueChange={nextValue => {
+                            setProvider(nextValue as SearchProvider); setKey(''); setKeyMode('replace'); setStatus(''); setTestResult(null);
                         }}>
-                            {config.providers.map((item) => <option key={item.provider} value={item.provider}>{item.display_name}</option>)}
-                        </select>
+                            {config.providers.map((item) => <SelectItem key={item.provider} value={item.provider}>{item.display_name}</SelectItem>)}
+                        </SelectField>
                     </label>
                     {!needsKey ? <p>{t('pages.webSearch.noKey')}</p> : <>
                         <label className="block space-y-2">
                             <span>{t('pages.webSearch.keyAction')}</span>
-                            <select className="block w-full rounded border bg-background p-2" value={keyMode} disabled={busy} onChange={(event) => { setKeyMode(event.target.value as typeof keyMode); setKey(''); }}>
-                                <option value="keep" disabled={provider !== config.provider}>{t('pages.webSearch.keepKey')}</option>
-                                <option value="replace">{t('pages.webSearch.replaceKey')}</option>
-                                <option value="clear">{t('pages.webSearch.clearKey')}</option>
-                            </select>
+                            <SelectField className="block w-full rounded border bg-background p-2" value={keyMode} disabled={busy} onValueChange={nextValue => { setKeyMode(nextValue as typeof keyMode); setKey(''); }}>
+                                <SelectItem value="keep" disabled={provider !== config.provider}>{t('pages.webSearch.keepKey')}</SelectItem>
+                                <SelectItem value="replace">{t('pages.webSearch.replaceKey')}</SelectItem>
+                                <SelectItem value="clear">{t('pages.webSearch.clearKey')}</SelectItem>
+                            </SelectField>
                         </label>
                         {keyMode === 'replace' && <label className="block space-y-2">
                             <span>{t('pages.webSearch.apiKey')}</span>

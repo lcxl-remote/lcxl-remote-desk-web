@@ -1,3 +1,4 @@
+import { selectOption } from '@/test-utils/select-option';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
@@ -47,9 +48,7 @@ describe('TerminalSessionLauncher', () => {
 
         expect(screen.queryByTestId('terminal-runtime')).not.toBeInTheDocument();
 
-        fireEvent.change(screen.getByRole('combobox'), {
-            target: { value: 'pwsh,-NoLogo' },
-        });
+        await selectOption(screen.getByRole('combobox'), 'pwsh');
 
         expect(await screen.findByTestId('terminal-runtime')).toHaveTextContent(
             'pwsh,-NoLogo:Mac',

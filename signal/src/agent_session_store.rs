@@ -1429,6 +1429,14 @@ impl SessionSeam for SignalAgentSessionStore {
         Ok(())
     }
 
+    async fn poll_directory_review(
+        &self,
+        session: &mut PersistedAgentSession,
+        request_id: &str,
+    ) -> Result<Option<bool>, AgentError> {
+        self.poll_file_scope_review(session, request_id).await
+    }
+
     async fn propose_directory(
         &self,
         session: &mut PersistedAgentSession,

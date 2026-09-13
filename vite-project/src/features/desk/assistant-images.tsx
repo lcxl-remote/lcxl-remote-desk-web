@@ -38,9 +38,9 @@ function StoredImage({ frame, onDelete }: { frame: DeviceAssistantVisualEvidence
         } catch { setFailed(true); } finally { setDeleting(false); }
     };
     return <div className="overflow-hidden rounded-md border bg-muted/30">
-        {source ? <button type="button" className="block w-full" onClick={() => setOpen(true)} aria-label={t('pages.deviceAssistant.imageOpen')}>
+        {source ? <Button variant="unstyled" type="button" className="block w-full" onClick={() => setOpen(true)} aria-label={t('pages.deviceAssistant.imageOpen')}>
             <img src={source} alt={t('pages.deviceAssistant.visualEvidenceAlt')} loading="lazy" className="max-h-56 w-full object-contain" />
-        </button> : <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">
+        </Button> : <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">
             {t(durable ? (failed ? 'pages.deviceAssistant.imageUnavailable' : 'pages.deviceAssistant.imageLoading')
                 : frame.status === 'expired' ? 'pages.deviceAssistant.visualEvidenceExpired' : 'pages.deviceAssistant.visualEvidenceNotRetained')}
         </div>}

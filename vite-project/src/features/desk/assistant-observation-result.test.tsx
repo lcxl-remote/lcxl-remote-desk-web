@@ -15,11 +15,11 @@ describe('observation summaries', () => {
         expect(screen.getByText('桌面可访问')).toBeTruthy();
         expect(screen.getByText('macOS')).toBeTruthy();
         expect(screen.getByText('Calculator')).toBeTruthy();
-        const details = container.querySelector('details')!;
-        expect(details.open).toBe(false);
+        const details = container.querySelector('[data-slot="disclosure"]')!;
+        expect(details.getAttribute('data-state') === 'open').toBe(false);
         expect(details.textContent).toContain('internal-token');
-        fireEvent.click(details.querySelector('summary')!);
-        expect(details.open).toBe(true);
+        fireEvent.click(details.querySelector('button[aria-expanded]')!);
+        expect(details.getAttribute('data-state') === 'open').toBe(true);
     });
     it('shows native control labels, values and incomplete results without exposing protected values in the summary', () => {
         const { container } = render(<AssistantObservationResult data={{ ReadContext: { DesktopUiInspect: { truncated: true, nodes: [
@@ -36,7 +36,7 @@ describe('observation summaries', () => {
     });
     it.each([null, {}, { ReadContext: { DesktopUiInspect: { nodes: [] } } }])('handles empty or unrecognized results', data => {
         const { container } = render(<AssistantObservationResult data={data} />);
-        expect(container.querySelector('details')!.open).toBe(false);
+        expect(container.querySelector('[data-slot="disclosure"]')!.getAttribute('data-state') === 'open').toBe(false);
         expect(container.querySelector('pre')!.textContent).toBe(JSON.stringify(data, null, 2));
     });
 });

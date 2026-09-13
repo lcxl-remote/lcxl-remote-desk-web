@@ -1,3 +1,4 @@
+import { Button } from '@/components/ui/button';
 import { useTranslation } from 'react-i18next';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import type { ContextUsageDto } from '@/services/types';
@@ -23,7 +24,7 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
     const bytes = (n: number) => t('pages.deviceAssistant.contextMeter.bytes', { value: new Intl.NumberFormat(i18n.language).format(n) });
     const label = t(values ? 'pages.deviceAssistant.contextMeter.percent' : 'pages.deviceAssistant.contextMeter.unknown', { percent: values?.percent });
     return <Popover><PopoverTrigger asChild>
-        <button type="button" aria-label={label} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <Button variant="unstyled" type="button" aria-label={label} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <svg viewBox="0 0 40 40" className="h-10 w-10" aria-hidden="true">
                 <circle cx="20" cy="20" r="17" fill="none" stroke="currentColor" strokeWidth="3" className="text-muted" />
                 {values && <circle cx="20" cy="20" r="17" fill="none" stroke="currentColor" strokeWidth="3"
@@ -31,7 +32,7 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
                     className={values.percent >= 90 ? 'text-amber-500' : 'text-primary'} />}
                 <text x="20" y="20" dy=".35em" textAnchor="middle" fill="currentColor" fontSize="10">{values ? `${values.percent}%` : '—'}</text>
             </svg>
-        </button>
+        </Button>
     </PopoverTrigger><PopoverContent side="top" className="max-w-xs space-y-2 p-3">
         <p className="font-medium">{t('pages.deviceAssistant.contextMeter.title')}</p>
         {values && usage ? <>

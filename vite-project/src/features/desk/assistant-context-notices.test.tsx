@@ -28,7 +28,7 @@ describe('assistant context timeline notices', () => {
         expect(screen.getByTestId('assistant-context-notice').textContent).toContain('contextNotice.compacted');
         rerender(<AssistantContextNotices historical notices={[{ id: 'b', turnId: 'old', kind: 'trimmed' }]} />);
         expect(container.querySelector('time')).toBeNull();
-        expect(container.querySelector('details')?.open).toBe(false);
+        expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
         expect(screen.getByTestId('assistant-context-notice').textContent).toContain('unknownTime');
         expect(screen.getByTestId('assistant-context-notice').textContent).toContain('contextNotice.trimmed');
         rerender(<AssistantContextNotices notices={[]} />);

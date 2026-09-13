@@ -127,6 +127,8 @@ struct MemSession {
     allow_permission_renewal: bool,
     inner: RefCell<Option<PersistedAgentSession>>,
     latest_revision: Rc<RefCell<Option<u64>>>,
+    directory_review_decision: Option<bool>,
+    directory_review_polls: RefCell<usize>,
     superseded_settles: Rc<RefCell<u32>>,
     saves: RefCell<usize>,
     fail_save_at: Option<usize>,
@@ -166,6 +168,40 @@ impl SessionSeam for MemSession {
             crate::file_scope::transaction::prepare(session, &update, now_unix_ms).unwrap();
         *session = next;
         self.save(session).await
+    }
+    async fn poll_directory_review(
+        &self,
+        session: &mut PersistedAgentSession,
+        request_id: &str,
+    ) -> Result<Option<bool>, AgentError> {
+        *self.directory_review_polls.borrow_mut() += 1;
+        if *self.directory_review_polls.borrow() < 3 {
+            return Ok(None);
+        }
+        let approve = self
+            .directory_review_decision
+            .ok_or_else(crate::directory_tools::unavailable)?;
+        let update = crate::file_scope::transaction::FileScopeUpdate {
+            subject: session
+                .file_scope_subject(
+                    &session.actor_id,
+                    &session.device_id,
+                    &session.conversation_id,
+                )
+                .unwrap(),
+            client_conversation_id: session.client_conversation_id.clone().unwrap(),
+            client_request_id: "owner-decision".into(),
+            expected_revision: session.file_scope.revision(),
+            mutation: crate::file_scope::transaction::FileScopeMutation::Decide {
+                directory_request_id: request_id.into(),
+                approve,
+            },
+        };
+        let (current, _) =
+            crate::file_scope::transaction::prepare(session, &update, 1781913602000).unwrap();
+        let decision = crate::directory_tools::adopt_review_snapshot(session, current, request_id)?;
+        *self.inner.borrow_mut() = Some(session.clone());
+        Ok(decision)
     }
     async fn claim_turn(
         &self,
@@ -1597,68 +1633,135 @@ async fn task_status_tool_updates_projection_without_dispatch() {
     assert_eq!(stored.as_ref().unwrap().last_event_seq, 1);
 }
 
-/// Permission planning persists a request and pauses. It never calls ToolSeam,
-/// and the persisted object is not a grant or dispatch instruction.
+struct DirectoryReviewHeartbeat<'a> {
+    polls: &'a RefCell<usize>,
+    stop: bool,
+}
+struct DirectoryReviewGuard;
+impl crate::seam::HeartbeatGuard for DirectoryReviewGuard {}
+impl crate::seam::LeaseHeartbeat for DirectoryReviewHeartbeat<'_> {
+    fn is_healthy(&self) -> bool {
+        !self.stop || *self.polls.borrow() == 0
+    }
+    fn start(&self, _: String, _: u64) -> Box<dyn crate::seam::HeartbeatGuard> {
+        Box::new(DirectoryReviewGuard)
+    }
+}
+
+/// Directory consent waits inside the original turn and is not tool authority.
 #[tokio::test]
-async fn directory_planning_pauses_with_pending_consent_without_content_or_authority_egress() {
-    let sess = MemSession::default();
-    let mut initial = PersistedAgentSession::new(
-        "conv",
-        "actor",
-        "device",
-        1,
-        scope(),
-        "2026-06-20T00:00:00Z",
-    );
-    initial.adopt_client_metadata(
-        Some("client"),
-        crate::session::AgentSessionSurface::DeviceAssistant,
-    );
-    initial.latest_input_seq = 1;
-    initial.input_revision = 1;
-    *sess.inner.borrow_mut() = Some(initial);
-    let model = ScriptModel {
-        turns: RefCell::new(
-            [tool_use_args(
-                "directory-call",
-                crate::directory_tools::REQUEST_DIRECTORY,
-                r#"{"path":"/tmp/work","purpose":"create a report"}"#,
-            )]
-            .into(),
-        ),
-        requests: Rc::new(RefCell::new(vec![])),
-    };
-    let tools = RecordingTools {
-        calls: Rc::new(RefCell::new(vec![])),
-        reply: "must not read or execute".into(),
-    };
-    let registry = crate::directory_tools::registry();
-    let clock = || "2026-06-20T00:00:01Z".to_string();
-    let outcome = run_agent_turn(
-        &deps(&sess, &model, &tools, &registry, &clock),
-        claim(),
-        ChatMessage::text("u", ChatRole::User, "create a report"),
-        &mut NullTurnSink,
-    )
-    .await
-    .unwrap();
-    assert!(matches!(outcome, LoopOutcome::PermissionRequested { .. }));
-    assert_eq!(
-        tools.calls.borrow().as_slice(),
-        &["resolve-directory:/tmp/work"]
-    );
-    let stored = sess.inner.borrow();
-    let stored = stored.as_ref().unwrap();
-    assert_eq!(stored.file_scope.records().len(), 1);
-    assert_eq!(
-        stored.file_scope.records()[0].state,
-        crate::file_scope::DirectoryConsentState::Pending
-    );
-    assert!(stored.permission_requests.is_empty());
-    assert!(stored.unclosed_tool_call_ids().is_empty());
-    let conversation = serde_json::to_string(&stored.conversation).unwrap();
-    assert!(!conversation.contains("not-for-model"));
-    assert!(!conversation.contains("owner-only-path"));
+async fn directory_planning_waits_for_decision_then_continues_without_granting_authority() {
+    for decision in [Some(true), Some(false), None] {
+        let approved = decision.unwrap_or(false);
+        let sess = MemSession {
+            directory_review_decision: decision,
+            ..Default::default()
+        };
+        let mut initial = PersistedAgentSession::new(
+            "conv",
+            "actor",
+            "device",
+            1,
+            scope(),
+            "2026-06-20T00:00:00Z",
+        );
+        initial.adopt_client_metadata(
+            Some("client"),
+            crate::session::AgentSessionSurface::DeviceAssistant,
+        );
+        initial.latest_input_seq = 1;
+        initial.input_revision = 1;
+        *sess.inner.borrow_mut() = Some(initial);
+        let model = ScriptModel {
+            turns: RefCell::new(
+                [
+                    tool_use_args(
+                        "directory-call",
+                        crate::directory_tools::REQUEST_DIRECTORY,
+                        r#"{"path":"/tmp/work","purpose":"create a report"}"#,
+                    ),
+                    answer("directory decision received"),
+                ]
+                .into(),
+            ),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(vec![])),
+            reply: "must not read or execute".into(),
+        };
+        let registry = crate::directory_tools::registry();
+        let clock = || "2026-06-20T00:00:01Z".to_string();
+        let heartbeat = DirectoryReviewHeartbeat {
+            polls: &sess.directory_review_polls,
+            stop: decision.is_none(),
+        };
+        let mut dependencies = deps(&sess, &model, &tools, &registry, &clock);
+        dependencies.heartbeat = Some(&heartbeat);
+        let frames = Rc::new(RefCell::new(vec![]));
+        let emitted = frames.clone();
+        let mut sink = crate::stream::StreamingTurnSink::new(
+            move |event| emitted.borrow_mut().push(event),
+            "directory-turn",
+        );
+        let outcome = run_agent_turn(
+            &dependencies,
+            claim(),
+            ChatMessage::text("u", ChatRole::User, "create a report"),
+            &mut sink,
+        )
+        .await;
+        if decision.is_none() {
+            assert!(outcome.is_err());
+            assert_eq!(*sess.directory_review_polls.borrow(), 1);
+            assert_eq!(model.requests.borrow().len(), 1);
+            continue;
+        }
+        assert!(matches!(outcome.unwrap(), LoopOutcome::Answered(_)));
+        use desk_agent_protocol::agent_event::AgentEventKind;
+        assert!(
+            frames
+                .borrow()
+                .iter()
+                .any(|e| e.kind == AgentEventKind::Answer)
+        );
+        assert!(
+            !frames
+                .borrow()
+                .iter()
+                .any(|e| e.kind == AgentEventKind::PermissionRequired)
+        );
+        assert_eq!(*sess.directory_review_polls.borrow(), 3);
+        assert_eq!(model.requests.borrow().len(), 2);
+        let requests = model.requests.borrow();
+        let result = requests[1]
+            .messages
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("directory-call"))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result.text).unwrap()["state"],
+            if approved { "approved" } else { "rejected" }
+        );
+        assert_eq!(
+            tools.calls.borrow().as_slice(),
+            &["resolve-directory:/tmp/work"]
+        );
+        let stored = sess.inner.borrow();
+        let stored = stored.as_ref().unwrap();
+        assert_eq!(stored.file_scope.records().len(), usize::from(approved));
+        if approved {
+            assert_eq!(
+                stored.file_scope.records()[0].state,
+                crate::file_scope::DirectoryConsentState::Approved
+            );
+        }
+        assert!(stored.permission_requests.is_empty());
+        assert!(stored.unclosed_tool_call_ids().is_empty());
+        let conversation = serde_json::to_string(&stored.conversation).unwrap();
+        assert!(!conversation.contains("not-for-model"));
+        assert!(!conversation.contains("owner-only-path"));
+    }
 }
 
 #[tokio::test]

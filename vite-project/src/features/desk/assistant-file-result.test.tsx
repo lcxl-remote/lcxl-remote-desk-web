@@ -10,7 +10,7 @@ describe('native file receipts', () => {
         expect(receipt.operation).toBe('update');
         expect(receipt.verified).toBe(false);
         const { container } = render(<AssistantFileResult receipt={receipt} text={text} />);
-        expect(container.querySelector('details')?.open).toBe(false);
+        expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
         expect(screen.getByText('pages.deviceAssistant.fileReceipt.unknownHint')).toBeTruthy();
         expect(container.querySelector('a')).toBeNull();
     });

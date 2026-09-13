@@ -1,3 +1,4 @@
+import { selectOption } from '@/test-utils/select-option';
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { WebSearchForm } from './web-search-form';
@@ -33,12 +34,12 @@ describe('shared Web Search settings', () => {
         const api = createApi();
         render(<WebSearchForm api={api} />);
         const provider = await screen.findByRole('combobox', { name: 'Search provider' });
-        fireEvent.change(provider, { target: { value: 'brave' } });
+        await selectOption(provider, 'Brave');
         fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'brave-secret' } });
-        fireEvent.change(provider, { target: { value: 'tavily' } });
+        await selectOption(provider, 'Tavily');
         expect(screen.getByLabelText('API Key')).toHaveValue('');
         expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
-        fireEvent.change(provider, { target: { value: 'duck_duck_go' } });
+        await selectOption(provider, 'DuckDuckGo');
         fireEvent.click(screen.getByRole('button', { name: 'Save' }));
         await waitFor(() => expect(api.save).toHaveBeenCalledWith({ expected_revision: 0, provider: 'duck_duck_go', api_key: '' }));
     });

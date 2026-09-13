@@ -1,3 +1,4 @@
+import { Textarea } from '@/components/ui/textarea';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { v4 } from 'uuid';
@@ -35,7 +36,7 @@ export function OutcomeReview({ client, scheduleId, runId, connected, onReload }
     return <div className="space-y-2" aria-busy={busy}>
         <p className="text-sm">{t('schedules.review.note')}</p>
         <label className="block text-sm">{t('schedules.review.description')}
-            <textarea className="mt-1 block w-full rounded border bg-background p-2" value={note}
+            <Textarea className="mt-1 block w-full rounded border bg-background p-2" value={note}
                 disabled={!connected || busy} maxLength={2048} onChange={event => setNote(event.target.value)} />
         </label>
         {error && <p role="alert">{t('schedules.requestFailed')}</p>}

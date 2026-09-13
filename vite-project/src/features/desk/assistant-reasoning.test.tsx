@@ -6,10 +6,10 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => k
 describe('assistant reasoning', () => {
     it('is folded by default and can be expanded without changing the text', () => {
         const { container } = render(<AssistantReasoning text="Model supplied reasoning" />);
-        const details = container.querySelector('details')!;
-        expect(details.open).toBe(false);
+        const details = container.querySelector('[data-slot="disclosure"]')!;
+        expect(details.getAttribute('data-state') === 'open').toBe(false);
         fireEvent.click(screen.getByText('pages.deviceAssistant.reasoning'));
-        expect(details.open).toBe(true);
+        expect(details.getAttribute('data-state') === 'open').toBe(true);
         expect(screen.getByText('Model supplied reasoning')).toBeTruthy();
     });
     it('does not create an empty thinking section', () => {

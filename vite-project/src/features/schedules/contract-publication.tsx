@@ -1,3 +1,4 @@
+import { Checkbox } from '@/components/ui/checkbox';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { v4 } from 'uuid';
@@ -62,7 +63,7 @@ export function ContractPublication({ client, review, connected, onPublished }: 
         {!confirmation ? <Button disabled={busy} onClick={() => void perform(false)}>{t('schedules.publication.prepare')}</Button> : <>
             <p>{t('schedules.publication.ready')}</p>
             <label className="flex gap-2 items-start">
-                <input type="checkbox" checked={accepted} disabled={busy} onChange={event => setAccepted(event.target.checked)} />
+                <Checkbox  checked={accepted} disabled={busy} onCheckedChange={nextChecked => setAccepted((nextChecked === true))} />
                 <span>{t('schedules.publication.accept')}</span>
             </label>
             <Button disabled={busy || !accepted} onClick={() => void perform(true)}>{t('schedules.publication.publish')}</Button>
