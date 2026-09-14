@@ -2,6 +2,7 @@ pub mod api_token;
 pub mod browser_extension;
 pub mod computer_use_policy;
 pub mod connection;
+pub mod file_recovery;
 pub mod host_readiness;
 pub mod info;
 pub mod init;

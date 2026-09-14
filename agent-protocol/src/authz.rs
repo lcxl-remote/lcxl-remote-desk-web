@@ -51,6 +51,14 @@ pub struct AuthzDevice {
 }
 
 /// The authorization decision the manager (PDP) injects for the daemon (PEP).
+/// Central persistence acknowledgment, frozen to the worker's private vault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRecoveryRegistration {
+    pub execution_epoch: u64,
+    pub authority: String,
+    pub os_user: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorizationBlock {
     /// Wire version; the daemon rejects unknown versions.
@@ -73,6 +81,8 @@ pub struct AuthorizationBlock {
     pub request_id: String,
     /// Optional session correlation.
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_recovery_registration: Option<FileRecoveryRegistration>,
     /// RFC3339 expiry; the daemon rejects an expired block.
     pub expires_at: Option<String>,
     /// Issuer identity (the manager node).
@@ -150,6 +160,7 @@ mod tests {
 
     fn block() -> AuthorizationBlock {
         AuthorizationBlock {
+            file_recovery_registration: None,
             version: AUTHORIZATION_BLOCK_VERSION,
             scope: AgentScope {
                 granted: Vec::new(),

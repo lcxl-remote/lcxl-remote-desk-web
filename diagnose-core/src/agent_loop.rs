@@ -3215,6 +3215,12 @@ async fn run_inner_impl(
                                     .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
                                     .unwrap_or(0);
                                 for item in &request.items {
+                                    crate::provider_preflight::text_file::validate_mutation_permission_input(
+                                        &session,
+                                        &item.tool_name,
+                                        item.canonical_input_json.as_deref(),
+                                        now,
+                                    )?;
                                     crate::provider_preflight::text_file::validate_read_permission_input(
                                         &session,
                                         &item.tool_name,

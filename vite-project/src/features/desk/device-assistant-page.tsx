@@ -1,3 +1,4 @@
+import { requireRecoveryZip } from '@/lib/file-recovery-error';
 import { Textarea } from '@/components/ui/textarea';
 import { Disclosure } from '@/components/ui/disclosure';
 import { AssistantObservationResult } from './assistant-observation-result';
@@ -15,6 +16,8 @@ import { AssistantComposerTools } from './assistant-composer-tools';
 import { AssistantFileScope } from './assistant-file-scope';
 import { AssistantConnectionIcon } from './assistant-connection-icon';
 import { AssistantCommandResult } from './assistant-command-result';
+import { exportDeviceFileRecovery } from '@/services/clients';
+import { FileRecoverySettings } from '@/features/settings/file-recovery-settings';
 import { AssistantContextNotices, noticeMessageId } from './assistant-context-notices';
 import { AssistantPermissionRequest } from './assistant-permission-request';
 import { AssistantPermissionRecords } from './assistant-permission-records';
@@ -235,6 +238,21 @@ export function DeviceAssistantWorkspace({
         sendMessage,
     });
     const capabilities = useDeviceAssistantCapabilities({ deskId, subscribe, sendMessage });
+    const recoveryConnections = useListConnections();
+    const exportBackup = async (id: string) => {
+        // Recovery records use the durable server session key, not the client
+        // conversation UUID used when submitting new assistant turns.
+        const conversation = chat.sessionId;
+        const connection = recoveryConnections.data?.find(item => item.connection_id === deskId);
+        if (!conversation || !connection) throw new Error('Backup target unavailable');
+        const data = await exportDeviceFileRecovery({ connection: deskId, device_id: connection.device_id,
+            conversation_id: conversation, recovery_id: id }, { responseType: 'blob' });
+        const zip = await requireRecoveryZip(data);
+        const url = URL.createObjectURL(zip);
+        const anchor = document.createElement('a');
+        anchor.href = url; anchor.download = 'file-recovery.zip'; anchor.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    };
     const exec = useConfirmExec({
         deskId,
         deviceId: stableDeviceId,
@@ -579,6 +597,8 @@ export function DeviceAssistantWorkspace({
             )}
 </>,
                 connection: <>
+            {recoveryConnections.data?.some(item => item.connection_id === deskId) && <FileRecoverySettings
+                key={deskId} target={{ connection: deskId, device_id: recoveryConnections.data.find(item => item.connection_id === deskId)?.device_id }} />}
             {localPairingAvailable && (
                 <Card data-testid="browser-extension-pairing">
                     <CardHeader>
@@ -734,7 +754,7 @@ export function DeviceAssistantWorkspace({
                             </CardTitle>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
-                            <AssistantHistory deskId={deskId} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
+                            <AssistantHistory deskId={deskId} deviceId={recoveryConnections.data?.find(item => item.connection_id === deskId)?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
                                 onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
@@ -789,7 +809,7 @@ export function DeviceAssistantWorkspace({
                                         : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
                                 }`}
                             >
-                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.deviceAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} /></> : message.role === 'assistant'
+                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.deviceAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} onExportBackup={exportBackup} /></> : message.role === 'assistant'
                                     ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
                                     : <p className="whitespace-pre-wrap">{message.text}</p>}
                             </div>

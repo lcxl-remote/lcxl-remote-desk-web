@@ -4,7 +4,7 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, GetContextManagementQueryResponse, UpdateContextManagementMutationRequest, UpdateContextManagementMutationResponse, GetScheduleBudgetPolicyQueryResponse, UpdateScheduleBudgetPolicyMutationRequest, UpdateScheduleBudgetPolicyMutationResponse, GetWebSearchQueryResponse, UpdateWebSearchMutationRequest, UpdateWebSearchMutationResponse, TestWebSearchMutationRequest, TestWebSearchMutationResponse, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, GetBrowserExtensionPairingQueryResponse, GetBrowserExtensionPairing500, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, OpenExecPtyCarrierQueryResponse, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, UpdateComputerUseApplicationPolicyMutationRequest, UpdateComputerUseApplicationPolicyMutationResponse, QueryComputerUseApplicationPolicyMutationResponse, UpdateComputerUseCommunicationPolicyMutationRequest, UpdateComputerUseCommunicationPolicyMutationResponse, QueryComputerUseCommunicationPolicyMutationResponse, QueryDeviceAssistantSettingsQueryResponse, UpdateDeviceAssistantSettingsMutationRequest, UpdateDeviceAssistantSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetDeviceAssistantSessionQueryResponse, GetDeviceAssistantSessionQueryParams, CancelDeviceAssistantBackgroundTaskMutationRequest, CancelDeviceAssistantBackgroundTaskMutationResponse, RevokeDeviceAssistantCapabilityGrantMutationRequest, RevokeDeviceAssistantCapabilityGrantMutationResponse, DeleteDeviceAssistantSessionMutationRequest, DeleteDeviceAssistantSessionMutationResponse, GetAssistantImageQueryResponse, GetAssistantImageQueryParams, GetAssistantImage404, DeleteAssistantImageMutationResponse, DeleteAssistantImageQueryParams, ListAssistantImagesQueryResponse, ListAssistantImagesQueryParams, DecideDeviceAssistantPermissionMutationRequest, DecideDeviceAssistantPermissionMutationResponse, ListDeviceAssistantSessionsQueryResponse, ListDeviceAssistantSessionsQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, GetContextManagementQueryResponse, UpdateContextManagementMutationRequest, UpdateContextManagementMutationResponse, GetScheduleBudgetPolicyQueryResponse, UpdateScheduleBudgetPolicyMutationRequest, UpdateScheduleBudgetPolicyMutationResponse, GetWebSearchQueryResponse, UpdateWebSearchMutationRequest, UpdateWebSearchMutationResponse, TestWebSearchMutationRequest, TestWebSearchMutationResponse, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, GetBrowserExtensionPairingQueryResponse, GetBrowserExtensionPairing500, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, OpenExecPtyCarrierQueryResponse, RetryLocalFileRecoveryCleanupMutationResponse, ConfirmLocalFileRecoveryClockMutationRequest, ConfirmLocalFileRecoveryClockMutationResponse, DiscardLocalFileRecoveryMutationRequest, DiscardLocalFileRecoveryMutationResponse, ExportLocalFileRecoveryMutationRequest, ExportLocalFileRecoveryMutationResponse, UpdateLocalFileRecoveryPolicyMutationRequest, UpdateLocalFileRecoveryPolicyMutationResponse, QueryLocalFileRecoveryMutationRequest, QueryLocalFileRecoveryMutationResponse, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, UpdateComputerUseApplicationPolicyMutationRequest, UpdateComputerUseApplicationPolicyMutationResponse, QueryComputerUseApplicationPolicyMutationResponse, UpdateComputerUseCommunicationPolicyMutationRequest, UpdateComputerUseCommunicationPolicyMutationResponse, QueryComputerUseCommunicationPolicyMutationResponse, QueryDeviceAssistantSettingsQueryResponse, UpdateDeviceAssistantSettingsMutationRequest, UpdateDeviceAssistantSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetDeviceAssistantSessionQueryResponse, GetDeviceAssistantSessionQueryParams, CancelDeviceAssistantBackgroundTaskMutationRequest, CancelDeviceAssistantBackgroundTaskMutationResponse, RevokeDeviceAssistantCapabilityGrantMutationRequest, RevokeDeviceAssistantCapabilityGrantMutationResponse, DeleteDeviceAssistantSessionMutationRequest, DeleteDeviceAssistantSessionMutationResponse, GetAssistantImageQueryResponse, GetAssistantImageQueryParams, GetAssistantImage404, DeleteAssistantImageMutationResponse, DeleteAssistantImageQueryParams, ListAssistantImagesQueryResponse, ListAssistantImagesQueryParams, DecideDeviceAssistantPermissionMutationRequest, DecideDeviceAssistantPermissionMutationResponse, ListDeviceAssistantSessionsQueryResponse, ListDeviceAssistantSessionsQueryParams, RetryFileRecoveryCleanupMutationRequest, RetryFileRecoveryCleanupMutationResponse, ListFileRecoveryCleanupQueryResponse, ListFileRecoveryCleanupQueryParams, ExportDeviceFileRecoveryMutationRequest, ExportDeviceFileRecoveryMutationResponse, ManageDeviceFileRecoveryMutationRequest, ManageDeviceFileRecoveryMutationResponse, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 
 function getGetContextManagementUrl() {
@@ -394,6 +394,114 @@ export async function openExecPtyCarrier(config: Partial<RequestConfig> & { clie
 
 
   const res = await request<OpenExecPtyCarrierQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getOpenExecPtyCarrierUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getRetryLocalFileRecoveryCleanupUrl() {
+  const res = { method: 'POST', url: `/api/desk/file-recovery/cleanup` as const }
+  return res
+}
+
+/**
+ * @summary Retry local file backup cleanup
+ * {@link /api/desk/file-recovery/cleanup}
+ */
+export async function retryLocalFileRecoveryCleanup(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<RetryLocalFileRecoveryCleanupMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getRetryLocalFileRecoveryCleanupUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getConfirmLocalFileRecoveryClockUrl() {
+  const res = { method: 'POST', url: `/api/desk/file-recovery/clock` as const }
+  return res
+}
+
+/**
+ * @summary Confirm corrected device time for backup cleanup
+ * {@link /api/desk/file-recovery/clock}
+ */
+export async function confirmLocalFileRecoveryClock(data: ConfirmLocalFileRecoveryClockMutationRequest, config: Partial<RequestConfig<ConfirmLocalFileRecoveryClockMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<ConfirmLocalFileRecoveryClockMutationResponse, ResponseErrorConfig<Error>, ConfirmLocalFileRecoveryClockMutationRequest>({ method : "POST", url : getConfirmLocalFileRecoveryClockUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getDiscardLocalFileRecoveryUrl() {
+  const res = { method: 'POST', url: `/api/desk/file-recovery/discard` as const }
+  return res
+}
+
+/**
+ * @summary Discard a confirmed local OS user backup
+ * {@link /api/desk/file-recovery/discard}
+ */
+export async function discardLocalFileRecovery(data: DiscardLocalFileRecoveryMutationRequest, config: Partial<RequestConfig<DiscardLocalFileRecoveryMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<DiscardLocalFileRecoveryMutationResponse, ResponseErrorConfig<Error>, DiscardLocalFileRecoveryMutationRequest>({ method : "POST", url : getDiscardLocalFileRecoveryUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getExportLocalFileRecoveryUrl() {
+  const res = { method: 'POST', url: `/api/desk/file-recovery/export` as const }
+  return res
+}
+
+/**
+ * @summary Export a local OS user file recovery package
+ * {@link /api/desk/file-recovery/export}
+ */
+export async function exportLocalFileRecovery(data: ExportLocalFileRecoveryMutationRequest, config: Partial<RequestConfig<ExportLocalFileRecoveryMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<ExportLocalFileRecoveryMutationResponse, ResponseErrorConfig<Error>, ExportLocalFileRecoveryMutationRequest>({ method : "POST", url : getExportLocalFileRecoveryUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getUpdateLocalFileRecoveryPolicyUrl() {
+  const res = { method: 'POST', url: `/api/desk/file-recovery/policy` as const }
+  return res
+}
+
+/**
+ * @summary Update local file backup retention and capacity
+ * {@link /api/desk/file-recovery/policy}
+ */
+export async function updateLocalFileRecoveryPolicy(data: UpdateLocalFileRecoveryPolicyMutationRequest, config: Partial<RequestConfig<UpdateLocalFileRecoveryPolicyMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateLocalFileRecoveryPolicyMutationResponse, ResponseErrorConfig<Error>, UpdateLocalFileRecoveryPolicyMutationRequest>({ method : "POST", url : getUpdateLocalFileRecoveryPolicyUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getQueryLocalFileRecoveryUrl() {
+  const res = { method: 'POST', url: `/api/desk/file-recovery/query` as const }
+  return res
+}
+
+/**
+ * @summary List local OS user file backups
+ * {@link /api/desk/file-recovery/query}
+ */
+export async function queryLocalFileRecovery(data: QueryLocalFileRecoveryMutationRequest, config: Partial<RequestConfig<QueryLocalFileRecoveryMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<QueryLocalFileRecoveryMutationResponse, ResponseErrorConfig<Error>, QueryLocalFileRecoveryMutationRequest>({ method : "POST", url : getQueryLocalFileRecoveryUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
@@ -1406,6 +1514,78 @@ export async function listDeviceAssistantSessions(params: ListDeviceAssistantSes
 
 
   const res = await request<ListDeviceAssistantSessionsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getListDeviceAssistantSessionsUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getRetryFileRecoveryCleanupUrl() {
+  const res = { method: 'POST', url: `/api/my/device-file-recovery/cleanup-retry` as const }
+  return res
+}
+
+/**
+ * @summary Retry pending backup cleanup
+ * {@link /api/my/device-file-recovery/cleanup-retry}
+ */
+export async function retryFileRecoveryCleanup(data: RetryFileRecoveryCleanupMutationRequest, config: Partial<RequestConfig<RetryFileRecoveryCleanupMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<RetryFileRecoveryCleanupMutationResponse, ResponseErrorConfig<Error>, RetryFileRecoveryCleanupMutationRequest>({ method : "POST", url : getRetryFileRecoveryCleanupUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getListFileRecoveryCleanupUrl() {
+  const res = { method: 'GET', url: `/api/my/device-file-recovery/cleanup-status` as const }
+  return res
+}
+
+/**
+ * @summary List pending backup cleanup after conversation deletion
+ * {@link /api/my/device-file-recovery/cleanup-status}
+ */
+export async function listFileRecoveryCleanup(params?: ListFileRecoveryCleanupQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<ListFileRecoveryCleanupQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getListFileRecoveryCleanupUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getExportDeviceFileRecoveryUrl() {
+  const res = { method: 'POST', url: `/api/my/device-file-recovery/export` as const }
+  return res
+}
+
+/**
+ * @summary Export an existing conversation's file backup
+ * {@link /api/my/device-file-recovery/export}
+ */
+export async function exportDeviceFileRecovery(data: ExportDeviceFileRecoveryMutationRequest, config: Partial<RequestConfig<ExportDeviceFileRecoveryMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<ExportDeviceFileRecoveryMutationResponse, ResponseErrorConfig<Error>, ExportDeviceFileRecoveryMutationRequest>({ method : "POST", url : getExportDeviceFileRecoveryUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getManageDeviceFileRecoveryUrl() {
+  const res = { method: 'POST', url: `/api/my/device-file-recovery/manage` as const }
+  return res
+}
+
+/**
+ * @summary Manage the owner's device file backups
+ * {@link /api/my/device-file-recovery/manage}
+ */
+export async function manageDeviceFileRecovery(data: ManageDeviceFileRecoveryMutationRequest, config: Partial<RequestConfig<ManageDeviceFileRecoveryMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<ManageDeviceFileRecoveryMutationResponse, ResponseErrorConfig<Error>, ManageDeviceFileRecoveryMutationRequest>({ method : "POST", url : getManageDeviceFileRecoveryUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 

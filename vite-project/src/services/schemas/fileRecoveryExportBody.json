@@ -1,0 +1,1 @@
+{"type":"object","required":["recovery_id"],"properties":{"recovery_id":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"FileRecoveryExportBody"}

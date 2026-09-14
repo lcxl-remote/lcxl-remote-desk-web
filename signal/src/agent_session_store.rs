@@ -2026,6 +2026,17 @@ mod tests {
             .db
             .execute(
                 &schema
+                    .create_table_from_entity(crate::entity::agent_file_recovery_cleanup::Entity)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+
+        store
+            .db
+            .execute(
+                &schema
                     .create_table_from_entity(crate::entity::agent_grant_reservation::Entity)
                     .if_not_exists()
                     .to_owned(),
@@ -2062,6 +2073,17 @@ mod tests {
                 .is_none()
         );
         assert!(store.save(&mut session).await.is_err());
+        let cleanup =
+            crate::entity::agent_file_recovery_cleanup::Entity::find_by_id("conversation-1")
+                .one(&store.db)
+                .await
+                .unwrap()
+                .expect("deletion must retain cleanup intent");
+        assert_eq!(cleanup.actor_id, "1");
+        assert_eq!(cleanup.device_id, "device-1".to_string());
+        assert_eq!(cleanup.attempts, 0);
+        assert!(cleanup.completed_at_unix_ms.is_none());
+
         assert!(
             store
                 .list_device_assistant_sessions("1", "device-1", 30)

@@ -237,10 +237,12 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
             }
             let permissionReason: string | undefined;
             let nativeFailed = false;
+            let nativeFileResult = false;
             try {
                 const native = JSON.parse(message.text);
                 permissionReason = snapshot.actionPermissionReasons?.[String(native.work_id)];
                 nativeFailed = ['definitely_not_started', 'outcome_unknown', 'failed'].includes(native.result);
+                nativeFileResult = ['file_artifact', 'text_file_mutation'].includes(native.output?.kind);
             } catch { /* Non-native results have no work binding. */ }
             const backgroundRunning = /"status"\s*:\s*"background_running"/.test(message.text);
             tools = upsertTool(tools, {
@@ -252,7 +254,7 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 argumentsJson: existing?.argumentsJson ?? '{}',
                 output: message.text,
             });
-            if (!backgroundRunning && message.text && (existing?.name === 'execute_confirmed_command' || message.backgroundTaskId || (nativeFailed && permissionReason))) {
+            if (!backgroundRunning && message.text && (existing?.name === 'execute_confirmed_command' || nativeFileResult || message.backgroundTaskId || (nativeFailed && permissionReason))) {
                 messages.push({ id: message.id, role: 'tool_result', text: message.text, permissionReason });
             }
         }

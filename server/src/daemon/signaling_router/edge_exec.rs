@@ -988,7 +988,30 @@ pub(super) async fn handle_computer_action_inbound(
         );
         return Ok(());
     }
+    let file_recovery = ctx
+        .file_recovery_authority
+        .as_ref()
+        .zip(authz.session_id.as_ref())
+        .filter(|(_, session)| {
+            !session.is_empty() && session.len() <= 512 && !session.chars().any(char::is_control)
+        })
+        .and_then(|(authority, conversation_id)| {
+            let registration = authz.file_recovery_registration.as_ref()?;
+            (registration.authority == *authority
+                && !registration.os_user.is_empty()
+                && registration.os_user.len() <= 128
+                && !registration.os_user.chars().any(char::is_control))
+            .then(
+                || desk_ipc_protocol::message::FileRecoveryExecutionContext {
+                    execution_epoch: registration.execution_epoch,
+                    authority: authority.clone(),
+                    conversation_id: conversation_id.clone(),
+                    os_user: registration.os_user.clone(),
+                },
+            )
+        });
     let payload = ComputerActionPlanPayload {
+        file_recovery,
         request_id: model.request_id.clone(),
         connection_id: model.from_connection_id.clone(),
         plan,

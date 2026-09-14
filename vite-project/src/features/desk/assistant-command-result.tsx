@@ -37,11 +37,11 @@ export function parseCommandReceipt(text: string): CommandReceipt | null {
     }
 }
 
-export function AssistantCommandResult({ text }: { text: string }) {
+export function AssistantCommandResult({ text, onExportBackup }: { text: string; onExportBackup?: (id: string) => Promise<void> }) {
     const { t, i18n } = useTranslation();
     const receipt = useMemo(() => parseCommandReceipt(text), [text]);
     const fileReceipt = useMemo(() => parseFileReceipt(text), [text]);
-    if (fileReceipt) return <AssistantFileResult receipt={fileReceipt} text={text} />;
+    if (fileReceipt) return <AssistantFileResult receipt={fileReceipt} text={text} onExportBackup={onExportBackup} />;
     const output = (label: string, content: string, truncated: boolean) => (
         <div className="min-w-0 space-y-1">
             <p className="font-medium">{label}</p>

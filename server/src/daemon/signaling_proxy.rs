@@ -277,6 +277,7 @@ pub async fn run_signaling_proxy(
         exec_capacity: Arc::new(crate::daemon::exec_capacity::ExecCapacity::new()),
         pc_registry: pc_registry.clone(),
         admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,
+        file_recovery_authority: None,
         manager_credential_link: None,
         exec_pty_link: None,
         outbound_tx: outbound_tx.clone(),
@@ -1643,6 +1644,24 @@ pub async fn run_signaling_proxy(
                         payload.connection_id, payload.request_id,
                     ),
                 }
+            }
+            WorkerToService::FileRecoveryQuotaRequested(request) => {
+                worker_mgr
+                    .handle_file_recovery_quota(
+                        resident_worker_key.as_ref(),
+                        worker_incarnation,
+                        request,
+                    )
+                    .await;
+            }
+            WorkerToService::FileRecoveryManaged(payload) => {
+                emit_typed_signaling(
+                    &outbound_tx,
+                    &payload.request_id,
+                    SignalingType::FileRecoveryManaged,
+                    payload.connection_id,
+                    &payload.reply,
+                );
             }
             WorkerToService::ComputerActionStarted(payload) => {
                 emit_typed_signaling(

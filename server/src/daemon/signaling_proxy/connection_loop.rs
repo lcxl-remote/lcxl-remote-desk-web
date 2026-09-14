@@ -202,7 +202,18 @@ pub(super) async fn maintain_proxy_connection(
     let pty_link_id = crate::daemon::exec_pty_carrier::PtyCarrierLinkId::new();
     let (pty_binary_tx, mut pty_binary_rx) =
         tokio::sync::mpsc::channel(crate::daemon::exec_pty_carrier::CARRIER_OUTPUT_QUEUE_CAP);
+    let recovery_lane = match remote_access_central_link {
+        RemoteAccessCentralLink::Manager => "manager",
+        RemoteAccessCentralLink::RemoteSignal => "remote-signal",
+        RemoteAccessCentralLink::Local => "local-signal",
+        RemoteAccessCentralLink::None => "untrusted",
+    };
     let effective_router_ctx = RouterContext {
+        file_recovery_authority: crate::daemon::file_recovery_authority::bind(
+            recovery_lane,
+            &url_clean,
+            &auth_token,
+        ),
         admission_origin: match remote_access_central_link {
             RemoteAccessCentralLink::Manager => {
                 crate::daemon::pc_manager::AdmissionOrigin::Manager(

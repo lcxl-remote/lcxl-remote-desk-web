@@ -96,6 +96,7 @@ pub(super) fn authz_block(
     max_risk: desk_agent_protocol::RiskLevel,
 ) -> AuthorizationBlock {
     AuthorizationBlock {
+        file_recovery_registration: None,
         version: AUTHORIZATION_BLOCK_VERSION,
         scope: AgentScope {
             granted,

@@ -55,7 +55,8 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::UpdateDeviceAssistantContext
         | SignalingType::UpdateDeviceAssistantObjectContext
         | SignalingType::SelectDeviceAssistantSession
-        | SignalingType::ManageScheduledTasks => Request,
+        | SignalingType::ManageScheduledTasks
+        | SignalingType::ManageFileRecovery => Request,
 
         SignalingType::HeartbeatAcknowledged
         | SignalingType::ConnectionsFetched
@@ -92,7 +93,8 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::DeviceAssistantContextUpdated
         | SignalingType::DeviceAssistantObjectContextUpdated
         | SignalingType::DeviceAssistantSessionSelected
-        | SignalingType::ScheduledTasksManaged => Response,
+        | SignalingType::ScheduledTasksManaged
+        | SignalingType::FileRecoveryManaged => Response,
 
         SignalingType::RevokeSupportCode
         | SignalingType::RevokeAccessGrant
@@ -132,6 +134,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
 pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
     Some(match t {
         SignalingType::ManageScheduledTasks => SignalingType::ScheduledTasksManaged,
+        SignalingType::ManageFileRecovery => SignalingType::FileRecoveryManaged,
         SignalingType::SendHeartbeat => SignalingType::HeartbeatAcknowledged,
         SignalingType::FetchConnections => SignalingType::ConnectionsFetched,
         SignalingType::RequestRemoteAccess => SignalingType::RemoteAccessInitialized,
@@ -184,6 +187,7 @@ pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] 
     use SignalingType::*;
     match t {
         ManageScheduledTasks => &[ScheduledTasksManaged],
+        ManageFileRecovery => &[FileRecoveryManaged],
         SendHeartbeat => &[HeartbeatAcknowledged],
         FetchConnections => &[ConnectionsFetched],
         RequestRemoteAccess => &[RemoteAccessInitialized],
@@ -773,4 +777,13 @@ pub trait PeerFrameRelay: Send + Sync {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<RelayOutcome, DeskSignalFacadeError>> + 'a>,
     >;
+}
+
+/// Receives private owner backup responses, bound to the reporting host connection.
+pub trait FileRecoveryObserver: Send + Sync {
+    fn on_file_recovery_reply<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }

@@ -266,6 +266,18 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, host_remote_access_state::Entity).await?;
     create_entity(db, &schema, agent_session::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_image_attachment::Entity).await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_file_recovery_cleanup::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_file_recovery_scope::Entity,
+    )
+    .await?;
     create_entity(db, &schema, agent_exec_task::Entity).await?;
     create_entity(db, &schema, agent_action_item::Entity).await?;
     create_entity(db, &schema, agent_capability_grant::Entity).await?;
@@ -456,6 +468,8 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     check_entity!(host_remote_access_state);
     check_entity!(agent_session);
     check_entity!(agent_image_attachment);
+    check_entity!(agent_file_recovery_cleanup);
+    check_entity!(agent_file_recovery_scope);
     check_entity!(agent_exec_task);
     check_entity!(agent_action_item);
     check_entity!(agent_capability_grant);
@@ -654,6 +668,8 @@ mod tests {
             "host_remote_access_state",
             "agent_session",
             "agent_image_attachment",
+            "agent_file_recovery_cleanup",
+            "agent_file_recovery_scope",
             "agent_exec_task",
             "agent_action_item",
             "agent_capability_grant",

@@ -293,6 +293,16 @@ impl WorkerSession {
         // joined at shutdown so the in-process transport's mpsc capacity is
         // fully drained before the test/runtime moves on.
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let file_recovery_quota = super::file_recovery_quota::QuotaClient::new(writer_tx.clone());
+        #[cfg(target_os = "macos")]
+        let _file_recovery_maintenance = if worker_profile == WorkerProfile::SessionUser {
+            worker_data_dir
+                .clone()
+                .map(|root| super::file_recovery::start(root, file_recovery_quota.clone()))
+        } else {
+            None
+        };
+
         let writer_task =
             spawn_profiled_event_forwarder_task(writer_rx, Arc::clone(&event_tx), worker_profile);
         let computer_use_readiness_task = (worker_profile == WorkerProfile::SessionUser).then(|| {
@@ -1682,7 +1692,23 @@ impl WorkerSession {
                                         }
                                     });
                                 }
+                                ServiceToWorker::FileRecoveryQuotaReplied(reply) => {
+                                    file_recovery_quota.complete(reply);
+                                }
+                                ServiceToWorker::ManageFileRecovery(payload) => {
+                                    let quota = file_recovery_quota.clone();
+                                    let root = worker_data_dir.clone();
+                                    let reply_tx = writer_tx.clone();
+                                    tokio::spawn(async move {
+                                        let result = tokio::task::spawn_blocking(move || {
+                                            let reply = crate::file_recovery_service::execute(root.as_deref(), &payload, Some(&quota));
+                                            desk_ipc_protocol::message::FileRecoveryReplyPayload { request_id: payload.request_id, connection_id: payload.connection_id, reply }
+                                        }).await;
+                                        if let Ok(reply) = result { let _ = reply_tx.send(WorkerToService::FileRecoveryManaged(reply)); }
+                                    });
+                                }
                                 ServiceToWorker::ComputerActionPlan(payload) => {
+                                    let file_recovery_quota = file_recovery_quota.clone();
                                     let plan = payload.plan;
                                     let reject_reason = plan
                                         .validate()
@@ -1892,6 +1918,7 @@ impl WorkerSession {
                                             },
                                         ),
                                     );
+                                    let action_data_root = worker_data_dir.clone();
                                     let action_writer = writer_tx.clone();
                                     let action_broker = computer_use_broker.clone();
                                     let application_settings = shared_settings.clone();
@@ -2237,6 +2264,10 @@ impl WorkerSession {
                                             return;
                                         }
                                         if desk_diagnose_core::provider_preflight::text_file::is_text_mutation(&step.action) {
+                                            let quota = file_recovery_quota.clone();
+                                            let recovery_binding = (payload.file_recovery.clone(), action_data_root.clone(),
+                                                plan.device_id.clone(), plan.approved_actor_id.clone(),
+                                                format!("{}:{}", plan.work_id, plan.action_request_id), generation.clone());
                                             let target = step.target.clone();
                                             let ComputerActionKind::File(action) = step.action.clone() else { unreachable!() };
                                             let broker = action_broker.clone();
@@ -2245,14 +2276,38 @@ impl WorkerSession {
                                                 #[cfg(target_os = "macos")]
                                                 {
                                                     broker.require_writer_lease(&generation_for_call)?;
+                                                    let (binding, data_root, device, owner, operation_id, generation) = recovery_binding;
+                                                    let (Some(binding), Some(data_root)) = (binding, data_root) else {
+                                                        return Err(desk_agent_protocol::AgentError {
+                                                            kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
+                                                            message: "Trusted conversation backup context is unavailable; file was not changed".into(),
+                                                            retryable: false, safe_for_model: true, error_code: None,
+                                                        });
+                                                    };
+                                                    if binding.os_user != unsafe { libc::geteuid() }.to_string() {
+                                                        return Err(desk_agent_protocol::AgentError {
+                                                            kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
+                                                            message: "Backup execution user changed after registration; file was not changed".into(),
+                                                            retryable: false, safe_for_model: true, error_code: None,
+                                                        });
+                                                    }
+                                                    let recovery_context = crate::worker::agent::file_reference_store::text_mutation::RecoveryContext {
+                                                        #[cfg(test)]
+                                                        _test_data: None,
+                                                        execution_epoch: binding.execution_epoch,
+                                                        data_root, quota: Some(quota), scope: desk_file_recovery::Scope {
+                                                            authority: binding.authority, device, owner,
+                                                            os_user: unsafe { libc::geteuid() }.to_string(),
+                                                        }, conversation_id: binding.conversation_id, operation_id, generation,
+                                                    };
                                                     crate::worker::agent::file_reference_store::text_mutation::execute(
-                                                        &target, &action,
+                                                        &target, &action, &recovery_context,
                                                         || broker.require_writer_lease(&generation_for_call).map(|_| ()),
                                                     )
                                                 }
                                                 #[cfg(not(target_os = "macos"))]
                                                 {
-                                                    let _ = (target, action, broker, generation_for_call);
+                                                    let _ = (target, action, broker, generation_for_call, recovery_binding);
                                                     Err::<(desk_agent_protocol::computer_use::TextFileMutationOutput, &'static str), _>(desk_agent_protocol::AgentError {
                                                         kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
                                                         message: "Native text mutation is not implemented on this platform".into(),

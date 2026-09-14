@@ -110,6 +110,7 @@ pub enum DeskError {
     InputError(desk_input_injection::error::InputError),
     /// Desk custom error
     CustomError(CustomDeskError),
+    FileRecoveryFailure(desk_agent_protocol::file_recovery::FileRecoveryFailure),
 }
 
 impl DeskError {
@@ -155,6 +156,7 @@ impl Display for DeskError {
             DeskError::ConfigError(error) => error.fmt(f),
             DeskError::TomlError(error) => error.fmt(f),
             DeskError::CustomError(error) => error.fmt(f),
+            DeskError::FileRecoveryFailure(_) => f.write_str("File backup operation failed"),
             DeskError::AnyhowError(error) => error.fmt(f),
             DeskError::TokioTaskJoinError(error) => error.fmt(f),
             DeskError::ActixWsClosed(closed) => closed.fmt(f),
@@ -509,6 +511,15 @@ impl ResponseError for DeskError {
             DeskError::CustomError(error) => error.error_code,
             _ => DeskErrorCode::SYSTEM_ERROR,
         };
+        if let DeskError::FileRecoveryFailure(reason) = self {
+            return actix_web::HttpResponse::Ok()
+                .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+                .json(RestResponse::failed_with_data(
+                    error_code,
+                    Some(self.to_string()),
+                    Some(reason.clone()),
+                ));
+        }
         // write as json
         let rest = RestResponse::failed(error_code, self.to_string());
         actix_web::HttpResponse::Ok()

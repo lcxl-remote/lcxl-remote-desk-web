@@ -75,6 +75,7 @@ async fn make_ctx() -> RouterContext {
         ),
         pc_registry,
         admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,
+        file_recovery_authority: None,
         manager_credential_link: None,
         exec_pty_link: None,
         outbound_tx,

@@ -50,6 +50,7 @@ pub mod exec_lifecycle;
 pub mod exec_policy;
 pub mod exec_pty;
 pub mod exec_pty_wire;
+pub mod file_recovery;
 pub mod model_proxy;
 pub mod provenance;
 pub mod remote_tool;

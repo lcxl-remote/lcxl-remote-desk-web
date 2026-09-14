@@ -296,6 +296,7 @@ pub async fn handle_signaling(
     .with_exec_state_reply_observer(exec_state_reply_observer)
     .with_remote_tool_observer(remote_tool_observer)
     .with_computer_action_observer(computer_action_observer)
+    .with_file_recovery_observer(desk_signal_facade::service::file_recovery::global_hub())
     .with_remote_access_admission_authorizer(remote_access_control.clone())
     .with_host_remote_access_controller(remote_access_control);
 

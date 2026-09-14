@@ -1,1 +1,1 @@
-{"type":"object","required":["deleted"],"properties":{"deleted":{"type":"boolean"}},"x-readme-ref-name":"DeleteDeviceAssistantSessionResponse"}
+{"type":"object","required":["deleted","backup_cleanup_pending"],"properties":{"backup_cleanup_pending":{"type":"boolean","description":"Cleanup intent is durable; physical removal awaits a device acknowledgment."},"deleted":{"type":"boolean"}},"x-readme-ref-name":"DeleteDeviceAssistantSessionResponse"}

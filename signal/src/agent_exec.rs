@@ -433,6 +433,7 @@ fn build_exec_frame(
         })?;
     let request_id = plan.execution_generation.clone();
     let authz = AuthorizationBlock {
+        file_recovery_registration: None,
         version: AUTHORIZATION_BLOCK_VERSION,
         exec_admission_policy: admission_policy,
         scope,

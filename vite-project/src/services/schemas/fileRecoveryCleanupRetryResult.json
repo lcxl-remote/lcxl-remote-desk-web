@@ -1,0 +1,1 @@
+{"type":"object","required":["scheduled"],"properties":{"scheduled":{"type":"boolean","description":"The queue was made due. This is not confirmation of filesystem cleanup."}},"x-readme-ref-name":"FileRecoveryCleanupRetryResult"}

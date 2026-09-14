@@ -22,6 +22,7 @@ desk-ipc-protocol = { workspace = true }
 desk-wayland-portal = { workspace = true }
 desk-agent-protocol = { workspace = true }
 desk-diagnose-core = { workspace = true }
+desk-file-recovery = { workspace = true }
 desk-mcp-server = { workspace = true }
 desk-virtual-display = { workspace = true }
 desk-virtual-display-driver-ops = { workspace = true }

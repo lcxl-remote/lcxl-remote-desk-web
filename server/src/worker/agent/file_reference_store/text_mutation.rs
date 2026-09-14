@@ -1,17 +1,50 @@
 //! Handle-relative macOS text changes with retained recovery material.
 //!
-//! renameatx_np swaps directory entries atomically, not conditionally on a
-//! content digest. We check both sides of the commit and never erase the old
-//! entry or blindly roll back across an uncooperative writer. A post-commit
-//! mismatch is explicitly uncertain, with recovery material retained.
+//! Successful filesystem calls determine the mutation result. References are
+//! issued from the staged handle, without rereading either side of the commit.
+//! Authorization and expected-version checks happen before the commit.
 use super::*;
 use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
 
+pub(crate) struct RecoveryContext {
+    pub data_root: PathBuf,
+    pub execution_epoch: u64,
+    pub quota: Option<crate::worker::session::QuotaClient>,
+    pub scope: desk_file_recovery::Scope,
+    pub conversation_id: String,
+    pub operation_id: String,
+    pub generation: String,
+    #[cfg(test)]
+    pub(crate) _test_data: Option<std::sync::Arc<tempfile::TempDir>>,
+}
+
+#[cfg(test)]
+fn test_context(_directory: &ObjectRef) -> RecoveryContext {
+    let fixture = std::sync::Arc::new(tempfile::tempdir().unwrap());
+    let data_root = fixture.path().to_path_buf();
+    RecoveryContext {
+        _test_data: Some(fixture),
+        execution_epoch: 0,
+        data_root,
+        quota: None,
+        scope: desk_file_recovery::Scope {
+            authority: "test".into(),
+            device: "device".into(),
+            os_user: "test-user".into(),
+            owner: "owner".into(),
+        },
+        conversation_id: "conversation".into(),
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        generation: "generation".into(),
+    }
+}
+
 pub(crate) fn execute(
     target: &ObjectRef,
     action: &desk_agent_protocol::computer_use::FilePatchAction,
+    recovery_context: &RecoveryContext,
     commit_guard: impl FnOnce() -> Result<(), AgentError>,
 ) -> Result<
     (
@@ -45,7 +78,7 @@ pub(crate) fn execute(
         } => (directory, expected_sha256, TextChange::Trash),
         _ => return Err(conflict()),
     };
-    let receipt = mutate_text_with_hooks(
+    let receipt = mutate_text_managed(
         directory,
         target,
         expected,
@@ -53,6 +86,7 @@ pub(crate) fn execute(
         || {},
         || {},
         commit_guard,
+        recovery_context,
     )?;
     let output = TextFileMutationOutput {
         operation: if matches!(action, FilePatchAction::UpdateText { .. }) {
@@ -64,7 +98,7 @@ pub(crate) fn execute(
         original_file_name: receipt.original_file_name,
         original_size_bytes: receipt.original_size_bytes,
         original_sha256: receipt.original_sha256,
-        recovery_path: receipt.recovery_path.to_string_lossy().into_owned(),
+        recovery: receipt.recovery,
         verified: receipt.verified,
         updated_file: receipt.file.map(|file| CreatedFileArtifactOutput {
             content: desk_agent_protocol::data_lineage::ContentRef::Artifact {
@@ -93,7 +127,11 @@ pub(super) struct TextMutationReceipt {
     pub original_file_name: String,
     pub original_size_bytes: u64,
     pub verified: bool,
-    pub recovery_path: PathBuf,
+    pub recovery: desk_agent_protocol::computer_use::FileRecoveryDescriptor,
+    #[cfg(test)]
+    pub backup_path: PathBuf,
+    #[cfg(test)]
+    _test_data: Option<std::sync::Arc<tempfile::TempDir>>,
     pub file: Option<CreatedTextArtifact>,
     pub original_sha256: String,
     pub message: &'static str,
@@ -185,6 +223,7 @@ fn mutate_text_inner(
     )
 }
 
+#[cfg(test)]
 fn mutate_text_with_hooks(
     directory: &ObjectRef,
     target: &ObjectRef,
@@ -193,6 +232,28 @@ fn mutate_text_with_hooks(
     before_commit: impl FnOnce(),
     after_commit: impl FnOnce(),
     commit_guard: impl FnOnce() -> Result<(), AgentError>,
+) -> Result<TextMutationReceipt, AgentError> {
+    mutate_text_managed(
+        directory,
+        target,
+        expected_sha256,
+        change,
+        before_commit,
+        after_commit,
+        commit_guard,
+        &test_context(directory),
+    )
+}
+
+fn mutate_text_managed(
+    directory: &ObjectRef,
+    target: &ObjectRef,
+    expected_sha256: &str,
+    change: TextChange<'_>,
+    before_commit: impl FnOnce(),
+    after_commit: impl FnOnce(),
+    commit_guard: impl FnOnce() -> Result<(), AgentError>,
+    recovery_context: &RecoveryContext,
 ) -> Result<TextMutationReceipt, AgentError> {
     if directory.object_kind != ObjectKind::Directory
         || target.object_kind != ObjectKind::File
@@ -253,179 +314,543 @@ fn mutate_text_with_hooks(
     {
         return Err(conflict());
     }
-    // Recovery is deliberately on the same filesystem, under the approved root.
-    // Failure never falls back to unlink/permanent deletion.
-    let recovery_name =
-        CString::new(format!(".assistant-recovery-{}", uuid::Uuid::new_v4())).unwrap();
-    if unsafe { libc::mkdirat(parent.handle.as_raw_fd(), recovery_name.as_ptr(), 0o700) } != 0 {
-        return Err(io_error(
-            "create text recovery directory",
-            std::io::Error::last_os_error(),
-        ));
+    let vault = desk_file_recovery::Vault::open(&recovery_context.data_root)
+        .map_err(|e| io_error("open private file backups", e))?;
+    let mut vault = vault
+        .lock()
+        .map_err(|e| io_error("lock private file backups", e))?;
+    vault
+        .observe_system_clock()
+        .map_err(|e| io_error("observe backup clock", e))?;
+    if let Some(quota) = &recovery_context.quota {
+        vault
+            .maintain_epoch_indexes(
+                &recovery_context.scope.os_user,
+                &mut quota.clone(),
+                usize::MAX,
+            )
+            .map_err(|e| io_error("resume backup index cleanup", e))?;
+        let (policy, _, _) = quota
+            .policy()
+            .map_err(|e| io_error("read device backup policy", e))?;
+        if vault.policy() != &policy {
+            vault
+                .set_policy(policy)
+                .map_err(|e| io_error("apply device backup policy", e))?;
+        }
     }
-    let recovery = open_relative_unix(&parent.handle, &recovery_name)
-        .map_err(|cause| io_error("open text recovery directory", cause))?;
-    let recovery_path = root.path.join(recovery_name.to_str().unwrap());
-    let saved_name = c"approved-before.txt";
-    let original_name = c"original";
-    let stage_name = c"replacement";
-    // An independent before-image is retained even if another writer still
-    // holds an open descriptor to the inode that will be moved here.
-    let _saved = create_private_file(&recovery, saved_name, &original)?;
-    let staged = replacement
-        .as_ref()
-        .map(|bytes| create_private_file(&recovery, stage_name, bytes))
-        .transpose()?;
-    if let Some(staged) = &staged {
-        // Preserve permissions, ACLs and xattrs through open descriptors, not a
-        // second pathname copy. In particular, do not drop quarantine metadata.
+    vault
+        .require_execution_epoch(recovery_context.execution_epoch)
+        .map_err(|e| {
+            io_error(
+                "validate backup execution epoch; request a new operation",
+                e,
+            )
+        })?;
+    vault
+        .cleanup(Utc::now().timestamp_millis().max(1) as u64)
+        .map_err(|e| io_error("maintain private file backups", e))?;
+    let metadata =
+        desk_file_recovery::macos::capture_metadata(&file, &source.path.to_string_lossy())
+            .map_err(|e| io_error("save original file metadata", e))?;
+    let backup_request = desk_file_recovery::BackupRequest {
+        scope: recovery_context.scope.clone(),
+        conversation: &recovery_context.conversation_id,
+        operation: &recovery_context.operation_id,
+        generation: &recovery_context.generation,
+        file_name,
+        content: &original,
+        metadata: &metadata,
+        now_ms: Utc::now().timestamp_millis().max(1) as u64,
+    };
+    let saved = match &recovery_context.quota {
+        Some(quota) => vault.backup_with_reservation_in_epoch(
+            backup_request,
+            recovery_context.execution_epoch,
+            |record| quota.reserve(record),
+        ),
+        None => {
+            #[cfg(test)]
+            {
+                vault.backup(backup_request)
+            }
+            #[cfg(not(test))]
+            {
+                Err(std::io::Error::other(
+                    "device backup quota is unavailable; file was not changed",
+                ))
+            }
+        }
+    }
+    .map_err(|e| io_error("save private file backup; target not changed", e))?;
+    let mut committed = false;
+    let result = (|| {
+        let recovery_name = vault
+            .plan_transaction(
+                &recovery_context.scope,
+                &saved.id,
+                &root.path.to_string_lossy(),
+                parent.metadata.dev(),
+                parent.metadata.ino(),
+                file.metadata()
+                    .map_err(|e| io_error("identify original file", e))?
+                    .ino(),
+            )
+            .map_err(|e| io_error("register file transaction", e))?;
+        let recovery_name = CString::new(recovery_name).map_err(|_| conflict())?;
+        if unsafe { libc::mkdirat(parent.handle.as_raw_fd(), recovery_name.as_ptr(), 0o700) } != 0 {
+            return Err(io_error(
+                "create file transaction directory",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        let recovery = open_relative_unix(&parent.handle, &recovery_name)
+            .map_err(|e| io_error("open file transaction directory", e))?;
+        desk_file_recovery::macos::make_private(&recovery)
+            .map_err(|e| io_error("protect file transaction directory", e))?;
+        let directory_inode = recovery
+            .metadata()
+            .map_err(|e| io_error("identify file transaction", e))?
+            .ino();
+        vault
+            .register_transaction(&recovery_context.scope, &saved.id, directory_inode, None)
+            .map_err(|e| io_error("register file transaction identity", e))?;
+        let original_name = c"original";
+        let stage_name = c"replacement";
+        let staged = replacement
+            .as_ref()
+            .map(|bytes| create_private_file(&recovery, stage_name, bytes))
+            .transpose()?;
+        if let Some(staged) = &staged {
+            vault
+                .register_transaction(
+                    &recovery_context.scope,
+                    &saved.id,
+                    directory_inode,
+                    Some(
+                        staged
+                            .metadata()
+                            .map_err(|e| io_error("identify staged file", e))?
+                            .ino(),
+                    ),
+                )
+                .map_err(|e| io_error("register staged file identity", e))?;
+            // Preserve permissions, ACLs and xattrs through open descriptors, not a
+            // second pathname copy. In particular, do not drop quarantine metadata.
+            if unsafe {
+                libc::fcopyfile(
+                    file.as_raw_fd(),
+                    staged.as_raw_fd(),
+                    std::ptr::null_mut(),
+                    libc::COPYFILE_METADATA,
+                )
+            } != 0
+            {
+                return Err(io_error(
+                    "preserve text file metadata",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            staged
+                .set_modified(std::time::SystemTime::now())
+                .and_then(|_| staged.sync_all())
+                .map_err(|cause| io_error("sync text metadata", cause))?;
+        }
+        before_commit();
+        let current = open_relative_unix(&parent.handle, &leaf).map_err(|_| conflict())?;
+        if unix_file_identity(&current).map_err(|_| conflict())? != source.identity
+            || digest(&complete_text(&current)?) != expected_sha256
+            || open_verified(&root.path)?.identity != parent.identity
+        {
+            return Err(conflict());
+        }
+        let (destination, flags) = if staged.is_some() {
+            (stage_name, libc::RENAME_SWAP)
+        } else {
+            (original_name, libc::RENAME_EXCL)
+        };
+        commit_guard()?;
+        vault
+            .transition(
+                &recovery_context.scope,
+                &saved.id,
+                desk_file_recovery::ChangeState::CommitIntent,
+            )
+            .map_err(|e| io_error("save file commit intent", e))?;
         if unsafe {
-            libc::fcopyfile(
-                file.as_raw_fd(),
-                staged.as_raw_fd(),
-                std::ptr::null_mut(),
-                libc::COPYFILE_METADATA,
+            libc::renameatx_np(
+                parent.handle.as_raw_fd(),
+                leaf.as_ptr(),
+                recovery.as_raw_fd(),
+                destination.as_ptr(),
+                flags,
             )
         } != 0
         {
             return Err(io_error(
-                "preserve text file metadata",
+                "commit recoverable text change",
                 std::io::Error::last_os_error(),
             ));
         }
-        let source_metadata = file.metadata().map_err(|_| conflict())?;
-        let stage_metadata = staged.metadata().map_err(|_| conflict())?;
-        if source_metadata.mode() != stage_metadata.mode()
-            || source_metadata.uid() != stage_metadata.uid()
-            || source_metadata.gid() != stage_metadata.gid()
-        {
-            return Err(conflict());
-        }
-        staged
-            .set_modified(std::time::SystemTime::now())
-            .and_then(|_| staged.sync_all())
-            .map_err(|cause| io_error("sync text metadata", cause))?;
-    }
-    before_commit();
-    let current = open_relative_unix(&parent.handle, &leaf).map_err(|_| conflict())?;
-    if unix_file_identity(&current).map_err(|_| conflict())? != source.identity
-        || digest(&complete_text(&current)?) != expected_sha256
-        || open_verified(&root.path)?.identity != parent.identity
-    {
-        return Err(conflict());
-    }
-    let (destination, flags) = if staged.is_some() {
-        (stage_name, libc::RENAME_SWAP)
-    } else {
-        (original_name, libc::RENAME_EXCL)
-    };
-    commit_guard()?;
-    if unsafe {
-        libc::renameatx_np(
-            parent.handle.as_raw_fd(),
-            leaf.as_ptr(),
-            recovery.as_raw_fd(),
-            destination.as_ptr(),
-            flags,
-        )
-    } != 0
-    {
-        return Err(io_error(
-            "commit recoverable text change",
-            std::io::Error::last_os_error(),
-        ));
-    }
-    // From this point onward, errors are not evidence of nonexecution. Keep
-    // both before-images and report an uncertain commit rather than retrying.
-    after_commit();
-    let uncertain = || TextMutationReceipt {
-        original_file_name: file_name.into(),
-        original_size_bytes: original.len() as u64,
-        verified: false,
-        recovery_path: recovery_path.clone(),
-        file: None,
-        original_sha256: expected_sha256.into(),
-        message: "text change crossed the commit point but verification conflicted; recovery copies were retained; do not retry automatically",
-    };
-    let old = match open_relative_unix(&recovery, destination) {
-        Ok(file) => file,
-        Err(_) => return Ok(uncertain()),
-    };
-    let old_identity = match unix_file_identity(&old) {
-        Ok(identity) => identity,
-        Err(_) => return Ok(uncertain()),
-    };
-    if old_identity.primary != source.identity.primary
-        || old_identity.secondary != source.identity.secondary
-    {
-        return Ok(uncertain());
-    }
-    if complete_text(&old)
-        .map(|bytes| digest(&bytes))
-        .ok()
-        .as_deref()
-        != Some(expected_sha256)
-    {
-        return Ok(uncertain());
-    }
-    if parent.handle.sync_all().is_err()
-        || recovery.sync_all().is_err()
-        || open_verified(&root.path).map(|opened| opened.identity).ok()
-            != Some(parent.identity.clone())
-    {
-        return Ok(uncertain());
-    }
-    let updated = if let Some(bytes) = replacement {
-        let published = match open_verified(&root.path.join(file_name)) {
-            Ok(file) => file,
-            Err(_) => return Ok(uncertain()),
-        };
-        let staged = staged.as_ref().unwrap();
-        let staged_identity = match unix_file_identity(staged) {
-            Ok(identity) => identity,
-            Err(_) => return Ok(uncertain()),
-        };
-        if published.identity != staged_identity
-            || complete_text(&published.handle).ok().as_deref() != Some(bytes.as_slice())
-        {
-            return Ok(uncertain());
-        }
-        let reference = match issue_opened_with_lifetime(
-            &root.path.join(file_name),
-            published,
-            DURABLE_ARTIFACT_REF_TTL_SECS,
-            true,
+        committed = true;
+        if let Err(e) = vault.transition(
+            &recovery_context.scope,
+            &saved.id,
+            desk_file_recovery::ChangeState::Succeeded,
         ) {
-            Ok(reference) => reference,
-            Err(_) => return Ok(uncertain()),
-        };
-        Some(CreatedTextArtifact {
-            file: reference,
-            file_name: file_name.into(),
-            byte_len: bytes.len() as u64,
-            sha256: digest(&bytes),
+            tracing::warn!(error_kind = ?e.kind(), "file commit succeeded but its journal needs recovery");
+        }
+        // Reference registration and maintenance cannot undo a successful syscall.
+        // Metadata from the already-open staged handle identifies a future read;
+        // it is not compared with the target to verify this mutation.
+        let updated = replacement.as_ref().and_then(|bytes| {
+        let reference = (|| {
+            let handle = staged.as_ref().unwrap().try_clone()
+                .map_err(|cause| io_error("clone updated file handle", cause))?;
+            let metadata = handle.metadata()
+                .map_err(|cause| io_error("identify updated file", cause))?;
+            let identity = unix_file_identity(&handle)
+                .map_err(|cause| io_error("identify updated file", cause))?;
+            issue_opened_with_lifetime(
+                &root.path.join(file_name),
+                OpenedFile { handle, metadata, identity },
+                DURABLE_ARTIFACT_REF_TTL_SECS,
+                true,
+            )
+        })();
+        match reference {
+            Ok(reference) => Some(CreatedTextArtifact {
+                file: reference,
+                file_name: file_name.into(),
+                byte_len: bytes.len() as u64,
+                sha256: digest(bytes),
+            }),
+            Err(cause) => {
+                tracing::warn!(error_kind = ?cause.kind, "text change succeeded but reference registration failed");
+                None
+            }
+        }
+    });
+        after_commit();
+        for directory in [&parent.handle, &recovery] {
+            if let Err(cause) = directory.sync_all() {
+                tracing::warn!(error_kind = ?cause.kind(), "text change succeeded but directory sync failed");
+            }
+        }
+        Ok(TextMutationReceipt {
+            original_file_name: file_name.into(),
+            original_size_bytes: original.len() as u64,
+            verified: true,
+            recovery: desk_agent_protocol::computer_use::FileRecoveryDescriptor {
+                recovery_id: saved.id.clone(),
+                created_at_unix_ms: saved.created_at_ms,
+                expires_at_unix_ms: saved.expires_at_ms,
+                cleanup_pending: false,
+            },
+            #[cfg(test)]
+            _test_data: recovery_context._test_data.clone(),
+            #[cfg(test)]
+            backup_path: recovery_context
+                .data_root
+                .join("file-recovery")
+                .join(format!("{}.body", saved.id)),
+            file: updated,
+            original_sha256: expected_sha256.into(),
+            message: if staged.is_some() {
+                "text update succeeded; prior version saved in device-private backup storage; no post-write readback was performed"
+            } else {
+                "selected file deleted; prior version saved in device-private backup storage"
+            },
         })
-    } else {
-        None
-    };
-    Ok(TextMutationReceipt {
-        original_file_name: file_name.into(),
-        original_size_bytes: original.len() as u64,
-        verified: true,
-        recovery_path,
-        file: updated,
-        original_sha256: expected_sha256.into(),
-        message: if staged.is_some() {
-            "text updated and read back; prior version retained in recovery directory"
-        } else {
-            "selected file moved to recovery directory; no permanent deletion"
-        },
+    })();
+    if !committed {
+        let _ = vault.transition(
+            &recovery_context.scope,
+            &saved.id,
+            desk_file_recovery::ChangeState::Aborted,
+        );
+    }
+    let settled = vault
+        .settle_transaction(&recovery_context.scope, &saved.id)
+        .unwrap_or(false);
+    if let Some(quota) = &recovery_context.quota {
+        quota.reconcile_settlements(&mut vault);
+    }
+    result.map(|mut receipt| {
+        receipt.recovery.cleanup_pending = !settled;
+        receipt
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mismatched_recovery_epoch_stops_before_backup_or_file_commit() {
+        let _guard = file_store_test_lock();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("notes.txt");
+        std::fs::write(&path, "old").unwrap();
+        let directory = issue(root.path()).unwrap();
+        let file = issue(&path).unwrap();
+        let mut context = test_context(&directory);
+        context.execution_epoch = 1;
+        let result = mutate_text_managed(
+            &directory,
+            &file,
+            &digest(b"old"),
+            TextChange::ReplaceAll("new"),
+            || panic!("must not reach commit"),
+            || {},
+            || Ok(()),
+            &context,
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        let vault = desk_file_recovery::Vault::open(&context.data_root).unwrap();
+        assert!(vault.lock().unwrap().list(&context.scope, None).is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires RECOVERY_CROSS_VOLUME_ROOT on a different volume from the system temporary directory"]
+    fn native_cross_volume_update_and_delete_export_old_versions() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let _guard = file_store_test_lock();
+        let base =
+            std::env::var("RECOVERY_CROSS_VOLUME_ROOT").expect("cross-volume target root required");
+        for deleting in [false, true] {
+            let root = tempfile::tempdir_in(&base).unwrap();
+            let path = root.path().join("notes.txt");
+            std::fs::write(&path, b"original-content").unwrap();
+            let mut old_handle = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let directory = issue(root.path()).unwrap();
+            let target = issue(&path).unwrap();
+            let context = test_context(&directory);
+            assert_ne!(
+                std::fs::metadata(root.path()).unwrap().dev(),
+                std::fs::metadata(&context.data_root).unwrap().dev(),
+                "must exercise two actual volumes"
+            );
+            let change = if deleting {
+                TextChange::Trash
+            } else {
+                TextChange::ReplaceAll("replacement")
+            };
+            let receipt = mutate_text_managed(
+                &directory,
+                &target,
+                &digest(b"original-content"),
+                change,
+                || {},
+                || {},
+                || Ok(()),
+                &context,
+            )
+            .unwrap();
+            assert!(receipt.verified);
+            assert!(!receipt.recovery.cleanup_pending);
+            assert_eq!(
+                std::fs::read_dir(root.path()).unwrap().count(),
+                usize::from(!deleting)
+            );
+            if deleting {
+                assert!(!path.exists());
+            } else {
+                assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+            }
+            // A writer retaining the old inode cannot change the private backup.
+            old_handle.seek(SeekFrom::Start(0)).unwrap();
+            old_handle.write_all(b"external-writer!").unwrap();
+            old_handle.sync_all().unwrap();
+            assert_eq!(
+                std::fs::read(&receipt.backup_path).unwrap(),
+                b"original-content"
+            );
+            let vault = desk_file_recovery::Vault::open(&context.data_root).unwrap();
+            let locked = vault.lock().unwrap();
+            let package = locked
+                .export_package(
+                    &context.scope,
+                    &receipt.recovery.recovery_id,
+                    Utc::now().timestamp_millis() as u64,
+                )
+                .unwrap();
+            let mut archive = zip::ZipArchive::new(std::io::Cursor::new(package)).unwrap();
+            let mut text = String::new();
+            archive
+                .by_name("before.txt")
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            assert_eq!(text, "original-content");
+            assert_eq!(archive.len(), 2);
+            if !deleting {
+                assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires disposable DYLD interposition runner from pocs/poc-file-recovery-storage"]
+    fn injected_backup_io_failure_preserves_native_target() {
+        let _guard = file_store_test_lock();
+        let base = std::env::var("RECOVERY_FAULT_ROOT").expect("fault root required");
+        for deleting in [false, true] {
+            let root = tempfile::tempdir_in(&base).unwrap();
+            let data = tempfile::tempdir_in(&base).unwrap();
+            let path = root.path().join("notes.txt");
+            std::fs::write(&path, b"original-content").unwrap();
+            let directory = issue(root.path()).unwrap();
+            let target = issue(&path).unwrap();
+            let mut context = test_context(&directory);
+            context.data_root = data.path().to_owned();
+            let change = if deleting {
+                TextChange::Trash
+            } else {
+                TextChange::ReplaceAll("replacement")
+            };
+            let result = mutate_text_managed(
+                &directory,
+                &target,
+                &digest(b"original-content"),
+                change,
+                || panic!("failed backup must not reach commit preparation"),
+                || panic!("failed backup must not commit"),
+                || Ok(()),
+                &context,
+            );
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"original-content");
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+            let vault = desk_file_recovery::Vault::open(data.path()).unwrap();
+            let mut locked = vault.lock().unwrap();
+            let rows = locked.list(&context.scope, Some(&context.conversation_id));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].change, desk_file_recovery::ChangeState::Aborted);
+            assert_ne!(rows[0].material, desk_file_recovery::MaterialState::Saved);
+            locked
+                .recover_interrupted(Utc::now().timestamp_millis() as u64)
+                .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"original-content");
+        }
+    }
+
+    #[test]
+    fn backup_body_or_metadata_write_failure_blocks_update_and_delete() {
+        let _guard = file_store_test_lock();
+        for suffix in ["body", "metadata"] {
+            for deleting in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let path = root.path().join("notes.txt");
+                std::fs::write(&path, "old").unwrap();
+                let directory = issue(root.path()).unwrap();
+                let file = issue(&path).unwrap();
+                let context = test_context(&directory);
+                let vault = desk_file_recovery::Vault::open(&context.data_root).unwrap();
+                let id = digest(
+                    &serde_json::to_vec(&(
+                        &context.scope,
+                        &context.conversation_id,
+                        &context.operation_id,
+                    ))
+                    .unwrap(),
+                );
+                std::fs::create_dir(
+                    context
+                        .data_root
+                        .join("file-recovery")
+                        .join(format!("{id}.{suffix}")),
+                )
+                .unwrap();
+                let change = if deleting {
+                    TextChange::Trash
+                } else {
+                    TextChange::ReplaceAll("new")
+                };
+                let result = mutate_text_managed(
+                    &directory,
+                    &file,
+                    &digest(b"old"),
+                    change,
+                    || panic!("backup failure must stop before commit preparation"),
+                    || panic!("backup failure must not commit"),
+                    || Ok(()),
+                    &context,
+                );
+                assert!(result.is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), b"old");
+                assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+                let records = vault
+                    .lock()
+                    .unwrap()
+                    .list(&context.scope, Some(&context.conversation_id));
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].change, desk_file_recovery::ChangeState::Aborted);
+                assert_ne!(
+                    records[0].material,
+                    desk_file_recovery::MaterialState::Saved
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn commit_intent_write_failure_keeps_original_for_update_and_delete() {
+        let _guard = file_store_test_lock();
+        for deleting in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("notes.txt");
+            std::fs::write(&path, "old").unwrap();
+            let directory = issue(root.path()).unwrap();
+            let file = issue(&path).unwrap();
+            let context = test_context(&directory);
+            let index = context.data_root.join("file-recovery/index.json");
+            let held = context.data_root.join("held-index.json");
+            let change = if deleting {
+                TextChange::Trash
+            } else {
+                TextChange::ReplaceAll("new")
+            };
+            let result = mutate_text_managed(
+                &directory,
+                &file,
+                &digest(b"old"),
+                change,
+                || {
+                    std::fs::rename(&index, &held).unwrap();
+                    std::fs::create_dir(&index).unwrap();
+                },
+                || panic!("commit intent failure must not commit"),
+                || Ok(()),
+                &context,
+            );
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            std::fs::remove_dir(&index).unwrap();
+            std::fs::rename(&held, &index).unwrap();
+            let vault = desk_file_recovery::Vault::open(&context.data_root).unwrap();
+            let mut locked = vault.lock().unwrap();
+            let records = locked.list(&context.scope, Some(&context.conversation_id));
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                locked
+                    .export(&context.scope, &records[0].id, records[0].created_at_ms)
+                    .unwrap()
+                    .1,
+                b"old"
+            );
+            locked
+                .recover_interrupted(Utc::now().timestamp_millis() as u64)
+                .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        }
+    }
 
     #[test]
     fn update_and_recoverable_delete_preserve_original_bytes() {
@@ -448,7 +873,7 @@ mod tests {
         assert!(updated.verified);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "你好 new");
         assert_eq!(
-            std::fs::read_to_string(updated.recovery_path.join("approved-before.txt")).unwrap(),
+            std::fs::read_to_string(updated.backup_path).unwrap(),
             "你好 old"
         );
         let created = updated.file.unwrap();
@@ -462,7 +887,7 @@ mod tests {
         assert!(deleted.verified);
         assert!(!path.exists());
         assert_eq!(
-            std::fs::read_to_string(deleted.recovery_path.join("original")).unwrap(),
+            std::fs::read_to_string(deleted.backup_path).unwrap(),
             "你好 new"
         );
     }
@@ -545,7 +970,7 @@ mod tests {
         assert_eq!(artifact.byte_len, 0);
         assert_eq!(artifact.sha256, digest(b""));
         assert!(std::fs::read(&path).unwrap().is_empty());
-        assert!(receipt.message.contains("read back"));
+        assert!(receipt.message.contains("no post-write readback"));
     }
 
     #[test]
@@ -647,20 +1072,35 @@ mod tests {
                 content_utf8: "new".into(),
             },
         };
-        assert!(execute(&target, &action, || Err(conflict())).is_err());
+        assert!(
+            execute(
+                &target,
+                &action,
+                &test_context(&issue(root.path()).unwrap()),
+                || Err(conflict())
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
-        let (receipt, _) = execute(&target, &action, || Ok(())).unwrap();
+        let context = test_context(&issue(root.path()).unwrap());
+        let (receipt, _) = execute(&target, &action, &context, || Ok(())).unwrap();
         receipt.validate_for(&target, &action).unwrap();
         assert!(receipt.verified);
         assert_eq!(
-            std::fs::read(Path::new(&receipt.recovery_path).join("approved-before.txt")).unwrap(),
+            std::fs::read(
+                context
+                    .data_root
+                    .join("file-recovery")
+                    .join(format!("{}.body", receipt.recovery.recovery_id))
+            )
+            .unwrap(),
             b"old"
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
     }
 
     #[test]
-    fn post_commit_conflict_is_unknown_and_retains_approved_before_image() {
+    fn later_external_write_does_not_reclassify_successful_commit() {
         let _guard = file_store_test_lock();
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("notes.txt");
@@ -679,14 +1119,48 @@ mod tests {
             || Ok(()),
         )
         .unwrap();
-        assert!(!receipt.verified);
-        assert!(receipt.file.is_none());
+        assert!(receipt.verified);
+        assert!(receipt.file.is_some());
         assert_eq!(std::fs::read(&path).unwrap(), b"external after commit");
-        assert_eq!(
-            std::fs::read(receipt.recovery_path.join("approved-before.txt")).unwrap(),
-            b"approved old"
+        assert_eq!(std::fs::read(receipt.backup_path).unwrap(), b"approved old");
+        assert!(receipt.message.contains("no post-write readback"));
+        assert!(
+            mutate_text(
+                &directory,
+                &receipt.file.unwrap().file,
+                &digest(b"new"),
+                TextChange::ReplaceAll("later"),
+            )
+            .is_err()
         );
-        assert!(receipt.message.contains("do not retry"));
+    }
+
+    #[test]
+    fn reference_persistence_failure_does_not_turn_committed_update_into_failure() {
+        let _guard = file_store_test_lock();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("notes.txt");
+        std::fs::write(&path, "old").unwrap();
+        let directory = issue(root.path()).unwrap();
+        let target = issue(&path).unwrap();
+        let previous = {
+            let mut state = store().lock().unwrap();
+            state
+                .durable_registry_path
+                .replace(path.join("registry.json"))
+        };
+        let result = mutate_text(
+            &directory,
+            &target,
+            &digest(b"old"),
+            TextChange::ReplaceAll("new"),
+        );
+        store().lock().unwrap().durable_registry_path = previous;
+        let receipt = result.unwrap();
+        assert!(receipt.verified);
+        assert!(receipt.file.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(std::fs::read(receipt.backup_path).unwrap(), b"old");
     }
 
     #[test]

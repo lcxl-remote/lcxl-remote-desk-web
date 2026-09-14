@@ -1331,6 +1331,7 @@ fn service_to_worker_all_variants_round_trip() {
             envelope: sample_readonly_agent_envelope(),
         }),
         ServiceToWorker::ComputerActionPlan(ComputerActionPlanPayload {
+            file_recovery: None,
             request_id: "r-computer".to_string(),
             connection_id: Some("c".to_string()),
             plan: sample_computer_action_plan(),
@@ -2499,6 +2500,7 @@ fn invoke_agent_capability_cannot_decode_an_exec_envelope() {
 #[test]
 fn computer_action_ipc_family_round_trips_independently() {
     let plan = ServiceToWorker::ComputerActionPlan(ComputerActionPlanPayload {
+        file_recovery: None,
         request_id: "r-computer".to_string(),
         connection_id: Some("conn-1".to_string()),
         plan: sample_computer_action_plan(),
@@ -2603,4 +2605,75 @@ fn restricted_desktop_profile_has_no_session_user_protocol_surface() {
         })
         .allowed_for_profile(restricted)
     );
+}
+
+#[test]
+fn file_recovery_ipc_carries_only_daemon_bound_owner_context() {
+    use desk_agent_protocol::file_recovery::*;
+    let request = ServiceToWorker::ManageFileRecovery(FileRecoveryRequestPayload {
+        request_id: "request".into(),
+        connection_id: None,
+        authority: "a".repeat(64),
+        actor_id: "1".into(),
+        device_id: "device".into(),
+        request: FileRecoveryRequest {
+            expected_authority: None,
+            expected_os_user: None,
+            command: FileRecoveryCommand::DeleteConversation {
+                conversation_id: "conversation".into(),
+            },
+        },
+    });
+    assert!(
+        matches!(wincode_round_trip(&request), ServiceToWorker::ManageFileRecovery(p) if p.actor_id == "1" && p.authority == "a".repeat(64))
+    );
+    let reply = WorkerToService::FileRecoveryManaged(FileRecoveryReplyPayload {
+        request_id: "request".into(),
+        connection_id: None,
+        reply: FileRecoveryReply {
+            authority: "a".repeat(64),
+            os_user: "501".into(),
+            outcome: FileRecoveryOutcome::Deleted { complete: true },
+        },
+    });
+    assert!(
+        matches!(wincode_round_trip(&reply), WorkerToService::FileRecoveryManaged(p) if matches!(p.reply.outcome, FileRecoveryOutcome::Deleted { complete: true }))
+    );
+}
+
+#[test]
+fn file_recovery_quota_rpc_round_trip_preserves_identity_and_never_allows_restricted_desktops() {
+    let request = WorkerToService::FileRecoveryQuotaRequested(FileRecoveryQuotaRequest {
+        request_id: "quota".into(),
+        os_user: "501".into(),
+        command: FileRecoveryQuotaCommand::Reserve {
+            identity: FileRecoveryQuotaIdentity {
+                execution_epoch: 0,
+                authority: "authority".into(),
+                device: "device".into(),
+                owner: "owner".into(),
+                conversation: "conversation".into(),
+                operation: "operation".into(),
+                generation: "generation".into(),
+            },
+            bytes: 123,
+            execution_deadline_ms: 456,
+        },
+    });
+    assert!(!request.allowed_for_profile(WorkerProfile::RestrictedDesktop));
+    assert!(request.connection_id().is_none());
+    assert!(
+        matches!(wincode_round_trip(&request), WorkerToService::FileRecoveryQuotaRequested(FileRecoveryQuotaRequest { os_user, command: FileRecoveryQuotaCommand::Reserve { bytes: 123, .. }, .. }) if os_user == "501")
+    );
+    let reply = ServiceToWorker::FileRecoveryQuotaReplied(FileRecoveryQuotaReply {
+        request_id: "quota".into(),
+        outcome: FileRecoveryQuotaOutcome::CapacityExceeded,
+    });
+    assert!(matches!(
+        wincode_round_trip(&reply),
+        ServiceToWorker::FileRecoveryQuotaReplied(FileRecoveryQuotaReply {
+            outcome: FileRecoveryQuotaOutcome::CapacityExceeded,
+            ..
+        })
+    ));
 }

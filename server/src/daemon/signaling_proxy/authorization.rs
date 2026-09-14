@@ -37,6 +37,7 @@ pub(super) fn is_ai_control_frame(t: SignalingType) -> bool {
             | SignalingType::DispatchComputerAction
             | SignalingType::CancelComputerAction
             | SignalingType::QueryComputerActionState
+            | SignalingType::ManageFileRecovery
     )
 }
 

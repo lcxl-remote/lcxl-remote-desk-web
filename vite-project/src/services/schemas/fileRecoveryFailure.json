@@ -1,0 +1,1 @@
+{"type":"string","enum":["unauthorized","invalid_request","identity_changed","busy","storage_unavailable","worker_unavailable","unsupported","material_unavailable","material_expired","material_cleaning","material_cleaned","clock_changed"],"x-readme-ref-name":"FileRecoveryFailure"}

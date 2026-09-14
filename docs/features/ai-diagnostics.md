@@ -363,3 +363,30 @@ Manual semantic UI previews under observation and troubleshooting, including del
 Under observation and troubleshooting, Desktop status shows the operating system and foreground application. Semantic UI previews list application or control names, types, values and supported actions, with a notice for truncated results. Raw results for both previews are available in collapsed Technical details. Viewing results does not authorize actions.
 
 AI inspects controls before choosing background clicks and prefers supported semantic actions. Self-only UI reads cannot be combined with search queries; invalid calls return corrected examples. Truncated searches prompt a deeper or narrower read rather than a claim of unsupported UI. Batch receipts confirm dispatch; AI checks the actual result and continues corrections within approved scope.
+
+Text updates and deletions still check authorization, target identity and the complete content version before execution, and save a backup first; backup failure prevents the mutation. A successful filesystem commit is not followed by a file readback. Later external writes or reference-registration failures do not reclassify the completed action as failed. Query the file again if a later operation needs a missing reference; do not repeat the successful update.
+
+Backups made before text updates and deletions live in the controlled device’s private recovery store, linked to their conversation and operation. They no longer remain as long-lived hidden directories beside the original file and are not automatically added to AI context. The File backups entry in a file operation record lists that conversation’s backups and exports recovery packages. Device backup management lists records the current user may access.
+
+The list shows the number of loaded backup records and indicates when more pages are available. This is not a device-wide total; access scope and pagination still apply.
+
+Only the device owner may manage backups, and the device must be online. Retention, capacity and usage apply to the whole device. Insufficient capacity blocks new file changes without silently deleting unexpired backups. Shortening retention requires confirmation and recalculates expiry from each backup’s original creation time. Dates use the viewer’s time zone.
+
+Conversation deletion also warns about removing its backups. Cleanup remains queued and retries while the device is offline or cleanup is incomplete; backup management shows its progress. Screenshots and file backups are managed separately. A recovery package contains the original text and saved metadata; exporting it does not overwrite the current file.
+
+Each recovery package has two fixed filenames: `before.txt` contains the previous UTF-8 text and `metadata.json` contains descriptive metadata. Automatic restoration in place is not available in this phase.
+
+| Information | Saved and exported scope |
+|---|---|
+| Original text | Complete text before this operation; the current native tool limit is 64 KiB |
+| Original path and filename | Manifest data only; never used to choose extraction destinations |
+| Mode, user/group IDs and ACL | Numeric values and ACL text; export does not apply them to the current file or extracted files |
+| Creation, access and modification times | Observed seconds and nanoseconds before the operation; extraction does not promise to restore these times |
+| Extended attributes and resource fork | Binary values encoded as hexadecimal in the manifest, included in metadata capacity accounting; not exported as extra executable files |
+
+Serialized metadata is limited to 256 KiB. Failure to read or save required metadata, or exceeding size or capacity limits, blocks the file change. The exported text copy does not recreate the original inode, permissions or all filesystem behavior.
+
+
+Backups with an unknown operation result remain exportable and count toward capacity; ordinary expiry does not delete them. Choose Discard backup in the Web, iOS or Android backup list and confirm to remove that saved version. This does not change the current file or the recorded result. Unsettled operations cannot be discarded, and temporary files whose identity cannot be verified are retained with cleanup shown as pending.
+
+Unexpected device time changes pause backup cleanup. Correct the device system time and refresh backup management. If cleanup remains paused, choose Confirm device time and verify the time reported in the dialog before resuming automatic cleanup. Expired backups may then be cleaned; original timestamps and operation results remain unchanged. Refresh before confirming if the displayed time is over a minute old or the device time changes again.

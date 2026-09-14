@@ -106,6 +106,7 @@ async fn central_computer_action_dispatches_without_peer_and_rejects_missing_wor
     };
     read(output.try_recv().unwrap());
     ctx.inbound_authz = Some(desk_agent_protocol::authz::AuthorizationBlock {
+        file_recovery_registration: None,
         version: desk_agent_protocol::authz::AUTHORIZATION_BLOCK_VERSION,
         scope: AgentScope {
             granted: vec![plan.actions[0].action.required_capability()],
@@ -138,6 +139,35 @@ async fn central_computer_action_dispatches_without_peer_and_rejects_missing_wor
     assert!(payload.connection_id.is_none());
     assert_eq!(payload.plan, plan);
     assert!(output.try_recv().is_err());
+    // Namespace binding is derived from both the live connection and the
+    // central registration. Unmatched identities never reach the worker.
+    ctx.file_recovery_authority = Some("a".repeat(64));
+    for (authority, os_user, accepted) in [
+        ("a".repeat(64), "501", true),
+        ("b".repeat(64), "501", false),
+        ("a".repeat(64), "", false),
+        ("a".repeat(64), "501\n", false),
+    ] {
+        let authz = ctx.inbound_authz.as_mut().unwrap();
+        authz.session_id = Some("conversation".into());
+        authz.file_recovery_registration =
+            Some(desk_agent_protocol::authz::FileRecoveryRegistration {
+                execution_epoch: 7,
+                authority,
+                os_user: os_user.into(),
+            });
+        handle_computer_action_inbound(&ctx, &model).await.unwrap();
+        let ServiceToWorker::ComputerActionPlan(payload) = receiver.try_recv().unwrap() else {
+            panic!("action expected")
+        };
+        assert_eq!(payload.file_recovery.is_some(), accepted);
+        if let Some(binding) = payload.file_recovery {
+            assert_eq!(binding.authority, "a".repeat(64));
+            assert_eq!(binding.os_user, "501");
+            assert_eq!(binding.execution_epoch, 7);
+            assert_eq!(binding.conversation_id, "conversation");
+        }
+    }
     ctx.worker_mgr.enable_session_targeting_for_test();
     handle_computer_action_inbound(&ctx, &model).await.unwrap();
     read(output.try_recv().unwrap());
@@ -173,6 +203,7 @@ async fn central_stop_preserves_identity_without_renewing_action_authority() {
             None,
         );
         let stamp = AuthorizationBlock {
+            file_recovery_registration: None,
             version: AUTHORIZATION_BLOCK_VERSION,
             scope: AgentScope {
                 granted: vec![],

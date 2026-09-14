@@ -2169,6 +2169,46 @@ impl SignalDeviceAssistantTools {
         Box::pin(self.authorize_and_execute_semantic_action_inner(call))
     }
 
+    /// Both semantic text mutations and artifact dispatch must freeze the same
+    /// trusted backup namespace before sending any native file mutation.
+    async fn prepare_file_recovery_registration(
+        &self,
+        plan: &SealedComputerActionPlan,
+    ) -> Result<Option<desk_agent_protocol::authz::FileRecoveryRegistration>, AgentError> {
+        if !plan.actions.iter().any(|step| {
+            desk_diagnose_core::provider_preflight::text_file::is_text_mutation(&step.action)
+        }) {
+            return Ok(None);
+        }
+        let actor = self.actor_id.parse::<i32>().map_err(|_| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                "Invalid backup owner",
+                false,
+                true,
+            )
+        })?;
+        crate::file_recovery_scope_store::FileRecoveryScopeStore::new(self.db.clone())
+            .prepare_dispatch(
+                &self.connections,
+                &self.target_connection_id,
+                actor,
+                None,
+                &self.target_device_id,
+                &self.run_id,
+            )
+            .await
+            .map(Some)
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::Internal,
+                    "Backup namespace registration failed; file was not changed",
+                    false,
+                    true,
+                )
+            })
+    }
+
     async fn authorize_and_execute_semantic_action_inner(
         &self,
         call: &ToolCall,
@@ -2830,6 +2870,7 @@ impl SignalDeviceAssistantTools {
             ));
         }
         let authz = AuthorizationBlock {
+            file_recovery_registration: self.prepare_file_recovery_registration(&plan).await?,
             version: AUTHORIZATION_BLOCK_VERSION,
             exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
             scope: AgentScope {
@@ -2845,7 +2886,7 @@ impl SignalDeviceAssistantTools {
             },
             device: AuthzDevice { device_id: None },
             request_id: generation.clone(),
-            session_id: None,
+            session_id: Some(self.run_id.clone()),
             expires_at: Some(plan.expires_at.clone()),
             issuer: "signal".into(),
             audience,
@@ -3539,7 +3580,10 @@ impl SignalDeviceAssistantTools {
             .await?;
             return Err(dispatch_error);
         }
+        let file_recovery_registration =
+            artifact_pre_send!(self.prepare_file_recovery_registration(&plan).await);
         let authz = AuthorizationBlock {
+            file_recovery_registration,
             version: AUTHORIZATION_BLOCK_VERSION,
             exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
             scope: AgentScope {
@@ -3555,7 +3599,7 @@ impl SignalDeviceAssistantTools {
             },
             device: AuthzDevice { device_id: None },
             request_id: generation.clone(),
-            session_id: None,
+            session_id: Some(self.run_id.clone()),
             expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339()),
             issuer: "signal".into(),
             audience,
@@ -4140,6 +4184,7 @@ impl SignalDeviceAssistantTools {
             CapabilityRiskTier::R3 => desk_agent_protocol::RiskLevel::High,
         };
         let authz = AuthorizationBlock {
+            file_recovery_registration: None,
             version: AUTHORIZATION_BLOCK_VERSION,
             exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
             scope: AgentScope {
@@ -4155,7 +4200,7 @@ impl SignalDeviceAssistantTools {
             },
             device: AuthzDevice { device_id: None },
             request_id: generation.clone(),
-            session_id: None,
+            session_id: Some(self.run_id.clone()),
             expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339()),
             issuer: "signal".into(),
             audience,
@@ -4654,6 +4699,7 @@ impl SignalDeviceAssistantTools {
             )
         })?;
         let authz = AuthorizationBlock {
+            file_recovery_registration: None,
             version: AUTHORIZATION_BLOCK_VERSION,
             exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
             scope: AgentScope {
@@ -4669,7 +4715,7 @@ impl SignalDeviceAssistantTools {
             },
             device: AuthzDevice { device_id: None },
             request_id: generation.clone(),
-            session_id: None,
+            session_id: Some(self.run_id.clone()),
             expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339()),
             issuer: "signal".into(),
             audience,

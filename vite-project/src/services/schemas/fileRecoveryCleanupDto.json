@@ -1,0 +1,1 @@
+{"type":"object","required":["pending_files","unknown_outcomes"],"properties":{"pending_files":{"type":"integer","format":"int64","minimum":0},"unknown_outcomes":{"type":"integer","format":"int64","minimum":0}},"x-readme-ref-name":"FileRecoveryCleanupDto"}

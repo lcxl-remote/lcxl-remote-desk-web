@@ -99,6 +99,10 @@ use tokio::{
 };
 
 mod connection;
+#[cfg(target_os = "macos")]
+mod file_recovery;
+mod file_recovery_quota;
+pub(crate) use file_recovery_quota::QuotaClient;
 mod outbound;
 mod runtime;
 mod tasks;

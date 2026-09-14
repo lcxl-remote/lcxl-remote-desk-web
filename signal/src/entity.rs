@@ -29,3 +29,6 @@ pub mod agent_task_budget_reservation;
 pub mod agent_task_rehearsal;
 
 pub mod agent_image_attachment;
+
+pub mod agent_file_recovery_cleanup;
+pub mod agent_file_recovery_scope;

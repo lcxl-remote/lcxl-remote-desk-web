@@ -1,3 +1,4 @@
+pub mod file_recovery;
 pub mod schedule_management;
 use std::{
     net::{IpAddr, SocketAddr},
@@ -227,6 +228,7 @@ pub struct SignalingHandler<U: SignalingUser> {
     pub remote_tool_observer: Option<Arc<dyn RemoteToolObserver>>,
     /// Centrally-owned sealed Computer Use lifecycle consumer.
     pub computer_action_observer: Option<Arc<dyn ComputerActionObserver>>,
+    pub file_recovery_observer: Option<Arc<dyn FileRecoveryObserver>>,
     /// Dynamic Computer Use readiness consumer. Manager persists a
     /// presence-fenced Redis snapshot; OSS Signal keeps a connection-scoped
     /// in-process snapshot.
@@ -424,6 +426,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             exec_state_reply_observer: None,
             remote_tool_observer: None,
             computer_action_observer: None,
+            file_recovery_observer: None,
             computer_use_readiness_observer: None,
             forward_lifecycle_observer: None,
             support_code_minter: None,
@@ -504,6 +507,11 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// frames are ignored there.
     pub fn with_remote_tool_observer(mut self, observer: Arc<dyn RemoteToolObserver>) -> Self {
         self.remote_tool_observer = Some(observer);
+        self
+    }
+
+    pub fn with_file_recovery_observer(mut self, observer: Arc<dyn FileRecoveryObserver>) -> Self {
+        self.file_recovery_observer = Some(observer);
         self
     }
 
@@ -1181,6 +1189,13 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 }
             }
 
+            SignalingType::FileRecoveryManaged => {
+                // Recovery material is consumed only by an authenticated central waiter.
+                // Never relay a device-provided destination to an arbitrary browser.
+                if let Some(observer) = self.file_recovery_observer.clone() {
+                    observer.on_file_recovery_reply(&self.connection_state, &signaling_model).await;
+                }
+            }
             SignalingType::ComputerUseReadinessUpdated => {
                 if let Some(observer) = self.computer_use_readiness_observer.clone() {
                     observer
@@ -1238,7 +1253,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::UpdateDeviceAssistantContext
             | SignalingType::UpdateDeviceAssistantObjectContext
             | SignalingType::SelectDeviceAssistantSession
-            | SignalingType::ManageScheduledTasks => {
+            | SignalingType::ManageScheduledTasks
+            | SignalingType::ManageFileRecovery => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
                     match authorizer
                         .authorize(&self.connection_state, &self.connection_map, &signaling_model)

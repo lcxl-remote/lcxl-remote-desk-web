@@ -21,6 +21,16 @@ pub struct AgentRequestPayload {
     pub envelope: desk_agent_protocol::ReadonlyAgentEnvelope,
 }
 
+/// Device-resolved namespace and central conversation correlation. Never accepted
+/// directly from a controller or a model argument.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileRecoveryExecutionContext {
+    pub execution_epoch: u64,
+    pub os_user: String,
+    pub authority: String,
+    pub conversation_id: String,
+}
+
 /// A sealed Computer Use mutation. It is deliberately separate from
 /// [`AgentRequestPayload`], whose envelope can only represent read operations.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
@@ -28,6 +38,7 @@ pub struct ComputerActionPlanPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
     pub plan: desk_agent_protocol::computer_use::SealedComputerActionPlan,
+    pub file_recovery: Option<FileRecoveryExecutionContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
@@ -185,4 +196,92 @@ pub enum ExecSpawnReport {
         /// Operator-facing reason (missing program, containment refused, …).
         reason: String,
     },
+}
+
+/// Trusted fields are set by the daemon after checking the central authorization.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileRecoveryRequestPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub authority: String,
+    pub actor_id: String,
+    pub device_id: String,
+    pub request: desk_agent_protocol::file_recovery::FileRecoveryRequest,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileRecoveryReplyPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub reply: desk_agent_protocol::file_recovery::FileRecoveryReply,
+}
+
+/// Private worker/daemon quota RPC. These fields never become model arguments.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileRecoveryQuotaIdentity {
+    pub execution_epoch: u64,
+    pub authority: String,
+    pub device: String,
+    pub owner: String,
+    pub conversation: String,
+    pub operation: String,
+    pub generation: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub enum FileRecoveryQuotaCommand {
+    Reserve {
+        identity: FileRecoveryQuotaIdentity,
+        bytes: u64,
+        execution_deadline_ms: u64,
+    },
+    Settle {
+        identity: FileRecoveryQuotaIdentity,
+        bytes: u64,
+    },
+    Release {
+        identity: FileRecoveryQuotaIdentity,
+        retained_index_bytes: u64,
+    },
+    ReleaseNamespace {
+        namespace: String,
+        execution_epoch: u64,
+    },
+    BeginEpochCleanup {
+        expected_epoch: u64,
+    },
+    FinishEpochCleanup {
+        execution_epoch: u64,
+    },
+    Read,
+    SetPolicy {
+        retention_days: u32,
+        max_bytes: u64,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileRecoveryQuotaRequest {
+    pub request_id: String,
+    pub os_user: String,
+    pub command: FileRecoveryQuotaCommand,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub enum FileRecoveryQuotaOutcome {
+    Epoch {
+        execution_epoch: u64,
+        cleanup_pending: bool,
+    },
+    Applied {
+        retention_days: u32,
+        max_bytes: u64,
+        used_bytes: u64,
+        reserved_bytes: u64,
+    },
+    CapacityExceeded,
+    IdentityChanged,
+    InvalidRequest,
+    StorageUnavailable,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileRecoveryQuotaReply {
+    pub request_id: String,
+    pub outcome: FileRecoveryQuotaOutcome,
 }

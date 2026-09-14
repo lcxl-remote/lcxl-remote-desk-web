@@ -498,6 +498,13 @@ pub enum SignalingType {
     #[wincode(tag = 646)]
     ScheduledTasksManaged = 646,
 
+    /// Trusted central owner-only file backup management. Never a model tool.
+    #[wincode(tag = 647)]
+    ManageFileRecovery = 647,
+    /// Device reply to owner-only file backup management.
+    #[wincode(tag = 648)]
+    FileRecoveryManaged = 648,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,

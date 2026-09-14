@@ -1,0 +1,1 @@
+{"type":"object","required":["retention_days","max_bytes"],"properties":{"max_bytes":{"type":"integer","format":"int64","minimum":0},"retention_days":{"type":"integer","format":"int32","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"FileRecoveryPolicyDto"}

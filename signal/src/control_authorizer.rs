@@ -195,6 +195,7 @@ fn build_wrapper_outcome(
         };
     };
     let authz = AuthorizationBlock {
+        file_recovery_registration: None,
         version: AUTHORIZATION_BLOCK_VERSION,
         exec_admission_policy: match scope.mode {
             ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved => {
@@ -298,6 +299,12 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
         model: &'a SignalingModel,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlFrameOutcome> + Send + 'a>> {
         Box::pin(async move {
+            if model.signaling_type == SignalingType::ManageFileRecovery {
+                return ControlFrameOutcome::Reject {
+                    code: DeskErrorCode::PERMISSION_ERROR,
+                    message: "Use the authenticated file recovery management API".into(),
+                };
+            }
             if model.signaling_type == SignalingType::ManageScheduledTasks {
                 return crate::schedule_management::handle(
                     &self.db,

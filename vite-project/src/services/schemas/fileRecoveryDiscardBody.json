@@ -1,0 +1,1 @@
+{"type":"object","required":["recovery_id","conversation_id","confirmed"],"properties":{"confirmed":{"type":"boolean"},"conversation_id":{"type":"string"},"recovery_id":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"FileRecoveryDiscardBody"}

@@ -6,6 +6,7 @@ pub mod exec_approval;
 pub mod exec_capacity;
 pub mod exec_ledger;
 pub mod exec_pty_carrier;
+pub(crate) mod file_recovery_authority;
 #[cfg(target_os = "linux")]
 pub mod linux_exec_pty;
 #[cfg(target_os = "linux")]

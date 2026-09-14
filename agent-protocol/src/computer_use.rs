@@ -1124,14 +1124,37 @@ pub enum TextFileMutationOperation {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 #[serde(deny_unknown_fields)]
+pub struct FileRecoveryDescriptor {
+    pub recovery_id: String,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub cleanup_pending: bool,
+}
+impl FileRecoveryDescriptor {
+    pub fn is_valid(&self) -> bool {
+        self.recovery_id.len() == 64
+            && self
+                .recovery_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.created_at_unix_ms > 0
+            && self.expires_at_unix_ms > self.created_at_unix_ms
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
 pub struct TextFileMutationOutput {
     pub operation: TextFileMutationOperation,
     pub original: ObjectRef,
     pub original_file_name: String,
     pub original_size_bytes: u64,
     pub original_sha256: String,
-    pub recovery_path: String,
+    pub recovery: FileRecoveryDescriptor,
     pub verified: bool,
+    // Reference registration may fail after a successful filesystem commit.
     pub updated_file: Option<CreatedFileArtifactOutput>,
 }
 
@@ -1172,10 +1195,8 @@ impl TextFileMutationOutput {
                 .any(|c| c.is_control() || c == '/' || c == '\\')
             || self.original_size_bytes > 65_536
             || &self.original_sha256 != expected_sha256
-            || self.recovery_path.is_empty()
-            || self.recovery_path.len() > 4096
-            || self.recovery_path.chars().any(char::is_control)
-            || (self.updated_file.is_some() != (self.verified && update))
+            || !self.recovery.is_valid()
+            || (self.updated_file.is_some() && !(self.verified && update))
         {
             return Err(invalid());
         }

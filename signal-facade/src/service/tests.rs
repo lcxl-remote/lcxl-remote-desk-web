@@ -106,6 +106,8 @@ fn computer_use_signaling_discriminants_are_stable_and_distinct() {
         (ComputerActionCompleted, 630),
         (ComputerActionStateReported, 631),
         (ComputerUseReadinessUpdated, 632),
+        (ManageFileRecovery, 647),
+        (FileRecoveryManaged, 648),
     ];
     for (signaling_type, tag) in cases {
         assert_eq!(signaling_type as i32, tag);

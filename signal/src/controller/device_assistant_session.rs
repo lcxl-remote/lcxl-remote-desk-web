@@ -639,22 +639,17 @@ pub async fn delete_device_assistant_session(
     connection_map: web::Data<SharedConnectionMap>,
     query: web::Json<DeleteDeviceAssistantSessionBody>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let target_audience = {
-        let map = connection_map.read().await;
-        let Some(target) = map.get(&query.connection) else {
-            return Ok(not_accessible());
-        };
-        if target.auth_context.auth_kind != AuthKind::TokenAuth
-            || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
-        {
-            return Ok(not_accessible());
-        }
-        match target.model.version_info.client_id.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => return Ok(not_accessible()),
-        }
-    };
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let Some(row) = crate::entity::agent_session::Entity::find()
+        .filter(crate::entity::agent_session::Column::ConversationId.eq(&query.session))
+        .filter(crate::entity::agent_session::Column::ActorId.eq(&actor_id))
+        .one(crate::db::get_db())
+        .await?
+    else {
+        return Ok(not_accessible());
+    };
+    let target_audience = row.device_id;
     let deleted = SignalAgentSessionStore::new(crate::db::get_db().clone())
         .delete_for_subject(&query.session, &actor_id, &target_audience)
         .await;
@@ -662,6 +657,7 @@ pub async fn delete_device_assistant_session(
         Ok(request) => request,
         Err(_) => return Ok(not_accessible()),
     };
+    crate::file_recovery_dispatch::notify();
     if let Some(request) = request {
         crate::device_assistant_orchestrator::cancellation::cancel(
             SINGLE_ACCOUNT_USER_ID,
@@ -685,7 +681,10 @@ pub async fn delete_device_assistant_session(
         .await;
     });
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
-        DeleteDeviceAssistantSessionResponse { deleted: true },
+        DeleteDeviceAssistantSessionResponse {
+            deleted: true,
+            backup_cleanup_pending: true,
+        },
     )))
 }
 

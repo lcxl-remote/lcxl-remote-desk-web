@@ -8,6 +8,7 @@ pub mod durable_file;
 pub mod error;
 pub mod exec;
 pub mod exec_shells;
+pub(crate) mod file_recovery_service;
 pub mod host_activity;
 pub mod host_control;
 pub mod locale;
@@ -260,6 +261,10 @@ pub fn configure_api_surface(
                         .service(list_assistant_images)
                         .service(get_assistant_image)
                         .service(delete_assistant_image)
+                        .service(desk_signal::controller::file_recovery::manage_device_file_recovery)
+                        .service(desk_signal::controller::file_recovery::list_file_recovery_cleanup)
+                        .service(desk_signal::controller::file_recovery::retry_file_recovery_cleanup)
+                        .service(desk_signal::controller::file_recovery::export_device_file_recovery)
                         .service(decide_device_assistant_permission)
                         .service(revoke_device_assistant_capability_grant)
                         .service(cancel_device_assistant_background_task)
@@ -279,6 +284,12 @@ pub fn configure_api_surface(
                     .service(query_device_assistant_settings)
                     .service(update_device_assistant_settings)
                     .service(controller::computer_use_policy::query_computer_use_application_policy)
+                    .service(controller::file_recovery::query_local_file_recovery)
+                    .service(controller::file_recovery::update_local_file_recovery_policy)
+                    .service(controller::file_recovery::retry_local_file_recovery_cleanup)
+                    .service(controller::file_recovery::export_local_file_recovery)
+                    .service(controller::file_recovery::discard_local_file_recovery)
+                    .service(controller::file_recovery::confirm_local_file_recovery_clock)
                     .service(
                         controller::computer_use_policy::query_computer_use_communication_policy,
                     )
@@ -662,6 +673,10 @@ pub async fn run_with_hub(
 
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
     if startup_mode_has_signal_db(&startup_mode) {
+        actix_web::rt::spawn(desk_signal::file_recovery_dispatch::run(
+            desk_signal::db::get_db().clone(),
+            connection_map.clone(),
+        ));
         actix_web::rt::spawn(
             desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
                 desk_signal::db::get_db().clone(),

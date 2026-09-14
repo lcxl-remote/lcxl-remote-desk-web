@@ -2608,6 +2608,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-file-recovery"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mach2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "zip",
+]
+
+[[package]]
 name = "desk-input-injection"
 version = "0.1.0"
 dependencies = [
@@ -2692,6 +2705,7 @@ dependencies = [
  "actix-ws",
  "async-trait",
  "awc",
+ "base64 0.22.1",
  "bytes",
  "bytestring",
  "chrono",
@@ -4945,6 +4959,7 @@ dependencies = [
  "desk-agent-protocol",
  "desk-capture-engine",
  "desk-diagnose-core",
+ "desk-file-recovery",
  "desk-input-injection",
  "desk-ipc-protocol",
  "desk-mcp-server",

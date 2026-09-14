@@ -1,0 +1,1 @@
+{"type":"object","required":["displayed_time_unix_ms","confirmed"],"properties":{"confirmed":{"type":"boolean"},"displayed_time_unix_ms":{"type":"integer","format":"int64","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"FileRecoveryClockBody"}

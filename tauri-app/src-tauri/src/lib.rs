@@ -874,7 +874,12 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                                 log::error!("Server error: {}", e);
                             }
                         }
-                        Err(e) => log::error!("Failed to start server: {}", e),
+                        Err(e) => {
+                            // Startup may fail before the server installs telemetry.
+                            // Preserve the failure in the launcher's stderr as well.
+                            eprintln!("Failed to start embedded server: {e}");
+                            log::error!("Failed to start server: {}", e);
+                        }
                     }
                 });
             });

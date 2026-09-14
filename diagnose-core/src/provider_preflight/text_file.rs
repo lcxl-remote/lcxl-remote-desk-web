@@ -27,9 +27,7 @@ pub fn unknown_text_recovery_receipt(json: &str) -> Option<String> {
         || output.original_file_name.is_empty()
         || output.original_file_name.len() > 512
         || output.original_size_bytes > 65_536
-        || output.recovery_path.is_empty()
-        || output.recovery_path.len() > 4096
-        || output.recovery_path.chars().any(char::is_control)
+        || !output.recovery.is_valid()
         || output.original_sha256.len() != 64
         || !output
             .original_sha256
@@ -71,9 +69,9 @@ pub fn registered_tools() -> Vec<crate::registry::RegisteredTool> {
             spec: ToolSpec {
                 name: if delete { DELETE_TEXT_TOOL } else { UPDATE_TEXT_TOOL }.into(),
                 description: if delete {
-                    "Move exactly one verified text file to a private recovery directory on macOS. Requires a currently approved conversation directory and one exact user confirmation. Reuse a verified creation/read/update result and its full SHA-256; a separate read is not required just to obtain a version. Text files only (UTF-8, at most 64 KiB), not installers or arbitrary binary files. Never recursive, never permanent deletion. Preserve the recovery receipt; an unknown result must not be retried."
+                    "Delete exactly one verified text file on macOS after saving its previous content in device-private backup storage. Requires a currently approved conversation directory and one exact user confirmation. Reuse a verified creation/read/update result and its full SHA-256; a separate read is not required just to obtain a version. Text files only (UTF-8, at most 64 KiB), not installers or arbitrary binary files. Never recursive, never permanent deletion. Preserve the recovery receipt; an unknown result must not be retried."
                 } else {
-                    "Update exactly one verified UTF-8 text file on macOS using full replacement or exactly one unambiguous text match, within 64 KiB. Requires a currently approved conversation directory and one exact user confirmation. Reuse a verified creation/read/update result: copy its file_result_call_id and full SHA-256. If the content needed for the edit is already known, request this update directly; do not list the directory or read again merely to obtain a version. The device checks the original identity and full SHA-256, retains recovery material and verifies the new bytes. Conflict means read again and request new approval, never retry automatically."
+                    "Update exactly one verified UTF-8 text file on macOS using full replacement or exactly one unambiguous text match, within 64 KiB. Requires a currently approved conversation directory and one exact user confirmation. Reuse a verified creation/read/update result: copy its file_result_call_id and full SHA-256. If the content needed for the edit is already known, request this update directly; do not list the directory or read again merely to obtain a version. The device checks the original identity and full SHA-256, retains recovery material and reports the filesystem operation result without rereading the written bytes. Conflict means read again and request new approval, never retry automatically."
                 }.into(),
                 parameters_schema: serde_json::json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
             },
@@ -442,6 +440,44 @@ pub fn uses_session_file_read(call: &ToolCall) -> Result<bool, AgentError> {
 
 /// Reject unusable file selectors before presenting an owner permission card.
 /// This resolves evidence only; grant issuance and dispatch revalidate it again.
+pub fn validate_mutation_permission_input(
+    session: &crate::session::PersistedAgentSession,
+    tool_name: &str,
+    exact_input: Option<&str>,
+    now: u64,
+) -> Result<(), AgentError> {
+    if !TextMutationPreflight::supports(tool_name) {
+        return Ok(());
+    }
+    let call = ToolCall {
+        id: "file-mutation-permission-preflight".into(),
+        name: tool_name.into(),
+        arguments_json: exact_input.unwrap_or("{}").into(),
+    };
+    let input: serde_json::Value =
+        serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+    let id = input
+        .get("file_result_call_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(unavailable)?;
+    if session
+        .conversation
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .any(|source| source.id == id && source.name == "inspect_selected_file_metadata")
+    {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            r#"A directory metadata result cannot authorize a text mutation. First request read_selected_text_file with exact_input={"file_result_call_id":"<metadata call ID>","entry_name":"<exact file name>"}, then execute that read. For delete_text_file, required exact_input fields are {"file_result_call_id":"<successful read/create/update call ID>","expected_sha256":"<full SHA-256 from that result>"}. update_text_file also requires change and the approved directory selector from its tool definition. If an existing successful read/create/update result already supplies the needed file and SHA-256, reuse it directly. No approval card was created; correct the source rather than asking the user to confirm again."#,
+            false,
+            true,
+        ));
+    }
+    let evidence = resolve_file_result(session, id, now)?;
+    TextMutationPreflight::build(session, &call, &evidence, now).map(|_| ())
+}
+
+/// Read approvals also require resolvable sources before displaying a card.
 pub fn validate_read_permission_input(
     session: &crate::session::PersistedAgentSession,
     tool_name: &str,
@@ -1064,6 +1100,35 @@ mod tests {
     }
 
     #[test]
+    fn metadata_mutation_permission_is_rejected_before_owner_card() {
+        let (mut session, _, _) = fixture();
+        session
+            .conversation
+            .push(crate::chat::ChatMessage::assistant_tool_calls(
+                "metadata-request",
+                "Inspect the directory",
+                vec![crate::chat::ToolCallRef {
+                    id: "metadata-call".into(),
+                    name: "inspect_selected_file_metadata".into(),
+                    arguments_json: "{}".into(),
+                }],
+            ));
+        for tool in [UPDATE_TEXT_TOOL, DELETE_TEXT_TOOL] {
+            let input = serde_json::json!({"file_result_call_id":"metadata-call", "expected_sha256":"a".repeat(64)}).to_string();
+            let error =
+                validate_mutation_permission_input(&session, tool, Some(&input), 1000).unwrap_err();
+            assert!(error.safe_for_model);
+            assert!(error.message.contains("entry_name"));
+            assert!(
+                error
+                    .message
+                    .contains("successful read/create/update call ID")
+            );
+            assert!(error.message.contains("No approval card was created"));
+        }
+    }
+
+    #[test]
     fn mutation_binding_includes_directory_file_version_and_exact_content() {
         let (mut session, evidence, mut call) = fixture();
         let plan = TextMutationPreflight::build(&session, &call, &evidence, 1).unwrap();
@@ -1145,7 +1210,12 @@ mod tests {
                     original_file_name: "notes.txt".into(),
                     original_size_bytes: 3,
                     original_sha256: evidence.sha256.clone(),
-                    recovery_path: "/private/tmp/text-test/.assistant-recovery-test".into(),
+                    recovery: desk_agent_protocol::computer_use::FileRecoveryDescriptor {
+                        recovery_id: "a".repeat(64),
+                        created_at_unix_ms: 1,
+                        expires_at_unix_ms: 1000,
+                        cleanup_pending: false,
+                    },
                     verified: false,
                     updated_file: None,
                 },
@@ -1160,6 +1230,13 @@ mod tests {
             unknown_text_recovery_receipt(&serde_json::to_string(&completed).unwrap()).is_none()
         );
         assert!(validate_completion(plan.target(), &action, &completed).is_err());
+        // A missing reference is a maintenance failure, not a failed mutation.
+        let mut succeeded = completed.clone();
+        succeeded.facts[0].verified = true;
+        if let Some(ComputerActionOutput::TextFileMutation(receipt)) = &mut succeeded.output {
+            receipt.verified = true;
+        }
+        assert!(validate_completion(plan.target(), &action, &succeeded).is_ok());
         completed.result = Class::OutcomeUnknown;
         let Some(ComputerActionOutput::TextFileMutation(receipt)) = &mut completed.output else {
             panic!()
@@ -1681,6 +1758,8 @@ mod tests {
                 call.arguments_json = value.to_string();
             }
             let capability = registry.capability_for_tool(tool).unwrap();
+            validate_mutation_permission_input(session, tool, Some(&call.arguments_json), 1000)
+                .unwrap();
             let request_call = ToolCall { id: "permission".into(), name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json: serde_json::json!({"items":[{
                 "item_id":"mutation", "provider_id":crate::device_assistant::TEXT_FILE_PROVIDER_ID,
                 "tool_name":tool,"expected_effect":"write_artifact", "exact_input":serde_json::from_str::<serde_json::Value>(&call.arguments_json).unwrap(),

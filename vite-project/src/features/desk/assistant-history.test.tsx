@@ -1,10 +1,27 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AssistantHistory } from './assistant-history';
+import { manageDeviceFileRecovery } from '@/services/clients';
+
+vi.mock('@/services/clients', () => ({ manageDeviceFileRecovery: vi.fn().mockRejectedValue(new Error('Offline')) }));
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 afterEach(() => vi.unstubAllGlobals());
 describe('assistant history', () => {
+    it('queries backups using the server session key even when the client conversation differs', async () => {
+        vi.mocked(manageDeviceFileRecovery).mockResolvedValueOnce({ data: { outcome: { kind: 'page', page: { records: [{ recovery_id: 'backup' }] } } } } as never);
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions: [
+            { sessionId: 'server-session', conversationId: 'client-uuid', firstQuestion: 'Backup test', updatedAt: '' },
+        ] } }) }));
+        render(<AssistantHistory deskId="connection" disabled={false} onSelect={() => true} />);
+        fireEvent.click(screen.getByRole('button'));
+        await screen.findByText('Backup test');
+        fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.history.delete' }));
+        await screen.findByText('pages.fileRecovery.deleteBackup.present');
+        expect(manageDeviceFileRecovery).toHaveBeenLastCalledWith({ connection: 'connection', device_id: undefined,
+            request: { command: { operation: 'query', conversation_id: 'server-session' } } },
+        { signal: expect.any(AbortSignal) });
+    });
     it('loads device history on demand and resumes the chosen conversation', async () => {
         const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions: [
             { sessionId: 's1', conversationId: 'c1', firstQuestion: 'Old question', updatedAt: '2026-09-05' },

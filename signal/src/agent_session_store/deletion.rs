@@ -84,6 +84,23 @@ impl SignalAgentSessionStore {
             .exec(&txn)
             .await
             .map_err(save_backend)?;
+        // Persist before removing history: reconnect and restart must retain cleanup intent.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        crate::entity::agent_file_recovery_cleanup::ActiveModel {
+            conversation_id: Set(id.to_owned()),
+            actor_id: Set(actor.to_owned()),
+            device_id: Set(device.to_owned()),
+            created_at_unix_ms: Set(now_ms),
+            next_attempt_at_unix_ms: Set(now_ms),
+            attempts: Set(0),
+            lease_id: Set(None),
+            lease_until_unix_ms: Set(None),
+            completed_at_unix_ms: Set(None),
+            last_error: Set(None),
+        }
+        .insert(&txn)
+        .await
+        .map_err(save_backend)?;
         agent_session::Entity::delete_many()
             .filter(agent_session::Column::Id.eq(row.id))
             .exec(&txn)

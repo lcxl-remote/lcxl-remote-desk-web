@@ -224,6 +224,8 @@ pub enum ServiceToWorker {
     /// Daemon → worker: an immutable, exact-owner-approved Computer Use plan.
     /// This variant is the only IPC lane that can carry Computer Use mutation.
     ComputerActionPlan(ComputerActionPlanPayload),
+    ManageFileRecovery(FileRecoveryRequestPayload),
+    FileRecoveryQuotaReplied(FileRecoveryQuotaReply),
 
     /// Daemon → worker: fence and cancel one Computer Use generation.
     ComputerActionCancel(ComputerActionCancelPayload),
@@ -508,6 +510,8 @@ pub enum WorkerToService {
 
     /// Worker → daemon: response to a generation-fenced state query.
     ComputerActionStateReported(ComputerActionStateReportedPayload),
+    FileRecoveryManaged(FileRecoveryReplyPayload),
+    FileRecoveryQuotaRequested(FileRecoveryQuotaRequest),
 
     /// Worker → daemon: bounded, dynamic Computer Use capability readiness.
     ComputerUseReadinessUpdated(ComputerUseReadinessPayload),
@@ -624,11 +628,13 @@ impl WorkerToService {
             Self::ComputerActionStarted(payload) => payload.connection_id.as_deref(),
             Self::ComputerActionCompleted(payload) => payload.connection_id.as_deref(),
             Self::ComputerActionStateReported(payload) => payload.connection_id.as_deref(),
+            Self::FileRecoveryManaged(payload) => payload.connection_id.as_deref(),
             Self::ExecutionCompleted(payload) => payload.connection_id.as_deref(),
             Self::ExecSpawnReport(payload) => payload.connection_id.as_deref(),
             Self::ExecHeartbeat(payload) => payload.connection_id.as_deref(),
             Self::ExecPtyOpened(_) | Self::ExecPtyOutput(_) | Self::ExecPtyClosed(_) => None,
-            Self::Ready
+            Self::FileRecoveryQuotaRequested(_)
+            | Self::Ready
             | Self::Capabilities(_)
             | Self::WaylandPortalStatus(_)
             | Self::Heartbeat(_)

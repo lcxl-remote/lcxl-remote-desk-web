@@ -68,6 +68,8 @@ pub struct DeleteDeviceAssistantSessionBody {
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct DeleteDeviceAssistantSessionResponse {
     pub deleted: bool,
+    /// Cleanup intent is durable; physical removal awaits a device acknowledgment.
+    pub backup_cleanup_pending: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, ToSchema)]

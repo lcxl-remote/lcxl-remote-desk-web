@@ -16,6 +16,7 @@ members = [
     "virtual-display-driver-ops",
     "agent-protocol",
     "diagnose-core",
+    "file-recovery",
     "mcp-server",
 ]
 exclude = ["web", "third-deps"]
@@ -48,6 +49,7 @@ desk-virtual-display = { path = "virtual-display" }
 desk-virtual-display-driver-ops = { path = "virtual-display-driver-ops" }
 desk-agent-protocol = { path = "agent-protocol" }
 desk-diagnose-core = { path = "diagnose-core" }
+desk-file-recovery = { path = "file-recovery" }
 desk-mcp-server = { path = "mcp-server" }
 
 clap = { version = "4.5", features = ["derive"] }

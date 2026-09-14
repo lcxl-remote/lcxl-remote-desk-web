@@ -2810,6 +2810,73 @@ impl WorkerManager {
         self.send_to_worker(msg).await
     }
 
+    /// Recovery management is bound to an OS user, independent of browser peers.
+    /// Only daemon-verified identities may select a resident user worker; the
+    /// receiving worker independently checks the expected user before opening a vault.
+    pub async fn send_file_recovery_request(
+        &self,
+        payload: desk_ipc_protocol::message::FileRecoveryRequestPayload,
+    ) -> Result<(), String> {
+        if !self.uses_session_targeting() {
+            return self
+                .send_to_worker(ServiceToWorker::ManageFileRecovery(payload))
+                .await;
+        }
+        if let Some(user) = payload.request.expected_os_user.as_deref() {
+            #[cfg(target_os = "linux")]
+            {
+                let uid = user.parse::<u32>().map_err(|_| "invalid recovery user")?;
+                if uid.to_string() != user {
+                    return Err("invalid recovery user".into());
+                }
+                let registry = self
+                    .session_shell_registry()
+                    .ok_or("recovery user unavailable")?;
+                let mut registrations: Vec<_> = registry
+                    .snapshot()
+                    .into_iter()
+                    .filter(|registration| {
+                        registration.process_identity.uid == uid
+                            && registration.logical_session.uid == uid
+                    })
+                    .collect();
+                registrations.sort_by_key(|registration| {
+                    std::cmp::Reverse(registration.registration_generation)
+                });
+                for registration in registrations {
+                    let session = linux_session_key(
+                        &registration.logical_session,
+                        registration.registration_generation,
+                    );
+                    if self
+                        .send_to_session_worker(
+                            &session,
+                            ServiceToWorker::ManageFileRecovery(payload.clone()),
+                        )
+                        .await
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = user;
+            return Err("original recovery user worker unavailable".into());
+        }
+        // Initial discovery has no frozen user yet. Multiple eligible users
+        // require explicit selection, rather than guessing the foreground user.
+        let session = self
+            .session_targets
+            .select(
+                crate::daemon::session_target::SessionCapability::Assistant,
+                None,
+            )
+            .map_err(|_| "recovery user selection unavailable")?;
+        self.send_to_session_worker(&session, ServiceToWorker::ManageFileRecovery(payload))
+            .await
+    }
+
     /// Central actions have no browser peer address. Only the established
     /// single-worker path permits that; resident workers still require the
     /// connection's immutable session selection.
@@ -3580,3 +3647,5 @@ mod policy_tests;
 
 #[cfg(test)]
 mod central_routing_tests;
+
+mod file_recovery_quota;

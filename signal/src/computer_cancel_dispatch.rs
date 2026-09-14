@@ -115,6 +115,7 @@ fn stop_frame(candidate: &CancelCandidate) -> Result<SignalingModel, DbErr> {
     let request = wire_request_id(candidate.work_id, &candidate.execution_generation);
     let wrapper = AuthorizedControlPayload {
         authz: AuthorizationBlock {
+            file_recovery_registration: None,
             version: AUTHORIZATION_BLOCK_VERSION,
             exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
             scope: AgentScope {

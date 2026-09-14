@@ -7270,7 +7270,7 @@ fn requested_file_operation_projection_requires_current_verified_device_evidence
     );
     let text = serde_json::json!({"work_id":"1","action_request_id":"action","execution_generation":"generation","result":"verified","facts":[],
         "output":{"kind":"text_file_mutation","value":{"operation":"delete","original":{"token":"file","snapshot_id":"snapshot","object_kind":"file","expires_at":"2099-01-01T00:00:00Z"},
-        "original_file_name":"notes.txt","original_size_bytes":3,"original_sha256":"a".repeat(64),"recovery_path":"/private/tmp/recovery","verified":true,"updated_file":null}}}).to_string();
+        "original_file_name":"notes.txt","original_size_bytes":3,"original_sha256":"a".repeat(64),"recovery":{"recovery_id":"a".repeat(64),"created_at_unix_ms":1,"expires_at_unix_ms":1000,"cleanup_pending":false},"verified":true,"updated_file":null}}}).to_string();
     let mut receipt = ChatMessage::tool_result("receipt", "delete-call", text.clone());
     receipt.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
         owner.data_envelope.as_ref(),

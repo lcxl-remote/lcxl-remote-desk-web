@@ -1523,6 +1523,11 @@ export type DeleteDeviceAssistantSessionBody = {
 
 export type DeleteDeviceAssistantSessionResponse = {
     /**
+     * @description Cleanup intent is durable; physical removal awaits a device acknowledgment.
+     * @type boolean
+    */
+    backup_cleanup_pending: boolean;
+    /**
      * @type boolean
     */
     deleted: boolean;
@@ -3222,6 +3227,526 @@ export type EncoderInputSupport = ({
     */
     Known: EncoderInputLimits;
 } | EncoderInputSupportEnumKey);
+
+export type FileRecoveryCleanupDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    pending_files: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    unknown_outcomes: number;
+};
+
+export type FileRecoveryCleanupStatus = {
+    /**
+     * @type integer, int64
+    */
+    attempts: number;
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type integer, int64
+    */
+    created_at_unix_ms: number;
+    /**
+     * @type integer, int64
+    */
+    next_attempt_at_unix_ms: number;
+    /**
+     * @description A fixed, user-readable category; never a remote raw error or filesystem path.
+     * @type string
+    */
+    reason: string;
+};
+
+export type FileRecoveryCleanupPage = {
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+    /**
+     * @type array
+    */
+    records: FileRecoveryCleanupStatus[];
+};
+
+export type FileRecoveryCleanupRetryBody = {
+    /**
+     * @type string
+    */
+    conversation_id: string;
+};
+
+export type FileRecoveryCleanupRetryResult = {
+    /**
+     * @description The queue was made due. This is not confirmation of filesystem cleanup.
+     * @type boolean
+    */
+    scheduled: boolean;
+};
+
+export type FileRecoveryClockBody = {
+    /**
+     * @type boolean
+    */
+    confirmed: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    displayed_time_unix_ms: number;
+};
+
+export const fileRecoveryCommandOperationEnum = {
+    query: "query"
+} as const;
+
+export type FileRecoveryCommandOperationEnumKey = (typeof fileRecoveryCommandOperationEnum)[keyof typeof fileRecoveryCommandOperationEnum];
+
+export const fileRecoveryCommandOperationEnum2 = {
+    set_policy: "set_policy"
+} as const;
+
+export type FileRecoveryCommandOperationEnum2Key = (typeof fileRecoveryCommandOperationEnum2)[keyof typeof fileRecoveryCommandOperationEnum2];
+
+export const fileRecoveryCommandOperationEnum3 = {
+    delete_conversation: "delete_conversation"
+} as const;
+
+export type FileRecoveryCommandOperationEnum3Key = (typeof fileRecoveryCommandOperationEnum3)[keyof typeof fileRecoveryCommandOperationEnum3];
+
+export const fileRecoveryCommandOperationEnum4 = {
+    retry_cleanup: "retry_cleanup"
+} as const;
+
+export type FileRecoveryCommandOperationEnum4Key = (typeof fileRecoveryCommandOperationEnum4)[keyof typeof fileRecoveryCommandOperationEnum4];
+
+export const fileRecoveryCommandOperationEnum5 = {
+    confirm_clock: "confirm_clock"
+} as const;
+
+export type FileRecoveryCommandOperationEnum5Key = (typeof fileRecoveryCommandOperationEnum5)[keyof typeof fileRecoveryCommandOperationEnum5];
+
+export const fileRecoveryCommandOperationEnum6 = {
+    discard: "discard"
+} as const;
+
+export type FileRecoveryCommandOperationEnum6Key = (typeof fileRecoveryCommandOperationEnum6)[keyof typeof fileRecoveryCommandOperationEnum6];
+
+export const fileRecoveryCommandOperationEnum7 = {
+    export: "export"
+} as const;
+
+export type FileRecoveryCommandOperationEnum7Key = (typeof fileRecoveryCommandOperationEnum7)[keyof typeof fileRecoveryCommandOperationEnum7];
+
+export type FileRecoveryCommand = ({
+    /**
+     * @type string,null
+    */
+    after?: string | null;
+    /**
+     * @type string,null
+    */
+    conversation_id?: string | null;
+    /**
+     * @type string
+    */
+    operation: FileRecoveryCommandOperationEnumKey;
+} | {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    max_bytes: number;
+    /**
+     * @type string
+    */
+    operation: FileRecoveryCommandOperationEnum2Key;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    retention_days: number;
+} | {
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type string
+    */
+    operation: FileRecoveryCommandOperationEnum3Key;
+} | {
+    /**
+     * @type string
+    */
+    operation: FileRecoveryCommandOperationEnum4Key;
+} | {
+    /**
+     * @type boolean
+    */
+    confirmed: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    displayed_time_unix_ms: number;
+    /**
+     * @type string
+    */
+    operation: FileRecoveryCommandOperationEnum5Key;
+} | {
+    /**
+     * @type boolean
+    */
+    confirmed: boolean;
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type string
+    */
+    operation: FileRecoveryCommandOperationEnum6Key;
+    /**
+     * @type string
+    */
+    recovery_id: string;
+} | {
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type string
+    */
+    operation: FileRecoveryCommandOperationEnum7Key;
+    /**
+     * @type string
+    */
+    recovery_id: string;
+});
+
+export type FileRecoveryDiscardBody = {
+    /**
+     * @type boolean
+    */
+    confirmed: boolean;
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type string
+    */
+    recovery_id: string;
+};
+
+export type FileRecoveryDownloadBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type string,null
+    */
+    device_id?: string | null;
+    /**
+     * @type string,null
+    */
+    expected_authority?: string | null;
+    /**
+     * @type string,null
+    */
+    expected_os_user?: string | null;
+    /**
+     * @type string
+    */
+    recovery_id: string;
+};
+
+export type FileRecoveryExportBody = {
+    /**
+     * @type string
+    */
+    recovery_id: string;
+};
+
+export const fileRecoveryFailureEnum = {
+    unauthorized: "unauthorized",
+    invalid_request: "invalid_request",
+    identity_changed: "identity_changed",
+    busy: "busy",
+    storage_unavailable: "storage_unavailable",
+    worker_unavailable: "worker_unavailable",
+    unsupported: "unsupported",
+    material_unavailable: "material_unavailable",
+    material_expired: "material_expired",
+    material_cleaning: "material_cleaning",
+    material_cleaned: "material_cleaned",
+    clock_changed: "clock_changed"
+} as const;
+
+export type FileRecoveryFailureEnumKey = (typeof fileRecoveryFailureEnum)[keyof typeof fileRecoveryFailureEnum];
+
+export type FileRecoveryFailure = FileRecoveryFailureEnumKey;
+
+export type FileRecoveryRequest = {
+    command: FileRecoveryCommand;
+    /**
+     * @description Returned by the device; set on follow-ups to reject a changed connection domain.
+     * @type string,null
+    */
+    expected_authority?: string | null;
+    /**
+     * @description Returned by the worker; follow-ups must stay in the same OS user\'s vault.
+     * @type string,null
+    */
+    expected_os_user?: string | null;
+};
+
+export type FileRecoveryManagementBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @description Manager public device handle. OSS resolves the authenticated connection.
+     * @type string,null
+    */
+    device_id?: string | null;
+    /**
+     * @type object
+    */
+    request: FileRecoveryRequest;
+};
+
+export type FileRecoveryRecordDto = {
+    /**
+     * @type string
+    */
+    change_state: string;
+    /**
+     * @type boolean
+    */
+    cleanup_pending: boolean;
+    /**
+     * @type string,null
+    */
+    cleanup_reason?: string | null;
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    created_at_unix_ms: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expires_at_unix_ms: number;
+    /**
+     * @type boolean
+    */
+    export_available: boolean;
+    /**
+     * @type string
+    */
+    file_name: string;
+    /**
+     * @type string
+    */
+    material_state: string;
+    /**
+     * @type string
+    */
+    recovery_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+};
+
+export type FileRecoveryPolicyDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    max_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    retention_days: number;
+};
+
+export type FileRecoveryPageDto = {
+    cleanup_warning?: (null | FileRecoveryFailure);
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    clock_confirmation_time_unix_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    execution_epoch: number;
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    oldest_pending_at_unix_ms?: number | null;
+    oldest_pending_record?: (null | FileRecoveryRecordDto);
+    /**
+     * @type object
+    */
+    policy: FileRecoveryPolicyDto;
+    /**
+     * @type array
+    */
+    records: FileRecoveryRecordDto[];
+    /**
+     * @description Included in used_bytes; not additional capacity consumption.
+     * @minLength 0
+     * @type integer, int64
+    */
+    reserved_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    used_bytes: number;
+};
+
+export const fileRecoveryOutcomeKindEnum = {
+    page: "page"
+} as const;
+
+export type FileRecoveryOutcomeKindEnumKey = (typeof fileRecoveryOutcomeKindEnum)[keyof typeof fileRecoveryOutcomeKindEnum];
+
+export const fileRecoveryOutcomeKindEnum2 = {
+    policy: "policy"
+} as const;
+
+export type FileRecoveryOutcomeKindEnum2Key = (typeof fileRecoveryOutcomeKindEnum2)[keyof typeof fileRecoveryOutcomeKindEnum2];
+
+export const fileRecoveryOutcomeKindEnum3 = {
+    cleanup: "cleanup"
+} as const;
+
+export type FileRecoveryOutcomeKindEnum3Key = (typeof fileRecoveryOutcomeKindEnum3)[keyof typeof fileRecoveryOutcomeKindEnum3];
+
+export const fileRecoveryOutcomeKindEnum4 = {
+    deleted: "deleted"
+} as const;
+
+export type FileRecoveryOutcomeKindEnum4Key = (typeof fileRecoveryOutcomeKindEnum4)[keyof typeof fileRecoveryOutcomeKindEnum4];
+
+export const fileRecoveryOutcomeKindEnum5 = {
+    export: "export"
+} as const;
+
+export type FileRecoveryOutcomeKindEnum5Key = (typeof fileRecoveryOutcomeKindEnum5)[keyof typeof fileRecoveryOutcomeKindEnum5];
+
+export const fileRecoveryOutcomeKindEnum6 = {
+    unavailable: "unavailable"
+} as const;
+
+export type FileRecoveryOutcomeKindEnum6Key = (typeof fileRecoveryOutcomeKindEnum6)[keyof typeof fileRecoveryOutcomeKindEnum6];
+
+export type FileRecoveryOutcome = ({
+    /**
+     * @type string
+    */
+    kind: FileRecoveryOutcomeKindEnumKey;
+    /**
+     * @type object
+    */
+    page: FileRecoveryPageDto;
+} | {
+    /**
+     * @type string
+    */
+    kind: FileRecoveryOutcomeKindEnum2Key;
+    /**
+     * @type object
+    */
+    policy: FileRecoveryPolicyDto;
+} | {
+    /**
+     * @type string
+    */
+    kind: FileRecoveryOutcomeKindEnum3Key;
+    /**
+     * @type object
+    */
+    report: FileRecoveryCleanupDto;
+} | {
+    /**
+     * @type boolean
+    */
+    complete: boolean;
+    /**
+     * @type string
+    */
+    kind: FileRecoveryOutcomeKindEnum4Key;
+} | {
+    /**
+     * @type string
+    */
+    kind: FileRecoveryOutcomeKindEnum5Key;
+    /**
+     * @type string
+    */
+    zip_base64: string;
+} | {
+    /**
+     * @type string
+    */
+    kind: FileRecoveryOutcomeKindEnum6Key;
+    /**
+     * @type string
+    */
+    reason: FileRecoveryFailure;
+});
+
+export type FileRecoveryPageBody = {
+    /**
+     * @type string,null
+    */
+    after?: string | null;
+};
+
+export type FileRecoveryReply = {
+    /**
+     * @type string
+    */
+    authority: string;
+    /**
+     * @type string
+    */
+    os_user: string;
+    outcome: FileRecoveryOutcome;
+};
 
 export type UploadRequest = {
     /**
@@ -5552,6 +6077,11 @@ export type RestResponseDeleteDeviceAssistantSessionResponse = {
     */
     data?: {
         /**
+         * @description Cleanup intent is durable; physical removal awaits a device acknowledgment.
+         * @type boolean
+        */
+        backup_cleanup_pending: boolean;
+        /**
          * @type boolean
         */
         deleted: boolean;
@@ -5758,6 +6288,208 @@ export type RestResponseEmptyResponseDto = {
      * @type object | undefined
     */
     data?: object;
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseFileRecoveryCleanupDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        pending_files: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        unknown_outcomes: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseFileRecoveryCleanupPage = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+        /**
+         * @type array
+        */
+        records: FileRecoveryCleanupStatus[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseFileRecoveryCleanupRetryResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description The queue was made due. This is not confirmation of filesystem cleanup.
+         * @type boolean
+        */
+        scheduled: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseFileRecoveryPageDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        cleanup_warning?: (null | FileRecoveryFailure);
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        clock_confirmation_time_unix_ms?: number | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        execution_epoch: number;
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        oldest_pending_at_unix_ms?: number | null;
+        oldest_pending_record?: (null | FileRecoveryRecordDto);
+        /**
+         * @type object
+        */
+        policy: FileRecoveryPolicyDto;
+        /**
+         * @type array
+        */
+        records: FileRecoveryRecordDto[];
+        /**
+         * @description Included in used_bytes; not additional capacity consumption.
+         * @minLength 0
+         * @type integer, int64
+        */
+        reserved_bytes: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        used_bytes: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseFileRecoveryPolicyDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        max_bytes: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        retention_days: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseFileRecoveryReply = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        authority: string;
+        /**
+         * @type string
+        */
+        os_user: string;
+        outcome: FileRecoveryOutcome;
+    };
     /**
      * @type string,null
     */
@@ -10433,6 +11165,78 @@ export type OpenExecPtyCarrierQuery = {
     Errors: any;
 };
 
+export type RetryLocalFileRecoveryCleanup200 = RestResponseFileRecoveryCleanupDto;
+
+export type RetryLocalFileRecoveryCleanupMutationResponse = RetryLocalFileRecoveryCleanup200;
+
+export type RetryLocalFileRecoveryCleanupMutation = {
+    Response: RetryLocalFileRecoveryCleanup200;
+    Errors: any;
+};
+
+export type ConfirmLocalFileRecoveryClock200 = RestResponseFileRecoveryCleanupDto;
+
+export type ConfirmLocalFileRecoveryClockMutationRequest = FileRecoveryClockBody;
+
+export type ConfirmLocalFileRecoveryClockMutationResponse = ConfirmLocalFileRecoveryClock200;
+
+export type ConfirmLocalFileRecoveryClockMutation = {
+    Response: ConfirmLocalFileRecoveryClock200;
+    Request: ConfirmLocalFileRecoveryClockMutationRequest;
+    Errors: any;
+};
+
+export type DiscardLocalFileRecovery200 = RestResponseFileRecoveryCleanupDto;
+
+export type DiscardLocalFileRecoveryMutationRequest = FileRecoveryDiscardBody;
+
+export type DiscardLocalFileRecoveryMutationResponse = DiscardLocalFileRecovery200;
+
+export type DiscardLocalFileRecoveryMutation = {
+    Response: DiscardLocalFileRecovery200;
+    Request: DiscardLocalFileRecoveryMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description ZIP with before.txt and metadata.json
+*/
+export type ExportLocalFileRecovery200 = number[];
+
+export type ExportLocalFileRecoveryMutationRequest = FileRecoveryExportBody;
+
+export type ExportLocalFileRecoveryMutationResponse = ExportLocalFileRecovery200;
+
+export type ExportLocalFileRecoveryMutation = {
+    Response: ExportLocalFileRecovery200;
+    Request: ExportLocalFileRecoveryMutationRequest;
+    Errors: any;
+};
+
+export type UpdateLocalFileRecoveryPolicy200 = RestResponseFileRecoveryPolicyDto;
+
+export type UpdateLocalFileRecoveryPolicyMutationRequest = FileRecoveryPolicyDto;
+
+export type UpdateLocalFileRecoveryPolicyMutationResponse = UpdateLocalFileRecoveryPolicy200;
+
+export type UpdateLocalFileRecoveryPolicyMutation = {
+    Response: UpdateLocalFileRecoveryPolicy200;
+    Request: UpdateLocalFileRecoveryPolicyMutationRequest;
+    Errors: any;
+};
+
+export type QueryLocalFileRecovery200 = RestResponseFileRecoveryPageDto;
+
+export type QueryLocalFileRecoveryMutationRequest = FileRecoveryPageBody;
+
+export type QueryLocalFileRecoveryMutationResponse = QueryLocalFileRecovery200;
+
+export type QueryLocalFileRecoveryMutation = {
+    Response: QueryLocalFileRecovery200;
+    Request: QueryLocalFileRecoveryMutationRequest;
+    Errors: any;
+};
+
 /**
  * @description Get macOS automatic-login status successfully
 */
@@ -11405,6 +12209,59 @@ export type ListDeviceAssistantSessionsQueryResponse = ListDeviceAssistantSessio
 export type ListDeviceAssistantSessionsQuery = {
     Response: ListDeviceAssistantSessions200;
     QueryParams: ListDeviceAssistantSessionsQueryParams;
+    Errors: any;
+};
+
+export type RetryFileRecoveryCleanup200 = RestResponseFileRecoveryCleanupRetryResult;
+
+export type RetryFileRecoveryCleanupMutationRequest = FileRecoveryCleanupRetryBody;
+
+export type RetryFileRecoveryCleanupMutationResponse = RetryFileRecoveryCleanup200;
+
+export type RetryFileRecoveryCleanupMutation = {
+    Response: RetryFileRecoveryCleanup200;
+    Request: RetryFileRecoveryCleanupMutationRequest;
+    Errors: any;
+};
+
+export type ListFileRecoveryCleanupQueryParams = {
+    /**
+     * @type string | undefined
+    */
+    after?: string;
+};
+
+export type ListFileRecoveryCleanup200 = RestResponseFileRecoveryCleanupPage;
+
+export type ListFileRecoveryCleanupQueryResponse = ListFileRecoveryCleanup200;
+
+export type ListFileRecoveryCleanupQuery = {
+    Response: ListFileRecoveryCleanup200;
+    QueryParams: ListFileRecoveryCleanupQueryParams;
+    Errors: any;
+};
+
+export type ExportDeviceFileRecovery200 = number[];
+
+export type ExportDeviceFileRecoveryMutationRequest = FileRecoveryDownloadBody;
+
+export type ExportDeviceFileRecoveryMutationResponse = ExportDeviceFileRecovery200;
+
+export type ExportDeviceFileRecoveryMutation = {
+    Response: ExportDeviceFileRecovery200;
+    Request: ExportDeviceFileRecoveryMutationRequest;
+    Errors: any;
+};
+
+export type ManageDeviceFileRecovery200 = RestResponseFileRecoveryReply;
+
+export type ManageDeviceFileRecoveryMutationRequest = FileRecoveryManagementBody;
+
+export type ManageDeviceFileRecoveryMutationResponse = ManageDeviceFileRecovery200;
+
+export type ManageDeviceFileRecoveryMutation = {
+    Response: ManageDeviceFileRecovery200;
+    Request: ManageDeviceFileRecoveryMutationRequest;
     Errors: any;
 };
 

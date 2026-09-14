@@ -112,6 +112,7 @@ mod desktop_settings;
 mod edge_exec;
 mod exec_lifecycle;
 mod external_requests;
+mod file_recovery;
 mod manager_terminal;
 
 use access_policy::*;
@@ -215,7 +216,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::ComputerActionStarted
         | SignalingType::ComputerActionCompleted
         | SignalingType::ComputerActionStateReported
-        | SignalingType::ComputerUseReadinessUpdated => RouteOwnership::Daemon,
+        | SignalingType::ComputerUseReadinessUpdated
+        | SignalingType::FileRecoveryManaged => RouteOwnership::Daemon,
 
         // Browser → daemon media control. This is a local bounded restart of
         // the already-negotiated pipeline and never enters the worker's generic
@@ -265,7 +267,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // never the generic worker signaling path.
         SignalingType::DispatchComputerAction
         | SignalingType::CancelComputerAction
-        | SignalingType::QueryComputerActionState => RouteOwnership::Daemon,
+        | SignalingType::QueryComputerActionState
+        | SignalingType::ManageFileRecovery => RouteOwnership::Daemon,
 
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
@@ -442,6 +445,8 @@ pub struct RouterContext {
     /// Exact upstream lane for admission provenance. Manager is set only by the
     /// manager connection loop and never inferred from `TrustedCentral`.
     pub admission_origin: pc_manager::AdmissionOrigin,
+    /// Bound to the actual connected upstream, never reread from mutable settings.
+    pub file_recovery_authority: Option<String>,
     /// Credential scope bound to the current manager WebSocket. `None` on local
     /// and bare remote-signaling lanes.
     pub manager_credential_link:
@@ -1243,6 +1248,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // `ExecutionCompleted` land with the worker executor in a later step.
         SignalingType::ResolveExecution => handle_resolve_exec_inbound(ctx, model).await,
         SignalingType::ControlExecution => handle_exec_control_inbound(ctx, model).await,
+        SignalingType::ManageFileRecovery => file_recovery::handle(ctx, model).await,
         SignalingType::DispatchComputerAction => handle_computer_action_inbound(ctx, model).await,
         SignalingType::CancelComputerAction => handle_computer_action_cancel_inbound(ctx, model).await,
         SignalingType::QueryComputerActionState => {
@@ -1257,7 +1263,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         SignalingType::ComputerActionStarted
         | SignalingType::ComputerActionCompleted
         | SignalingType::ComputerActionStateReported
-        | SignalingType::ComputerUseReadinessUpdated => Ok(()),
+        | SignalingType::ComputerUseReadinessUpdated
+        | SignalingType::FileRecoveryManaged => Ok(()),
         // AI audit events are emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never persists audit itself).
         SignalingType::ReportAiAuditEvent => Ok(()),

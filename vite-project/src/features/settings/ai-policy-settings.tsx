@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { useToast } from "@/hooks/use-toast"
+import { FileRecoverySettings } from './file-recovery-settings';
 import { ComputerUseApplicationPolicySettings } from './computer-use-application-policy';
 import { ComputerUseCommunicationPolicySettings } from './computer-use-communication-policy';
 
@@ -242,6 +243,7 @@ export function AiPolicySettings() {
 
             <ComputerUseCommunicationPolicySettings />
             <ComputerUseApplicationPolicySettings />
+            <FileRecoverySettings />
             <Card>
                 <CardHeader>
                     <CardTitle>{t("pages.aiPolicy.title")}</CardTitle>

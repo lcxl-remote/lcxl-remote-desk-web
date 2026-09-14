@@ -1,0 +1,1 @@
+{"type":"object","required":["conversation_id"],"properties":{"conversation_id":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"FileRecoveryCleanupRetryBody"}

@@ -701,6 +701,7 @@ pub(super) async fn confirm_exec_local_mode_caps_manager_authorization() {
     ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::SuggestOnly;
     // Manager authorization grants a far broader mode.
     ctx.inbound_authz = Some(AuthorizationBlock {
+        file_recovery_registration: None,
         version: AUTHORIZATION_BLOCK_VERSION,
         scope: AgentScope {
             granted: Vec::new(),

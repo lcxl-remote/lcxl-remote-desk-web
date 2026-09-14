@@ -448,6 +448,30 @@ describe('useDeviceAssistantChat', () => {
         expect(result.current.status).toBe('done');
     });
 
+    it.each(['update_text_file', 'delete_text_file'])('renders a successful %s recovery receipt outside the folded tool payload', async (name) => {
+        const output = JSON.stringify({ result: 'verified', output: { kind: 'text_file_mutation', value: {
+            operation: name === 'update_text_file' ? 'update' : 'delete', verified: true,
+            original_file_name: 'notes.txt', original_size_bytes: 3, original_sha256: 'a'.repeat(64), updated_file: null,
+            recovery: { recovery_id: 'b'.repeat(64), created_at_unix_ms: 1000, expires_at_unix_ms: 2000, cleanup_pending: false },
+        } } });
+        localStorage.setItem('device-assistant-conversation:desk-1', 'conversation-1');
+        vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+            sessionId: 'session-1', seq: 34, active: false, messages: [
+                { id: 'call', role: 'assistant', text: '', toolCalls: [{ id: 'file-1', name, argumentsJson: '{}' }] },
+                { id: 'finished', role: 'tool', toolCallId: 'file-1', text: output },
+            ],
+        } }) })));
+        const { result } = renderHook(() => useDeviceAssistantChat({
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
+        }));
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(result.current.messages).toEqual([
+            expect.objectContaining({ role: 'tool_call', toolCallId: 'file-1' }),
+            { id: 'finished', role: 'tool_result', text: output },
+        ]);
+        expect(result.current.tools[0].status).toBe('ok');
+    });
+
     it('attaches only the opaque owner-selected window reference', () => {
         const sendMessage = vi.fn(() => 'window-request-1');
         const { result } = renderHook(() => useDeviceAssistantChat({

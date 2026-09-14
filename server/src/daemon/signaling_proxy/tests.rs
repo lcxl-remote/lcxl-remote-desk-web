@@ -683,6 +683,7 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         ),
         pc_registry,
         admission_origin: crate::daemon::pc_manager::AdmissionOrigin::Local,
+        file_recovery_authority: None,
         manager_credential_link: None,
         exec_pty_link: None,
         outbound_tx: outbound_tx.clone(),
@@ -1158,6 +1159,7 @@ use desk_agent_protocol::{AgentScope, ExecutionMode, RiskLevel};
 
 fn block(request_id: &str, audience: &str) -> AuthorizationBlock {
     AuthorizationBlock {
+        file_recovery_registration: None,
         version: AUTHORIZATION_BLOCK_VERSION,
         scope: AgentScope {
             granted: Vec::new(),
