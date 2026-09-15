@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { v4 } from 'uuid';
 import { Button } from '@/components/ui/button';
+import { useReferenceClock } from '@/hooks/use-reference-clock';
 import type { DeviceAssistantSessionSnapshotDto } from '@/services/types';
 import type { ScheduleClient } from './client';
 
@@ -20,6 +21,7 @@ export function RunDirectories({ client, scheduleId, runId, snapshot, connected,
         return () => { ++epoch.current; };
     }, [scheduleId, runId, snapshot.sessionId, connected]);
     const scope = snapshot.fileScope;
+    const now = useReferenceClock(scope.directories);
     const canDecide = connected && !loading && !busy && snapshot.requestId === runId;
     const decide = async (requestId: string, approve: boolean | null) => {
         const directory = scope.directories.find(item => item.requestId === requestId);
@@ -52,9 +54,10 @@ export function RunDirectories({ client, scheduleId, runId, snapshot, connected,
             <p className="break-words text-sm">{directory.purpose}</p>
             <p className="text-sm">{t(`schedules.directoryState.${directory.state}`)}</p>
             <p className="text-xs">{t('pages.deviceAssistant.directories.expiry', { time: new Date(directory.referenceExpiresAt).toLocaleString() })}</p>
+            {!(Date.parse(directory.referenceExpiresAt) > now) && <p className="text-xs text-amber-700 dark:text-amber-300">{t('pages.deviceAssistant.directories.expired')}</p>}
             {directory.state === 'approved' && <Button variant="outline" disabled={!canDecide} onClick={() => void decide(directory.requestId, null)}>{t('pages.deviceAssistant.directories.remove')}</Button>}
             {directory.state === 'pending' && <div className="flex gap-2">
-                <Button disabled={!canDecide || !(Date.parse(directory.referenceExpiresAt) > Date.now())} onClick={() => void decide(directory.requestId, true)}>{t('pages.deviceAssistant.directories.approve')}</Button>
+                <Button disabled={!canDecide || !(Date.parse(directory.referenceExpiresAt) > now)} onClick={() => void decide(directory.requestId, true)}>{t('pages.deviceAssistant.directories.approve')}</Button>
                 <Button variant="outline" disabled={!canDecide} onClick={() => void decide(directory.requestId, false)}>{t('pages.deviceAssistant.directories.reject')}</Button>
             </div>}
         </article>)}

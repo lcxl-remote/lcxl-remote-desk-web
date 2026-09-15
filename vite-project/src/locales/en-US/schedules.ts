@@ -182,6 +182,7 @@ export default {
     "schedules.result.note": "Shows the original conversation and marks this run’s initial turn. Viewing does not resume execution; submitting a permission decision can allow it to continue.",
     "schedules.result.unavailable": "The conversation is unavailable or has changed. Refresh to check current access and state.",
     "schedules.result.empty": "No saved messages yet.",
+    "schedules.result.currentConversationError": "Current conversation error:",
     "schedules.result.older": "Earlier messages",
     "schedules.result.thisRun": "Initial turn of this run",
     "schedules.result.role.user": "User",

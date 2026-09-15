@@ -16,8 +16,14 @@ impl Drop for Server {
 
 async fn start(executable: &str, config: &Path, port: u16, log: &Path) -> Server {
     let output = std::fs::File::create(log).unwrap();
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW for the test-owned server.
+    }
     let mut server = Server(
-        Command::new(executable)
+        command
             .args(["--startup-mode", "signaling", "--config-file-path"])
             .arg(config)
             .env("TMPDIR", config.parent().unwrap())
@@ -148,26 +154,23 @@ async fn exercise_process(reconnect: bool) {
     use desk_agent_protocol::schedule::management::{
         ScheduleManagementRequest as Request, ScheduleManagementResponse as Response,
     };
-    let Response::Task { task: draft_task } =
+    let Response::Task { task: active } =
         crate::schedule_management::manage(&db, 1, Request::CreateDraft { draft })
             .await
             .unwrap()
     else {
-        panic!("expected draft")
+        panic!("expected manually created conversation task")
     };
-    assert_eq!(draft_task.status, ScheduledTaskStatus::Draft);
-    let Response::Task { task: active } = crate::schedule_management::manage(
-        &db,
-        1,
-        Request::ActivateConversationResume {
-            schedule_id: draft_task.schedule_id,
-            expected_revision: draft_task.revision,
-        },
-    )
-    .await
-    .unwrap() else {
-        panic!("expected active task")
-    };
+    // Manual conversation tasks activate in the creation transaction.
+    assert_eq!(active.status, ScheduledTaskStatus::Active);
+    assert!(active.next_run_at.is_some());
+    // Creation records an activation receipt in the existing conversation.
+    // Compare restart recovery against that committed state, before any server starts.
+    let row = crate::entity::agent_session::Entity::find_by_id(row.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);

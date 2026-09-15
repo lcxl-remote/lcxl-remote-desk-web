@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { CancelDeviceAssistantBackgroundTaskMutationRequest, CancelDeviceAssistantBackgroundTaskMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { cancelDeviceAssistantBackgroundTask } from "../../clients.ts";
+import type { CancelDeviceAssistantBackgroundTaskMutationRequest, CancelDeviceAssistantBackgroundTaskMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { cancelDeviceAssistantBackgroundTask } from "../../clients.ts";
 
 export const cancelDeviceAssistantBackgroundTaskMutationKey = () => [{ url: '/api/my/device-assistant-session/background-task/cancel' }] as const
 

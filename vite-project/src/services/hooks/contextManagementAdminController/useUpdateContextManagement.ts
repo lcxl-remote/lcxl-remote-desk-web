@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { UpdateContextManagementMutationRequest, UpdateContextManagementMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { updateContextManagement } from "../../clients.ts";
+import type { UpdateContextManagementMutationRequest, UpdateContextManagementMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { updateContextManagement } from "../../clients.ts";
 
 export const updateContextManagementMutationKey = () => [{ url: '/api/admin/system/ai-context-management' }] as const
 

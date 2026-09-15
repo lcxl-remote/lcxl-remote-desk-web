@@ -128,14 +128,16 @@ impl ModelSeam for MeteredModel {
             .record_dispatch(&authorized, model_call_ordinal, ordinary_receipt_id)
             .await
             .map_err(|error| {
-                log::warn!("[device-assistant] failed to persist model egress: {error}");
-                AgentError {
-                    kind: AgentErrorKind::Internal,
-                    message: "The AI model request could not be audited safely.".into(),
-                    retryable: false,
-                    safe_for_model: true,
-                    error_code: None,
-                }
+                error.into_agent_error(|error| {
+                    log::warn!("[device-assistant] failed to persist model egress: {error}");
+                    AgentError {
+                        kind: AgentErrorKind::Internal,
+                        message: "The AI model request could not be audited safely.".into(),
+                        retryable: false,
+                        safe_for_model: true,
+                        error_code: None,
+                    }
+                })
             })?;
         log::info!(
             "[device-assistant] authorized model egress receipt_id={} destination={:?} envelopes={:?} digests={:?} total_bytes={}",

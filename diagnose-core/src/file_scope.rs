@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::session::{AgentSessionSurface, PersistedAgentSession};
 
 pub mod transaction;
+pub(crate) mod windows_path;
 
 pub fn approved_directories(
     session: &PersistedAgentSession,
@@ -48,6 +49,9 @@ pub fn requires_directory_scope(tool_name: &str) -> bool {
             "patch_selected_numbers_copy"
                 | "replace_selected_pages_copy_body"
                 | "patch_selected_keynote_copy"
+                | "patch_selected_powerpoint_copy"
+                | "replace_selected_word_copy_body"
+                | "patch_selected_excel_copy"
         )
 }
 
@@ -111,6 +115,9 @@ pub fn validate_artifact_scope(
                 "patch_selected_numbers_copy"
                     | "replace_selected_pages_copy_body"
                     | "patch_selected_keynote_copy"
+                    | "patch_selected_powerpoint_copy"
+                    | "replace_selected_word_copy_body"
+                    | "patch_selected_excel_copy"
             )
         {
             // The other exact reference is the selected source file/live target.

@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { GetUsageRetentionQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import { getUsageRetention } from "../../clients.ts";
+import type { GetUsageRetentionQueryResponse } from "../../types.ts";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
+import { getUsageRetention } from "../../clients.ts";
 
 export const getUsageRetentionSuspenseQueryKey = () => [{ url: '/api/usage/usage-retention' }] as const
 

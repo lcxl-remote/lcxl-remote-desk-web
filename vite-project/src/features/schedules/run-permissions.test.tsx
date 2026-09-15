@@ -6,7 +6,7 @@ import { deskErrorCodeEnum } from '@/services/types';
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
 type Props = Parameters<typeof RunPermissions>[0];
 const snapshot: Props['snapshot'] = {
-    sessionId: 'original-session', seq: 10, inputRevision: 3, requestId: 'run-1',
+    sessionId: 'original-session', seq: 10, inputRevision: 3, requestId: 'run-1', active: false,
     permissionRequests: [{ schemaVersion: 1, requestId: 'permission-1', inputRevision: 3, state: 'pending', createdAt: '2026-09-06T00:00:00Z',
         items: [{ itemId: 'read', providerId: 'desktop.session', toolName: 'inspect_desktop_session', expectedEffect: 'read_device',
             reason: 'Read selected device', resourceScope: ['target:device-1'], operationScope: ['observe'], exportDestinations: [],
@@ -36,9 +36,10 @@ describe('scheduled run permission submission', () => {
                 operation_scope: ['observe'], export_destinations: [], ttl_seconds: 60, max_uses: 1 }] });
         expect(await screen.findByText('Decision recorded. The conversation has been refreshed to check execution progress.')).toBeInTheDocument();
     });
-    it.each(['other-run', 'other-input', 'offline', 'wrong-device', 'other-active-run', 'deleted', 'wrong-task', 'metadata-failed', 'prototype-name'])(
+    it.each(['committing', 'other-run', 'other-input', 'offline', 'wrong-device', 'other-active-run', 'deleted', 'wrong-task', 'metadata-failed', 'prototype-name'])(
         'does not submit when %s', async reason => {
             const input = props();
+            if (reason === 'committing') input.snapshot = { ...snapshot, active: true };
             if (reason === 'other-run') input.snapshot = { ...snapshot, requestId: 'another-run' };
             if (reason === 'other-input') input.snapshot = { ...snapshot, inputRevision: 4 };
             if (reason === 'offline') input.connectionIds = {};

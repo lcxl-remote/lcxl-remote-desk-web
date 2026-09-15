@@ -142,6 +142,21 @@ fn confirm_cli_lock() -> anyhow::Result<()> {
 }
 
 fn main() {
+    #[cfg(windows)]
+    {
+        let mut args = std::env::args_os();
+        let _ = args.next();
+        if args.next().as_deref()
+            == Some(std::ffi::OsStr::new(
+                lcxl_remote_desk_server::windows_office_helper::MODE,
+            ))
+        {
+            if args.next().is_some() {
+                std::process::exit(2);
+            }
+            std::process::exit(lcxl_remote_desk_server::windows_office_helper::run_stdio());
+        }
+    }
     // This private launcher is entered before clap, logging, settings, or any
     // network/runtime initialization. Its stdin/stdout are a bounded binary
     // control pipe owned by the root ServiceDaemon; argv never carries the

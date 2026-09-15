@@ -1,6 +1,9 @@
 //! Separate generated text from the per-run directory selector after Provider preflight.
 use super::*;
 
+#[path = "windows_directory.rs"]
+mod windows_directory;
+
 pub fn generated_text_input(
     tool: &crate::chat::ToolCall,
 ) -> Result<TaskGeneratedTextArtifact, TaskContractError> {
@@ -109,8 +112,12 @@ pub fn bind_directory(
 }
 
 // Interpret the remote path independently of the scheduler host's OS. Reject
-// traversal and Windows device namespaces; canonicalization belongs to Provider.
+// traversal and Windows device namespaces except strict local verbatim drive
+// paths returned by the controlled device; canonicalization belongs to Provider.
 fn is_absolute_directory(path: &str) -> bool {
+    if path.starts_with(r"\\?\") {
+        return windows_directory::is_verbatim_local_directory(path);
+    }
     let bytes = path.as_bytes();
     let drive = bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
@@ -142,6 +149,9 @@ mod directory_tests {
             "/reports",
             "C:/Reports",
             r"C:\Reports",
+            r"\\?\C:\Reports",
+            r"\\?\D:\测试 输入",
+            r"\\?\D:\",
             r"\\server\share\reports",
         ] {
             assert!(directory_resource_scope("device", path).is_ok(), "{path}");
@@ -153,7 +163,14 @@ mod directory_tests {
             "./reports",
             "/reports/../private",
             r"C:\Reports\..\Private",
-            r"\\?\C:\Reports",
+            r"\\?\C:\Reports\..\Private",
+            r"\\?\C:\Reports\.",
+            r"\\?\C:\Reports ",
+            r"\\?\C:\NUL",
+            r"\\?\C:\Reports:stream",
+            r"\\?\UNC\server\share",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+            r"\\?\C:Reports",
             r"\\.\pipe\report",
             r"\\server",
             "/reports\n",
@@ -312,7 +329,11 @@ pub fn permits_directory_resolution(
         || session.device_id != contract.contract.target_device_id
         || !session.turn_state.is_active()
         || crate::file_scope::validate_resolved_proposal(proposal, now).is_err()
-        || proposal.requested_path != proposal.canonical_path
+        || (proposal.requested_path != proposal.canonical_path
+            && !crate::file_scope::windows_path::differs_only_by_verbatim_prefix(
+                &proposal.requested_path,
+                &proposal.canonical_path,
+            ))
     {
         return false;
     }

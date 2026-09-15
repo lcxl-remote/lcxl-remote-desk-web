@@ -638,6 +638,20 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: args.max_bytes,
             })
         }
+        "inspect_selected_excel_cell" => {
+            let args = serde_json::from_str::<crate::device_assistant::windows_excel::InspectArgs>(
+                &call.arguments_json,
+            )
+            .map_err(bad_arguments)?;
+            let params = desk_agent_protocol::computer_use::SpreadsheetBatchInspectParams {
+                file: None,
+                sheet_name: args.sheet_name,
+                address: args.address,
+                max_bytes: args.max_bytes,
+            };
+            params.validate_selection().map_err(bad_arguments)?;
+            ContextKind::SpreadsheetBatchInspect(params)
+        }
         "inspect_live_document" => {
             let args = parse_params::<LiveDocumentToolArgs>(&call.arguments_json)?;
             ContextKind::DocumentLiveInspect(LiveDocumentInspectParams {
@@ -646,7 +660,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: args.max_bytes,
             })
         }
-        "inspect_selected_pages_with_iwork" => {
+        "inspect_selected_pages_with_iwork" | "inspect_selected_word_file" => {
             let args = parse_params::<BatchDocumentToolArgs>(&call.arguments_json)?;
             ContextKind::DocumentLiveInspect(LiveDocumentInspectParams {
                 target: None,
@@ -662,7 +676,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: args.max_bytes,
             })
         }
-        "inspect_selected_keynote_with_iwork" => {
+        "inspect_selected_keynote_with_iwork" | "inspect_selected_powerpoint_file" => {
             let args = parse_params::<BatchDocumentToolArgs>(&call.arguments_json)?;
             ContextKind::PresentationLiveInspect(LiveDocumentInspectParams {
                 target: None,
@@ -1011,6 +1025,10 @@ mod tests {
                 "inspect_selected_keynote_with_iwork",
                 Capability::PresentationLiveInspect,
             ),
+            (
+                "inspect_selected_powerpoint_file",
+                Capability::PresentationLiveInspect,
+            ),
         ] {
             let (capability, input) = build_read_operation(&ToolCall {
                 id: format!("call-{name}"),
@@ -1040,6 +1058,36 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn excel_cell_inspection_requires_explicit_selection_and_server_bound_source() {
+        let call = |arguments: &str| ToolCall {
+            id: "excel-cell".into(),
+            name: "inspect_selected_excel_cell".into(),
+            arguments_json: arguments.into(),
+        };
+        for arguments in [
+            "",
+            "{}",
+            r#"{"sheet_name":"Sheet1","address":"A1"}"#,
+            r#"{"sheet_name":"Sheet1","address":"A1","max_bytes":1024,"path":"C:\\private.xlsx"}"#,
+        ] {
+            assert!(build_read_operation(&call(arguments)).is_err());
+        }
+        let (_, input) = build_read_operation(&call(
+            r#"{"sheet_name":"Sheet1","address":"A1","max_bytes":1024}"#,
+        ))
+        .unwrap();
+        let OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::SpreadsheetBatchInspect(params),
+        }) = input
+        else {
+            panic!("expected file batch read")
+        };
+        assert!(params.file.is_none());
+        assert_eq!(params.sheet_name, "Sheet1");
+        assert_eq!(params.address, "A1");
     }
 }
 

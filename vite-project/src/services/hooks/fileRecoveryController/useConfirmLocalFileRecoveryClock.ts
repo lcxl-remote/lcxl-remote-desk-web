@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { ConfirmLocalFileRecoveryClockMutationRequest, ConfirmLocalFileRecoveryClockMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { confirmLocalFileRecoveryClock } from "../../clients.ts";
+import type { ConfirmLocalFileRecoveryClockMutationRequest, ConfirmLocalFileRecoveryClockMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { confirmLocalFileRecoveryClock } from "../../clients.ts";
 
 export const confirmLocalFileRecoveryClockMutationKey = () => [{ url: '/api/desk/file-recovery/clock' }] as const
 

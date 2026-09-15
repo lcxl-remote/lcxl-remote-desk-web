@@ -268,7 +268,7 @@ export function useDeviceAssistantObservation({
         } else if (entries.desktop_session_inspect.phase === 'ready') {
             applicationCatalogRequested.current = false;
             const root = sessionOutput?.session;
-            if (sessionOutput?.os === 'macos' && root?.object_kind === 'desktop_session'
+            if ((sessionOutput?.os === 'macos' || sessionOutput?.os === 'windows') && root?.object_kind === 'desktop_session'
                 && root.token && root.snapshot_id) inspectUi(root);
         }
     }, [entries.desktop_session_inspect, sessionOutput, inspectUi]);
@@ -302,5 +302,5 @@ export function useDeviceAssistantObservation({
     }, [cancelDelayedUi, deskId, enabled, inspectUi]);
 
     return { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds,
-        applications, listApplications, applicationSelectionAvailable: !sessionOutput?.os || sessionOutput.os === 'macos' };
+        applications, listApplications, applicationSelectionAvailable: !sessionOutput?.os || sessionOutput.os === 'macos' || sessionOutput.os === 'windows' };
 }

@@ -105,7 +105,7 @@ describe('ownerSelectableWindows', () => {
 
 
 describe('background application selection', () => {
-    it('fetches a fresh session then sends the selected opaque application root', () => {
+    it.each(['macos', 'windows'])('fetches a fresh %s session then sends the selected opaque application root', (os) => {
         let subscriber: SignalingSubscriber = () => {};
         const subscribe = (handler: SignalingSubscriber) => { subscriber = handler; return () => {}; };
         let seq = 0;
@@ -115,11 +115,12 @@ describe('background application selection', () => {
         const app = { ...root, token: 'calculator', object_kind: 'application' as const };
         act(() => result.current.listApplications());
         act(() => subscriber({ signaling_type: SIGNALING_TYPE_CODE_AGENT_CAPABILITY_COMPLETED, request_id: 'request-1',
-            signaling_data: { Ok: { ReadContext: { DesktopSessionInspect: { session: root, os: 'macos' } } } },
+            signaling_data: { Ok: { ReadContext: { DesktopSessionInspect: { session: root, os } } } },
         } as Parameters<SignalingSubscriber>[0]));
         expect(sendMessage.mock.calls[1][1]).toMatchObject({ operation: { input: { params: { kind: { params: { root, allow_unfiltered: true } } } } } });
         const output = { ReadContext: { DesktopUiInspect: { nodes: [{ role: 'application', name: 'Calculator', object_ref: app }] } } };
         act(() => subscriber({ signaling_type: SIGNALING_TYPE_CODE_AGENT_CAPABILITY_COMPLETED, request_id: 'request-2', signaling_data: { Ok: output } } as Parameters<SignalingSubscriber>[0]));
+        expect(result.current.applicationSelectionAvailable).toBe(true);
         expect(result.current.applications[0].name).toBe('Calculator');
         act(() => result.current.inspectUi(result.current.applications[0].objectRef));
         expect(sendMessage.mock.calls[2][1]).toMatchObject({ operation: { input: { params: { kind: { params: { root: app, allow_unfiltered: true } } } } } });

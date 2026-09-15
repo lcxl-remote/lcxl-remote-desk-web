@@ -8,17 +8,7 @@ use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
 
-pub(crate) struct RecoveryContext {
-    pub data_root: PathBuf,
-    pub execution_epoch: u64,
-    pub quota: Option<crate::worker::session::QuotaClient>,
-    pub scope: desk_file_recovery::Scope,
-    pub conversation_id: String,
-    pub operation_id: String,
-    pub generation: String,
-    #[cfg(test)]
-    pub(crate) _test_data: Option<std::sync::Arc<tempfile::TempDir>>,
-}
+pub(crate) use super::text_recovery_context::RecoveryContext;
 
 #[cfg(test)]
 fn test_context(_directory: &ObjectRef) -> RecoveryContext {

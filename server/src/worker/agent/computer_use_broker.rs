@@ -5,6 +5,15 @@
 //! every prior reference. Typed actions re-resolve those references and run
 //! only behind the writer lease, local ceiling, and exact-grant dispatch path.
 
+mod application_catalog;
+mod ui_platform;
+#[cfg(windows)]
+mod windows_excel;
+#[cfg(windows)]
+mod windows_office;
+#[cfg(windows)]
+mod windows_word;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -85,6 +94,27 @@ fn screen_capture_readiness(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ResolvedObject {
+    #[cfg(windows)]
+    ExcelBatch {
+        source_file: ObjectRef,
+        source_sha256: String,
+        source_byte_len: u64,
+        sheet_name: String,
+        cell_address: String,
+    },
+    #[cfg(windows)]
+    WordBatch {
+        source_file: ObjectRef,
+        source_sha256: String,
+        source_byte_len: u64,
+    },
+    #[cfg(windows)]
+    PowerPointBatch {
+        source_file: ObjectRef,
+        source_sha256: String,
+        source_byte_len: u64,
+        slide_number: i64,
+    },
     DesktopSession {
         session_id: u32,
     },
@@ -202,6 +232,8 @@ pub struct ComputerUseBroker {
     screen_capture_gate: Mutex<ScreenCaptureGateState>,
     human_input_epoch: AtomicU64,
     input_ownership_ready: AtomicBool,
+    #[cfg(windows)]
+    file_recovery_ready: AtomicBool,
     objects: Mutex<HashMap<String, StoredObject>>,
     ui_identities: Mutex<HashMap<String, ResolvedObject>>,
     ui_identity_session: Mutex<Option<String>>,
@@ -236,6 +268,8 @@ impl ComputerUseBroker {
             screen_capture_gate: Mutex::new(ScreenCaptureGateState::default()),
             human_input_epoch: AtomicU64::new(0),
             input_ownership_ready: AtomicBool::new(false),
+            #[cfg(windows)]
+            file_recovery_ready: AtomicBool::new(false),
             objects: Mutex::new(HashMap::new()),
             ui_identities: Mutex::new(HashMap::new()),
             ui_identity_session: Mutex::new(None),
@@ -243,6 +277,11 @@ impl ComputerUseBroker {
             writer_lease: WriterLeaseCoordinator::new(),
             browser_extension: Arc::new(BrowserExtensionBroker::default()),
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn set_file_recovery_ready(&self, ready: bool) {
+        self.file_recovery_ready.store(ready, Ordering::SeqCst);
     }
 
     pub(crate) fn start_browser_extension_bridge(
@@ -293,25 +332,11 @@ impl ComputerUseBroker {
                     false,
                 ));
             }
-            #[cfg(target_os = "macos")]
-            {
-                Some(
-                    super::macos_accessibility_observer::resolve_window_capture_target(
-                        process_id,
-                        &image_path,
-                        &fingerprint,
-                    )?,
-                )
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = (process_id, image_path, fingerprint);
-                return Err(error(
-                    AgentErrorKind::UnsupportedCapability,
-                    "owner-selected window capture is currently available only on macOS",
-                    false,
-                ));
-            }
+            Some(ui_platform::window_capture_target(
+                process_id,
+                &image_path,
+                &fingerprint,
+            )?)
         } else {
             None
         };
@@ -1026,6 +1051,11 @@ impl ComputerUseBroker {
         let terminal_provider_supported = core_diagnostics_supported;
         let desktop_provider_supported = cfg!(any(windows, target_os = "macos"));
         let file_provider_supported = cfg!(any(windows, target_os = "linux", target_os = "macos"));
+        let text_file_supported = cfg!(any(windows, target_os = "macos"));
+        #[cfg(windows)]
+        let text_file_storage_ready = self.file_recovery_ready.load(Ordering::SeqCst);
+        #[cfg(not(windows))]
+        let text_file_storage_ready = cfg!(target_os = "macos");
         let artifact_reason = if !file_provider_supported {
             Some(ComputerUseReadinessReason::UnsupportedPlatform)
         } else if !ceiling.enabled {
@@ -1517,6 +1547,9 @@ impl ComputerUseBroker {
                         },
                     ),
                 },
+                #[cfg(windows)]
+                windows_excel::readiness(ceiling, session_ready, session_reason),
+                #[cfg(not(windows))]
                 ComputerUseCapabilityReadiness {
                     capability: Capability::SpreadsheetLiveInspect,
                     adapter: ComputerUseAdapterRef {
@@ -1527,6 +1560,9 @@ impl ComputerUseBroker {
                     ready: numbers_ref.is_some(),
                     reason: iwork_reason(numbers_ref.is_some(), numbers_error),
                 },
+                #[cfg(windows)]
+                windows_excel::mutation_readiness(ceiling, session_ready, session_reason),
+                #[cfg(not(windows))]
                 ComputerUseCapabilityReadiness {
                     capability: Capability::SpreadsheetLivePatchConfirmed,
                     adapter: ComputerUseAdapterRef {
@@ -1537,6 +1573,9 @@ impl ComputerUseBroker {
                     ready: numbers_ref.is_some(),
                     reason: iwork_reason(numbers_ref.is_some(), numbers_error),
                 },
+                #[cfg(windows)]
+                windows_word::readiness(ceiling, session_ready, session_reason),
+                #[cfg(not(windows))]
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DocumentLiveInspect,
                     adapter: ComputerUseAdapterRef {
@@ -1547,6 +1586,9 @@ impl ComputerUseBroker {
                     ready: pages_ref.is_some(),
                     reason: iwork_reason(pages_ref.is_some(), pages_error),
                 },
+                #[cfg(windows)]
+                windows_word::mutation_readiness(ceiling, session_ready, session_reason),
+                #[cfg(not(windows))]
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DocumentLivePatchConfirmed,
                     adapter: ComputerUseAdapterRef {
@@ -1557,6 +1599,9 @@ impl ComputerUseBroker {
                     ready: pages_ref.is_some(),
                     reason: iwork_reason(pages_ref.is_some(), pages_error),
                 },
+                #[cfg(windows)]
+                windows_office::readiness(ceiling, session_ready, session_reason),
+                #[cfg(not(windows))]
                 ComputerUseCapabilityReadiness {
                     capability: Capability::PresentationLiveInspect,
                     adapter: ComputerUseAdapterRef {
@@ -1567,6 +1612,9 @@ impl ComputerUseBroker {
                     ready: keynote_ref.is_some(),
                     reason: iwork_reason(keynote_ref.is_some(), keynote_error),
                 },
+                #[cfg(windows)]
+                windows_office::mutation_readiness(ceiling, session_ready, session_reason),
+                #[cfg(not(windows))]
                 ComputerUseCapabilityReadiness {
                     capability: Capability::PresentationLivePatchConfirmed,
                     adapter: ComputerUseAdapterRef {
@@ -1658,10 +1706,12 @@ impl ComputerUseBroker {
                         version: desk_diagnose_core::device_assistant::TEXT_FILE_ADAPTER_VERSION
                             .into(),
                     },
-                    supported: cfg!(target_os = "macos"),
-                    ready: cfg!(target_os = "macos") && ceiling.enabled,
-                    reason: if !cfg!(target_os = "macos") {
+                    supported: text_file_supported,
+                    ready: text_file_supported && text_file_storage_ready && ceiling.enabled,
+                    reason: if !text_file_supported {
                         Some(ComputerUseReadinessReason::UnsupportedPlatform)
+                    } else if ceiling.enabled && !text_file_storage_ready {
+                        Some(ComputerUseReadinessReason::AdapterUnavailable)
                     } else {
                         artifact_reason
                     },
@@ -1673,10 +1723,12 @@ impl ComputerUseBroker {
                         version: desk_diagnose_core::device_assistant::TEXT_FILE_ADAPTER_VERSION
                             .into(),
                     },
-                    supported: cfg!(target_os = "macos"),
-                    ready: cfg!(target_os = "macos") && ceiling.enabled,
-                    reason: if !cfg!(target_os = "macos") {
+                    supported: text_file_supported,
+                    ready: text_file_supported && text_file_storage_ready && ceiling.enabled,
+                    reason: if !text_file_supported {
                         Some(ComputerUseReadinessReason::UnsupportedPlatform)
+                    } else if ceiling.enabled && !text_file_storage_ready {
+                        Some(ComputerUseReadinessReason::AdapterUnavailable)
                     } else {
                         artifact_reason
                     },
@@ -2646,126 +2698,6 @@ impl ComputerUseBroker {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn inspect_application_catalog(
-        &self,
-        session_id: u32,
-        params: &UiInspectParams,
-        ceiling: &ComputerUseSettings,
-    ) -> Result<UiInspectOutput, AgentError> {
-        let snapshot_id = self.next_snapshot_id();
-        let incarnation = format!("{}:{}", session_id, self.current_incarnation_nonce());
-        let mut output = UiInspectOutput {
-            snapshot_id: snapshot_id.clone(),
-            adapter: ComputerUseAdapterRef {
-                kind: ComputerUseAdapterKind::MacosAccessibility,
-                version: "macos-accessibility-read/v1".into(),
-            },
-            nodes: Vec::new(),
-            owner_selectable_windows: Vec::new(),
-            truncated: false,
-        };
-        for application in super::macos_accessibility_observer::running_applications()? {
-            if !ceiling.application_allowed(&application.image_path) {
-                continue;
-            }
-            let display_name = std::path::Path::new(&application.image_path)
-                .file_name()
-                .map(|v| v.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let metadata = super::macos_accessibility_observer::application_display_metadata(
-                application.process_id,
-            );
-            let application_state = metadata.as_ref().map(|(_, state)| *state);
-            let localized_name = metadata.map(|(name, _)| name).unwrap_or_default();
-            let catalog_name = if localized_name.is_empty() || localized_name == display_name {
-                display_name.clone()
-            } else {
-                format!("{localized_name} ({display_name})")
-            };
-            let matched_queries = params
-                .query
-                .as_ref()
-                .map(|q| {
-                    desk_agent_protocol::matching_search_terms(
-                        &q.queries,
-                        &[&display_name, &localized_name, &application.image_path],
-                    )
-                })
-                .unwrap_or_default();
-            if params.query.as_ref().is_some_and(|q| {
-                (!q.queries.is_empty() && matched_queries.is_empty()) || q.element_id.is_some()
-            }) {
-                continue;
-            }
-            if output.nodes.len() >= (params.max_nodes as usize).min(128) {
-                output.truncated = true;
-                break;
-            }
-            let name = Some(catalog_name);
-            let object_ref = self.issue_ref(
-                &snapshot_id,
-                &incarnation,
-                ObjectKind::Application,
-                ResolvedObject::Application {
-                    window_handle: application.window_handle,
-                    process_id: application.process_id,
-                    image_path: application.image_path,
-                    process_started_at: application.process_started_at,
-                },
-            )?;
-            output.nodes.push(UiNodeProjection {
-                location: Default::default(),
-                application_state,
-                element_id: None,
-                matched_queries: Vec::new(),
-                collapsed_children: 0,
-                native_id: None,
-                object_ref,
-                parent_index: None,
-                role: "application".into(),
-                name,
-                value: None,
-                is_protected: false,
-                enabled: true,
-                supported_actions: Vec::new(),
-            });
-            if serde_json::to_vec(&output)
-                .map_err(|_| {
-                    error(
-                        AgentErrorKind::Internal,
-                        "failed to encode the application catalog",
-                        false,
-                    )
-                })?
-                .len()
-                > params.max_bytes as usize
-            {
-                output.nodes.pop();
-                output.truncated = true;
-                break;
-            }
-        }
-        if serde_json::to_vec(&output)
-            .map_err(|_| {
-                error(
-                    AgentErrorKind::Internal,
-                    "failed to encode the application catalog",
-                    false,
-                )
-            })?
-            .len()
-            > params.max_bytes as usize
-        {
-            return Err(error(
-                AgentErrorKind::OutputLimitExceeded,
-                "application catalog byte budget is too small",
-                false,
-            ));
-        }
-        Ok(output)
-    }
-
     pub fn inspect_desktop_ui(
         &self,
         params: &UiInspectParams,
@@ -2814,7 +2746,6 @@ impl ComputerUseBroker {
         };
 
         let observed = observe_interactive_desktop()?;
-        #[cfg(target_os = "macos")]
         if let Some(ResolvedObject::DesktopSession { session_id }) = &resolved_root
             && *session_id == observed.session_id
         {
@@ -2827,17 +2758,7 @@ impl ComputerUseBroker {
             }
             return self.inspect_application_catalog(*session_id, params, ceiling);
         }
-        #[cfg(target_os = "macos")]
-        let selected_application = match &resolved_root {
-            Some(ResolvedObject::Application { process_id, .. })
-            | Some(ResolvedObject::Window { process_id, .. })
-            | Some(ResolvedObject::UiElement { process_id, .. }) => Some(
-                super::macos_accessibility_observer::application_by_pid(*process_id)?,
-            ),
-            _ => None,
-        };
-        #[cfg(not(target_os = "macos"))]
-        let selected_application = None;
+        let selected_application = ui_platform::selected_application(resolved_root.as_ref())?;
         let application = selected_application
             .or(observed.foreground_application)
             .ok_or_else(|| {
@@ -2904,12 +2825,7 @@ impl ComputerUseBroker {
             }
         }
         let (mut collected, adapter_kind, adapter_version, adapter_name) =
-            collect_foreground_desktop_ui(
-                application.process_id,
-                &application.image_path,
-                &native_params,
-                selected_window.as_deref(),
-            )?;
+            ui_platform::collect(&application, &native_params, selected_window.as_deref())?;
 
         let collapsed = if params.overview && params.query.is_none() && !params.element_only {
             fold_ui_collections(&mut collected)
@@ -2917,17 +2833,7 @@ impl ComputerUseBroker {
             std::collections::HashMap::new()
         };
 
-        #[cfg(target_os = "macos")]
-        if super::macos_accessibility_observer::application_by_pid(application.process_id)?
-            .process_started_at
-            != application.process_started_at
-        {
-            return Err(error(
-                AgentErrorKind::SessionUnavailable,
-                "the selected application restarted during inspection",
-                true,
-            ));
-        }
+        ui_platform::validate_lifetime(&application)?;
         let snapshot_id = self.next_snapshot_id();
         let incarnation = format!(
             "{}:{}",
@@ -2941,9 +2847,7 @@ impl ComputerUseBroker {
         let mut encoded_bytes = 512usize;
         let mut truncated = collected.truncated;
         for mut node in collected.nodes {
-            #[cfg(target_os = "macos")]
-            let window_projection = if node.role == "AXWindow" || node.role.starts_with("AXWindow/")
-            {
+            let window_projection = if ui_platform::is_window(&node) {
                 let object_ref = self.issue_ref(
                     &snapshot_id,
                     &incarnation,
@@ -3023,7 +2927,6 @@ impl ComputerUseBroker {
                     true,
                 )
             })?;
-            #[cfg(target_os = "macos")]
             let window_bytes = window_projection
                 .as_ref()
                 .map(|window| serde_json::to_vec(window))
@@ -3038,8 +2941,6 @@ impl ComputerUseBroker {
                 .map_or(0, |bytes| {
                     bytes.len() + usize::from(!owner_selectable_windows.is_empty())
                 });
-            #[cfg(not(target_os = "macos"))]
-            let window_bytes = 0usize;
             let additional = projection_bytes.len() + usize::from(!nodes.is_empty()) + window_bytes;
             if encoded_bytes.saturating_add(additional) > params.max_bytes as usize {
                 truncated = true;
@@ -3047,7 +2948,6 @@ impl ComputerUseBroker {
             }
             encoded_bytes += additional;
             nodes.push(projection);
-            #[cfg(target_os = "macos")]
             if let Some(window) = window_projection {
                 owner_selectable_windows.push(window);
             }
@@ -3092,7 +2992,7 @@ impl ComputerUseBroker {
     /// bridge document hash, while discarding it here creates a readiness-cache
     /// race immediately after the owner opens or uses the task pane. A later
     /// mutation still cannot reuse Worksheet, Range, or coordinate snapshots.
-    /// macOS semantic UI identities survive input but are relocated and checked
+    /// Native semantic UI identities survive input but are relocated and checked
     /// against the live Accessibility tree before each action. AI adapter input will use a
     /// separate marked path when mutation is implemented.
     pub fn note_browser_input(&self) {
@@ -3207,21 +3107,21 @@ impl ComputerUseBroker {
                 if matches!(&object.resolved, ResolvedObject::OfficeDocument { .. }) {
                     return true;
                 }
-                // macOS semantic targets are process-bound identities, not coordinates.
+                // Native semantic targets are process-bound identities, not coordinates.
                 // Approval clicks must not erase them. Native preflight and execution
                 // both relocate the fingerprint and validate the supported action.
                 // Writer leases are still preempted above on every human input.
-                #[cfg(target_os = "macos")]
+                #[cfg(any(windows, target_os = "macos"))]
                 if matches!(
                     &object.resolved,
                     ResolvedObject::UiElement { .. } | ResolvedObject::Window { .. }
                 ) {
                     return true;
                 }
-                // macOS application/session selectors are read identities, not
+                // Native application/session selectors are read identities, not
                 // UI snapshots. Clicking the picker must not invalidate them.
                 // Session changes and expiry still invalidate every selector.
-                #[cfg(target_os = "macos")]
+                #[cfg(any(windows, target_os = "macos"))]
                 if matches!(
                     &object.resolved,
                     ResolvedObject::DesktopSession { .. }
@@ -3575,14 +3475,11 @@ impl ScreenCapturePermit {
                     false,
                 ));
             };
-            #[cfg(target_os = "macos")]
-            if Some(
-                super::macos_accessibility_observer::resolve_window_capture_target(
-                    process_id,
-                    &image_path,
-                    &fingerprint,
-                )?,
-            ) != self.window_target
+            if Some(ui_platform::window_capture_target(
+                process_id,
+                &image_path,
+                &fingerprint,
+            )?) != self.window_target
             {
                 return Err(error(
                     AgentErrorKind::SessionUnavailable,
@@ -3590,8 +3487,6 @@ impl ScreenCapturePermit {
                     true,
                 ));
             }
-            #[cfg(not(target_os = "macos"))]
-            let _ = (process_id, image_path, fingerprint);
         }
         Ok(())
     }
@@ -3953,71 +3848,6 @@ pub(super) struct CollectedUiNode {
 pub(super) struct CollectedUiTree {
     pub(super) nodes: Vec<CollectedUiNode>,
     pub(super) truncated: bool,
-}
-
-fn collect_foreground_desktop_ui(
-    process_id: u32,
-    image_path: &str,
-    params: &UiInspectParams,
-    menu_window: Option<&str>,
-) -> Result<
-    (
-        CollectedUiTree,
-        ComputerUseAdapterKind,
-        &'static str,
-        &'static str,
-    ),
-    AgentError,
-> {
-    #[cfg(windows)]
-    {
-        Ok((
-            super::windows_uia_observer::collect_foreground_selection(
-                process_id,
-                image_path,
-                params.max_depth,
-                params.max_nodes,
-                params.max_bytes,
-                params.scope,
-                menu_window,
-                params.query.as_ref(),
-                params.element_only,
-            )?,
-            ComputerUseAdapterKind::WindowsUia,
-            "a4-windows-uia-read/v1",
-            "Windows UI Automation",
-        ))
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        Ok((
-            super::macos_accessibility_observer::collect_application_selection(
-                process_id,
-                image_path,
-                params.max_depth,
-                params.max_nodes,
-                params.max_bytes,
-                params.scope,
-                menu_window,
-                params.query.as_ref(),
-                params.element_only,
-            )?,
-            ComputerUseAdapterKind::MacosAccessibility,
-            "macos-accessibility-read/v1",
-            "macOS Accessibility",
-        ))
-    }
-
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = (process_id, image_path, params, menu_window);
-        Err(error(
-            AgentErrorKind::UnsupportedPlatform,
-            "semantic desktop UI inspection is unavailable on this platform",
-            false,
-        ))
-    }
 }
 
 #[cfg(windows)]
@@ -4510,9 +4340,13 @@ mod tests {
     #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn unsupported_desktop_ui_adapter_fails_closed() {
-        let error = collect_foreground_desktop_ui(
-            1,
-            "/usr/bin/example",
+        let error = ui_platform::collect(
+            &ObservedApplication {
+                window_handle: 0,
+                process_id: 1,
+                image_path: "/usr/bin/example".into(),
+                process_started_at: Some(1),
+            },
             &UiInspectParams {
                 allow_unfiltered: true,
                 overview: false,
@@ -4729,6 +4563,7 @@ mod tests {
 
     #[test]
     fn file_writer_without_observation_remains_worker_bound_and_preemptible() {
+        use desk_agent_protocol::computer_use::{ComputerActionKind, FilePatchAction};
         let broker = ComputerUseBroker::new();
         let readiness = broker.readiness(
             &ComputerUseSettings {
@@ -4741,7 +4576,16 @@ mod tests {
         );
         assert!(broker.active_session_incarnation.lock().unwrap().is_none());
         let request = WriterLeaseRequest {
-            scope: WriterLeaseScope::FileWorker,
+            scope: crate::worker::agent::computer_use_writer::scope_for_action(
+                &ComputerActionKind::File(FilePatchAction::CreateTextArtifact {
+                    file_name: "output.txt".into(),
+                    content_utf8: "approved text".into(),
+                }),
+                &ComputerUseAdapterRef {
+                    kind: ComputerUseAdapterKind::FileSystem,
+                    version: "file-workspace/v1".into(),
+                },
+            ),
             work_id: "file-work".into(),
             action_request_id: "file-action".into(),
             execution_generation: "file-generation".into(),
@@ -4863,7 +4707,7 @@ mod tests {
         drop(monitor);
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn human_input_invalidates_existing_references() {
         let broker = ComputerUseBroker::new();
@@ -4885,7 +4729,7 @@ mod tests {
         assert_eq!(error.kind, AgentErrorKind::InvalidInput);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn approval_input_and_elapsed_time_preserve_identity_but_worker_restart_does_not() {
         let broker = ComputerUseBroker::new();
@@ -5318,6 +5162,8 @@ mod tests {
     #[test]
     fn text_mutations_follow_master_switch_without_granting_directory_authority() {
         let broker = ComputerUseBroker::new();
+        #[cfg(windows)]
+        broker.set_file_recovery_ready(true);
         for enabled in [false, true, false] {
             let settings = ComputerUseSettings {
                 enabled,
@@ -5333,8 +5179,11 @@ mod tests {
                     .iter()
                     .find(|entry| entry.capability == capability)
                     .unwrap();
-                assert_eq!(entry.supported, cfg!(target_os = "macos"));
-                assert_eq!(entry.ready, enabled && cfg!(target_os = "macos"));
+                assert_eq!(entry.supported, cfg!(any(target_os = "macos", windows)));
+                assert_eq!(
+                    entry.ready,
+                    enabled && cfg!(any(target_os = "macos", windows))
+                );
                 assert_eq!(
                     entry.adapter.version,
                     desk_diagnose_core::device_assistant::TEXT_FILE_ADAPTER_VERSION

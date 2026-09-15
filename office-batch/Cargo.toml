@@ -1,0 +1,13 @@
+[package]
+name = "desk-office-batch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+desk-agent-protocol.workspace = true
+desk-diagnose-core.workspace = true
+quick-xml.workspace = true
+zip.workspace = true

@@ -116,7 +116,7 @@ impl SignalScheduleExecutor {
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
         let token = claimed.session.lease_token;
-        let result = crate::device_assistant_orchestrator::resume_fresh_task(
+        let result = owned_task::run(crate::device_assistant_orchestrator::resume_fresh_task(
             self.connections.clone(),
             self.db.clone(),
             self.gate.clone(),
@@ -124,8 +124,11 @@ impl SignalScheduleExecutor {
             NODE,
             claimed.session,
             LEASE_SECONDS,
-        )
+        ))
         .await;
+        let Ok(result) = result else {
+            return Ok(DispatchResult::Reconcile);
+        };
         let lease = || crate::schedule_store::FreshTaskLease {
             owner: candidate.owner_user_id,
             run_id: &candidate.run_id,

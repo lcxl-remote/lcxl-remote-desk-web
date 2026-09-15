@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { QueryDeviceAssistantSettingsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import { queryDeviceAssistantSettings } from "../../clients.ts";
+import type { QueryDeviceAssistantSettingsQueryResponse } from "../../types.ts";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
+import { queryDeviceAssistantSettings } from "../../clients.ts";
 
 export const queryDeviceAssistantSettingsSuspenseQueryKey = () => [{ url: '/api/desk/settings/device-assistant' }] as const
 

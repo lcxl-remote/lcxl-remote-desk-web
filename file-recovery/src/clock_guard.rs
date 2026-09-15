@@ -161,7 +161,13 @@ fn system_boot_clock() -> io::Result<(String, u64)> {
     Ok((boot.trim().into(), elapsed))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+#[path = "clock_windows.rs"]
+mod windows_clock;
+#[cfg(windows)]
+use windows_clock::system_boot_clock;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn system_boot_clock() -> io::Result<(String, u64)> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

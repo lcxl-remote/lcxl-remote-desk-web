@@ -23,6 +23,10 @@ fn both_orchestrators_derive_application_ui_authority_for_the_same_bounded_actio
         UiSemanticAction::SetValue {
             value: "test value".into(),
         },
+        UiSemanticAction::Scroll {
+            horizontal: 0,
+            vertical: 2,
+        },
     ] {
         let call = call(action.clone());
         for surface in [
@@ -73,7 +77,9 @@ fn ui_decoder_rejects_non_ui_targets_extra_authority_and_unbounded_actions() {
             1 => value["target"]["token"] = json!(" "),
             2 => value["target"]["token"] = json!(""),
             3 => value["risk_tier"] = json!("r0"),
-            4 => value["action"] = json!({"kind":"scroll","params":{"horizontal":0,"vertical":1}}),
+            4 => {
+                value["action"] = json!({"kind":"scroll","params":{"horizontal":0,"vertical":300}})
+            }
             5 => {
                 value["action"] =
                     json!({"kind":"set_value","params":{"value":"x".repeat(16*1024+1)}})
@@ -89,6 +95,25 @@ fn ui_decoder_rejects_non_ui_targets_extra_authority_and_unbounded_actions() {
         }
         call.arguments_json = value.to_string();
         assert!(ui_action_from_call(&call).is_err(), "case {case}");
+    }
+}
+
+#[test]
+fn semantic_scroll_accepts_only_nonempty_discrete_axis_amounts() {
+    for horizontal in [i32::MIN, -3, -2, -1, 0, 1, 2, 3, i32::MAX] {
+        for vertical in [-3, -2, -1, 0, 1, 2, 3] {
+            let valid = (-2..=2).contains(&horizontal)
+                && (-2..=2).contains(&vertical)
+                && (horizontal != 0 || vertical != 0);
+            assert_eq!(
+                ui_action_from_call(&call(UiSemanticAction::Scroll {
+                    horizontal,
+                    vertical
+                }))
+                .is_ok(),
+                valid
+            );
+        }
     }
 }
 

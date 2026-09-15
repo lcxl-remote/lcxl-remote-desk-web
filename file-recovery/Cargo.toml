@@ -16,5 +16,8 @@ zip = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = "0.4.3"
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Security_Authorization", "Win32_System_IO", "Wdk_System_SystemInformation"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }

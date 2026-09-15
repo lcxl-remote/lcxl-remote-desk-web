@@ -69,6 +69,10 @@ pub fn bind(
             p.max_bytes = p.max_bytes.min(bytes);
             1
         }
+        ContextKind::SpreadsheetBatchInspect(p) => {
+            p.max_bytes = p.max_bytes.min(bytes);
+            1
+        }
         ContextKind::FileMetadataInspect(p) => {
             p.max_bytes = p.max_bytes.min(bytes);
             p.max_entries = p.max_entries.min(items);
@@ -161,6 +165,7 @@ pub fn validate_output(
         }
         (ContextKind::FileContentRead(_), ReadContextOutput::FileContentRead(_))
         | (ContextKind::SpreadsheetLiveInspect(_), ReadContextOutput::SpreadsheetLiveInspect(_))
+        | (ContextKind::SpreadsheetBatchInspect(_), ReadContextOutput::SpreadsheetLiveInspect(_))
         | (ContextKind::DocumentLiveInspect(_), ReadContextOutput::DocumentLiveInspect(_))
         | (
             ContextKind::PresentationLiveInspect(_),

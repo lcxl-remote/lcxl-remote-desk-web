@@ -10,6 +10,12 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, opti
 } }) }));
 
 describe('observation summaries', () => {
+    it('shows semantic scrolling only when advertised by the observed control', () => {
+        const { rerender } = render(<AssistantObservationResult data={{ ReadContext: { DesktopUiInspect: { nodes: [{ role: 'list', name: '列表', supported_actions: ['scroll'] }] } } }} />);
+        expect(screen.getByText('支持操作：滚动内容')).toBeTruthy();
+        rerender(<AssistantObservationResult data={{ ReadContext: { DesktopUiInspect: { nodes: [{ role: 'list', name: '列表', supported_actions: [] }] } } }} />);
+        expect(screen.queryByText('支持操作：滚动内容')).toBeNull();
+    });
     it('shows desktop facts with native references confined to collapsed details', () => {
         const { container } = render(<AssistantObservationResult data={{ ReadContext: { DesktopSessionInspect: { os: 'macos', active_application_name: 'Calculator', session: { token: 'internal-token' } } } }} />);
         expect(screen.getByText('桌面可访问')).toBeTruthy();

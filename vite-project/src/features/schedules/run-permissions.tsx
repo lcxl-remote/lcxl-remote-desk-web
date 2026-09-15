@@ -4,7 +4,7 @@ import { AssistantPermissionRequest } from '@/features/desk/assistant-permission
 import { deskErrorCodeEnum, type DeviceAssistantSessionSnapshotDto, type PermissionDecisionBody, type PermissionRequestDto, type ScheduleView } from '@/services/types';
 import type { ScheduleClient } from './client';
 
-type ApprovalSnapshot = Pick<DeviceAssistantSessionSnapshotDto, 'sessionId' | 'seq' | 'requestId' | 'inputRevision' | 'permissionRequests'>;
+type ApprovalSnapshot = Pick<DeviceAssistantSessionSnapshotDto, 'sessionId' | 'seq' | 'requestId' | 'inputRevision' | 'permissionRequests' | 'active'>;
 
 export function RunPermissions({ client, scheduleId, runId, snapshot, connectionIds = {}, connected, loading, onReload }: {
     client: Pick<ScheduleClient, 'request'>; scheduleId: string; runId: string; snapshot: ApprovalSnapshot;
@@ -39,7 +39,7 @@ export function RunPermissions({ client, scheduleId, runId, snapshot, connection
     const currentRun = snapshot.requestId === runId && task?.active_run_id === runId
         && ['active', 'triggered', 'paused'].includes(task.status);
     const hasCurrentPending = snapshot.permissionRequests.some(request => request.state === 'pending' && request.inputRevision === snapshot.inputRevision);
-    const canDecide = hasCurrentPending && connected && !!connection && currentRun && !loading && validatedSnapshot === snapshot;
+    const canDecide = hasCurrentPending && !snapshot.active && connected && !!connection && currentRun && !loading && validatedSnapshot === snapshot;
     const decide = async (request: PermissionRequestDto, items: PermissionDecisionBody['items']) => {
         if (!canDecide || inFlight.current || request.state !== 'pending' || request.inputRevision !== snapshot.inputRevision
             || !snapshot.permissionRequests.includes(request)) return false;
@@ -78,6 +78,6 @@ export function RunPermissions({ client, scheduleId, runId, snapshot, connection
         {snapshot.permissionRequests.map(request => <AssistantPermissionRequest
             key={`${snapshot.sessionId}:${request.requestId}:${request.inputRevision}`} request={request}
             canDecide={currentRun && request.inputRevision === snapshot.inputRevision}
-            disabled={!canDecide} busy={submitting} onDecide={decide} />)}
+            disabled={!canDecide} busy={submitting} waitingForTurn={snapshot.active} onDecide={decide} />)}
     </section>;
 }

@@ -97,7 +97,19 @@ impl ScheduleStore {
             ..Default::default()
         };
         for candidate in candidates {
-            match self.expire_fresh_approval_wait(&candidate.run_id).await {
+            let result = if candidate.cancel_requested_at.is_some() {
+                match self.cancel_continuation_wait(&candidate.run_id).await {
+                    Ok(true) => Ok(true),
+                    Ok(false)
+                    | Err(ScheduleStoreError::Conflict | ScheduleStoreError::NotFound) => {
+                        self.expire_fresh_approval_wait(&candidate.run_id).await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                self.expire_fresh_approval_wait(&candidate.run_id).await
+            };
+            match result {
                 Ok(true) => report.expired += 1,
                 Ok(false) | Err(ScheduleStoreError::Conflict | ScheduleStoreError::NotFound) => {
                     report.deferred += 1

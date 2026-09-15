@@ -62,13 +62,125 @@ async fn state(store: &SignalAgentSessionStore) -> PersistedAgentSession {
 }
 
 #[tokio::test]
+async fn stale_and_expired_directory_decisions_leave_no_receipt_or_partial_state() {
+    for path in [r"C:\用户资料\季度 报告", "/Users/owner/季度 报告"] {
+        let store = setup().await;
+        let mut proposed = update();
+        let FileScopeMutation::Select { mut proposal } = proposed.mutation else {
+            panic!()
+        };
+        proposal.source = DirectoryConsentSource::ModelProposal;
+        proposal.requested_path = path.into();
+        proposal.canonical_path = path.into();
+        proposal.directory.expires_at = (now() + chrono::Duration::seconds(1)).to_rfc3339();
+        proposed.mutation = FileScopeMutation::Propose { proposal };
+        store.update_file_scope(&proposed, now()).await.unwrap();
+        let before = state(&store).await;
+        let mut decision = FileScopeUpdate {
+            client_request_id: "decide".into(),
+            expected_revision: before.file_scope.revision(),
+            mutation: FileScopeMutation::Decide {
+                directory_request_id: "select".into(),
+                approve: true,
+            },
+            ..update()
+        };
+        for (revision, time) in [
+            (0, now()),
+            (
+                before.file_scope.revision(),
+                now() + chrono::Duration::seconds(1),
+            ),
+        ] {
+            decision.expected_revision = revision;
+            assert!(store.update_file_scope(&decision, time).await.is_err());
+            assert_eq!(state(&store).await, before);
+            assert!(
+                agent_run_event::Entity::find()
+                    .filter(agent_run_event::Column::EventId.eq(decision.event_id()))
+                    .one(&store.db)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // A failed approval has no receipt to poison a later explicit rejection.
+        decision.mutation = FileScopeMutation::Decide {
+            directory_request_id: "select".into(),
+            approve: false,
+        };
+        let expired = now() + chrono::Duration::seconds(2);
+        let receipt = store.update_file_scope(&decision, expired).await.unwrap();
+        let rejected = state(&store).await;
+        assert_eq!(
+            rejected.file_scope.revision(),
+            before.file_scope.revision() + 1
+        );
+        assert_eq!(rejected.scope_snapshot, before.scope_snapshot);
+        assert!(
+            desk_diagnose_core::file_scope::approved_directories(
+                &rejected,
+                expired.timestamp_millis() as u64,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let reopened = scoped(store.db.clone());
+        assert_eq!(
+            reopened
+                .update_file_scope(&decision, expired)
+                .await
+                .unwrap(),
+            receipt
+        );
+        assert_eq!(state(&reopened).await, rejected);
+    }
+}
+
+#[tokio::test]
 async fn receipt_and_scope_survive_reopen_and_expired_replay_without_resurrection() {
+    for (requested, canonical) in [
+        ("/private/tmp/test", "/private/tmp/test"),
+        (r"D:\测试 输入", r"\\?\D:\测试 输入"),
+        (r"D:\", r"\\?\D:\"),
+    ] {
+        verify_persisted_directory_replay(requested, canonical).await;
+    }
+}
+
+async fn verify_persisted_directory_replay(requested: &str, canonical: &str) {
     let store = setup().await;
-    let selected = update();
+    let mut selected = update();
+    let FileScopeMutation::Select { proposal } = &mut selected.mutation else {
+        unreachable!()
+    };
+    proposal.requested_path = requested.into();
+    proposal.canonical_path = canonical.into();
     let first = store.update_file_scope(&selected, now()).await.unwrap();
     assert_eq!(first.scope_revision, 2);
     assert!(state(&store).await.scope_snapshot.granted.is_empty());
     let reopened = scoped(store.db.clone());
+    let persisted = state(&reopened).await;
+    assert_eq!(
+        persisted.file_scope.records()[0].proposal.requested_path,
+        requested
+    );
+    assert_eq!(
+        persisted.file_scope.records()[0].proposal.canonical_path,
+        canonical
+    );
+    let mut changed_intent = selected.clone();
+    let FileScopeMutation::Select { proposal } = &mut changed_intent.mutation else {
+        unreachable!()
+    };
+    proposal.requested_path = "/different-request".into();
+    assert!(
+        reopened
+            .update_file_scope(&changed_intent, now())
+            .await
+            .is_err()
+    );
+    assert_eq!(state(&reopened).await, persisted);
     assert_eq!(
         reopened.update_file_scope(&selected, now()).await.unwrap(),
         first

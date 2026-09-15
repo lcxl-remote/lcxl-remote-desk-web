@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import zh from '@/locales/zh-CN/pages';
 import en from '@/locales/en-US/pages';
@@ -11,9 +12,15 @@ describe('capability inventory copy', () => {
             .toBe('assistant.capabilityDescription.systemCommandExecute');
     });
     it('provides a name and description in both languages for every registered capability', () => {
-        const source = readFileSync('../diagnose-core/src/device_assistant.rs', 'utf8');
+        const moduleRoot = '../diagnose-core/src/device_assistant';
+        const source = [readFileSync('../diagnose-core/src/device_assistant.rs', 'utf8'),
+            ...readdirSync(moduleRoot, { recursive: true }).filter(name => name.endsWith('.rs'))
+                .map(name => readFileSync(join(moduleRoot, name), 'utf8'))].join('\n');
         const keys = [...new Set([...source.matchAll(/"(assistant\.capability\.[A-Za-z]+)"/g)].map((match) => match[1]))];
         expect(keys.length).toBeGreaterThan(0);
+        expect(keys).toContain('assistant.capability.wordBatchInspect');
+        expect(keys).toContain('assistant.capability.wordBatchPatch');
+        expect(keys).toContain('assistant.capability.powerpointBatchInspect');
         for (const key of keys) {
             for (const locale of [zh, en]) {
                 const copy = locale as Record<string, string>;

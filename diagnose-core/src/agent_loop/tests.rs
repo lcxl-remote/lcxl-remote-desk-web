@@ -3759,7 +3759,7 @@ async fn projection_metrics_capture_long_session_growth_but_bounded_model_input(
         long.loaded_capability_detail_utf8_bytes
     );
     assert_eq!(short.loaded_capability_count, long.loaded_capability_count);
-    assert_eq!(long.capability_registry_count, 52);
+    assert_eq!(long.capability_registry_count, 58);
     assert!(long.conversation_message_count > short.conversation_message_count);
     assert!(long.session_snapshot_json_bytes > short.session_snapshot_json_bytes);
     println!(
@@ -7214,6 +7214,108 @@ fn requested_artifact_projection_restores_only_verbatim_named_typed_artifact() {
             .contains(&"artifact-envelope".to_string())
     );
 
+    let long_pptx_name = format!("{}.pptx", "a".repeat(250));
+    for name in [
+        "stage5_report.docx",
+        "reviewed.pptx",
+        long_pptx_name.as_str(),
+    ] {
+        for (expiry, expected) in [
+            ("1970-01-01T00:00:00Z", false),
+            ("1970-01-01T00:01:00Z", false),
+            ("1970-01-01T00:01:00.001Z", true),
+            ("invalid", false),
+        ] {
+            let mut value = artifact_json.clone();
+            value["output"]["value"]["file_name"] = name.into();
+            value["output"]["value"]["file"]["expires_at"] = expiry.into();
+            if name.ends_with(".pptx") {
+                let mime = crate::provider_preflight::batch_document::PPTX_MEDIA_TYPE;
+                value["output"]["value"]["media_type"] = mime.into();
+                value["output"]["value"]["content"]["media_type"] = mime.into();
+            }
+            let mut reference = artifact.clone();
+            reference.text = value.to_string();
+            let mut request = user.clone();
+            request.text = format!("Use {name} again");
+            let projected = requested_artifact_registry_projection(
+                &[reference, request],
+                "reference-expiry",
+                0,
+            )
+            .unwrap();
+            assert_eq!(projected.is_some(), expected, "{name}: {expiry}");
+        }
+    }
+    for name in ["reviewed.key", "reviewed.pages", "reviewed.numbers"] {
+        let mut batch = artifact_json.clone();
+        batch["output"] = serde_json::json!({
+            "kind": "batch_document_artifact",
+            "value": {
+                "file": artifact_json["output"]["value"]["file"].clone(),
+                "file_name": name,
+                "byte_len": 7,
+                "sha256": "b".repeat(64),
+                "validation_byte_len": 12,
+                "validation_sha256": "c".repeat(64)
+            }
+        });
+        let mut request = user.clone();
+        request.text = format!("Use {name} again");
+        for case in 0..8 {
+            let mut completion = batch.clone();
+            match case {
+                0 => {}
+                1 => completion["result"] = "outcome_unknown".into(),
+                2 => completion["output"]["value"]["validation_sha256"] = "bad".into(),
+                3 => completion["output"]["value"]["validation_byte_len"] = 0.into(),
+                4 => {
+                    completion["output"]["value"]["file"]["expires_at"] =
+                        "1970-01-01T00:01:00Z".into()
+                }
+                5 => completion["output"]["value"]["file"]["object_kind"] = "directory".into(),
+                6 => completion["output"]["value"]["file_name"] = format!("../{name}").into(),
+                7 => completion["output"]["value"]["file_name"] = "different.key".into(),
+                _ => unreachable!(),
+            }
+            let mut reference = artifact.clone();
+            reference.text = completion.to_string();
+            let projected = requested_artifact_registry_projection(
+                &[reference.clone(), reference, request.clone()],
+                "batch-registry",
+                0,
+            )
+            .unwrap();
+            assert_eq!(projected.is_some(), case == 0, "{name}: {case}");
+            if let Some(projected) = projected {
+                let payload: serde_json::Value =
+                    serde_json::from_str(projected.text.split_once(": ").unwrap().1).unwrap();
+                assert_eq!(
+                    payload["batch_document_artifacts"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert_eq!(
+                    payload["batch_document_artifacts"][0]["file"]["token"],
+                    "artifact-token-1"
+                );
+                assert_eq!(
+                    payload["batch_document_artifacts"][0]["sha256"],
+                    "b".repeat(64)
+                );
+                assert!(
+                    projected
+                        .data_envelope
+                        .unwrap()
+                        .provenance
+                        .source_envelope_ids
+                        .contains(&"artifact-envelope".into())
+                );
+            }
+        }
+    }
     let mut expired = artifact.clone();
     expired
         .data_envelope

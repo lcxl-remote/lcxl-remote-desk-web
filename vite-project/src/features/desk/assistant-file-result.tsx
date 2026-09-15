@@ -15,6 +15,13 @@ export function parseFileReceipt(text: string): FileReceipt | null {
         const completion: unknown = JSON.parse(text);
         if (!record(completion) || !record(completion.output) || !record(completion.output.value)) return null;
         const value = completion.output.value;
+        if (completion.output.kind === 'batch_document_artifact' && completion.result === 'verified'
+            && typeof value.file_name === 'string' && value.file_name.length > 0
+            && digest(value.sha256) && digest(value.validation_sha256)
+            && Number.isSafeInteger(value.byte_len) && (value.byte_len as number) > 0
+            && Number.isSafeInteger(value.validation_byte_len) && (value.validation_byte_len as number) > 0) {
+            return { operation: 'create', verified: true, fileName: value.file_name, bytes: value.byte_len as number, digest: value.sha256 };
+        }
         if (completion.output.kind === 'file_artifact' && completion.result === 'verified'
             && typeof value.file_name === 'string' && digest(value.digest_sha256)
             && Number.isSafeInteger(value.size_bytes) && (value.size_bytes as number) >= 0) {

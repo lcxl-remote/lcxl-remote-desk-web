@@ -588,7 +588,9 @@ mod tests {
         assert!(!one.contains("description"));
         assert_eq!(
             one,
-            include_str!("../tests/fixtures/capability_name_index.txt").trim_end()
+            include_str!("../tests/fixtures/capability_name_index.txt")
+                .replace("\r\n", "\n")
+                .trim_end()
         );
     }
 

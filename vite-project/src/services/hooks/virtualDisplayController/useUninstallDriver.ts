@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { UninstallDriverMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { uninstallDriver } from "../../clients.ts";
+import type { UninstallDriverMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { uninstallDriver } from "../../clients.ts";
 
 export const uninstallDriverMutationKey = () => [{ url: '/api/virtual-display/driver/uninstall' }] as const
 

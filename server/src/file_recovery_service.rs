@@ -2,6 +2,12 @@
 use desk_agent_protocol::file_recovery::*;
 use desk_file_recovery::{ChangeState, LockedVault, MaterialState, Record, Scope};
 use std::{io, path::Path};
+#[path = "file_recovery_local.rs"]
+pub(crate) mod local;
+#[path = "file_recovery_local_quota.rs"]
+mod local_quota;
+#[path = "file_recovery_user.rs"]
+pub(crate) mod platform_user;
 
 pub(crate) fn project_record(vault: &LockedVault, r: Record, now: u64) -> FileRecoveryRecordDto {
     FileRecoveryRecordDto {
@@ -56,13 +62,24 @@ fn policy(vault: &LockedVault) -> FileRecoveryPolicyDto {
         max_bytes: vault.policy().max_bytes,
     }
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn execute(
     root: Option<&Path>,
     payload: &desk_ipc_protocol::message::FileRecoveryRequestPayload,
     quota: Option<&crate::worker::session::QuotaClient>,
 ) -> FileRecoveryReply {
-    let os_user = unsafe { libc::geteuid() }.to_string();
+    let os_user = match platform_user::current() {
+        Ok(user) => user,
+        Err(_) => {
+            return FileRecoveryReply {
+                authority: payload.authority.clone(),
+                os_user: String::new(),
+                outcome: FileRecoveryOutcome::Unavailable {
+                    reason: FileRecoveryFailure::IdentityChanged,
+                },
+            };
+        }
+    };
     let result = (|| {
         payload
             .request
@@ -212,7 +229,7 @@ pub(crate) fn execute(
         outcome: result.unwrap_or_else(|reason| FileRecoveryOutcome::Unavailable { reason }),
     }
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) fn execute(
     _: Option<&Path>,
     payload: &desk_ipc_protocol::message::FileRecoveryRequestPayload,

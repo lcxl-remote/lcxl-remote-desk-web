@@ -1,4 +1,4 @@
-//! Closed iWork mutation input bound to the original owner selection.
+//! Closed document mutation input bound to the original owner selection.
 
 use super::*;
 use crate::input_read_context::{ReadContextSelection, live_read};
@@ -11,7 +11,7 @@ use desk_agent_protocol::computer_use::{
 fn unavailable() -> AgentError {
     error(
         AgentErrorKind::PermissionDenied,
-        "iWork input or original object selection is unavailable",
+        "document input or original object selection is unavailable",
         false,
         true,
     )
@@ -139,6 +139,9 @@ impl IworkCallPreflight {
                 | "patch_selected_numbers_copy"
                 | "replace_selected_pages_copy_body"
                 | "patch_selected_keynote_copy"
+                | "patch_selected_powerpoint_copy"
+                | "replace_selected_word_copy_body"
+                | "patch_selected_excel_copy"
         )
     }
 
@@ -149,6 +152,247 @@ impl IworkCallPreflight {
         original: &ReadContextSelection,
         approved_directories: &[ObjectRef],
         now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
+        Self::build_with_presentation_binding(
+            registry,
+            surface,
+            call,
+            original,
+            approved_directories,
+            now_unix_ms,
+            None,
+        )
+    }
+
+    /// Check frozen-plan consistency only. This never grants authority; send
+    /// admission must separately call `from_session` with current device state.
+    pub fn frozen_presentation_resources(
+        call: &ToolCall,
+        target: &ObjectRef,
+        action: &ComputerActionKind,
+    ) -> Result<Vec<String>, AgentError> {
+        if call.name == crate::device_assistant::windows_excel::PATCH_TOOL {
+            let args: SpreadsheetBatchActionArgs =
+                serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+            let expected =
+                ComputerActionKind::SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction {
+                    output: args.output.clone(),
+                    action: args.action,
+                });
+            if &args.target != target
+                || target.object_kind != ObjectKind::Range
+                || args.output.destination_parent.object_kind != ObjectKind::Directory
+                || &expected != action
+            {
+                return Err(unavailable());
+            }
+            return Ok(fresh_object_resource_scope(&[
+                args.target,
+                args.output.destination_parent,
+            ]));
+        }
+        if call.name == crate::device_assistant::windows_word::PATCH_TOOL {
+            let args: DocumentBatchActionArgs =
+                serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+            let expected = ComputerActionKind::DocumentLiveBatch(DocumentLiveBatchPatchAction {
+                output: args.output.clone(),
+                action: DocumentLivePatchAction::ReplaceBodyText { text: args.text },
+            });
+            if &args.target != target
+                || target.object_kind != ObjectKind::Document
+                || args.output.destination_parent.object_kind != ObjectKind::Directory
+                || &expected != action
+            {
+                return Err(unavailable());
+            }
+            return Ok(fresh_object_resource_scope(&[
+                args.target,
+                args.output.destination_parent,
+            ]));
+        }
+        if !matches!(
+            call.name.as_str(),
+            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy"
+        ) {
+            return Err(unavailable());
+        }
+        let args: PresentationBatchActionArgs =
+            serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+        let expected =
+            ComputerActionKind::PresentationLiveBatch(PresentationLiveBatchPatchAction {
+                output: args.output.clone(),
+                action: args.action,
+            });
+        if &args.target != target
+            || target.object_kind != ObjectKind::Slide
+            || args.output.destination_parent.object_kind != ObjectKind::Directory
+            || &expected != action
+        {
+            return Err(unavailable());
+        }
+        Ok(fresh_object_resource_scope(&[
+            args.target,
+            args.output.destination_parent,
+        ]))
+    }
+
+    /// Runtime entry point: directory consent and read evidence come from the
+    /// same authoritative session, with the worker supplied by fresh readiness.
+    pub fn from_session(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        original: &ReadContextSelection,
+        session: &crate::session::PersistedAgentSession,
+        interactive_session_incarnation: &str,
+        now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
+        let binding = if matches!(
+            call.name.as_str(),
+            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy"
+        ) {
+            original.validate()?;
+            let args: PresentationBatchActionArgs =
+                serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+            let refs = original
+                .object_attachments
+                .iter()
+                .map(|attachment| {
+                    serde_json::from_str::<ObjectRef>(&attachment.object_ref.opaque_token)
+                        .map_err(|_| unavailable())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut files = refs
+                .iter()
+                .filter(|reference| reference.object_kind == ObjectKind::File);
+            let file = files.next().ok_or_else(unavailable)?;
+            if files.next().is_some() {
+                return Err(unavailable());
+            }
+            let (_, worker) = interactive_session_incarnation
+                .split_once(':')
+                .ok_or_else(unavailable)?;
+            Some(super::batch_document::resolve_presentation_read(
+                session,
+                file,
+                worker,
+                &args.target,
+                now_unix_ms,
+            )?)
+        } else {
+            None
+        };
+        let word = if call.name == crate::device_assistant::windows_word::PATCH_TOOL {
+            original.validate()?;
+            let args: DocumentBatchActionArgs =
+                serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+            let refs = original
+                .object_attachments
+                .iter()
+                .map(|attachment| {
+                    serde_json::from_str::<ObjectRef>(&attachment.object_ref.opaque_token)
+                        .map_err(|_| unavailable())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut files = refs
+                .iter()
+                .filter(|reference| reference.object_kind == ObjectKind::File);
+            let file = files.next().ok_or_else(unavailable)?;
+            if files.next().is_some() {
+                return Err(unavailable());
+            }
+            let (_, worker) = interactive_session_incarnation
+                .split_once(':')
+                .ok_or_else(unavailable)?;
+            Some(super::word_read_binding::resolve_word_read(
+                session,
+                file,
+                worker,
+                &args.target,
+                now_unix_ms,
+            )?)
+        } else {
+            None
+        };
+        let excel = if call.name == crate::device_assistant::windows_excel::PATCH_TOOL {
+            original.validate()?;
+            let args: SpreadsheetBatchActionArgs =
+                serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+            let refs = original
+                .object_attachments
+                .iter()
+                .map(|attachment| {
+                    serde_json::from_str::<ObjectRef>(&attachment.object_ref.opaque_token)
+                        .map_err(|_| unavailable())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut files = refs.iter().filter(|r| r.object_kind == ObjectKind::File);
+            let file = files.next().ok_or_else(unavailable)?;
+            if files.next().is_some() {
+                return Err(unavailable());
+            }
+            let (_, worker) = interactive_session_incarnation
+                .split_once(':')
+                .ok_or_else(unavailable)?;
+            Some(super::excel_read_binding::resolve_excel_read(
+                session,
+                file,
+                worker,
+                &args.target,
+                now_unix_ms,
+            )?)
+        } else {
+            None
+        };
+        let directories = crate::file_scope::approved_directories(session, now_unix_ms)
+            .map_err(|_| unavailable())?;
+        Self::build_with_batch_bindings(
+            registry,
+            surface,
+            call,
+            original,
+            &directories,
+            now_unix_ms,
+            binding.as_ref(),
+            word.as_ref(),
+            excel.as_ref(),
+        )
+    }
+
+    /// The optional binding is host-derived from an authenticated prior read.
+    /// Presentation batch calls cannot use a File ref as their semantic target.
+    pub fn build_with_presentation_binding(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        original: &ReadContextSelection,
+        approved_directories: &[ObjectRef],
+        now_unix_ms: u64,
+        presentation: Option<&super::batch_document::PresentationReadBinding>,
+    ) -> Result<Self, AgentError> {
+        Self::build_with_batch_bindings(
+            registry,
+            surface,
+            call,
+            original,
+            approved_directories,
+            now_unix_ms,
+            presentation,
+            None,
+            None,
+        )
+    }
+
+    fn build_with_batch_bindings(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        original: &ReadContextSelection,
+        approved_directories: &[ObjectRef],
+        now_unix_ms: u64,
+        presentation: Option<&super::batch_document::PresentationReadBinding>,
+        word: Option<&super::word_read_binding::WordReadBinding>,
+        excel: Option<&super::excel_read_binding::ExcelReadBinding>,
     ) -> Result<Self, AgentError> {
         original.validate()?;
         let capability = registry
@@ -302,12 +546,72 @@ impl IworkCallPreflight {
                     u64::MAX,
                 )
             }
-            "patch_selected_keynote_copy" => {
-                let args: PresentationBatchActionArgs =
+            "patch_selected_excel_copy" => {
+                let args: SpreadsheetBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                if exact_batch_file()? != args.target {
+                let binding = excel.ok_or_else(unavailable)?;
+                if exact_batch_file()? != binding.source().file
+                    || !desk_agent_protocol::computer_use::office_batch::is_xlsx(binding.adapter())
+                {
                     return Err(unavailable());
                 }
+                binding.validate_target(&args.target, now_unix_ms)?;
+                binding.validate_action(&args.action)?;
+                validate_destination(&args.output.destination_parent)?;
+                if !desk_agent_protocol::computer_use::office_batch::valid_xlsx_leaf(
+                    &args.output.native_file_name,
+                ) {
+                    return Err(unavailable());
+                }
+                let refs = vec![args.target.clone(), args.output.destination_parent.clone()];
+                (
+                    args.target,
+                    refs,
+                    ComputerActionKind::SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction {
+                        output: args.output,
+                        action: args.action,
+                    }),
+                    ComputerUseAdapterKind::OfficeExcel,
+                    binding.valid_until_unix_ms(),
+                )
+            }
+            "replace_selected_word_copy_body" => {
+                let args: DocumentBatchActionArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+                let binding = word.ok_or_else(unavailable)?;
+                if exact_batch_file()? != binding.source().file
+                    || !desk_agent_protocol::computer_use::office_batch::is_docx(binding.adapter())
+                {
+                    return Err(unavailable());
+                }
+                binding.validate_target(&args.target, now_unix_ms)?;
+                validate_destination(&args.output.destination_parent)?;
+                let refs = vec![args.target.clone(), args.output.destination_parent.clone()];
+                (
+                    args.target,
+                    refs,
+                    ComputerActionKind::DocumentLiveBatch(DocumentLiveBatchPatchAction {
+                        output: args.output,
+                        action: DocumentLivePatchAction::ReplaceBodyText { text: args.text },
+                    }),
+                    ComputerUseAdapterKind::OfficeWord,
+                    binding.valid_until_unix_ms(),
+                )
+            }
+            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy" => {
+                let args: PresentationBatchActionArgs =
+                    serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+                let binding = presentation.ok_or_else(unavailable)?;
+                let adapter = if call.name == "patch_selected_powerpoint_copy" {
+                    ComputerUseAdapterKind::OfficePowerPoint
+                } else {
+                    ComputerUseAdapterKind::IworkKeynote
+                };
+                if exact_batch_file()? != binding.source().file || binding.adapter().kind != adapter
+                {
+                    return Err(unavailable());
+                }
+                binding.validate_target(&args.target, now_unix_ms)?;
                 validate_destination(&args.output.destination_parent)?;
                 let refs = vec![args.target.clone(), args.output.destination_parent.clone()];
                 (
@@ -317,8 +621,8 @@ impl IworkCallPreflight {
                         output: args.output,
                         action: args.action,
                     }),
-                    ComputerUseAdapterKind::IworkKeynote,
-                    u64::MAX,
+                    adapter,
+                    binding.valid_until_unix_ms(),
                 )
             }
             _ => return Err(unavailable()),

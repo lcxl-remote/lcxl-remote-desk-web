@@ -1654,6 +1654,18 @@ pub async fn run_signaling_proxy(
                     )
                     .await;
             }
+            WorkerToService::LocalFileRecoveryManaged(reply) => {
+                #[cfg(windows)]
+                worker_mgr
+                    .complete_local_file_recovery(
+                        resident_worker_key.as_ref(),
+                        worker_incarnation,
+                        reply,
+                    )
+                    .await;
+                #[cfg(not(windows))]
+                let _ = reply;
+            }
             WorkerToService::FileRecoveryManaged(payload) => {
                 emit_typed_signaling(
                     &outbound_tx,

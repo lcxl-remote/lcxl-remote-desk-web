@@ -476,6 +476,12 @@ unsafe fn apply_numbers_document(
     }
     let cell = numbers_cell(document)?;
     let requested = match action {
+        SpreadsheetLivePatchAction::SetCellNumber { .. }
+        | SpreadsheetLivePatchAction::SetCellBoolean { .. } => {
+            return Err(unavailable(
+                "explicit scalar storage is not advertised by the Numbers adapter",
+            ));
+        }
         SpreadsheetLivePatchAction::SetCellValue { value } => value,
         // Numbers exposes `formula` as read-only. Its scripting contract requires
         // formula text to be assigned through the writable `value` property.
@@ -491,6 +497,8 @@ unsafe fn apply_numbers_document(
     let after_formula =
         optional_property_string(cell, CELL_FORMULA)?.filter(|value| !value.is_empty());
     let exact = match action {
+        SpreadsheetLivePatchAction::SetCellNumber { .. }
+        | SpreadsheetLivePatchAction::SetCellBoolean { .. } => false,
         SpreadsheetLivePatchAction::SetCellValue { value } => after_value == *value,
         SpreadsheetLivePatchAction::SetCellFormula { formula } => {
             after_formula.as_deref() == Some(formula.as_str())

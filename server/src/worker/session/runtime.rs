@@ -85,6 +85,30 @@ impl WorkerSession {
             .data_dir
             .as_deref()
             .map(std::path::PathBuf::from);
+        #[cfg(windows)]
+        let worker_data_dir = if worker_profile == WorkerProfile::SessionUser
+            && shared_computer_use_broker.is_none()
+        {
+            if let Some(configured) = worker_data_dir {
+                match tokio::task::spawn_blocking(move || {
+                    super::windows_user_paths::prepare(&configured)
+                })
+                .await
+                {
+                    Ok(Ok(path)) => Some(path),
+                    _ => {
+                        warn!(
+                            "Private user-worker storage is unavailable; user data capabilities remain unavailable"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            worker_data_dir
+        };
 
         let worker_locale = settings
             .system
@@ -114,6 +138,21 @@ impl WorkerSession {
         let computer_use_broker = shared_computer_use_broker.unwrap_or_else(|| {
             Arc::new(crate::worker::agent::computer_use_broker::ComputerUseBroker::new())
         });
+        #[cfg(windows)]
+        {
+            let root = worker_data_dir.clone();
+            let session_user = worker_profile == WorkerProfile::SessionUser;
+            let ready = tokio::task::spawn_blocking(move || {
+                session_user
+                    && crate::file_recovery_service::platform_user::current().is_ok()
+                    && root
+                        .as_deref()
+                        .is_some_and(|path| desk_file_recovery::Vault::open(path).is_ok())
+            })
+            .await
+            .unwrap_or(false);
+            computer_use_broker.set_file_recovery_ready(ready);
+        }
         if worker_profile == WorkerProfile::SessionUser {
             crate::worker::agent::file_reference_store::configure_durable_artifact_store(
                 worker_data_dir.as_deref(),
@@ -294,7 +333,7 @@ impl WorkerSession {
         // fully drained before the test/runtime moves on.
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
         let file_recovery_quota = super::file_recovery_quota::QuotaClient::new(writer_tx.clone());
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let _file_recovery_maintenance = if worker_profile == WorkerProfile::SessionUser {
             worker_data_dir
                 .clone()
@@ -1695,6 +1734,20 @@ impl WorkerSession {
                                 ServiceToWorker::FileRecoveryQuotaReplied(reply) => {
                                     file_recovery_quota.complete(reply);
                                 }
+                                ServiceToWorker::ManageLocalFileRecovery(payload) => {
+                                    let quota = file_recovery_quota.clone();
+                                    let root = worker_data_dir.clone();
+                                    let reply_tx = writer_tx.clone();
+                                    tokio::spawn(async move {
+                                        let request_id = payload.request_id.clone();
+                                        let outcome = tokio::task::spawn_blocking(move || {
+                                            crate::file_recovery_service::local::execute_worker(root.as_deref(), quota, &payload)
+                                        }).await.unwrap_or(Err(desk_agent_protocol::file_recovery::FileRecoveryFailure::StorageUnavailable));
+                                        let _ = reply_tx.send(WorkerToService::LocalFileRecoveryManaged(
+                                            desk_ipc_protocol::local_file_recovery::LocalFileRecoveryReply { request_id, outcome }
+                                        ));
+                                    });
+                                }
                                 ServiceToWorker::ManageFileRecovery(payload) => {
                                     let quota = file_recovery_quota.clone();
                                     let root = worker_data_dir.clone();
@@ -1762,13 +1815,9 @@ impl WorkerSession {
                                     let selected_display = action_settings.desk.video_device_name.clone();
                                     drop(action_settings);
                                     let lease = crate::worker::agent::computer_use_writer::WriterLeaseRequest {
-                                        scope: if matches!(&plan.actions[0].action, ComputerActionKind::BackgroundInput { .. }) {
-                                            crate::worker::agent::computer_use_writer::WriterLeaseScope::BackgroundApplication
-                                        } else if cfg!(target_os = "macos") && matches!(&plan.actions[0].action, ComputerActionKind::File(_)) {
-                                            crate::worker::agent::computer_use_writer::WriterLeaseScope::FileWorker
-                                        } else {
-                                            crate::worker::agent::computer_use_writer::WriterLeaseScope::InteractiveSession
-                                        },
+                                        scope: crate::worker::agent::computer_use_writer::scope_for_action(
+                                            &plan.actions[0].action, &plan.adapter,
+                                        ),
                                         work_id: plan.work_id.clone(),
                                         action_request_id: plan.action_request_id.clone(),
                                         execution_generation: plan.execution_generation.clone(),
@@ -1841,6 +1890,11 @@ impl WorkerSession {
                                         | ComputerActionKind::SpreadsheetLiveBatch(_)
                                         | ComputerActionKind::DocumentLiveBatch(_)
                                         | ComputerActionKind::PresentationLiveBatch(_) => {
+                                            #[cfg(windows)]
+                                            {
+                                                crate::worker::agent::windows_office_batch::preflight(&computer_use_broker, &plan, &ceiling)
+                                                    .map_err(|error| error.message)
+                                            }
                                             #[cfg(target_os = "macos")]
                                             {
                                                 computer_use_broker
@@ -1851,7 +1905,7 @@ impl WorkerSession {
                                                     )
                                                     .map_err(|error| error.message)
                                             }
-                                            #[cfg(not(target_os = "macos"))]
+                                            #[cfg(not(any(target_os = "macos", windows)))]
                                             {
                                                 Err("the live document adapter is unavailable on this platform".to_string())
                                             }
@@ -1930,10 +1984,14 @@ impl WorkerSession {
                                             let generation_for_call = generation.clone();
                                             let background = matches!(&steps[0].action, ComputerActionKind::BackgroundInput {..});
                                             let result = tokio::task::spawn_blocking(move || {
+                                                let guard_broker = broker.clone();
+                                                let guard_generation = generation_for_call.clone();
+                                                let guard_settings = application_settings.clone();
+                                                let guard_ceiling = application_settings.blocking_read().computer_use.clone();
                                                 let run = move || {
                                                 Ok(crate::worker::agent::application_batch::execute(&steps, |step| {
-                                                    let settings = application_settings.blocking_read();
-                                                    let ceiling = &settings.computer_use;
+                                                    let current_ceiling = application_settings.blocking_read().computer_use.clone();
+                                                    let ceiling = &current_ceiling;
                                                     broker.require_writer_lease(&generation_for_call).map_err(|e|(e,false))?;
                                                     broker.preflight_application_step(step,ceiling).map_err(|e|(e,false))?;
                                                     let mut last_scroll = None;
@@ -1949,12 +2007,22 @@ impl WorkerSession {
                                                     Ok(last_scroll)
                                                 }))
                                                 };
-                                                if background { run() } else { crate::worker::agent::native_ui_identity::run(run) }
+                                                if background { run().map_err(crate::worker::agent::native_ui_identity::NativeExecutionError::maybe_started) } else { crate::worker::agent::native_ui_identity::run_guarded(run, move || {
+                                                    guard_broker.require_writer_lease(&guard_generation)?;
+                                                    if guard_settings.blocking_read().computer_use != guard_ceiling {
+                                                        return Err(desk_agent_protocol::AgentError {
+                                                            kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
+                                                            message: "local Computer Use policy changed before native UI mutation".into(),
+                                                            retryable: false, safe_for_model: true, error_code: None,
+                                                        });
+                                                    }
+                                                    Ok(())
+                                                }) }
                                             }).await;
                                             action_broker.release_writer_lease(&generation);
                                             let (class,message) = match result {
                                                 Ok(Ok(result)) => result,
-                                                Ok(Err(error)) => (ComputerActionResultClass::OutcomeUnknown,format!("Batch native thread unavailable: {}. Read current state before replanning.",error.message)),
+                                                Ok(Err(error)) => (error.result_class(),format!("Batch native execution stopped: {}. Read current state before replanning.",error.error.message)),
                                                 Err(error) => (ComputerActionResultClass::OutcomeUnknown, format!("Batch worker interrupted: {error}. Effects may have occurred; remaining steps are not replayed. Read current UI before choosing a new operation.")),
                                             };
                                             let _ = action_writer.send(WorkerToService::ComputerActionCompleted(ComputerActionCompletedPayload {
@@ -1963,7 +2031,7 @@ impl WorkerSession {
                                             }));
                                             return;
                                         }
-                                        let step = plan.actions.into_iter().next().expect("preflight checked one action");
+                                        let step = plan.actions.first().cloned().expect("preflight checked one action");
                                         if matches!(&step.action, ComputerActionKind::RawInput(_)) {
                                             let target = step.target.clone();
                                             let action = step.action.clone();
@@ -2019,6 +2087,19 @@ impl WorkerSession {
                                                     },
                                                 ),
                                             );
+                                            return;
+                                        }
+                                        #[cfg(windows)]
+                                        if desk_agent_protocol::computer_use::office_batch::is_pptx(&plan.adapter)
+                                            || desk_agent_protocol::computer_use::office_batch::is_docx(&plan.adapter)
+                                            || desk_agent_protocol::computer_use::office_batch::is_xlsx(&plan.adapter) {
+                                            let completed = crate::worker::agent::windows_office_batch::execute_admitted(
+                                                action_broker.clone(), plan.clone(), ceiling.clone(),
+                                            ).await;
+                                            let _ = action_writer.send(WorkerToService::ComputerActionCompleted(
+                                                ComputerActionCompletedPayload { request_id: payload.request_id,
+                                                    connection_id: payload.connection_id, completed },
+                                            ));
                                             return;
                                         }
                                         if matches!(
@@ -2272,8 +2353,9 @@ impl WorkerSession {
                                             let ComputerActionKind::File(action) = step.action.clone() else { unreachable!() };
                                             let broker = action_broker.clone();
                                             let generation_for_call = generation.clone();
-                                            let result = tokio::task::spawn_blocking(move || {
-                                                #[cfg(target_os = "macos")]
+                                            let result = crate::worker::agent::computer_use_writer::spawn_writer_task(
+                                                broker.clone(), generation.clone(), move || {
+                                                #[cfg(any(target_os = "macos", windows))]
                                                 {
                                                     broker.require_writer_lease(&generation_for_call)?;
                                                     let (binding, data_root, device, owner, operation_id, generation) = recovery_binding;
@@ -2284,7 +2366,12 @@ impl WorkerSession {
                                                             retryable: false, safe_for_model: true, error_code: None,
                                                         });
                                                     };
-                                                    if binding.os_user != unsafe { libc::geteuid() }.to_string() {
+                                                    let os_user = crate::file_recovery_service::platform_user::current().map_err(|_| desk_agent_protocol::AgentError {
+                                                        kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
+                                                        message: "Backup execution user is unavailable; file was not changed".into(),
+                                                        retryable: false, safe_for_model: true, error_code: None,
+                                                    })?;
+                                                    if binding.os_user != os_user {
                                                         return Err(desk_agent_protocol::AgentError {
                                                             kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
                                                             message: "Backup execution user changed after registration; file was not changed".into(),
@@ -2297,7 +2384,7 @@ impl WorkerSession {
                                                         execution_epoch: binding.execution_epoch,
                                                         data_root, quota: Some(quota), scope: desk_file_recovery::Scope {
                                                             authority: binding.authority, device, owner,
-                                                            os_user: unsafe { libc::geteuid() }.to_string(),
+                                                            os_user,
                                                         }, conversation_id: binding.conversation_id, operation_id, generation,
                                                     };
                                                     crate::worker::agent::file_reference_store::text_mutation::execute(
@@ -2305,7 +2392,7 @@ impl WorkerSession {
                                                         || broker.require_writer_lease(&generation_for_call).map(|_| ()),
                                                     )
                                                 }
-                                                #[cfg(not(target_os = "macos"))]
+                                                #[cfg(not(any(target_os = "macos", windows)))]
                                                 {
                                                     let _ = (target, action, broker, generation_for_call, recovery_binding);
                                                     Err::<(desk_agent_protocol::computer_use::TextFileMutationOutput, &'static str), _>(desk_agent_protocol::AgentError {
@@ -2315,7 +2402,6 @@ impl WorkerSession {
                                                     })
                                                 }
                                             }).await;
-                                            action_broker.release_writer_lease(&generation);
                                             let (class, facts, message, output) = match result {
                                                 Ok(Ok((output, message))) => (
                                                     if output.verified { ComputerActionResultClass::Verified } else { ComputerActionResultClass::OutcomeUnknown },
@@ -2340,17 +2426,17 @@ impl WorkerSession {
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
-                                                tokio::task::spawn_blocking(move || {
+                                                crate::worker::agent::computer_use_writer::spawn_writer_task(broker.clone(), generation.clone(), move || {
                                                     broker.require_writer_lease(&generation_for_call)?;
-                                                    crate::worker::agent::file_reference_store::create_text_artifact(
+                                                    crate::worker::agent::file_reference_store::publication::create_text_artifact(
                                                         &target,
                                                         &file_name,
                                                         &content_utf8,
                                                     )
                                                 })
                                                 .await
-                                                .map_err(|error| format!("artifact worker failed to join: {error}"))
-                                                .and_then(|result| result.map_err(|error| error.message))
+                                                .map_err(|error| crate::worker::agent::file_reference_store::publication::Failure::unknown(format!("artifact worker failed to join: {error}")))
+                                                .flatten()
                                                 .map(|artifact| (artifact, "text/plain;charset=utf-8"))
                                             }
                                             ComputerActionKind::File(
@@ -2362,7 +2448,7 @@ impl WorkerSession {
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
-                                                tokio::task::spawn_blocking(move || {
+                                                crate::worker::agent::computer_use_writer::spawn_writer_task(broker.clone(), generation.clone(), move || {
                                                     broker.require_writer_lease(&generation_for_call)?;
                                                     if !file_name.to_ascii_lowercase().ends_with(".xlsx") {
                                                         return Err(desk_agent_protocol::AgentError {
@@ -2371,18 +2457,19 @@ impl WorkerSession {
                                                             retryable: false,
                                                             safe_for_model: true,
                                                             error_code: None,
-                                                        });
+                                                        }.into());
                                                     }
                                                     let bytes = crate::worker::agent::spreadsheet_file::materialize_preview_xlsx(&preview_id)?;
-                                                    crate::worker::agent::file_reference_store::create_binary_artifact(
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    crate::worker::agent::file_reference_store::publication::create_binary_artifact(
                                                         &target,
                                                         &file_name,
                                                         &bytes,
                                                     )
                                                 })
                                                 .await
-                                                .map_err(|error| format!("spreadsheet artifact worker failed to join: {error}"))
-                                                .and_then(|result| result.map_err(|error| error.message))
+                                                .map_err(|error| crate::worker::agent::file_reference_store::publication::Failure::unknown(format!("spreadsheet artifact worker failed to join: {error}")))
+                                                .flatten()
                                                 .map(|artifact| (artifact, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
                                             }
                                             ComputerActionKind::File(
@@ -2398,7 +2485,7 @@ impl WorkerSession {
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
-                                                tokio::task::spawn_blocking(move || {
+                                                crate::worker::agent::computer_use_writer::spawn_writer_task(broker.clone(), generation.clone(), move || {
                                                     broker.require_writer_lease(&generation_for_call)?;
                                                     if !file_name.to_ascii_lowercase().ends_with(".xlsx") {
                                                         return Err(desk_agent_protocol::AgentError {
@@ -2407,7 +2494,7 @@ impl WorkerSession {
                                                             retryable: false,
                                                             safe_for_model: true,
                                                             error_code: None,
-                                                        });
+                                                        }.into());
                                                     }
                                                     let bytes = crate::worker::agent::spreadsheet_file::materialize_preview_formula_xlsx(
                                                         &preview_id,
@@ -2416,15 +2503,16 @@ impl WorkerSession {
                                                         &locale,
                                                         &formula_policy_digest_sha256,
                                                     )?;
-                                                    crate::worker::agent::file_reference_store::create_binary_artifact(
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    crate::worker::agent::file_reference_store::publication::create_binary_artifact(
                                                         &target,
                                                         &file_name,
                                                         &bytes,
                                                     )
                                                 })
                                                 .await
-                                                .map_err(|error| format!("spreadsheet formula artifact worker failed to join: {error}"))
-                                                .and_then(|result| result.map_err(|error| error.message))
+                                                .map_err(|error| crate::worker::agent::file_reference_store::publication::Failure::unknown(format!("spreadsheet formula artifact worker failed to join: {error}")))
+                                                .flatten()
                                                 .map(|artifact| (artifact, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
                                             }
                                             ComputerActionKind::File(
@@ -2438,7 +2526,7 @@ impl WorkerSession {
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
-                                                tokio::task::spawn_blocking(move || {
+                                                crate::worker::agent::computer_use_writer::spawn_writer_task(broker.clone(), generation.clone(), move || {
                                                     broker.require_writer_lease(&generation_for_call)?;
                                                     if !file_name.to_ascii_lowercase().ends_with(".docx") {
                                                         return Err(desk_agent_protocol::AgentError {
@@ -2447,22 +2535,23 @@ impl WorkerSession {
                                                             retryable: false,
                                                             safe_for_model: true,
                                                             error_code: None,
-                                                        });
+                                                        }.into());
                                                     }
                                                     let bytes = crate::worker::agent::spreadsheet_file::materialize_preview_docx(
                                                         &preview_id,
                                                         &title,
                                                         &web_sources,
                                                     )?;
-                                                    crate::worker::agent::file_reference_store::create_binary_artifact(
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    crate::worker::agent::file_reference_store::publication::create_binary_artifact(
                                                         &target,
                                                         &file_name,
                                                         &bytes,
                                                     )
                                                 })
                                                 .await
-                                                .map_err(|error| format!("Word report artifact worker failed to join: {error}"))
-                                                .and_then(|result| result.map_err(|error| error.message))
+                                                .map_err(|error| crate::worker::agent::file_reference_store::publication::Failure::unknown(format!("Word report artifact worker failed to join: {error}")))
+                                                .flatten()
                                                 .map(|artifact| (artifact, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
                                             }
                                             ComputerActionKind::File(
@@ -2474,7 +2563,7 @@ impl WorkerSession {
                                                 let target = step.target;
                                                 let broker = action_broker.clone();
                                                 let generation_for_call = generation.clone();
-                                                tokio::task::spawn_blocking(move || {
+                                                crate::worker::agent::computer_use_writer::spawn_writer_task(broker.clone(), generation.clone(), move || {
                                                     broker.require_writer_lease(&generation_for_call)?;
                                                     if !file_name
                                                         .to_ascii_lowercase()
@@ -2486,7 +2575,7 @@ impl WorkerSession {
                                                             retryable: false,
                                                             safe_for_model: true,
                                                             error_code: None,
-                                                        });
+                                                        }.into());
                                                     }
                                                     let bytes = desk_diagnose_core::communication::render_local_draft_text(&draft)
                                                         .map_err(|error| desk_agent_protocol::AgentError {
@@ -2496,63 +2585,22 @@ impl WorkerSession {
                                                             safe_for_model: true,
                                                             error_code: None,
                                                         })?;
-                                                    crate::worker::agent::file_reference_store::create_binary_artifact(
+                                                    broker.require_writer_lease(&generation_for_call)?;
+                                                    crate::worker::agent::file_reference_store::publication::create_binary_artifact(
                                                         &target,
                                                         &file_name,
                                                         &bytes,
                                                     )
                                                 })
                                                 .await
-                                                .map_err(|error| format!("local communication draft worker failed to join: {error}"))
-                                                .and_then(|result| result.map_err(|error| error.message))
+                                                .map_err(|error| crate::worker::agent::file_reference_store::publication::Failure::unknown(format!("local communication draft worker failed to join: {error}")))
+                                                .flatten()
                                                 .map(|artifact| (artifact, "text/plain;charset=utf-8"))
                                             }
-                                            _ => Err("only create-new text, local communication draft, retained-preview XLSX/formula-XLSX, and retained-preview DOCX artifacts are enabled in this slice".to_string()),
+                                            _ => Err("only create-new text, local communication draft, retained-preview XLSX/formula-XLSX, and retained-preview DOCX artifacts are enabled in this slice".to_string().into()),
                                         };
                                         action_broker.release_writer_lease(&generation);
-                                        let (class, facts, message, output) = match result {
-                                            Ok((artifact, media_type)) => {
-                                                let output = Some({
-                                                    let output = desk_agent_protocol::computer_use::CreatedFileArtifactOutput {
-                                                        file: artifact.file.clone(),
-                                                        file_name: artifact.file_name.clone(),
-                                                        media_type: media_type.to_string(),
-                                                        size_bytes: artifact.byte_len,
-                                                        digest_sha256: artifact.sha256.clone(),
-                                                        content: desk_agent_protocol::data_lineage::ContentRef::Artifact {
-                                                            artifact_id: artifact.file.token.clone(),
-                                                            sha256: artifact.sha256.clone(),
-                                                            size_bytes: artifact.byte_len,
-                                                            media_type: media_type.to_string(),
-                                                        },
-                                                    };
-                                                    output
-                                                        .validate()
-                                                        .expect("worker created a valid typed artifact output");
-                                                    ComputerActionOutput::FileArtifact(output)
-                                                });
-                                                (
-                                                    ComputerActionResultClass::Verified,
-                                                    vec![ComputerActionStepFact {
-                                                        index: 0,
-                                                        changed: true,
-                                                        verified: true,
-                                                        summary: format!(
-                                                            "created {} ({} bytes, sha256={})",
-                                                            artifact.file_name, artifact.byte_len, artifact.sha256
-                                                        ),
-                                                    }],
-                                                    Some("artifact created with create-new semantics and verified by independent handle read-back".to_string()),
-                                                    output,
-                                                )
-                                            }
-                                            Err(reason) => (
-                                                ComputerActionResultClass::Failed,
-                                                vec![],
-                                                Some(reason),
-                                                None,
-                                            ),
-                                        };
+                                        let (class, facts, message, output) = crate::worker::agent::file_reference_store::publication::receipt(result);
                                         let _ = action_writer.send(
                                             WorkerToService::ComputerActionCompleted(
                                                 ComputerActionCompletedPayload {

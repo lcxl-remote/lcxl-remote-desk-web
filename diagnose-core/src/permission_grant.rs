@@ -278,7 +278,9 @@ pub fn build_permission_grants(
                         .actions
                         .iter()
                         .copied()
-                        .map(crate::application_ui::operation_kind)
+                        .map(|action| {
+                            crate::application_ui::operation_for_tool(&requested.tool_name, action)
+                        })
                         .any(|allowed| allowed == *operation)
                 })
             {

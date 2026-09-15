@@ -13,6 +13,8 @@ pub mod wgc_capture;
 pub mod wgc_compose;
 #[cfg(target_os = "windows")]
 pub mod windows;
+#[cfg(target_os = "windows")]
+pub mod windows_window_capture;
 #[cfg(target_os = "linux")]
 pub mod x11_capture;
 

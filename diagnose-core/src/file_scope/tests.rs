@@ -139,6 +139,8 @@ fn all_native_file_writes_require_a_current_directory_but_live_edits_do_not() {
         "patch_selected_numbers_copy",
         "replace_selected_pages_copy_body",
         "patch_selected_keynote_copy",
+        "patch_selected_powerpoint_copy",
+        "replace_selected_word_copy_body",
     ] {
         assert!(
             validate_artifact_scope(&session, tool, &resources, 1).is_ok(),
@@ -164,6 +166,8 @@ fn all_native_file_writes_require_a_current_directory_but_live_edits_do_not() {
         "patch_selected_numbers_copy",
         "replace_selected_pages_copy_body",
         "patch_selected_keynote_copy",
+        "patch_selected_powerpoint_copy",
+        "replace_selected_word_copy_body",
     ] {
         assert!(
             validate_artifact_scope(&session, tool, &resources, 1).is_err(),
@@ -454,6 +458,68 @@ fn canonical_path_changes_require_confirmation_and_retries_bind_original_intent(
     stored.file_scope.archive_terminal_records();
     assert!(replay(&stored, &selection, &receipt).is_ok());
     assert!(stored.file_scope.records().is_empty());
+}
+
+#[test]
+fn windows_prefix_conversion_keeps_owner_selection_but_not_target_changes() {
+    use super::transaction::*;
+    use desk_agent_protocol::computer_use::FileDirectoryResolveOutput;
+    use desk_agent_protocol::device_assistant::{
+        DeviceAssistantObjectContextOperation, DeviceAssistantObjectContextUpdate,
+    };
+    let wire = DeviceAssistantObjectContextUpdate {
+        conversation_id: "browser-intent".into(),
+        client_request_id: "directory-request".into(),
+        operation: DeviceAssistantObjectContextOperation::SelectDirectory {
+            path: r"D:\测试 输入".into(),
+            purpose: "test".into(),
+            expected_revision: 0,
+        },
+    };
+    for (canonical, approved) in [(r"\\?\D:\测试 输入", true), (r"\\?\D:\other", false)] {
+        let selection = owner_selection(
+            &wire,
+            subject(),
+            FileDirectoryResolveOutput {
+                canonical_path: canonical.into(),
+                directory: proposal().directory,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            matches!(selection.mutation, FileScopeMutation::Select { .. }),
+            approved
+        );
+        let mut session = PersistedAgentSession::new(
+            "conversation",
+            "owner",
+            "device",
+            0,
+            AgentScope {
+                granted: vec![],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-09-05T00:00:00Z",
+        );
+        session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::DeviceAssistant);
+        let (stored, receipt) = prepare(&session, &selection, 1).unwrap();
+        assert_eq!(
+            stored.file_scope.records()[0].state == DirectoryConsentState::Approved,
+            approved
+        );
+        assert!(stored.scope_snapshot.granted.is_empty());
+        match_owner_selection(&receipt, &wire, &subject()).unwrap();
+        let mut changed = wire.clone();
+        let DeviceAssistantObjectContextOperation::SelectDirectory { path, .. } =
+            &mut changed.operation
+        else {
+            panic!()
+        };
+        *path = canonical.into();
+        assert!(match_owner_selection(&receipt, &changed, &subject()).is_err());
+    }
 }
 
 #[test]

@@ -549,4 +549,43 @@ async fn batch_completion_projects_only_compact_failure_or_success() {
         .unwrap();
     assert_eq!(result.outcome, CapabilityDispatchOutcome::Failed);
     assert!(!result.content.contains("steps\""));
+    for adapter in [
+        ComputerUseAdapterKind::WindowsUia,
+        ComputerUseAdapterKind::MacosAccessibility,
+    ] {
+        plan.adapter.kind = adapter;
+        for (class, count, effect) in [
+            (
+                ComputerActionResultClass::DefinitelyNotStarted,
+                0,
+                "no_effect",
+            ),
+            (ComputerActionResultClass::PartiallyApplied, 1, "no_effect"),
+            (
+                ComputerActionResultClass::OutcomeUnknown,
+                0,
+                "may_have_effect",
+            ),
+            (
+                ComputerActionResultClass::OutcomeUnknown,
+                1,
+                "may_have_effect",
+            ),
+        ] {
+            native.result = class;
+            native.message = Some(
+                json!({
+                    "status":"stopped_on_error", "failed_step_number":count+1,
+                    "completed_steps":count, "effect":effect,
+                    "error":{"message":"native dispatch stopped"}
+                })
+                .to_string(),
+            );
+            let result = project(&plan, "execute_ui_actions", "run", "{}", &native)
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.outcome, CapabilityDispatchOutcome::Failed);
+            assert_eq!(Some(result.content), native.message);
+        }
+    }
 }

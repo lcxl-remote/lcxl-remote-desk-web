@@ -773,6 +773,106 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
 }
 
 #[test]
+fn scroll_approval_keeps_semantic_and_background_authority_separate() {
+    use crate::capability_grant::match_capability_grant;
+    use crate::provider_preflight::{ProviderCallSubject, UiCallPreflight};
+    let (mut session, _, _) = decision_fixture();
+    session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
+    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let app = serde_json::json!({"token":"app","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-11T03:09:00Z")
+        .unwrap()
+        .timestamp_millis() as u64;
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        for tool in ["execute_ui_actions", "execute_background_inputs"] {
+            let planning = crate::chat::ToolCall {id:"request".into(),name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:serde_json::json!({"items":[{"item_id":"scroll","tool_name":tool,"application_scope":{"application":app,"actions":["scroll"]},"suggested_ttl_seconds":60,"suggested_max_uses":2,"reason":"Scroll requested content"}]}).to_string()};
+            let request = crate::permission_tools::build_permission_request(
+                &planning,
+                &registry,
+                "request".into(),
+                1,
+                "2026-09-11T03:09:00Z".into(),
+            )
+            .unwrap();
+            let item = &request.items[0];
+            let expected = if tool == "execute_ui_actions" {
+                "ui:scroll"
+            } else {
+                "background_input:scroll"
+            };
+            assert_eq!(item.operation_scope, vec![expected]);
+            let inventory = vec![CapabilityAvailability {
+                provider_id: item.provider_id.clone(),
+                capability_id: registry
+                    .capability_for_tool(tool)
+                    .unwrap()
+                    .wire
+                    .capability_id
+                    .clone(),
+                tool_name: tool.into(),
+                compiled: true,
+                enabled: true,
+                connected: true,
+                ready: true,
+                reason: None,
+            }];
+            let mut decisions = vec![PermissionDecisionItem {
+                item_id: item.item_id.clone(),
+                decision: PermissionItemDecision::Approve {
+                    resource_scope: item.resource_scope.clone(),
+                    operation_scope: item.operation_scope.clone(),
+                    export_destinations: vec![],
+                    ttl_seconds: 60,
+                    max_uses: 2,
+                },
+            }];
+            let context = PermissionGrantIssuanceContext {
+                surface,
+                registry: &registry,
+                inventory: &inventory,
+                readiness_revision: 7,
+                now_unix_ms: now,
+                implicit_fresh_object_refs: &[],
+            };
+            let grant = build_permission_grants(&session, &request, &decisions, &context, None)
+                .unwrap()
+                .remove(0);
+            let call = crate::chat::ToolCall {id:"call".into(),name:"execute_ui_actions".into(),arguments_json:serde_json::json!({"application":app,"target":{"token":"list","snapshot_id":"ui","object_kind":"ui_element","expires_at":"2026-09-11T03:10:00Z"},"action":{"kind":"scroll","params":{"horizontal":0,"vertical":2}}}).to_string()};
+            let preflight = UiCallPreflight::build(&registry, surface, &call, now).unwrap();
+            let subject = ProviderCallSubject {
+                actor_id: &session.actor_id,
+                run_id: &session.conversation_id,
+                input_revision: session.input_revision,
+                target_device_id: &session.device_id,
+                policy_revision: session.policy_revision,
+                readiness_revision: 7,
+                now_unix_ms: now,
+            };
+            assert_eq!(
+                match_capability_grant(&grant, &preflight.grant_call(&subject).unwrap()).is_ok(),
+                tool == "execute_ui_actions"
+            );
+            if let PermissionItemDecision::Approve {
+                operation_scope, ..
+            } = &mut decisions[0].decision
+            {
+                *operation_scope = vec![if tool == "execute_ui_actions" {
+                    "background_input:scroll".into()
+                } else {
+                    "ui:scroll".into()
+                }];
+            }
+            assert!(
+                build_permission_grants(&session, &request, &decisions, &context, None).is_err()
+            );
+        }
+    }
+}
+
+#[test]
 fn background_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
     use crate::capability_grant::match_capability_grant;
     use crate::provider_preflight::{BackgroundInputCallPreflight, ProviderCallSubject};

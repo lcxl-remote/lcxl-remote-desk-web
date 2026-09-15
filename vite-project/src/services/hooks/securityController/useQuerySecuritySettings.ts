@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { QuerySecuritySettingsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import { querySecuritySettings } from "../../clients.ts";
+import type { QuerySecuritySettingsQueryResponse } from "../../types.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
+import { querySecuritySettings } from "../../clients.ts";
 
 export const querySecuritySettingsQueryKey = () => [{ url: '/api/desk/security-settings' }] as const
 

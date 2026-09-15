@@ -17,6 +17,45 @@ use desk_signal_facade::model::terminal::{
 use std::collections::BTreeMap;
 
 #[test]
+fn local_recovery_stays_in_user_worker_ipc_and_redacts_export_debug() {
+    use crate::local_file_recovery::*;
+    let request = ServiceToWorker::ManageLocalFileRecovery(LocalFileRecoveryRequest {
+        request_id: "a23a727e-8847-42f8-8ef0-a51e53c695ae".into(),
+        os_user: "S-1-5-21-100-200-300-1001".into(),
+        session_id: 4,
+        deadline_unix_ms: 30_000,
+        command: LocalFileRecoveryCommand::Export {
+            recovery_id: "a".repeat(64),
+        },
+    });
+    assert!(request.allowed_for_profile(WorkerProfile::SessionUser));
+    assert!(!request.allowed_for_profile(WorkerProfile::RestrictedDesktop));
+    let ServiceToWorker::ManageLocalFileRecovery(decoded) = wincode_round_trip(&request) else {
+        panic!("wrong request variant")
+    };
+    assert_eq!(decoded.session_id, 4);
+    assert_eq!(decoded.os_user, "S-1-5-21-100-200-300-1001");
+    assert!(decoded.command.validate().is_ok());
+    let reply = WorkerToService::LocalFileRecoveryManaged(LocalFileRecoveryReply {
+        request_id: decoded.request_id,
+        outcome: Ok(LocalFileRecoveryOutcome::Export(
+            b"private backup material".to_vec(),
+        )),
+    });
+    assert!(reply.connection_id().is_none());
+    assert!(reply.allowed_for_profile(WorkerProfile::SessionUser));
+    assert!(!reply.allowed_for_profile(WorkerProfile::RestrictedDesktop));
+    assert!(!format!("{reply:?}").contains("private backup material"));
+    let WorkerToService::LocalFileRecoveryManaged(decoded) = wincode_round_trip(&reply) else {
+        panic!("wrong reply variant")
+    };
+    assert_eq!(
+        decoded.outcome.unwrap().into_export().unwrap(),
+        b"private backup material"
+    );
+}
+
+#[test]
 fn application_policy_publication_and_exact_ack_round_trip() {
     let policy = ComputerUseLocalPolicyPayload {
         enabled: true,

@@ -28,11 +28,12 @@ type PermissionItemEdit = {
     maxUses?: number;
 };
 
-export function AssistantPermissionRequest({ request, canDecide, disabled = false, busy = false, onDecide }: {
+export function AssistantPermissionRequest({ request, canDecide, disabled = false, busy = false, waitingForTurn = false, onDecide }: {
     request: PermissionRequestDto;
     canDecide: boolean;
     disabled?: boolean;
     busy?: boolean;
+    waitingForTurn?: boolean;
     onDecide: (request: PermissionRequestDto, items: PermissionDecisionBody['items']) => Promise<boolean>;
 }) {
     const { t } = useTranslation();
@@ -90,7 +91,10 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
 
 
     return <AssistantPermissionDisclosure state={request.state} tools={request.items.map((item) => item.toolName)}>
-        <fieldset disabled={disabled || busy} className="min-w-0 space-y-3">
+        <fieldset disabled={disabled || busy || waitingForTurn} className="min-w-0 space-y-3">
+            {waitingForTurn && request.state === 'pending' && <p role="status" className="text-xs text-muted-foreground">
+                {t('pages.deviceAssistant.permissionWaitingForTurn')}
+            </p>}
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs text-muted-foreground">
                     rev {request.inputRevision}
@@ -349,7 +353,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     <Button
                         type="button"
                         size="sm"
-                        disabled={disabled || busy}
+                        disabled={disabled || busy || waitingForTurn}
                         onClick={() => void onDecide(
                             request,
                             request.items.map((item) => {
@@ -397,7 +401,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                         type="button"
                         size="sm"
                         variant="outline"
-                        disabled={disabled || busy}
+                        disabled={disabled || busy || waitingForTurn}
                         onClick={() => void onDecide(request, request.items.map(item => ({ itemId: item.itemId, decision: 'deny' })))}
                     >
                         <X className="mr-2 h-4 w-4" />

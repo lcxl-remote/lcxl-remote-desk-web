@@ -2,6 +2,7 @@ import { Disclosure } from '@/components/ui/disclosure';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AssistantFileResult, parseFileReceipt } from './assistant-file-result';
+import { hasUnknownActionResult } from './action-result-status';
 
 type CommandReceipt = {
     exit_code: number;
@@ -41,6 +42,7 @@ export function AssistantCommandResult({ text, onExportBackup }: { text: string;
     const { t, i18n } = useTranslation();
     const receipt = useMemo(() => parseCommandReceipt(text), [text]);
     const fileReceipt = useMemo(() => parseFileReceipt(text), [text]);
+    const outcomeUnknown = useMemo(() => hasUnknownActionResult(text), [text]);
     if (fileReceipt) return <AssistantFileResult receipt={fileReceipt} text={text} onExportBackup={onExportBackup} />;
     const output = (label: string, content: string, truncated: boolean) => (
         <div className="min-w-0 space-y-1">
@@ -52,6 +54,7 @@ export function AssistantCommandResult({ text, onExportBackup }: { text: string;
     return (
         <Disclosure className="min-w-0" title={<>
                 {t('pages.deviceAssistant.commandResultTitle')}
+                {outcomeUnknown && <> · {t('pages.deviceAssistant.toolCall.inspectBeforeRetry')}</>}
             </>} summaryClassName="cursor-pointer rounded font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
 
             <div className="mt-3 space-y-3">

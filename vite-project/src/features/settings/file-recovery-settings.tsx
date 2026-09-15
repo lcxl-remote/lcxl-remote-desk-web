@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Archive, Download, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -13,8 +13,29 @@ import { queryLocalFileRecovery, updateLocalFileRecoveryPolicy, retryLocalFileRe
 import type { FileRecoveryPageDto, FileRecoveryCommand } from '@/services/types';
 import { AssistantBackupCleanup } from '@/features/desk/assistant-backup-cleanup';
 
-export function FileRecoverySettings({ target }: { target?: { connection: string; device_id?: string | null } }) {
+type RecoverySettingsProps = { target?: { connection: string; device_id?: string | null } };
+
+export function FileRecoverySettings({ target }: RecoverySettingsProps) {
+    // A new destination must not inherit another device's page, authority,
+    // OS account, cursor or pending confirmation.
+    const key = target ? JSON.stringify([target.connection, target.device_id ?? null]) : 'local';
+    return <ScopedFileRecoverySettings key={key} target={target} />;
+}
+
+function ScopedFileRecoverySettings({ target }: RecoverySettingsProps) {
     const { t } = useTranslation();
+    const active = useRef(true);
+    const running = useRef(false);
+    useEffect(() => {
+        active.current = true;
+        return () => { active.current = false; };
+    }, []);
+    const current = async <T,>(request: () => Promise<T>): Promise<T> => {
+        if (!active.current) throw new Error('Recovery destination changed');
+        const result = await request();
+        if (!active.current) throw new Error('Recovery destination changed');
+        return result;
+    };
     const [page, setPage] = useState<FileRecoveryPageDto | null>(null);
     const [days, setDays] = useState('7');
     const [capacity, setCapacity] = useState('100');
@@ -33,7 +54,7 @@ export function FileRecoverySettings({ target }: { target?: { connection: string
     const available = !!target || local;
     const remote = async (command: FileRecoveryCommand) => {
         if (!target) throw new Error('Missing device');
-        const response = await manageDeviceFileRecovery({ ...target, request: { command, expected_authority: authority, expected_os_user: osUser } });
+        const response = await current(() => manageDeviceFileRecovery({ ...target, request: { command, expected_authority: authority, expected_os_user: osUser } }));
         if (!response.data) throw new Error('Device backup storage unavailable');
         if (response.data.outcome.kind === 'unavailable') throw new RecoveryFailure(response.data.outcome.reason);
         setAuthority(response.data.authority);
@@ -46,7 +67,7 @@ export function FileRecoverySettings({ target }: { target?: { connection: string
         const after = more ? page?.next_cursor : undefined;
         const outcome = target ? await remote({ operation: 'query', after }) : null;
         const next = target ? (outcome?.kind === 'page' ? outcome.page : null)
-            : (await queryLocalFileRecovery({ after })).data;
+            : (await current(() => queryLocalFileRecovery({ after }))).data;
         if (!next) throw new Error('Missing recovery page');
         setPage(more && page ? { ...next, records: [...page.records, ...next.records] } : next);
         if (!more) {
@@ -55,24 +76,28 @@ export function FileRecoverySettings({ target }: { target?: { connection: string
         }
     };
     const run = async (action: () => Promise<void>) => {
-        if (busy) return;
+        if (!active.current || running.current) return;
+        running.current = true;
         setBusy(true); setStatus(null);
         try { await action(); } catch (error) {
-            setStatus(recoveryErrorKey(error));
-        } finally { setBusy(false); }
+            if (active.current) setStatus(recoveryErrorKey(error));
+        } finally {
+            running.current = false;
+            if (active.current) setBusy(false);
+        }
     };
     const save = () => run(async () => {
         if (!valid) return;
         const policy = { retention_days: Number(days), max_bytes: Number(capacity) * 1048576 };
         if (target) {
             if ((await remote({ operation: 'set_policy', ...policy })).kind !== 'policy') throw new Error('Missing recovery policy');
-        } else if (!(await updateLocalFileRecoveryPolicy(policy)).data) throw new Error('Missing recovery policy');
+        } else if (!(await current(() => updateLocalFileRecoveryPolicy(policy))).data) throw new Error('Missing recovery policy');
         await load(); setStatus('saved');
     });
     const cleanup = () => run(async () => {
         const outcome = target ? await remote({ operation: 'retry_cleanup' }) : null;
         const report = target ? (outcome?.kind === 'cleanup' ? outcome.report : null)
-            : (await retryLocalFileRecoveryCleanup()).data;
+            : (await current(() => retryLocalFileRecoveryCleanup())).data;
         if (!report) throw new Error('Missing cleanup result');
         await load();
         setStatus(report.pending_files || report.unknown_outcomes ? 'pending' : 'cleaned');
@@ -80,10 +105,10 @@ export function FileRecoverySettings({ target }: { target?: { connection: string
     const download = (id: string) => run(async () => {
         const record = records.find(row => row.recovery_id === id);
         if (!record) throw new Error('Missing backup');
-        const data = target ? await exportDeviceFileRecovery({ ...target, recovery_id: id,
+        const data = await current(() => target ? exportDeviceFileRecovery({ ...target, recovery_id: id,
             conversation_id: record.conversation_id, expected_authority: authority, expected_os_user: osUser }, { responseType: 'blob' })
-            : await exportLocalFileRecovery({ recovery_id: id }, { responseType: 'blob' });
-        const zip = await requireRecoveryZip(data);
+            : exportLocalFileRecovery({ recovery_id: id }, { responseType: 'blob' }));
+        const zip = await current(() => requireRecoveryZip(data));
         const url = URL.createObjectURL(zip);
         const anchor = document.createElement('a');
         anchor.href = url; anchor.download = 'file-recovery.zip'; anchor.click();
@@ -95,18 +120,18 @@ export function FileRecoverySettings({ target }: { target?: { connection: string
         const body = { recovery_id: id, conversation_id: record.conversation_id, confirmed: true };
         const outcome = target ? await remote({ operation: 'discard', ...body }) : null;
         const report = target ? (outcome?.kind === 'cleanup' ? outcome.report : null)
-            : (await discardLocalFileRecovery(body)).data;
+            : (await current(() => discardLocalFileRecovery(body))).data;
         if (!report) throw new Error('Missing discard result');
-        try { await load(); } catch { setStatus('discardRefreshFailed'); return; }
+        try { await load(); } catch { if (active.current) setStatus('discardRefreshFailed'); return; }
         setStatus(report.pending_files ? 'pending' : 'discarded');
     });
     const acceptClock = (displayedTime: number) => run(async () => {
         const body = { displayed_time_unix_ms: displayedTime, confirmed: true };
         const outcome = target ? await remote({ operation: 'confirm_clock', ...body }) : null;
         const report = target ? (outcome?.kind === 'cleanup' ? outcome.report : null)
-            : (await confirmLocalFileRecoveryClock(body)).data;
+            : (await current(() => confirmLocalFileRecoveryClock(body))).data;
         if (!report) throw new Error('Missing clock confirmation');
-        try { await load(); } catch { setStatus('clockRefreshFailed'); return; }
+        try { await load(); } catch { if (active.current) setStatus('clockRefreshFailed'); return; }
         setStatus('clockConfirmed');
     });
     return <Card>

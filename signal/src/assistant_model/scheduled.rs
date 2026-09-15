@@ -6,6 +6,7 @@ use crate::{
     entity::agent_session,
     schedule_store::{ScheduleStore, TaskBudgetKind, TaskBudgetRequest},
 };
+use desk_diagnose_core::schedule::model_admission::ModelAdmissionError;
 use desk_diagnose_core::{model_egress::AuthorizedModelRequest, session::PersistedAgentSession};
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
@@ -53,7 +54,7 @@ impl MeteredModel {
         authorized: &AuthorizedModelRequest,
         ordinal: u64,
         ordinary_id: String,
-    ) -> Result<String, DbErr> {
+    ) -> Result<String, ModelAdmissionError<DbErr>> {
         let Some(task) = &self.fresh_task else {
             crate::model_egress_store::SignalModelEgressStore::new(self.db.clone())
                 .record_dispatch_intent(
@@ -68,7 +69,7 @@ impl MeteredModel {
         };
         let settings = task.gate.snapshot();
         if !settings.enabled || task.run_epoch <= 0 || task.session_token == 0 {
-            return Err(denied());
+            return Err(denied().into());
         }
         task.validate_target().await?;
         let (digest, units) = self
@@ -103,7 +104,7 @@ impl MeteredModel {
                     ModelExportSource::Turn(held.current_turn_id.as_deref().ok_or_else(denied)?),
                 )
         {
-            return Err(denied());
+            return Err(denied().into());
         }
         // The task write fence holds SQLite's writer lock, so local model edits
         // cannot commit between this configuration check and dispatch commit.
@@ -132,10 +133,15 @@ impl MeteredModel {
             &authorized.input_envelopes,
         )
         .await
-        .map_err(|_| denied())?;
+        .map_err(|error| match error {
+            crate::schedule_store::ScheduleStoreError::BudgetExceeded => {
+                ModelAdmissionError::BudgetExceeded
+            }
+            _ => ModelAdmissionError::Backend(denied()),
+        })?;
         task.validate_target().await?;
         if task.gate.snapshot() != settings {
-            return Err(denied());
+            return Err(denied().into());
         }
         txn.commit().await?;
         Ok(dispatch.receipt.receipt_id)

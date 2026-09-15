@@ -2,13 +2,12 @@
 //! observation snapshots and authorization leases. Native handles never cross
 //! threads (in particular, UIA interfaces never outlive their COM apartment).
 
-use std::cell::Cell;
-use std::sync::{OnceLock, mpsc};
+use std::sync::OnceLock;
+use std::time::Duration;
+mod executor;
+pub(crate) use executor::{NativeExecutionError, check_mutation};
 
 use desk_agent_protocol::{AgentError, AgentErrorKind};
-
-thread_local! { static ON_UI_THREAD: Cell<bool> = const { Cell::new(false) }; }
-type Job = Box<dyn FnOnce() + Send>;
 
 fn error(message: &str) -> AgentError {
     AgentError {
@@ -23,53 +22,55 @@ fn error(message: &str) -> AgentError {
 pub(crate) fn run<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T, AgentError> + Send + 'static,
 ) -> Result<T, AgentError> {
-    if ON_UI_THREAD.with(Cell::get) {
-        return operation();
-    }
-    static THREAD: OnceLock<Result<mpsc::SyncSender<Job>, String>> = OnceLock::new();
-    let sender = THREAD.get_or_init(|| {
-        let (sender, receiver) = mpsc::sync_channel::<Job>(8);
-        std::thread::Builder::new()
-            .name("native-ui-identity".into())
-            .stack_size(8 * 1024 * 1024)
-            .spawn(move || {
-                ON_UI_THREAD.with(|flag| flag.set(true));
-                #[cfg(windows)]
-                let initialized = unsafe {
-                    windows::Win32::System::Com::CoInitializeEx(
-                        None,
-                        windows::Win32::System::Com::COINIT_MULTITHREADED,
-                    )
-                };
-                #[cfg(windows)]
-                if initialized.is_err() {
-                    return;
-                }
-                // Keep the apartment alive for every retained UIA element.
-                // Thread-local native handles are released when this thread exits.
-                while let Ok(job) = receiver.recv() {
-                    job();
-                }
-            })
-            .map(|_| sender)
-            .map_err(|e| e.to_string())
-    });
-    let sender = sender
-        .as_ref()
-        .map_err(|_| error("native UI thread could not start"))?;
-    let (reply, result) = mpsc::sync_channel(1);
-    sender
-        .try_send(Box::new(move || {
-            let _ = reply.send(operation());
-        }))
-        .map_err(|_| {
-            error("native UI worker is busy or unavailable; this request was not executed")
-        })?;
-    result
-        .recv()
-        .map_err(|_| error("native UI worker stopped before returning a result"))?
+    run_impl(operation, None).map_err(|failure| failure.error)
 }
 
+pub(crate) fn run_guarded<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, AgentError> + Send + 'static,
+    guard: impl Fn() -> Result<(), AgentError> + Send + 'static,
+) -> Result<T, NativeExecutionError> {
+    run_impl(operation, Some(Box::new(guard)))
+}
+
+fn run_impl<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, AgentError> + Send + 'static,
+    guard: Option<executor::MutationGuard>,
+) -> Result<T, NativeExecutionError> {
+    if executor::is_current() {
+        executor::check_mutation().map_err(NativeExecutionError::maybe_started)?;
+        if let Some(guard) = guard {
+            return executor::with_guard(guard, operation)
+                .map_err(NativeExecutionError::maybe_started);
+        }
+        return operation().map_err(NativeExecutionError::maybe_started);
+    }
+    static THREAD: OnceLock<Result<executor::Executor, String>> = OnceLock::new();
+    let executor = THREAD
+        .get_or_init(|| {
+            executor::Executor::new(|| {
+                #[cfg(windows)]
+                {
+                    // Keep COM alive for the lifetime of the retained UIA handles.
+                    unsafe {
+                        windows::Win32::System::Com::CoInitializeEx(
+                            None,
+                            windows::Win32::System::Com::COINIT_MULTITHREADED,
+                        )
+                    }
+                    .is_ok()
+                }
+                #[cfg(not(windows))]
+                {
+                    true
+                }
+            })
+        })
+        .as_ref()
+        .map_err(|_| {
+            NativeExecutionError::not_started(error("native UI thread could not start"))
+        })?;
+    executor.run_classified(Duration::from_secs(10), operation, guard)
+}
 pub(super) trait NativeElement {
     fn same_element(&self, other: &Self) -> bool;
     /// Transient permission/transport errors must never count as destruction.
@@ -174,6 +175,7 @@ impl<T: NativeElement> IdentityStore<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::rc::Rc;
     #[derive(Clone)]
     struct Element {

@@ -15,6 +15,9 @@ import {
 } from './constants';
 import type { SignalingSubscriber } from './use-desk-signaling';
 import { useDeviceAssistantChat } from './use-device-assistant-chat';
+import { deskErrorCodeEnum } from '@/services/types';
+
+vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
 
 describe('useDeviceAssistantChat', () => {
     it('does not send live desktop metadata as an explicit object attachment', async () => {
@@ -168,20 +171,28 @@ describe('useDeviceAssistantChat', () => {
         expect(result.current.fileScope.revision).toBe(1);
         unmount();
     });
-    it('restores the durable terminal error in a newly opened page', async () => {
+    it.each([
+        [undefined, 'model context compression failed: stale_context'],
+        [deskErrorCodeEnum.SCHEDULE_MODEL_BUDGET_EXCEEDED,
+            'The scheduled task has insufficient model-token budget remaining. This model request was not sent. Review the task budget before running it again.'],
+    ])('restores and localizes durable terminal error code %s in a newly opened page', async (errorCode, expected) => {
         localStorage.setItem('device-assistant-conversation:restore-error', 'saved-conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
             sessionId: 'saved-conversation', seq: 10, active: false,
-            terminalError: { message: 'model context compression failed: stale_context' },
+            terminalError: { message: 'model context compression failed: stale_context', error_code: errorCode },
             messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
         } }) }));
         const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'restore-error', connected: true,
             subscribe: () => () => undefined, sendMessage: () => 'select' }));
-        await waitFor(() => expect(result.current.error).toBe('model context compression failed: stale_context'));
+        await waitFor(() => expect(result.current.error).toBe(expected));
         expect(result.current.status).toBe('error');
         unmount();
     });
-    it('keeps the concrete turn error after snapshot refresh and clears it on a new turn', async () => {
+    it.each([
+        [undefined, 'Context authorization expired.'],
+        [deskErrorCodeEnum.SCHEDULE_MODEL_BUDGET_EXCEEDED,
+            'The scheduled task has insufficient model-token budget remaining. This model request was not sent. Review the task budget before running it again.'],
+    ])('keeps localized turn error code %s after refresh and clears it on a new turn', async (errorCode, expected) => {
         let subscriber: SignalingSubscriber | null = null;
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
             sessionId: 'failed-session', seq: 10, active: false,
@@ -200,11 +211,11 @@ describe('useDeviceAssistantChat', () => {
         act(() => { expect(result.current.start('continue')).toBe(true); });
         await act(async () => subscriber?.({ request_id: 'turn-request',
             signaling_type: SIGNALING_TYPE_CODE_DEVICE_ASSISTANT_UPDATED,
-            signaling_data: { seq: 1, kind: 'error', error: { message: 'Context authorization expired.' } },
+            signaling_data: { seq: 1, kind: 'error', error: { message: 'Context authorization expired.', error_code: errorCode } },
         }));
         await waitFor(() => expect(result.current.messages.at(-1)?.text).toBe('continue'));
         expect(result.current.deliveryState).toBeNull();
-        expect(result.current.error).toBe('Context authorization expired.');
+        expect(result.current.error).toBe(expected);
         expect(result.current.status).toBe('error');
         act(() => { expect(result.current.start('another question')).toBe(true); });
         expect(result.current.error).toBeNull();
@@ -1714,6 +1725,35 @@ describe('useDeviceAssistantChat', () => {
         expect(result.current.running).toBe(false);
         expect('disposeUnknownOutcome' in result.current).toBe(false);
     });
+});
+
+it.each([
+    ['file_artifact', 'patch_selected_powerpoint_copy', 'copy.pptx'],
+    ['file_artifact', 'replace_selected_word_copy_body', `${'a'.repeat(250)}.DOCX`],
+    ['batch_document_artifact', 'patch_selected_keynote_copy', 'copy.key'],
+])('restores %s from %s as a visible file result after refresh', async (kind, tool, fileName) => {
+    localStorage.setItem('device-assistant-conversation:copy-device', 'copy-conversation');
+    const value = kind === 'file_artifact'
+        ? { file_name: fileName, size_bytes: 123, digest_sha256: 'a'.repeat(64) }
+        : { file_name: fileName, byte_len: 123, sha256: 'a'.repeat(64), validation_byte_len: 32, validation_sha256: 'b'.repeat(64) };
+    const text = JSON.stringify({ result: 'verified', output: { kind, value } });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        sessionId: 'server-session', seq: 1, active: false,
+        messages: [
+            { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'copy-call', name: tool, argumentsJson: '{}' }] },
+            { id: 'copy-result', role: 'tool', toolCallId: 'copy-call', text },
+        ],
+    } }) })));
+    const { result, unmount } = renderHook(() => useDeviceAssistantChat({ deskId: 'copy-device', subscribe: () => () => {}, sendMessage: () => 'request' }));
+    try {
+        await waitFor(() => expect(result.current.messages.find(message => message.id === 'copy-result')).toMatchObject({ role: 'tool_result', text }));
+        expect(result.current.tools[0]).toMatchObject({ callId: 'copy-call', status: 'ok', output: text });
+        expect(result.current.messages.filter(message => message.id === 'copy-result')).toHaveLength(1);
+    } finally {
+        unmount();
+        localStorage.removeItem('device-assistant-conversation:copy-device');
+        vi.unstubAllGlobals();
+    }
 });
 
 it('projects a failed native action with the reason bound to its work record', async () => {

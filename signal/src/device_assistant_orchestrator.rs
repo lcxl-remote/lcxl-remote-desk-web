@@ -57,6 +57,7 @@ use sha2::{Digest, Sha256};
 use crate::model_dial::SignalModelSeam;
 pub(crate) mod fresh;
 mod scheduled;
+mod scheduled_dispatch;
 pub use fresh::resume_fresh_task;
 pub use scheduled::resume_scheduled_turn;
 mod scheduled_permission;
@@ -1284,6 +1285,9 @@ async fn compose_turn_inner(
                     "inspect_selected_numbers_with_iwork",
                     "inspect_selected_pages_with_iwork",
                     "inspect_selected_keynote_with_iwork",
+                    "inspect_selected_powerpoint_file",
+                    "inspect_selected_word_file",
+                    "inspect_selected_excel_cell",
                 ]
                 .into_iter()
                 .map(str::to_string),
@@ -1294,6 +1298,9 @@ async fn compose_turn_inner(
                         "patch_selected_numbers_copy",
                         "replace_selected_pages_copy_body",
                         "patch_selected_keynote_copy",
+                        "patch_selected_powerpoint_copy",
+                        "replace_selected_word_copy_body",
+                        "patch_selected_excel_copy",
                     ]
                     .into_iter()
                     .map(str::to_string),
@@ -1481,6 +1488,9 @@ async fn compose_turn_inner(
                     desk_diagnose_core::device_assistant::SPREADSHEET_BATCH_INSPECT_CAPABILITY_ID,
                     desk_diagnose_core::device_assistant::DOCUMENT_BATCH_INSPECT_CAPABILITY_ID,
                     desk_diagnose_core::device_assistant::PRESENTATION_BATCH_INSPECT_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::windows_excel::INSPECT_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::windows_word::INSPECT_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::windows_office::INSPECT_CAPABILITY_ID,
                 ]
                 .into_iter()
                 .map(str::to_string),
@@ -1491,6 +1501,9 @@ async fn compose_turn_inner(
                     desk_diagnose_core::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID,
                     desk_diagnose_core::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID,
                     desk_diagnose_core::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::windows_excel::PATCH_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::windows_word::PATCH_CAPABILITY_ID,
+                    desk_diagnose_core::device_assistant::windows_office::PATCH_CAPABILITY_ID,
                 ]
                 .into_iter()
                 .map(str::to_string),
@@ -1763,6 +1776,22 @@ async fn compose_turn_inner(
         }) {
             granted.push(desk_agent_protocol::Capability::FileArtifactCreateConfirmed);
             granted.push(desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed);
+            if selected_file_roots
+                .iter()
+                .filter(|object_ref| {
+                    object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::File
+                })
+                .count()
+                == 1
+            {
+                // File batch actions use the same protocol capabilities as Live
+                // actions. They still require their own exact Provider grant.
+                granted.extend([
+                    desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
+                    desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
+                    desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
+                ]);
+            }
         }
     }
     if !selected_spreadsheet_roots.is_empty() {
@@ -1987,45 +2016,15 @@ async fn compose_turn_inner(
             StreamingTurnSink::starting_at(|_event: DeviceAssistantEvent| {}, request_id, 0);
         sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
         sink.turn_started(&turn_id);
-        let outcome = if let Some(fresh) = resume.fresh {
-            if let Some(request_id) = fresh.approval_reference {
-                desk_diagnose_core::agent_loop::resume_claimed_fresh_task_permission_turn(
-                    &deps,
-                    resume.claimed.session,
-                    &fresh.contract,
-                    &resume.claimed.run.run_id,
-                    &request_id,
-                    &mut sink,
-                )
-                .await?
-            } else {
-                desk_diagnose_core::agent_loop::resume_claimed_fresh_task_turn(
-                    &deps,
-                    resume.claimed.session,
-                    &fresh.contract,
-                    &resume.claimed.run.run_id,
-                    &mut sink,
-                )
-                .await?
-            }
-        } else if let Some(request_id) = resume.permission_request_id {
-            desk_diagnose_core::agent_loop::resume_claimed_scheduled_permission_turn(
-                &deps,
-                resume.claimed.session,
-                &resume.claimed.run.run_id,
-                &request_id,
-                &mut sink,
-            )
-            .await?
-        } else {
-            desk_diagnose_core::agent_loop::resume_claimed_scheduled_turn(
-                &deps,
-                resume.claimed.session,
-                &resume.claimed.run.run_id,
-                &mut sink,
-            )
-            .await?
-        };
+        let outcome = scheduled_dispatch::drive(
+            &deps,
+            resume.claimed.session,
+            &resume.claimed.run.run_id,
+            resume.permission_request_id.as_deref(),
+            resume.fresh.as_ref(),
+            &mut sink,
+        )
+        .await?;
         sink.finish_outcome(&outcome);
         return Ok(Some(outcome));
     }

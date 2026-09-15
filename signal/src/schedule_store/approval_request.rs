@@ -64,6 +64,16 @@ pub(crate) async fn validate_task_directory_on(
     mutation: &desk_diagnose_core::file_scope::transaction::FileScopeMutation,
 ) -> Result<(), ScheduleStoreError> {
     use desk_diagnose_core::file_scope::transaction::FileScopeMutation;
+    if session.trigger_origin == TriggerOrigin::ScheduledContinuation {
+        if let FileScopeMutation::Decide {
+            directory_request_id,
+            approve: true,
+        } = mutation
+        {
+            super::continuation_wait::lock_approval_on(txn, session, directory_request_id).await?;
+        }
+        return Ok(());
+    }
     if session.trigger_origin != TriggerOrigin::ScheduledTask {
         return Ok(());
     }

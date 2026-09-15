@@ -73,7 +73,11 @@ pub fn missing_results(
         }
         if record.state != DirectoryConsentState::Approved
             || record.proposal.requested_path != input.path
-            || record.proposal.canonical_path != input.path
+            || (record.proposal.canonical_path != input.path
+                && !crate::file_scope::windows_path::differs_only_by_verbatim_prefix(
+                    &input.path,
+                    &record.proposal.canonical_path,
+                ))
             || record.proposal.purpose != input.purpose
         {
             return Err(TaskSourceError::ConflictingNode);
@@ -123,6 +127,16 @@ mod tests {
 
     #[test]
     fn recovery_requires_original_task_consent_and_does_not_recover_twice() {
+        for (requested, canonical) in [
+            ("/reports", "/reports"),
+            (r"D:\测试 输入", r"\\?\D:\测试 输入"),
+            (r"D:\", r"\\?\D:\"),
+        ] {
+            check_recovery(requested, canonical);
+        }
+    }
+
+    fn check_recovery(requested: &str, canonical: &str) {
         let mut session = PersistedAgentSession::new(
             "run",
             "owner",
@@ -144,7 +158,7 @@ mod tests {
         let tool = ToolCall {
             id: "directory-call".into(),
             name: crate::directory_tools::REQUEST_DIRECTORY.into(),
-            arguments_json: serde_json::json!({"path":"/reports", "purpose":"Write report"})
+            arguments_json: serde_json::json!({"path":requested, "purpose":"Write report"})
                 .to_string(),
         };
         let mut parent = crate::model_message_labels::model_bound_user_message(
@@ -168,8 +182,8 @@ mod tests {
         );
         let proposal = DirectoryProposal {
             request_id: request_id.clone(),
-            requested_path: "/reports".into(),
-            canonical_path: "/reports".into(),
+            requested_path: requested.into(),
+            canonical_path: canonical.into(),
             directory: ObjectRef {
                 token: "fresh-token".into(),
                 snapshot_id: "snapshot".into(),

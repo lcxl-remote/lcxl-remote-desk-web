@@ -1,4 +1,5 @@
 use super::*;
+mod word;
 use crate::{
     context_attachment::{
         AttachmentBounds, AttachmentObjectRef, AttachmentState, CONTEXT_ATTACHMENT_SCHEMA_VERSION,
@@ -368,9 +369,59 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             Capability::PresentationLivePatchConfirmed,
         ),
     ];
+    let cases = cases.into_iter().chain(std::iter::once((
+        "patch_selected_powerpoint_copy",
+        "inspect_selected_powerpoint_file",
+        "copy.pptx",
+        serde_json::json!({"action":{"kind":"replace_slide_title","params":{"text":"Title"}}}),
+        Capability::PresentationLivePatchConfirmed,
+    )));
     for (tool, read_tool, file_name, extra, capability) in cases {
+        use super::super::batch_document::PresentationReadBinding;
+        use desk_agent_protocol::computer_use::{
+            BatchDocumentSourceProjection, ComputerUseAdapterRef, LiveDocumentInspectOutput,
+            LiveDocumentProjection,
+        };
+        let slide = derived_reference(ObjectKind::Slide);
+        let binding = if matches!(
+            tool,
+            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy"
+        ) {
+            let mut presentation = derived_reference(ObjectKind::Presentation);
+            presentation.token = "presentation".into();
+            Some(
+                PresentationReadBinding::from_authenticated_read(
+                    &file,
+                    "worker-1:7",
+                    &LiveDocumentInspectOutput {
+                        snapshot_id: slide.snapshot_id.clone(),
+                        adapter: ComputerUseAdapterRef {
+                            kind: if tool == "patch_selected_powerpoint_copy" { ComputerUseAdapterKind::OfficePowerPoint } else { ComputerUseAdapterKind::IworkKeynote },
+                            version: if tool == "patch_selected_powerpoint_copy" { desk_agent_protocol::computer_use::office_batch::PPTX_ADAPTER_VERSION } else { crate::device_assistant::IWORK_ADAPTER_VERSION }.into(),
+                        },
+                        projection: LiveDocumentProjection::Presentation {
+                            presentation,
+                            slide: slide.clone(),
+                            slide_number: 1,
+                            title: "Title".into(),
+                            presenter_notes: String::new(),
+                        },
+                        batch_source: Some(BatchDocumentSourceProjection {
+                            file: file.clone(),
+                            display_name: "source.key".into(),
+                            byte_len: 100,
+                            sha256: "a".repeat(64),
+                        }),
+                    },
+                    NOW,
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        };
         let mut arguments = serde_json::json!({
-            "target":file,
+            "target":if binding.is_some() { &slide } else { &file },
             "output":{"destination_parent":directory,"native_file_name":file_name}
         });
         arguments
@@ -395,28 +446,170 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             ],
             live_targets: vec![],
         };
-        let preflight = IworkCallPreflight::build(
+        let preflight = IworkCallPreflight::build_with_presentation_binding(
             &device_assistant_provider_registry(),
             ProductSurface::ManagerPersonalOwner,
             &call,
             &original,
             std::slice::from_ref(&directory),
             NOW,
+            binding.as_ref(),
         )
         .unwrap();
         assert_eq!(preflight.required_capability(), capability);
         assert_eq!(preflight.action().required_capability(), capability);
         assert_eq!(preflight.resource_scope().len(), 2);
 
+        if let Some(binding) = &binding {
+            use crate::chat::{ChatMessage, ChatRole, ToolCallRef};
+            use crate::file_scope::{DirectoryConsentSource, DirectoryProposal};
+            use sha2::{Digest, Sha256};
+            let mut session = crate::session::PersistedAgentSession::new(
+                "conversation",
+                "owner",
+                "device",
+                1,
+                desk_agent_protocol::AgentScope {
+                    granted: vec![],
+                    expires_at: None,
+                    mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                    policy_name: None,
+                },
+                "2026-08-31T00:00:01Z",
+            );
+            session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+            let subject = session
+                .file_scope_subject("owner", "device", "conversation")
+                .unwrap();
+            session
+                .file_scope
+                .propose(
+                    &subject,
+                    0,
+                    DirectoryProposal {
+                        request_id: "output".into(),
+                        requested_path: "/tmp/output".into(),
+                        canonical_path: "/tmp/output".into(),
+                        purpose: "new copy".into(),
+                        source: DirectoryConsentSource::ModelProposal,
+                        directory: directory.clone(),
+                    },
+                    NOW,
+                )
+                .unwrap();
+            session
+                .file_scope
+                .decide(&subject, 1, "output", true, NOW)
+                .unwrap();
+            let mut presentation = derived_reference(ObjectKind::Presentation);
+            presentation.token = "presentation".into();
+            let output = LiveDocumentInspectOutput {
+                snapshot_id: slide.snapshot_id.clone(),
+                adapter: binding.adapter().clone(),
+                batch_source: Some(binding.source().clone()),
+                projection: LiveDocumentProjection::Presentation {
+                    presentation,
+                    slide: slide.clone(),
+                    slide_number: 1,
+                    title: "Title".into(),
+                    presenter_notes: String::new(),
+                },
+            };
+            let text = serde_json::to_string(&desk_agent_protocol::OperationOutput::ReadContext(
+                desk_agent_protocol::ReadContextOutput::PresentationLiveInspect(output),
+            ))
+            .unwrap();
+            let mut proposal = ChatMessage::text("proposal", ChatRole::Assistant, "");
+            proposal.tool_calls.push(ToolCallRef {
+                id: "read".into(),
+                name: read_tool.into(),
+                arguments_json: "{}".into(),
+            });
+            let mut receipt = ChatMessage::tool_result("receipt", "read", text.clone());
+            let mut envelope = original.object_attachments[1].envelope.clone();
+            let registry = device_assistant_provider_registry();
+            let capability = registry.capability_for_tool(read_tool).unwrap();
+            envelope.provenance.source_provider_id = registry
+                .provider_for_capability(&capability.wire.capability_id)
+                .unwrap()
+                .wire
+                .provider_id
+                .clone();
+            envelope.provenance.source_tool_name = read_tool.into();
+            envelope.digest_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+            envelope.content = ContentRef::EphemeralObservation {
+                observation_id: "read".into(),
+                size_bytes: text.len() as u64,
+                expires_at_unix_ms: NOW + 30_000,
+            };
+            receipt.data_envelope = Some(envelope);
+            session.conversation = vec![proposal, receipt];
+            for surface in [
+                ProductSurface::OssPersonalOwner,
+                ProductSurface::ManagerPersonalOwner,
+            ] {
+                let runtime = IworkCallPreflight::from_session(
+                    &registry,
+                    surface,
+                    &call,
+                    &original,
+                    &session,
+                    "501:worker-1:7",
+                    NOW,
+                )
+                .unwrap();
+                assert_eq!(runtime.action(), preflight.action());
+                assert_eq!(
+                    IworkCallPreflight::frozen_presentation_resources(
+                        &call,
+                        runtime.target(),
+                        runtime.action()
+                    )
+                    .unwrap(),
+                    runtime.resource_scope()
+                );
+                assert!(
+                    IworkCallPreflight::from_session(
+                        &registry,
+                        surface,
+                        &call,
+                        &original,
+                        &session,
+                        "501:old-worker",
+                        NOW
+                    )
+                    .is_err()
+                );
+            }
+            session.file_scope.revoke(&subject, 2, "output").unwrap();
+            assert!(
+                IworkCallPreflight::from_session(
+                    &registry,
+                    ProductSurface::OssPersonalOwner,
+                    &call,
+                    &original,
+                    &session,
+                    "501:worker-1:7",
+                    NOW
+                )
+                .is_err()
+            );
+            assert!(
+                IworkCallPreflight::frozen_presentation_resources(&call, &file, preflight.action())
+                    .is_err()
+            );
+        }
+
         // Selecting a source or attaching a directory is not directory consent.
         assert!(
-            IworkCallPreflight::build(
+            IworkCallPreflight::build_with_presentation_binding(
                 &device_assistant_provider_registry(),
                 ProductSurface::ManagerPersonalOwner,
                 &call,
                 &original,
                 &[],
-                NOW
+                NOW,
+                binding.as_ref(),
             )
             .is_err()
         );
@@ -425,13 +618,14 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             .object_attachments
             .retain(|attachment| attachment.kind != ContextAttachmentKind::DirectorySelection);
         assert!(
-            IworkCallPreflight::build(
+            IworkCallPreflight::build_with_presentation_binding(
                 &device_assistant_provider_registry(),
                 ProductSurface::ManagerPersonalOwner,
                 &call,
                 &source_only,
                 std::slice::from_ref(&directory),
-                NOW
+                NOW,
+                binding.as_ref(),
             )
             .is_ok()
         );
@@ -442,13 +636,14 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
         changed_json["target"]["token"] = "not-selected".into();
         changed.arguments_json = changed_json.to_string();
         assert!(
-            IworkCallPreflight::build(
+            IworkCallPreflight::build_with_presentation_binding(
                 &device_assistant_provider_registry(),
                 ProductSurface::ManagerPersonalOwner,
                 &changed,
                 &original,
                 std::slice::from_ref(&directory),
                 NOW,
+                binding.as_ref(),
             )
             .is_err()
         );

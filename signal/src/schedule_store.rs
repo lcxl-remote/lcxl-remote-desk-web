@@ -28,6 +28,7 @@ mod approval_admission;
 mod approval_claim;
 mod approval_expiry;
 mod approval_request;
+mod continuation_wait;
 mod directory_receipt;
 mod fresh_permission_recovery;
 pub(crate) use approval_admission::lock_fresh_approval_on;

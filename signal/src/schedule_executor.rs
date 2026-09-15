@@ -1,5 +1,6 @@
 //! Single-node scheduled dispatch using durable paired claims.
 mod fresh;
+use crate::owned_task;
 use crate::{
     device_assistant_gate::DeviceAssistantGate,
     device_assistant_orchestrator::{claim_scheduled_permission, resume_scheduled_turn},
@@ -78,7 +79,8 @@ impl SignalScheduleExecutor {
         let mut tasks = stream::iter(
             candidates
                 .into_iter()
-                .map(|candidate| self.process(candidate)),
+                // Keep the large dispatch future out of buffer_unordered's poll frame.
+                .map(|candidate| Box::pin(self.process(candidate))),
         )
         .buffer_unordered(LOCAL_CONCURRENCY);
         while let Some(result) = tasks.next().await {
@@ -158,7 +160,7 @@ impl SignalScheduleExecutor {
         )
         .is_ok_and(|task| task.kind == "fresh_task")
         {
-            return self.process_fresh(candidate).await;
+            return Box::pin(self.process_fresh(candidate)).await;
         }
         if !self.gate.is_enabled()
             || candidate.owner_user_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID
@@ -193,15 +195,27 @@ impl SignalScheduleExecutor {
             run_epoch: epoch,
             session_token: token,
         };
-        let result = resume_scheduled_turn(
-            self.connections.clone(),
-            self.db.clone(),
-            &self.gate,
-            target,
-            claimed,
-            LEASE_SECONDS,
-        )
+        // Poll the model continuation outside the scanner's dispatch stack.
+        // The owned task preserves scan cancellation ownership.
+        let connections = self.connections.clone();
+        let db = self.db.clone();
+        let gate = self.gate.clone();
+        let result = owned_task::run(async move {
+            Box::pin(resume_scheduled_turn(
+                connections,
+                db,
+                &gate,
+                target,
+                claimed,
+                LEASE_SECONDS,
+            ))
+            .await
+        })
         .await;
+        let Ok(result) = result else {
+            // A lost task is not proof of completion or permission to replay.
+            return DispatchResult::Reconcile;
+        };
         let store = ScheduleStore::new(self.db.clone());
         let settled = match result {
             Ok(LoopOutcome::Answered(answer)) => {

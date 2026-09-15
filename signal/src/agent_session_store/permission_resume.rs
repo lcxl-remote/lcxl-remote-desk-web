@@ -595,6 +595,21 @@ pub(crate) async fn close_fresh_wait_decision_on(
     if session.trigger_origin != TriggerOrigin::ScheduledTask {
         return Err(invalid());
     }
+    close_wait_decision_on(txn, session, request_id, now).await
+}
+
+pub(crate) async fn close_wait_decision_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), AgentError> {
+    if !matches!(
+        session.trigger_origin,
+        TriggerOrigin::ScheduledTask | TriggerOrigin::ScheduledContinuation
+    ) {
+        return Err(invalid());
+    }
     if permission_receipt::decided_on(txn, session, request_id)
         .await?
         .is_none()

@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Read;
 fn scope() -> Scope {
     Scope {
         authority: "central-a".into(),
@@ -935,10 +936,10 @@ fn corrupt_index_is_not_recreated() {
 fn separate_worker_handles_are_exclusively_locked() {
     let (root, vault) = fixture();
     let v = vault.lock().unwrap();
-    let other = open_private(&root.path().join("file-recovery/lock"), true).unwrap();
-    assert!(other.try_lock().is_err());
+    let other = Vault::open(root.path()).unwrap();
+    assert!(other.try_lock().unwrap().is_none());
     drop(v);
-    other.try_lock().unwrap();
+    assert!(other.try_lock().unwrap().is_some());
 }
 
 #[test]
@@ -947,10 +948,11 @@ fn lock_child() {
         return;
     };
     assert!(
-        open_private(Path::new(&path), true)
+        Vault::open(Path::new(&path).parent().unwrap().parent().unwrap())
             .unwrap()
             .try_lock()
-            .is_err()
+            .unwrap()
+            .is_none()
     );
 }
 #[test]

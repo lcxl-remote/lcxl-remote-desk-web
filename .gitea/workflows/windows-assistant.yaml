@@ -1,0 +1,37 @@
+name: Windows Assistant
+
+on: [push, pull_request]
+
+jobs:
+  assistant:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.90.0
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Shared assistant contracts and file batch processing
+        run: cargo test --locked -p desk-agent-protocol -p desk-ipc-protocol -p desk-diagnose-core -p desk-office-batch
+      - name: Windows private file recovery storage
+        run: cargo test --locked -p desk-file-recovery
+      # Desktop-dependent cases require a separate interactive acceptance session.
+      # Compilation covers the Windows worker and isolated Office helper without
+      # activating Office, connecting accounts or sending external messages.
+      - name: Compile Windows server and test targets
+        run: cargo test --locked -p lcxl-remote-desk-server --no-run
+      - name: Windows Office source and prepared-copy contracts
+        run: |
+          cargo test --locked -p lcxl-remote-desk-server --lib worker::agent::computer_use_writer::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p lcxl-remote-desk-server --lib worker::agent::file_reference_store::publication::tests::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p lcxl-remote-desk-server --lib worker::agent::file_reference_store::windows_batch::tests::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p lcxl-remote-desk-server --lib worker::agent::windows_excel_batch::tests::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p lcxl-remote-desk-server --lib worker::agent::windows_word_batch::tests::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

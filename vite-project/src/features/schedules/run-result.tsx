@@ -6,6 +6,8 @@ import { RunDirectories } from './run-directories';
 import { RunPermissions } from './run-permissions';
 import type { ScheduleClient } from './client';
 import { Button } from '@/components/ui/button';
+import { agentErrorMessage } from '@/lib/agent-error-i18n';
+import { AssistantCommandResult } from '@/features/desk/assistant-command-result';
 import { deskErrorCodeEnum, type DeviceAssistantSessionSnapshotDto, type SnapshotMessageDto } from '@/services/types';
 
 export function RunResult({ scheduleId, runId, connected, onBack, client, connectionIds }: { client?: Pick<ScheduleClient, 'request'>; connectionIds?: Record<string, string>; scheduleId: string; runId: string; connected: boolean; onBack: () => void }) {
@@ -52,7 +54,10 @@ export function RunResult({ scheduleId, runId, connected, onBack, client, connec
         {!connected && <p role="status">{t('schedules.connecting')}</p>}
         {busy && <p role="status">{t('schedules.loading')}</p>}
         {failed && <p role="alert">{t('schedules.result.unavailable')}</p>}
-        {connected && !busy && !failed && !messages.length && <p>{t('schedules.result.empty')}</p>}
+        {snapshot?.terminalError && <p role="alert">{t('schedules.result.currentConversationError')}{' '}{agentErrorMessage(t,
+            snapshot.terminalError.error_code, snapshot.terminalError.message,
+            t('schedules.requestFailed'))}</p>}
+        {connected && !busy && !failed && !snapshot?.terminalError && !messages.length && <p>{t('schedules.result.empty')}</p>}
         {cursor && <Button variant="outline" disabled={!connected || busy} onClick={() => void load(cursor)}>{t('schedules.result.older')}</Button>}
         {client && snapshot && Array.isArray(snapshot.permissionRequests) && snapshot.permissionRequests.length > 0 &&
             <RunPermissions key={`${scheduleId}:${runId}:${snapshot.sessionId}`} client={client} scheduleId={scheduleId} runId={runId}
@@ -68,7 +73,9 @@ export function RunResult({ scheduleId, runId, connected, onBack, client, connec
         {messages.map(message => <article key={message.id} className="space-y-2 rounded-lg border p-3">
             <p className="text-sm font-medium">{t(['user', 'assistant', 'tool'].includes(message.role) ? `schedules.result.role.${message.role}` : 'schedules.result.role.other')}
                 {message.turnId === `${runId}-turn` && <span className="ml-2">{t('schedules.result.thisRun')}</span>}</p>
-            {message.text && <div className="whitespace-pre-wrap break-words text-sm">{message.text}</div>}
+            {message.text && (message.role === 'tool'
+                ? <AssistantCommandResult text={message.text} />
+                : <div className="whitespace-pre-wrap break-words text-sm">{message.text}</div>)}
             {message.toolCalls?.map(call => <Disclosure key={call.id} title={<>{call.name}</>}><pre className="overflow-x-auto whitespace-pre-wrap text-xs">{call.argumentsJson}</pre></Disclosure>)}
         </article>)}
     </div>;

@@ -27,6 +27,10 @@ pub mod terminal_complete;
 pub mod terminal_copilot;
 pub mod transport_guard;
 pub mod version;
+#[cfg(windows)]
+pub(crate) mod windows_local_user;
+#[cfg(windows)]
+pub mod windows_office_helper;
 pub mod worker;
 
 use std::{
@@ -1022,6 +1026,10 @@ pub async fn run_with_hub(
                     })),
             )
     });
+    #[cfg(windows)]
+    {
+        http_server = http_server.on_connect(windows_local_user::on_connect);
+    }
     let ipv6_active = settings.system.enable_ipv6 && check_ipv6_available();
     for addr in resolve_bind_addrs(
         ipv6_active,

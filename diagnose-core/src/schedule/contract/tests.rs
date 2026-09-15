@@ -1,6 +1,8 @@
 use super::*;
 use desk_agent_protocol::capability_grant::CapabilityGrantLimits;
 
+mod directory_binding;
+
 fn scope() -> TaskPermissionScope {
     TaskPermissionScope {
         resources: vec!["device:1".into()],
@@ -2177,6 +2179,28 @@ fn generated_text_artifact_contract_requires_safe_name_local_effect_and_sources(
     }];
     assert!(validate_contract(&definition).is_ok());
     let mut wrong = definition.clone();
+    for directory in [r"\\?\D:\测试 输入", r"\\?\D:\"] {
+        let mut windows = definition.clone();
+        let scope =
+            artifact::directory_resource_scope(&windows.target_device_id, directory).unwrap();
+        windows.permissions[0].automatic.resources = scope.clone();
+        windows.permissions[0].approval_ceiling.resources = scope;
+        let TaskStepBinding::ProduceTextArtifact {
+            canonical_directory,
+            ..
+        } = &mut windows.steps[0].binding
+        else {
+            unreachable!()
+        };
+        *canonical_directory = directory.into();
+        let saved = serde_json::to_string(&windows).unwrap();
+        let restored: TaskContract = serde_json::from_str(&saved).unwrap();
+        let validated = validate_contract(&restored).unwrap();
+        assert_eq!(
+            validated.contract().steps[0].binding,
+            windows.steps[0].binding
+        );
+    }
     wrong.permissions[0].input = TaskInputConstraint::GeneratedTextArtifact {
         file_name: "../report.txt".into(),
         max_content_bytes: 100,

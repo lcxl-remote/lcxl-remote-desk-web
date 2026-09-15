@@ -243,6 +243,8 @@ impl WorkerMessageSink {
 
 #[derive(Clone)]
 pub struct WorkerManager {
+    #[cfg(windows)]
+    local_recovery_requests: local_file_recovery::PendingRequests,
     settings: web::Data<SharedSettings>,
     inner: Arc<Mutex<WorkerManagerInner>>,
     worker_msg_tx: Arc<mpsc::UnboundedSender<WorkerMessage>>,
@@ -656,6 +658,8 @@ impl WorkerManager {
             remote_access_acks: Arc::new(StdMutex::new(HashMap::new())),
             policy_acks: Arc::new(StdMutex::new(HashMap::new())),
             local_policy_acks: Arc::new(StdMutex::new(HashMap::new())),
+            #[cfg(windows)]
+            local_recovery_requests: local_file_recovery::PendingRequests::default(),
         };
         (mgr, rx)
     }
@@ -2823,6 +2827,12 @@ impl WorkerManager {
                 .await;
         }
         if let Some(user) = payload.request.expected_os_user.as_deref() {
+            #[cfg(windows)]
+            {
+                return self
+                    .send_windows_file_recovery_request(user, payload.clone())
+                    .await;
+            }
             #[cfg(target_os = "linux")]
             {
                 let uid = user.parse::<u32>().map_err(|_| "invalid recovery user")?;
@@ -2860,8 +2870,9 @@ impl WorkerManager {
                     }
                 }
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", windows)))]
             let _ = user;
+            #[cfg(not(windows))]
             return Err("original recovery user worker unavailable".into());
         }
         // Initial discovery has no frozen user yet. Multiple eligible users
@@ -3649,3 +3660,8 @@ mod policy_tests;
 mod central_routing_tests;
 
 mod file_recovery_quota;
+#[cfg(windows)]
+mod local_file_recovery;
+#[cfg(windows)]
+#[path = "worker_manager/windows_recovery_route.rs"]
+mod windows_recovery_route;

@@ -8,6 +8,7 @@ const t = ((key: string) => `t:${key}`) as unknown as TFunction;
 
 describe('agentErrorMessage', () => {
     it.each([
+        [deskErrorCodeEnum.SCHEDULE_MODEL_BUDGET_EXCEEDED, 'pages.agentError.scheduleModelBudgetExceeded'],
         [deskErrorCodeEnum.RATE_LIMITED, 'pages.agentError.aiRateDisabled'],
         [
             deskErrorCodeEnum.AI_CONTEXT_LIMIT_EXCEEDED,

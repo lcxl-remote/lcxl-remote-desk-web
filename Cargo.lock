@@ -2617,6 +2617,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "windows 0.61.3",
  "zip",
 ]
 
@@ -2678,6 +2679,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "desk-office-batch"
+version = "0.1.0"
+dependencies = [
+ "desk-agent-protocol",
+ "desk-diagnose-core",
+ "quick-xml 0.38.4",
+ "zip",
 ]
 
 [[package]]
@@ -4963,6 +4974,7 @@ dependencies = [
  "desk-input-injection",
  "desk-ipc-protocol",
  "desk-mcp-server",
+ "desk-office-batch",
  "desk-server-user",
  "desk-server-version",
  "desk-signal",

@@ -101,7 +101,7 @@ async fn select_live_document(store: &SignalAgentRunEventStore) {
             capability: Capability::DocumentLiveInspect,
             adapter: ComputerUseAdapterRef {
                 kind: ComputerUseAdapterKind::IworkPages,
-                version: "1".into(),
+                version: desk_diagnose_core::device_assistant::IWORK_ADAPTER_VERSION.into(),
             },
             supported: true,
             ready: true,

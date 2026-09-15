@@ -146,7 +146,10 @@ pub fn capability_authorization_prompt(
                 scope.actions.retain(|action| {
                     grant
                         .operation_scope
-                        .contains(&crate::application_ui::operation_kind(*action))
+                        .contains(&crate::application_ui::operation_for_tool(
+                            &grant.tool_name,
+                            *action,
+                        ))
                 });
                 entry["application_scope"] = json!(scope);
                 approved_exact_input_expires_at_unix_ms = Some(
@@ -587,7 +590,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "tool_name": {"type": "string", "maxLength": 128},
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
-                                "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
+                                "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
                                 "exact_input": {"type": "object", "description": "Use the target tool definition (load_capability_details if missing) and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
@@ -803,6 +806,9 @@ pub fn build_permission_request(
                     | crate::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
                     | crate::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
                     | crate::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
+                    | crate::device_assistant::windows_excel::PATCH_CAPABILITY_ID
+                    | crate::device_assistant::windows_word::PATCH_CAPABILITY_ID
+                    | crate::device_assistant::windows_office::PATCH_CAPABILITY_ID
             );
         let exact_semantic_refs = if exact_semantic_action {
             #[derive(Deserialize)]
@@ -858,6 +864,9 @@ pub fn build_permission_request(
                 crate::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
                     | crate::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
                     | crate::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
+                    | crate::device_assistant::windows_excel::PATCH_CAPABILITY_ID
+                    | crate::device_assistant::windows_word::PATCH_CAPABILITY_ID
+                    | crate::device_assistant::windows_office::PATCH_CAPABILITY_ID
             );
             let mut refs = vec![input.target];
             if is_batch {
@@ -1006,7 +1015,7 @@ pub fn build_permission_request(
         items.push(GrantRequestItem {
             item_id: item.item_id.trim().to_string(),
             provider_id: provider.wire.provider_id.clone(),
-            tool_name: item.tool_name,
+            tool_name: item.tool_name.clone(),
             expected_effect: capability.wire.effect,
             resource_scope,
             operation_scope: if let Some(scope) = &application_scope {
@@ -1014,7 +1023,9 @@ pub fn build_permission_request(
                     .actions
                     .iter()
                     .copied()
-                    .map(crate::application_ui::operation_kind)
+                    .map(|action| {
+                        crate::application_ui::operation_for_tool(&item.tool_name, action)
+                    })
                     .collect()
             } else {
                 compiled_scope.map_or_else(
@@ -1813,6 +1824,50 @@ mod tests {
                 .all(|scope| scope.starts_with("selected:sha256:"))
         );
         assert!(item.canonical_input_digest_sha256.is_some());
+    }
+
+    #[test]
+    fn windows_excel_batch_permission_seals_range_and_output() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let reference = |token, kind| {
+            serde_json::json!({
+                "token": token, "snapshot_id": "snapshot", "object_kind": kind,
+                "expires_at": "2026-08-28T00:01:00Z"
+            })
+        };
+        let mut args = serde_json::json!({"items":[{
+            "item_id":"excel", "provider_id":"office.xlsx.batch",
+            "tool_name":"patch_selected_excel_copy", "expected_effect":"mutate_application",
+            "exact_input": {"target":reference("cell", "range"),
+                "output":{"destination_parent":reference("output", "directory"), "native_file_name":"copy.xlsx"},
+                "action":{"kind":"set_cell_number","params":{"value":"84"}}},
+            "suggested_ttl_seconds":60, "suggested_max_uses":3, "reason":"Create workbook copy"
+        }]});
+        let build = |args: &serde_json::Value| {
+            build_permission_request(
+                &call(&args.to_string()),
+                &registry,
+                "permission-excel".into(),
+                1,
+                "2026-08-28T00:00:00Z".into(),
+            )
+        };
+        let request = build(&args).unwrap();
+        let item = &request.items[0];
+        assert_eq!(item.suggested_max_uses, 1);
+        let expected: Vec<desk_agent_protocol::computer_use::ObjectRef> = vec![
+            serde_json::from_value(reference("cell", "range")).unwrap(),
+            serde_json::from_value(reference("output", "directory")).unwrap(),
+        ];
+        assert_eq!(item.resource_scope, fresh_object_resource_scope(&expected));
+        args["items"][0]["exact_input"]
+            .as_object_mut()
+            .unwrap()
+            .remove("output");
+        assert!(
+            build(&args).is_err(),
+            "missing output must not create a permission request"
+        );
     }
 
     #[test]

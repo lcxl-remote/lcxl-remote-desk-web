@@ -1,19 +1,73 @@
 //! Cleanup touches only registered directory objects and their known children.
 use super::*;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "StoredTransaction")]
 pub struct Transaction {
     pub parent: String,
-    pub parent_device: u64,
-    #[cfg(target_os = "macos")]
-    pub parent_volume_uuid: [u8; 16],
-    pub parent_inode: u64,
     pub directory: String,
-    pub directory_inode: Option<u64>,
-    pub original_inode: u64,
-    pub staged_inode: Option<u64>,
+    pub identity: TransactionIdentity,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredTransaction {
+    Current(CurrentTransaction),
+    Legacy(LegacyTransaction),
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentTransaction {
+    parent: String,
+    directory: String,
+    identity: TransactionIdentity,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyTransaction {
+    parent: String,
+    directory: String,
+    parent_device: u64,
+    parent_volume_uuid: Option<[u8; 16]>,
+    parent_inode: u64,
+    directory_inode: Option<u64>,
+    original_inode: u64,
+    staged_inode: Option<u64>,
+}
+impl TryFrom<StoredTransaction> for Transaction {
+    type Error = String;
+    fn try_from(value: StoredTransaction) -> Result<Self, Self::Error> {
+        Ok(match value {
+            StoredTransaction::Current(tx) => Self {
+                parent: tx.parent,
+                directory: tx.directory,
+                identity: tx.identity,
+            },
+            StoredTransaction::Legacy(tx) => {
+                let files = InodeIdentity {
+                    parent_device: tx.parent_device,
+                    parent_inode: tx.parent_inode,
+                    directory_inode: tx.directory_inode,
+                    original_inode: tx.original_inode,
+                    staged_inode: tx.staged_inode,
+                };
+                let identity = match tx.parent_volume_uuid {
+                    Some(volume_uuid) => TransactionIdentity::Macos { volume_uuid, files },
+                    None => TransactionIdentity::Unix { files },
+                };
+                Self {
+                    parent: tx.parent,
+                    directory: tx.directory,
+                    identity,
+                }
+            }
+        })
+    }
 }
 impl Transaction {
     pub(crate) fn validate(&self, id: &str) -> io::Result<()> {
+        self.identity.validate_host()?;
         if !Path::new(&self.parent).is_absolute()
             || self.parent.len() > 4096
             || self.parent.chars().any(char::is_control)
@@ -25,6 +79,7 @@ impl Transaction {
     }
 }
 impl LockedVault {
+    #[cfg(unix)]
     pub fn plan_transaction(
         &mut self,
         scope: &Scope,
@@ -53,29 +108,60 @@ impl LockedVault {
             }
             crate::macos::volume_uuid(&directory)?
         };
-        let r = self
-            .ledger
-            .records
-            .get_mut(id)
-            .filter(|r| {
-                &r.scope == scope && r.change == ChangeState::BackupReady && r.transaction.is_none()
-            })
-            .ok_or_else(|| invalid("transaction cannot be planned"))?;
         let directory = format!(".assistant-transaction-{id}");
-        r.transaction = Some(Transaction {
-            parent: parent.into(),
+        let files = InodeIdentity {
             parent_device: device,
-            #[cfg(target_os = "macos")]
-            parent_volume_uuid,
             parent_inode: inode,
-            directory: directory.clone(),
             directory_inode: None,
             original_inode,
             staged_inode: None,
-        });
-        self.persist()?;
+        };
+        #[cfg(target_os = "macos")]
+        let identity = TransactionIdentity::Macos {
+            volume_uuid: parent_volume_uuid,
+            files,
+        };
+        #[cfg(not(target_os = "macos"))]
+        let identity = TransactionIdentity::Unix { files };
+        self.store_transaction_plan(
+            scope,
+            id,
+            Transaction {
+                parent: parent.into(),
+                directory: directory.clone(),
+                identity,
+            },
+        )?;
         Ok(directory)
     }
+
+    fn store_transaction_plan(
+        &mut self,
+        scope: &Scope,
+        id: &str,
+        transaction: Transaction,
+    ) -> io::Result<()> {
+        transaction.validate(id)?;
+        let record = self
+            .ledger
+            .records
+            .get_mut(id)
+            .filter(|record| {
+                &record.scope == scope
+                    && record.change == ChangeState::BackupReady
+                    && record.transaction.is_none()
+            })
+            .ok_or_else(|| invalid("transaction cannot be planned"))?;
+        record.transaction = Some(transaction);
+        if let Err(error) = self.persist() {
+            // A failed plan cannot authorize creation from in-memory state.
+            // Reopening reads the actual durable plan if publication occurred.
+            self.ledger.records.get_mut(id).unwrap().transaction = None;
+            return Err(error);
+        }
+        Ok(())
+    }
+    #[cfg(unix)]
     pub fn register_transaction(
         &mut self,
         scope: &Scope,
@@ -93,17 +179,18 @@ impl LockedVault {
             .transaction
             .as_mut()
             .ok_or_else(|| invalid("transaction was not planned"))?;
-        if tx
+        let files = tx.identity.inodes_mut()?;
+        if files
             .directory_inode
             .is_some_and(|inode| inode != directory_inode)
-            || tx
+            || files
                 .staged_inode
                 .is_some_and(|inode| Some(inode) != staged_inode)
         {
             return Err(invalid("transaction identity changed"));
         }
-        tx.directory_inode = Some(directory_inode);
-        tx.staged_inode = staged_inode;
+        files.directory_inode = Some(directory_inode);
+        files.staged_inode = staged_inode;
         self.persist()
     }
     pub fn settle_transaction(&mut self, scope: &Scope, id: &str) -> io::Result<bool> {
@@ -116,7 +203,21 @@ impl LockedVault {
         let Some(tx) = r.transaction.clone() else {
             return Ok(true);
         };
+        #[cfg(not(windows))]
         let result = clean(&tx);
+        #[cfg(windows)]
+        let result = (|| {
+            let content = self
+                .storage
+                .read(&format!("{id}.body"), MAX_TEXT_BYTES as u64)?;
+            let metadata = self
+                .storage
+                .read(&format!("{id}.metadata"), MAX_METADATA_BYTES as u64)?;
+            if hash(&content) != r.sha256 {
+                return Err(invalid("Windows recovery content changed"));
+            }
+            crate::windows::clean_transaction(&tx, r.change, &r.file_name, &content, &metadata)
+        })();
         let r = self.ledger.records.get_mut(id).unwrap();
         match result {
             Ok(()) => {
@@ -133,92 +234,19 @@ impl LockedVault {
     }
 }
 #[cfg(unix)]
-fn clean(tx: &Transaction) -> io::Result<()> {
-    use std::{
-        ffi::CString,
-        os::{
-            fd::{AsRawFd, FromRawFd},
-            unix::fs::{MetadataExt, OpenOptionsExt},
-        },
-    };
-    let dir_name =
-        CString::new(tx.directory.as_bytes()).map_err(|_| invalid("invalid transaction name"))?;
-    if !tx.directory.starts_with(".assistant-transaction-")
-        || tx.directory.contains('/')
-        || tx.directory.contains('\\')
-    {
-        return Err(invalid("invalid transaction name"));
-    }
-    let parent = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(&tx.parent)?;
-    let pm = parent.metadata()?;
-    #[cfg(target_os = "macos")]
-    let same_volume = crate::macos::volume_uuid(&parent)? == tx.parent_volume_uuid;
-    #[cfg(not(target_os = "macos"))]
-    let same_volume = pm.dev() == tx.parent_device;
-    if !same_volume || pm.ino() != tx.parent_inode {
-        return Err(invalid("transaction parent identity changed"));
-    }
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            dir_name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        let e = io::Error::last_os_error();
-        return if e.kind() == io::ErrorKind::NotFound {
-            Ok(())
-        } else {
-            Err(e)
-        };
-    }
-    let directory = unsafe { File::from_raw_fd(fd) };
-    let dm = directory.metadata()?;
-    if tx.directory_inode != Some(dm.ino()) || dm.dev() != pm.dev() {
-        return Err(invalid(
-            "transaction directory identity is unavailable or changed",
-        ));
-    }
-    for name in [c"replacement", c"original"] {
-        let fd = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::NotFound {
-                continue;
-            }
-            return Err(e);
-        }
-        let file = unsafe { File::from_raw_fd(fd) };
-        let m = file.metadata()?;
-        if !m.is_file()
-            || m.dev() != pm.dev()
-            || !(m.ino() == tx.original_inode || Some(m.ino()) == tx.staged_inode)
-        {
-            return Err(invalid("transaction child identity changed"));
-        }
-        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    if unsafe { libc::unlinkat(parent.as_raw_fd(), dir_name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    parent.sync_all()
-}
-#[cfg(not(unix))]
-fn clean(_: &Transaction) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "native transaction cleanup is unavailable",
-    ))
-}
+#[path = "transaction_unix.rs"]
+mod native;
+#[cfg(not(any(unix, windows)))]
+#[path = "transaction_unsupported.rs"]
+mod native;
+#[cfg(not(windows))]
+use native::clean;
+
+#[cfg(windows)]
+#[path = "transaction_windows_commit.rs"]
+mod windows_commit;
+#[cfg(windows)]
+#[path = "transaction_windows_registration.rs"]
+mod windows_registration;
+#[cfg(windows)]
+pub use windows_commit::{WindowsCommitError, WindowsCommitRequest};

@@ -38,7 +38,7 @@ describe('reserved rehearsal conversation', () => {
             question: intent.prompt, client_message_id: intent.initial_message_id,
             conversation_id: intent.client_conversation_id, locale: 'zh-CN',
             selected_capability_ids: ['read'], selected_attachment_ids: [],
-        }, 'device');
+        }, 'device', expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/));
         act(() => { expect(result.current.start(intent.prompt)).toBe(false); result.current.reset(); });
         expect(sendMessage).toHaveBeenCalledTimes(1);
         expect(localStorage.getItem('device-assistant-conversation:device')).toBe('ordinary-conversation');

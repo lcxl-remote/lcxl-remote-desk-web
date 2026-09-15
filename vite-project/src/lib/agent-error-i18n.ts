@@ -14,6 +14,8 @@ import { deskErrorMessage, type ErrorCodeKeyMap } from '@/lib/desk-error-i18n';
 
 /** Codes reaching the agent-error wire that have a dedicated localized message. */
 const CODE_TO_KEY: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.SCHEDULE_MODEL_BUDGET_EXCEEDED]:
+        'pages.agentError.scheduleModelBudgetExceeded',
     [deskErrorCodeEnum.TERMINAL_COPILOT_DISABLED]: 'pages.agentError.terminalCopilotDisabled',
     [deskErrorCodeEnum.AI_MODEL_NOT_CONFIGURED]: 'pages.agentError.aiModelNotConfigured',
     [deskErrorCodeEnum.COPILOT_STEP_LIMIT_EXCEEDED]: 'pages.agentError.copilotStepLimit',

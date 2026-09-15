@@ -1,10 +1,13 @@
 //! Local OS owner recovery, including backups from a replaced upstream credential.
 //! These routes are deliberately unavailable through manager/remote proxies.
 use super::host_readiness::validate_local_mutation;
-use crate::{error::DeskError, model::settings::SharedSettings};
+use crate::{error::DeskError, file_recovery_service::local, model::settings::SharedSettings};
 use actix_web::{HttpRequest, HttpResponse, http::header, post, web};
 pub use desk_agent_protocol::file_recovery::{
     FileRecoveryCleanupDto, FileRecoveryPageDto, FileRecoveryPolicyDto, FileRecoveryRecordDto,
+};
+use desk_ipc_protocol::local_file_recovery::{
+    LocalFileRecoveryCommand as Command, LocalFileRecoveryOutcome as Outcome,
 };
 use desk_utils::rest::RestResponse;
 use serde::Deserialize;
@@ -33,47 +36,57 @@ pub struct FileRecoveryClockBody {
     pub displayed_time_unix_ms: u64,
     pub confirmed: bool,
 }
-fn now_ms() -> u64 {
-    chrono::Utc::now().timestamp_millis().max(1) as u64
-}
 async fn local_operation<T: Send + 'static>(
+    _req: &HttpRequest,
     settings: &SharedSettings,
-    operation: impl FnOnce(
-        &mut desk_file_recovery::LockedVault,
-        &mut desk_file_recovery::quota::LockedDeviceQuota,
-    ) -> std::io::Result<T>
-    + Send
-    + 'static,
+    command: Command,
+    project: fn(Outcome) -> Result<T, &'static str>,
 ) -> Result<T, DeskError> {
+    #[cfg(windows)]
+    let local_user = crate::windows_local_user::authenticate(_req).map_err(|error| {
+        DeskError::FileRecoveryFailure(crate::file_recovery_service::storage_failure(error))
+    })?;
+    #[cfg(windows)]
+    if let Some(manager) = _req
+        .app_data::<web::Data<crate::model::settings_coordinator::SettingsCoordinator>>()
+        .and_then(|coordinator| coordinator.worker_manager())
+        .filter(|manager| manager.uses_session_targeting())
+    {
+        let outcome = manager
+            .request_local_file_recovery(&local_user, command)
+            .await
+            .map_err(DeskError::FileRecoveryFailure)?;
+        return project(outcome).map_err(|_| {
+            DeskError::FileRecoveryFailure(
+                desk_agent_protocol::file_recovery::FileRecoveryFailure::StorageUnavailable,
+            )
+        });
+    }
     let root = settings.read().await.paths().data_root().to_path_buf();
     Ok(tokio::task::spawn_blocking(move || {
-        let vault = desk_file_recovery::Vault::open(&root)?;
-        let mut locked = vault.try_lock()?.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "File backup storage is busy; retry after the active operation finishes",
-            )
-        })?;
-        let mut quota = desk_file_recovery::quota::DeviceQuota::open(&root)?.lock()?;
-        locked.observe_system_clock()?;
-        let policy = quota.policy();
-        if locked.policy() != &policy {
-            locked.set_policy(policy)?;
+        #[cfg(windows)]
+        if !local_user.is_alive()
+            || crate::file_recovery_service::platform_user::current()? != local_user.sid
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Local backup access requires the same OS user",
+            ));
         }
-        #[cfg(unix)]
-        locked.maintain_epoch_indexes(&unsafe { libc::geteuid() }.to_string(), &mut quota, 64)?;
-        operation(&mut locked, &mut quota)
+        local::execute(
+            &root,
+            || desk_file_recovery::quota::DeviceQuota::open(&root)?.lock(),
+            command,
+        )
+        .and_then(|outcome| {
+            project(outcome)
+                .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))
+        })
     })
     .await?
     .map_err(|error| {
         DeskError::FileRecoveryFailure(crate::file_recovery_service::storage_failure(error))
     })?)
-}
-fn policy(vault: &desk_file_recovery::LockedVault) -> FileRecoveryPolicyDto {
-    FileRecoveryPolicyDto {
-        retention_days: vault.policy().retention_days,
-        max_bytes: vault.policy().max_bytes,
-    }
 }
 #[utoipa::path(tag = "FileRecovery", summary = "List local OS user file backups",
     request_body = FileRecoveryPageBody,
@@ -86,31 +99,12 @@ pub async fn query_local_file_recovery(
 ) -> Result<HttpResponse, DeskError> {
     validate_local_mutation(&req)?;
     let body = body.into_inner();
-    let page = local_operation(&settings, move |vault, quota| {
-        let mut records = vault.local_records(body.after.as_deref())?;
-        let more = records.len() > 100;
-        records.truncate(100);
-        let next_cursor = more.then(|| records.last().unwrap().id.clone());
-        Ok(FileRecoveryPageDto {
-            execution_epoch: vault.execution_epoch(),
-            cleanup_warning: vault
-                .cleanup_clock_paused()
-                .then_some(desk_agent_protocol::file_recovery::FileRecoveryFailure::ClockChanged),
-            clock_confirmation_time_unix_ms: vault.cleanup_clock_paused().then(now_ms),
-            oldest_pending_at_unix_ms: vault.oldest_pending_created_at(None),
-            oldest_pending_record: vault.oldest_pending_record(None, None).map(|record| {
-                crate::file_recovery_service::project_record(vault, record, now_ms())
-            }),
-            policy: policy(vault),
-            used_bytes: quota.used_bytes(),
-            reserved_bytes: quota.reserved_bytes(),
-            next_cursor,
-            records: records
-                .into_iter()
-                .map(|r| crate::file_recovery_service::project_record(vault, r, now_ms()))
-                .collect(),
-        })
-    })
+    let page = local_operation(
+        &req,
+        &settings,
+        Command::Query { after: body.after },
+        Outcome::into_page,
+    )
     .await?;
     Ok(HttpResponse::Ok()
         .insert_header((header::CACHE_CONTROL, "no-store"))
@@ -156,54 +150,12 @@ pub async fn retry_local_file_recovery_cleanup(
     settings: web::Data<SharedSettings>,
 ) -> Result<HttpResponse, DeskError> {
     validate_local_mutation(&req)?;
-    let report = local_operation(&settings, |vault, quota| {
-        let unknown = vault.recover_interrupted(now_ms())?;
-        for record in vault.pending_quota_settlement().into_iter().take(32) {
-            let mut key = desk_file_recovery::quota::QuotaKey::new(
-                &record.scope,
-                &record.conversation,
-                &record.operation,
-                &record.generation,
-            )?;
-            key.epoch = record.storage_epoch;
-            quota.settle(&key, record.bytes)?;
-            vault.acknowledge_quota_settlement(&record.scope, &record.id)?;
-        }
-        for record in vault.pending_quota_cleanup().into_iter().take(32) {
-            let mut key = desk_file_recovery::quota::QuotaKey::new(
-                &record.scope,
-                &record.conversation,
-                &record.operation,
-                &record.generation,
-            )?;
-            key.epoch = record.storage_epoch;
-            quota.release_with_retained_index(
-                &key,
-                desk_file_recovery::LockedVault::retained_index_bytes(&record)?,
-            )?;
-            vault.acknowledge_quota_cleanup(&record.scope, &record.id)?;
-        }
-        for namespace in vault.pending_quota_namespaces().into_iter().take(32) {
-            #[cfg(unix)]
-            quota.release_namespace_at_epoch(
-                &namespace,
-                &unsafe { libc::geteuid() }.to_string(),
-                vault.namespace_epoch(&namespace)?,
-            )?;
-            #[cfg(not(unix))]
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "local recovery is unavailable",
-            ));
-            vault.acknowledge_quota_namespace(&namespace)?;
-        }
-        #[cfg(unix)]
-        vault.maintain_epoch_indexes(&unsafe { libc::geteuid() }.to_string(), quota, 1)?;
-        Ok(FileRecoveryCleanupDto {
-            pending_files: vault.pending_cleanup_count(),
-            unknown_outcomes: unknown.len() as u64,
-        })
-    })
+    let report = local_operation(
+        &req,
+        &settings,
+        Command::RetryCleanup,
+        Outcome::into_cleanup,
+    )
     .await?;
     Ok(HttpResponse::Ok()
         .insert_header((header::CACHE_CONTROL, "no-store"))
@@ -220,37 +172,16 @@ pub async fn discard_local_file_recovery(
 ) -> Result<HttpResponse, DeskError> {
     validate_local_mutation(&req)?;
     let body = body.into_inner();
-    let report = local_operation(&settings, move |vault, quota| {
-        if !body.confirmed {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Backup discard requires confirmation",
-            ));
-        }
-        vault.discard_local(&body.conversation_id, &body.recovery_id, now_ms())?;
-        for record in vault
-            .pending_quota_cleanup()
-            .into_iter()
-            .filter(|record| record.id == body.recovery_id)
-        {
-            let mut key = desk_file_recovery::quota::QuotaKey::new(
-                &record.scope,
-                &record.conversation,
-                &record.operation,
-                &record.generation,
-            )?;
-            key.epoch = record.storage_epoch;
-            quota.release_with_retained_index(
-                &key,
-                desk_file_recovery::LockedVault::retained_index_bytes(&record)?,
-            )?;
-            vault.acknowledge_quota_cleanup(&record.scope, &record.id)?;
-        }
-        Ok(FileRecoveryCleanupDto {
-            pending_files: vault.pending_cleanup_count(),
-            unknown_outcomes: vault.unknown_outcome_count(None),
-        })
-    })
+    let report = local_operation(
+        &req,
+        &settings,
+        Command::Discard {
+            recovery_id: body.recovery_id,
+            conversation_id: body.conversation_id,
+            confirmed: body.confirmed,
+        },
+        Outcome::into_cleanup,
+    )
     .await?;
     Ok(HttpResponse::Ok()
         .insert_header((header::CACHE_CONTROL, "no-store"))
@@ -268,19 +199,15 @@ pub async fn confirm_local_file_recovery_clock(
 ) -> Result<HttpResponse, DeskError> {
     validate_local_mutation(&req)?;
     let body = body.into_inner();
-    let report = local_operation(&settings, move |vault, _| {
-        if !body.confirmed || body.displayed_time_unix_ms == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Clock confirmation is required",
-            ));
-        }
-        vault.acknowledge_clock(body.displayed_time_unix_ms)?;
-        Ok(FileRecoveryCleanupDto {
-            pending_files: vault.pending_cleanup_count(),
-            unknown_outcomes: vault.unknown_outcome_count(None),
-        })
-    })
+    let report = local_operation(
+        &req,
+        &settings,
+        Command::ConfirmClock {
+            displayed_time_unix_ms: body.displayed_time_unix_ms,
+            confirmed: body.confirmed,
+        },
+        Outcome::into_cleanup,
+    )
     .await?;
     Ok(HttpResponse::Ok()
         .insert_header((header::CACHE_CONTROL, "no-store"))
@@ -298,9 +225,14 @@ pub async fn export_local_file_recovery(
 ) -> Result<HttpResponse, DeskError> {
     validate_local_mutation(&req)?;
     let body = body.into_inner();
-    let bytes = local_operation(&settings, move |vault, _quota| {
-        vault.export_local_package(&body.recovery_id, now_ms())
-    })
+    let bytes = local_operation(
+        &req,
+        &settings,
+        Command::Export {
+            recovery_id: body.recovery_id,
+        },
+        Outcome::into_export,
+    )
     .await?;
     Ok(HttpResponse::Ok()
         .insert_header((header::CACHE_CONTROL, "no-store"))

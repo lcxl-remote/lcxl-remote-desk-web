@@ -1,8 +1,20 @@
 //! Bounded Windows UI Automation projection and semantic actions.
 //!
-//! Every action rechecks the foreground process and resolves a retained native
+//! Every action rechecks the selected process and resolves a retained native
 //! element bound to that process lifetime. Password controls fail closed;
 //! mutations are limited to typed UIA patterns; callers inspect their effects separately.
+
+mod application;
+mod scroll;
+mod window_capture;
+pub(super) use window_capture::resolve_window_capture_target;
+#[cfg(test)]
+mod owned_window_tests;
+
+pub(super) use application::{
+    application_by_process, application_by_window, application_for_element,
+    resolve_foreground_application, running_applications,
+};
 
 use desk_agent_protocol::computer_use::UiInspectScope;
 use std::time::{Duration, Instant};
@@ -76,6 +88,7 @@ impl Drop for ComGuard {
 }
 
 struct WalkConfig<'a> {
+    window_root: Option<&'a str>,
     selection: Option<&'a str>,
     query: Option<&'a desk_agent_protocol::computer_use::UiInspectQuery>,
     element_only: bool,
@@ -94,124 +107,6 @@ struct WalkState {
     visited: usize,
     encoded_bytes: usize,
     truncated: bool,
-}
-
-pub(super) fn resolve_foreground_application() -> Result<WindowsForegroundApplication, AgentError> {
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.0.is_null() {
-        return Err(failure("the foreground window disappeared", true));
-    }
-    let mut host_process_id = 0u32;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut host_process_id)) };
-    let host_image_path = process_image(host_process_id)
-        .ok_or_else(|| failure("cannot resolve the foreground process image", true))?;
-    let (process_id, image_path) = if executable_name(&host_image_path)
-        .eq_ignore_ascii_case("ApplicationFrameHost.exe")
-    {
-        let _com = ComGuard::initialize()?;
-        let automation: IUIAutomation =
-            unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
-                .map_err(|_| failure("Windows UI Automation is unavailable", true))?;
-        let root = unsafe { automation.ElementFromHandle(hwnd) }
-            .map_err(|_| failure("the foreground window has no UI Automation root", true))?;
-        let walker = unsafe { automation.ControlViewWalker() }
-            .map_err(|_| failure("cannot create a UI Automation tree walker", true))?;
-        let mut candidates = Vec::new();
-        let mut visited = 0usize;
-        collect_hosted_window_processes(
-            &root,
-            &walker,
-            host_process_id,
-            0,
-            Instant::now() + HARD_DEADLINE,
-            &mut visited,
-            &mut candidates,
-        );
-        candidates.sort_unstable();
-        candidates.dedup();
-        if candidates.len() != 1 {
-            return Err(failure(
-                "the hosted foreground window does not resolve to exactly one application process",
-                false,
-            ));
-        }
-        let process_id = candidates[0];
-        let image_path = process_image(process_id).ok_or_else(|| {
-            failure(
-                "cannot resolve the hosted foreground application image",
-                false,
-            )
-        })?;
-        (process_id, image_path)
-    } else {
-        (host_process_id, host_image_path)
-    };
-    let process_started_at = process_start(process_id).ok_or_else(|| {
-        failure(
-            "cannot bind the foreground application to its process incarnation",
-            false,
-        )
-    })?;
-    Ok(WindowsForegroundApplication {
-        window_handle: hwnd.0 as isize,
-        process_id,
-        image_path,
-        process_started_at,
-    })
-}
-
-fn executable_name(path: &str) -> &str {
-    path.rsplit(['\\', '/']).next().unwrap_or(path)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_hosted_window_processes(
-    element: &IUIAutomationElement,
-    walker: &IUIAutomationTreeWalker,
-    host_process_id: u32,
-    depth: u16,
-    deadline: Instant,
-    visited: &mut usize,
-    candidates: &mut Vec<u32>,
-) {
-    if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
-        return;
-    }
-    *visited += 1;
-    let process_id = unsafe { element.CurrentProcessId() }
-        .unwrap_or_default()
-        .max(0) as u32;
-    let control_type = unsafe { element.CurrentControlType() }
-        .map(|value| value.0)
-        .unwrap_or_default();
-    if process_id != 0 && process_id != host_process_id && control_type == UIA_WindowControlTypeId.0
-    {
-        candidates.push(process_id);
-    }
-    if depth >= ACTION_MAX_DEPTH {
-        return;
-    }
-    let Ok(mut child) = (unsafe { walker.GetFirstChildElement(element) }) else {
-        return;
-    };
-    loop {
-        collect_hosted_window_processes(
-            &child,
-            walker,
-            host_process_id,
-            depth + 1,
-            deadline,
-            visited,
-            candidates,
-        );
-        if *visited >= ACTION_MAX_NODES || Instant::now() >= deadline {
-            return;
-        }
-        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&child) }) else {
-            return;
-        };
-        child = next;
-    }
 }
 
 fn find_process_root(
@@ -309,6 +204,7 @@ pub(super) fn collect_foreground_selection(
     let selection = selection.map(str::to_owned);
     super::native_ui_identity::run(move || {
         collect_foreground_selection_inner(
+            None,
             expected_process_id,
             &expected_image_path,
             max_depth,
@@ -323,6 +219,7 @@ pub(super) fn collect_foreground_selection(
 }
 
 fn collect_foreground_selection_inner(
+    selected_application: Option<&WindowsForegroundApplication>,
     expected_process_id: u32,
     expected_image_path: &str,
     max_depth: u16,
@@ -334,7 +231,26 @@ fn collect_foreground_selection_inner(
     element_only: bool,
 ) -> Result<CollectedUiTree, AgentError> {
     let _com = ComGuard::initialize()?;
-    let foreground = resolve_foreground_application()?;
+    let foreground = match selected_application {
+        Some(application) => {
+            let current = if application.window_handle == 0 {
+                application_by_process(application.process_id)?
+            } else {
+                application_by_window(application.window_handle)?
+            };
+            if current.process_id != application.process_id
+                || current.process_started_at != application.process_started_at
+                || !path_eq(&current.image_path, &application.image_path)
+            {
+                return Err(failure(
+                    "the selected application changed during UI inspection",
+                    false,
+                ));
+            }
+            current
+        }
+        None => resolve_foreground_application()?,
+    };
     if foreground.process_id != expected_process_id
         || !path_eq(&foreground.image_path, expected_image_path)
     {
@@ -349,32 +265,24 @@ fn collect_foreground_selection_inner(
             .map_err(|_| failure("Windows UI Automation is unavailable", true))?;
     let walker = unsafe { automation.ControlViewWalker() }
         .map_err(|_| failure("cannot create a UI Automation tree walker", true))?;
-    let root = if let Some(id) = selection {
-        retained_element(id, expected_process_id, foreground.process_started_at)?
-    } else {
-        let root = unsafe {
-            automation.ElementFromHandle(windows::Win32::Foundation::HWND(
-                foreground.window_handle as *mut std::ffi::c_void,
-            ))
-        }
-        .map_err(|_| failure("the foreground window has no UI Automation root", true))?;
-        let mut root_search_visited = 0usize;
-        find_process_root(
-        &root,
-        &walker,
-        expected_process_id,
-        0,
-        Instant::now() + HARD_DEADLINE,
-        &mut root_search_visited,
-    )
-    .ok_or_else(|| {
-        failure(
-            "the foreground UI Automation tree has no root for the resolved application process",
-            false,
+    let (windows, enumeration_truncated) = if foreground.window_handle == 0 && selection.is_none() {
+        let (windows, truncated) = running_applications()?;
+        (
+            windows
+                .into_iter()
+                .filter(|window| {
+                    window.process_id == expected_process_id
+                        && window.process_started_at == foreground.process_started_at
+                        && path_eq(&window.image_path, expected_image_path)
+                })
+                .collect::<Vec<_>>(),
+            truncated,
         )
-    })?
+    } else {
+        (vec![foreground.clone()], false)
     };
     let config = WalkConfig {
+        window_root: None,
         selection,
         query,
         element_only,
@@ -386,11 +294,75 @@ fn collect_foreground_selection_inner(
         max_bytes: max_bytes as usize,
         deadline: Instant::now() + HARD_DEADLINE,
     };
-    let mut state = WalkState::default();
+    let mut state = WalkState {
+        truncated: enumeration_truncated,
+        ..Default::default()
+    };
     let mut nodes = Vec::new();
-    walk(
-        root, None, 0, 0, false, false, &config, &mut state, &mut nodes,
-    )?;
+    for window in windows {
+        if Instant::now() >= config.deadline || nodes.len() >= config.max_nodes {
+            state.truncated = true;
+            break;
+        }
+        let root = if let Some(id) = selection {
+            retained_element(id, expected_process_id, foreground.process_started_at)?
+        } else {
+            let current = application_by_window(window.window_handle)?;
+            if current.process_id != expected_process_id
+                || current.process_started_at != foreground.process_started_at
+                || !path_eq(&current.image_path, expected_image_path)
+            {
+                return Err(failure(
+                    "the selected window changed during inspection",
+                    false,
+                ));
+            }
+            let root = unsafe {
+                automation.ElementFromHandle(windows::Win32::Foundation::HWND(
+                    window.window_handle as *mut std::ffi::c_void,
+                ))
+            }
+            .map_err(|_| failure("the selected window has no UI Automation root", true))?;
+            find_process_root(
+                &root,
+                &walker,
+                expected_process_id,
+                0,
+                config.deadline,
+                &mut state.visited,
+            )
+            .ok_or_else(|| failure("the selected window has no application root", false))?
+        };
+        let root_identity = element_identity(&root)?;
+        let is_window_root = selection.is_none()
+            || unsafe {
+                automation.ElementFromHandle(windows::Win32::Foundation::HWND(
+                    window.window_handle as *mut std::ffi::c_void,
+                ))
+            }
+            .ok()
+            .is_some_and(|native_root| {
+                match (runtime_key(&native_root), runtime_key(&root)) {
+                    (Ok(expected), Ok(actual)) => expected == actual,
+                    _ => false,
+                }
+            });
+        let window_config = WalkConfig {
+            window_root: is_window_root.then_some(root_identity.as_str()),
+            ..config
+        };
+        walk(
+            root,
+            None,
+            0,
+            0,
+            false,
+            false,
+            &window_config,
+            &mut state,
+            &mut nodes,
+        )?;
+    }
     if selection.is_some() && !state.found_selection {
         return Err(failure(
             "selected UI root was not found within the bounded search",
@@ -400,6 +372,44 @@ fn collect_foreground_selection_inner(
     Ok(CollectedUiTree {
         nodes,
         truncated: state.truncated,
+    })
+}
+
+pub(super) fn collect_application_selection(
+    application: &super::computer_use_broker::ObservedApplication,
+    params: &desk_agent_protocol::computer_use::UiInspectParams,
+    selection: Option<&str>,
+) -> Result<CollectedUiTree, AgentError> {
+    let application = WindowsForegroundApplication {
+        window_handle: application.window_handle,
+        process_id: application.process_id,
+        image_path: application.image_path.clone(),
+        process_started_at: application
+            .process_started_at
+            .ok_or_else(|| failure("the selected application has no process lifetime", false))?,
+    };
+    let params = params.clone();
+    let selection = selection.map(str::to_owned);
+    super::native_ui_identity::run(move || {
+        let result = collect_foreground_selection_inner(
+            Some(&application),
+            application.process_id,
+            &application.image_path,
+            params.max_depth,
+            params.max_nodes,
+            params.max_bytes,
+            params.scope,
+            selection.as_deref(),
+            params.query.as_ref(),
+            params.element_only,
+        )?;
+        if process_start(application.process_id) != Some(application.process_started_at) {
+            return Err(failure(
+                "the selected application restarted during UI inspection",
+                false,
+            ));
+        }
+        Ok(result)
     })
 }
 
@@ -489,6 +499,7 @@ fn apply_action_inner(
     match action {
         UiSemanticAction::Invoke => {
             let pattern = invoke_pattern(&target.element)?;
+            super::native_ui_identity::check_mutation()?;
             unsafe { pattern.Invoke() }.map_err(|_| {
                 action_failure("the UI Automation invoke action was rejected by the target")
             })?;
@@ -504,6 +515,7 @@ fn apply_action_inner(
                 unsupported("the UI Automation toggle has an indeterminate or unknown state")
             })?;
             if before != *desired {
+                super::native_ui_identity::check_mutation()?;
                 unsafe { pattern.Toggle() }.map_err(|_| {
                     action_failure("the UI Automation toggle action was rejected by the target")
                 })?;
@@ -512,6 +524,7 @@ fn apply_action_inner(
         }
         UiSemanticAction::Select => {
             let pattern = selection_pattern(&target.element)?;
+            super::native_ui_identity::check_mutation()?;
             unsafe { pattern.Select() }.map_err(|_| {
                 action_failure("the UI Automation selection action was rejected by the target")
             })?;
@@ -526,20 +539,26 @@ fn apply_action_inner(
                 ));
             }
             let pattern = value_pattern(&target.element)?;
+            super::native_ui_identity::check_mutation()?;
             unsafe { pattern.SetValue(&BSTR::from(value)) }.map_err(|_| {
                 action_failure("the UI Automation value action was rejected by the target")
             })?;
             Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::Focus => {
+            super::native_ui_identity::check_mutation()?;
             unsafe { target.element.SetFocus() }.map_err(|_| {
                 action_failure("the UI Automation focus action was rejected by the target")
             })?;
             Ok(AppliedUiAction::accepted(true))
         }
-        UiSemanticAction::Scroll { .. } => Err(unsupported(
-            "this UI Automation semantic action is not enabled by the Windows adapter",
-        )),
+        UiSemanticAction::Scroll {
+            horizontal,
+            vertical,
+        } => {
+            scroll::apply(&target.element, *horizontal, *vertical)?;
+            Ok(AppliedUiAction::accepted(true))
+        }
     }
 }
 
@@ -549,12 +568,13 @@ fn locate_action_target(
     target_fingerprint: &str,
 ) -> Result<LocatedElement, AgentError> {
     let com = ComGuard::initialize()?;
-    let foreground = resolve_foreground_application()?;
+    let foreground =
+        application_for_element(expected_process_id, expected_image_path, target_fingerprint)?;
     if foreground.process_id != expected_process_id
         || !path_eq(&foreground.image_path, expected_image_path)
     {
         return Err(failure(
-            "the foreground application changed before the UI Automation action",
+            "the selected application changed before the UI Automation action",
             false,
         ));
     }
@@ -631,9 +651,10 @@ fn validate_action_target(
                 ))
             }
         }
-        UiSemanticAction::Scroll { .. } => Err(unsupported(
-            "this UI Automation semantic action is not enabled by the Windows adapter",
-        )),
+        UiSemanticAction::Scroll {
+            horizontal,
+            vertical,
+        } => scroll::validate(element, *horizontal, *vertical),
     }
 }
 
@@ -744,11 +765,15 @@ fn walk(
         return Ok(());
     }
     let (index, fingerprint) = if emit {
-        let (node, strings_truncated) = read_node(
+        let (mut node, strings_truncated) = read_node(
             &element,
             identity.clone(),
             parent.as_ref().and_then(|(index, _)| *index),
         );
+        if !node.is_protected && config.window_root == Some(identity.as_str()) {
+            node.window_fingerprint = Some(identity.clone());
+            node.role = format!("window/{}", node.role);
+        }
         if !super::computer_use_broker::ui_query_matches(config.query, &node) {
             (None, node.fingerprint)
         } else {
@@ -888,6 +913,9 @@ fn read_node(
             (None, false)
         };
         let mut supported_actions = Vec::new();
+        if !is_protected && scroll::available(element) {
+            supported_actions.push(UiSemanticActionKind::Scroll);
+        }
         if invoke.is_some() {
             supported_actions.push(UiSemanticActionKind::Invoke);
         }
@@ -919,7 +947,8 @@ fn read_node(
         (
             CollectedUiNode {
                 location: Default::default(),
-                window_fingerprint: None,
+                window_fingerprint: (control_type == UIA_WindowControlTypeId.0 && !is_protected)
+                    .then(|| fingerprint.clone()),
                 is_collection: [
                     UIA_DataGridControlTypeId.0,
                     UIA_TableControlTypeId.0,

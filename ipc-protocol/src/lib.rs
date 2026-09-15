@@ -80,5 +80,6 @@
 //! daemon / worker modules.
 
 pub mod dual_transport;
+pub mod local_file_recovery;
 pub mod message;
 pub mod transport;

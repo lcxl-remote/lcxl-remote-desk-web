@@ -33,12 +33,18 @@ pub mod office_bridge_observer;
 pub mod outlook_new_handoff;
 pub mod spreadsheet_file;
 pub mod terminal_reference_store;
+#[cfg(target_os = "windows")]
+pub mod windows_excel_batch;
 #[cfg(windows)]
 pub mod windows_input_ownership;
+#[cfg(windows)]
+pub mod windows_office_batch;
 #[cfg(windows)]
 pub mod windows_raw_input;
 #[cfg(windows)]
 pub mod windows_uia_observer;
+#[cfg(windows)]
+pub mod windows_word_batch;
 
 /// Minimum lifetime for an edge-issued object that may cross a model-driven
 /// permission round trip. A five-minute token can expire while a reasoning
@@ -451,7 +457,47 @@ async fn dispatch_read_context(
                 ))
             }
         }
+        ContextKind::SpreadsheetBatchInspect(params) => {
+            #[cfg(windows)]
+            {
+                let Some(settings) = settings else {
+                    return Err(unsupported(
+                        "Excel batch observation requires a session context",
+                    ));
+                };
+                let ceiling = settings.read().await.computer_use.clone();
+                let output = run_blocking(move || {
+                    computer_use_broker.inspect_excel_batch(&params, &ceiling)
+                })
+                .await??;
+                Ok(OperationOutput::ReadContext(
+                    ReadContextOutput::SpreadsheetLiveInspect(output),
+                ))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = params;
+                Err(unsupported(
+                    "Excel batch adapter is unavailable on this platform",
+                ))
+            }
+        }
         ContextKind::DocumentLiveInspect(params) => {
+            #[cfg(windows)]
+            {
+                let Some(settings) = settings else {
+                    return Err(unsupported(
+                        "Word batch observation requires a session context",
+                    ));
+                };
+                let ceiling = settings.read().await.computer_use.clone();
+                let output =
+                    run_blocking(move || computer_use_broker.inspect_word_batch(&params, &ceiling))
+                        .await??;
+                Ok(OperationOutput::ReadContext(
+                    ReadContextOutput::DocumentLiveInspect(output),
+                ))
+            }
             #[cfg(target_os = "macos")]
             {
                 let Some(settings) = settings else {
@@ -472,15 +518,31 @@ async fn dispatch_read_context(
                     ReadContextOutput::DocumentLiveInspect(output),
                 ))
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", windows)))]
             {
                 let _ = params;
                 Err(unsupported(
-                    "live document adapter is unavailable on this platform",
+                    "document adapter is unavailable on this platform",
                 ))
             }
         }
         ContextKind::PresentationLiveInspect(params) => {
+            #[cfg(windows)]
+            {
+                let Some(settings) = settings else {
+                    return Err(unsupported(
+                        "PowerPoint batch observation requires a session context",
+                    ));
+                };
+                let ceiling = settings.read().await.computer_use.clone();
+                let output = run_blocking(move || {
+                    computer_use_broker.inspect_powerpoint_batch(&params, &ceiling)
+                })
+                .await??;
+                Ok(OperationOutput::ReadContext(
+                    ReadContextOutput::PresentationLiveInspect(output),
+                ))
+            }
             #[cfg(target_os = "macos")]
             {
                 let Some(settings) = settings else {
@@ -501,7 +563,7 @@ async fn dispatch_read_context(
                     ReadContextOutput::PresentationLiveInspect(output),
                 ))
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", windows)))]
             {
                 let _ = params;
                 Err(unsupported(

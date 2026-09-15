@@ -1,6 +1,8 @@
 import type { AssistantContextUsage } from './assistant-context-meter';
 import type { AssistantFileScopeView, AssistantDirectoryOperation } from './assistant-file-scope';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { agentErrorMessage } from '@/lib/agent-error-i18n';
 import { v4 } from 'uuid';
 
 import type { AiProvenance } from '@/components/ai-generated-mark';
@@ -180,7 +182,7 @@ type PersistedSnapshot = {
     actionPermissionReasons?: Record<string, string>;
     requestId?: string;
     fileScope?: AssistantFileScopeView;
-    terminalError?: { message: string } | null;
+    terminalError?: { message: string; error_code?: number | null } | null;
     contextNotices?: ContextNoticeDto[];
     contextUsage?: AssistantContextUsage | null;
     sessionId: string;
@@ -242,7 +244,7 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 const native = JSON.parse(message.text);
                 permissionReason = snapshot.actionPermissionReasons?.[String(native.work_id)];
                 nativeFailed = ['definitely_not_started', 'outcome_unknown', 'failed'].includes(native.result);
-                nativeFileResult = ['file_artifact', 'text_file_mutation'].includes(native.output?.kind);
+                nativeFileResult = ['file_artifact', 'batch_document_artifact', 'text_file_mutation'].includes(native.output?.kind);
             } catch { /* Non-native results have no work binding. */ }
             const backgroundRunning = /"status"\s*:\s*"background_running"/.test(message.text);
             tools = upsertTool(tools, {
@@ -306,6 +308,10 @@ export function useDeviceAssistantChat({
     subscribe,
     sendMessage,
 }: Props) {
+    const { t } = useTranslation();
+    // Changing language must not reset the conversation or its snapshot requests.
+    const translate = useRef(t);
+    translate.current = t;
     const targetSelectionEnabled = connected !== undefined;
     const [contextUsage, setContextUsage] = useState<AssistantContextUsage | null>(null);
     const [contextNotices, setContextNotices] = useState<ContextNoticeDto[]>([]);
@@ -357,6 +363,12 @@ export function useDeviceAssistantChat({
     const [capabilityGrants, setCapabilityGrants] = useState<CapabilityGrantDto[]>([]);
     const [outcomeDisposing, setOutcomeDisposing] = useState(false);
     const [permissionUpdating, setPermissionUpdating] = useState(false);
+    const permissionSubmission = useRef<{ epoch: number } | null>(null);
+    useEffect(() => {
+        permissionSubmission.current = null;
+        setPermissionUpdating(false);
+        return () => { permissionSubmission.current = null; };
+    }, [deskId, connected]);
     const [grantRevoking, setGrantRevoking] = useState<string | null>(null);
     const [pendingInputCount, setPendingInputCount] = useState(0);
     const [messagePage, setMessagePage] = useState<{
@@ -550,7 +562,8 @@ export function useDeviceAssistantChat({
                     setError(null);
                 } else if (snapshot.terminalError) {
                     setStatus('error');
-                    setError(snapshot.terminalError.message);
+                    setError(agentErrorMessage(translate.current, snapshot.terminalError.error_code,
+                        snapshot.terminalError.message, 'The AI Assistant turn could not complete.'));
 
                 } else if (projected.permissionRequests.some((request) => request.state === 'pending')
                     || snapshot.fileScope?.directories.some(directory => directory.state === 'pending')) {
@@ -823,7 +836,8 @@ export function useDeviceAssistantChat({
 
         if (event.kind === 'status' && event.status === 'accepted') acknowledgeDelivery();
         if (event.kind === 'error' && event.seq === 1 && pendingDelivery.current && !stopPending.current) {
-            deliveryFailure.current = event.error?.message ?? 'The AI Assistant turn could not complete.';
+            deliveryFailure.current = agentErrorMessage(translate.current, event.error?.error_code,
+                event.error?.message, 'The AI Assistant turn could not complete.');
             const rejectedId = pendingDelivery.current.id;
             pendingDelivery.current = null;
             setDeliveryState(null);
@@ -909,7 +923,8 @@ export function useDeviceAssistantChat({
                 break;
             case 'error':
             case 'retracted':
-                setError(event.error?.message ?? 'The AI Assistant turn could not complete.');
+                setError(agentErrorMessage(translate.current, event.error?.error_code,
+                    event.error?.message, 'The AI Assistant turn could not complete.'));
                 setPartial('');
                 setStatus('error');
                 activeRequest.current = null;
@@ -1123,9 +1138,18 @@ export function useDeviceAssistantChat({
         items: PermissionDecisionBody['items'],
     ) => {
         const currentConversationId = conversationId.current;
-        if (!currentConversationId || request.state !== 'pending' || permissionUpdating) {
+        if (!currentConversationId || connected === false || hydrating || remoteActive || activeRequest.current
+            || request.state !== 'pending' || permissionUpdating
+            || request.inputRevision !== snapshotWatermark.current?.inputRevision
+            || permissionSubmission.current?.epoch === snapshotEpoch.current
+            || !permissionRequests.some(current => current.requestId === request.requestId
+                && current.inputRevision === request.inputRevision && current.state === 'pending')) {
             return false;
         }
+        const submission = { epoch: snapshotEpoch.current };
+        permissionSubmission.current = submission;
+        const isCurrent = () => permissionSubmission.current === submission
+            && snapshotEpoch.current === submission.epoch && conversationId.current === currentConversationId;
         const body: PermissionDecisionBody = {
             connection: deskId,
             conversation: currentConversationId,
@@ -1142,18 +1166,27 @@ export function useDeviceAssistantChat({
                 body: JSON.stringify(body),
             });
             const result = response.ok ? await response.json() : null;
+            if (!isCurrent()) return false;
             if (!response.ok || !result?.success || !result?.data?.state) {
                 throw new Error(result?.message ?? 'Permission decision was rejected.');
             }
             await loadSnapshot(currentConversationId);
-            return true;
+            return isCurrent();
         } catch (reason) {
+            if (!isCurrent()) return false;
+            // An uncertain response is not a failed decision. Read durable state
+            // once; never automatically repeat the approval mutation.
+            await loadSnapshot(currentConversationId);
+            if (!isCurrent()) return false;
             setError(reason instanceof Error ? reason.message : 'Permission decision failed.');
             return false;
         } finally {
-            setPermissionUpdating(false);
+            if (isCurrent()) {
+                permissionSubmission.current = null;
+                setPermissionUpdating(false);
+            }
         }
-    }, [deskId, loadSnapshot, permissionUpdating]);
+    }, [deskId, loadSnapshot, permissionUpdating, permissionRequests, connected, hydrating, remoteActive]);
 
     const decidePermission = useCallback((
         request: PermissionRequestDto,

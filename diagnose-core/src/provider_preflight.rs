@@ -36,7 +36,11 @@ pub use semantic_raw_input::{RawInputCallPreflight, raw_input_from_call};
 mod semantic_iwork;
 pub use semantic_iwork::IworkCallPreflight;
 mod artifact;
+pub mod batch_document;
+pub mod excel_read_binding;
+pub mod office_file_completion;
 pub mod text_file;
+pub mod word_read_binding;
 pub use artifact::{
     ArtifactCallPreflight, DOCX_ARTIFACT_MEDIA_TYPE, TEXT_ARTIFACT_MEDIA_TYPE,
     XLSX_ARTIFACT_MEDIA_TYPE, artifact_action_from_call, without_directory_selector,

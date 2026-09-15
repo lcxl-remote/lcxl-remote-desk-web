@@ -1,13 +1,8 @@
 //! Daemon-owned device quota. Workers never open this directory directly.
 //! An expired execution deadline does not prove that its backup was removed.
-use super::{atomic_write, bounded_read, hash, identity, invalid, open_private, private_dir};
+use super::{hash, identity, invalid, storage};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    fs::File,
-    io,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, io, path::Path};
 
 const MAX_ENTRIES: usize = 10_000;
 const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
@@ -95,29 +90,29 @@ impl Default for Ledger {
 }
 
 pub struct DeviceQuota {
-    root: PathBuf,
+    storage: storage::Root,
 }
 pub struct LockedDeviceQuota {
-    root: PathBuf,
-    _lock: File,
+    storage: storage::Locked,
     ledger: Ledger,
     failed: bool,
 }
 impl DeviceQuota {
     /// Root belongs to the daemon's trusted runtime, never a worker-supplied path.
     pub fn open(daemon_data_root: &Path) -> io::Result<Self> {
-        let root = daemon_data_root.join("file-recovery-quota");
-        private_dir(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            storage: storage::Root::open_named(daemon_data_root, "file-recovery-quota")?,
+        })
     }
     pub fn lock(&self) -> io::Result<LockedDeviceQuota> {
-        private_dir(&self.root)?;
-        let lock = open_private(&self.root.join("lock"), true)?;
-        lock.lock()?;
-        let ledger: Ledger = match bounded_read(&self.root.join("index.json"), MAX_INDEX_BYTES) {
+        let storage = self.storage.lock()?;
+        let ledger: Ledger = match storage.read("index.json", MAX_INDEX_BYTES) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|_| invalid("device quota index is corrupt"))?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ledger::default(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                storage.validate_missing_index()?;
+                Ledger::default()
+            }
             Err(error) => return Err(error),
         };
         super::Policy {
@@ -170,8 +165,7 @@ impl DeviceQuota {
             }
         }
         Ok(LockedDeviceQuota {
-            root: self.root.clone(),
-            _lock: lock,
+            storage,
             ledger,
             failed: false,
         })
@@ -303,7 +297,7 @@ impl LockedDeviceQuota {
             return Err(invalid("device quota index capacity exhausted"));
         }
         self.require_healthy()?;
-        if let Err(error) = atomic_write(&self.root.join("index.json"), &bytes) {
+        if let Err(error) = self.storage.write_index(&bytes) {
             // Rename may have succeeded before a later sync failure. Never
             // continue allocating from a potentially stale in-memory ledger.
             self.failed = true;
@@ -776,11 +770,12 @@ mod tests {
         assert!(locked.release(&stale).is_err());
         assert_eq!(locked.used_bytes(), 100 + ENTRY_BYTES);
         drop(locked);
-        atomic_write(
-            &root.path().join("file-recovery-quota/index.json"),
-            b"invalid",
-        )
-        .unwrap();
+        quota
+            .storage
+            .lock()
+            .unwrap()
+            .write_index(b"invalid")
+            .unwrap();
         assert!(quota.lock().is_err());
     }
     #[test]
@@ -790,10 +785,24 @@ mod tests {
         let mut locked = quota.lock().unwrap();
         let first = key("501", "first");
         locked.reserve(first.clone(), 100, 100, 1).unwrap();
+        #[cfg(not(windows))]
         let temporary = root.path().join("file-recovery-quota/index.json.tmp");
+        #[cfg(not(windows))]
         std::fs::create_dir(&temporary).unwrap();
+        #[cfg(windows)]
+        let blocker = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(root.path().join("file-recovery-quota/index.json"))
+                .unwrap()
+        };
         assert!(locked.reserve(key("502", "second"), 100, 100, 2).is_err());
+        #[cfg(not(windows))]
         std::fs::remove_dir(&temporary).unwrap();
+        #[cfg(windows)]
+        drop(blocker);
         // Even an idempotent retry must not return a permit from stale state.
         assert!(locked.reserve(first.clone(), 100, 100, 3).is_err());
         assert!(locked.release(&first).is_err());

@@ -15,6 +15,20 @@ const request = (items = [item()]): PermissionRequestDto => ({
 });
 const submit = () => screen.getByRole('button', { name: 'pages.deviceAssistant.permissionSubmitSelection' });
 describe('shared permission review', () => {
+    it.each([
+        ['execute_ui_actions', 'ui:scroll'],
+        ['execute_background_inputs', 'background_input:scroll'],
+    ])('preserves the %s scroll authority when approving', (toolName, operation) => {
+        const onDecide = vi.fn().mockResolvedValue(true);
+        const value = request([item({ itemId: 'app', toolName, expectedEffect: 'mutate_application',
+            resourceScope: ['ui_application:sha256:opaque'], operationScope: [operation],
+            applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Test app', actions: ['scroll'] },
+        })]);
+        render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
+        expect(screen.getByRole('checkbox', { name: 'pages.deviceAssistant.uiAction_scroll' })).toBeChecked();
+        fireEvent.click(submit());
+        expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', operation_scope: [operation] });
+    });
     it('shows the observed application and allows narrowing reusable actions and uses', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         const value = request([item({ itemId: 'app', toolName: 'execute_ui_actions', expectedEffect: 'mutate_application',
@@ -90,7 +104,7 @@ describe('shared permission review', () => {
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0]).toMatchObject({ itemId: 'send', decision: 'approve', max_uses: 1 });
     });
-    it.each(['disabled', 'busy'] as const)('blocks both approval and denial when %s', flag => {
+    it.each(['disabled', 'busy', 'waitingForTurn'] as const)('blocks both approval and denial when %s', flag => {
         const onDecide = vi.fn().mockResolvedValue(true);
         render(<AssistantPermissionRequest request={request()} canDecide {...{ [flag]: true }} onDecide={onDecide} />);
         expect(submit()).toBeDisabled();
@@ -98,6 +112,7 @@ describe('shared permission review', () => {
         expect(deny).toBeDisabled();
         fireEvent.click(submit()); fireEvent.click(deny);
         expect(onDecide).not.toHaveBeenCalled();
+        if (flag === 'waitingForTurn') expect(screen.getByRole('status')).toHaveTextContent('pages.deviceAssistant.permissionWaitingForTurn');
     });
     it('allows reading completed reviews while decisions are disabled', () => {
         render(<AssistantPermissionRequest request={{ ...request(), state: 'approved' }} canDecide disabled onDecide={vi.fn()} />);

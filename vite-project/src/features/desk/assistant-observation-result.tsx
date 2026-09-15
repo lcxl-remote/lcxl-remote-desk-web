@@ -20,7 +20,7 @@ export function AssistantObservationResult({ data }: { data: unknown }) {
         scrollarea: 'scrollArea', scrollbar: 'scrollBar', menu: 'menu', menuitem: 'menuItem',
         group: 'group', list: 'list', row: 'row', table: 'table', tab: 'tab', slider: 'slider',
     };
-    const knownActions = ['invoke', 'select', 'focus', 'toggle', 'set_value'];
+    const knownActions = ['invoke', 'select', 'focus', 'toggle', 'set_value', 'scroll'];
     return <div className="space-y-3 text-sm">
         {context.DesktopSessionInspect != null ? <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 rounded-md bg-muted p-3">
             <dt>{label('status')}</dt><dd>{label('accessible')}</dd>

@@ -16,10 +16,7 @@ pub(crate) struct QuotaClient {
 }
 impl QuotaClient {
     pub(crate) fn new(sender: tokio::sync::mpsc::UnboundedSender<WorkerToService>) -> Self {
-        #[cfg(unix)]
-        let os_user = Some(unsafe { libc::geteuid() }.to_string());
-        #[cfg(not(unix))]
-        let os_user = None;
+        let os_user = crate::file_recovery_service::platform_user::current().ok();
         Self {
             sender,
             pending: Arc::new(Mutex::new(HashMap::new())),

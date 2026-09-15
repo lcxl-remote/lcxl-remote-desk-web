@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { updateCollectionPolicySettings } from "../../clients.ts";
+import type { UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { updateCollectionPolicySettings } from "../../clients.ts";
 
 export const updateCollectionPolicySettingsMutationKey = () => [{ url: '/api/desk/settings/collection-policy' }] as const
 

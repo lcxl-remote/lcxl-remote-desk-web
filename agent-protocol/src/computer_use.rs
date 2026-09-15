@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
+pub mod office_batch;
+
 use crate::{
     Capability, RiskLevel,
     browser_control::{
@@ -132,6 +134,7 @@ pub enum ComputerUseAdapterKind {
     SystemDiagnostics,
     BrowserExtension,
     OutlookNewMailto,
+    OfficeWord,
 }
 
 #[derive(
@@ -430,6 +433,57 @@ pub struct LiveDocumentInspectParams {
     #[serde(default)]
     pub batch_file: Option<ObjectRef>,
     pub max_bytes: u32,
+}
+
+/// Explicit file batch selection, independent of any active Office document.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct SpreadsheetBatchInspectParams {
+    /// Filled by the central host from the authoritative owner selection.
+    pub file: Option<ObjectRef>,
+    pub sheet_name: String,
+    pub address: String,
+    pub max_bytes: u32,
+}
+
+impl SpreadsheetBatchInspectParams {
+    pub fn validate_selection(&self) -> Result<(), &'static str> {
+        if self
+            .file
+            .as_ref()
+            .is_some_and(|f| f.object_kind != ObjectKind::File)
+            || self.sheet_name.is_empty()
+            || self.sheet_name.chars().count() > 31
+            || self
+                .sheet_name
+                .chars()
+                .any(|c| c.is_control() || "[]:*?/\\".contains(c))
+            || !(1024..=65536).contains(&self.max_bytes)
+        {
+            return Err("invalid Excel batch file, sheet or output budget");
+        }
+        let split = self
+            .address
+            .bytes()
+            .take_while(u8::is_ascii_uppercase)
+            .count();
+        if split == 0 || split > 3 || split == self.address.len() {
+            return Err("Excel batch requires a canonical A1 cell address");
+        }
+        let (column, row) = self.address.split_at(split);
+        let column = column
+            .bytes()
+            .fold(0u32, |n, c| n * 26 + u32::from(c - b'A' + 1));
+        if row.starts_with('0')
+            || !row.bytes().all(|c| c.is_ascii_digit())
+            || column > 16384
+            || !row.parse::<u32>().ok().is_some_and(|r| r <= 1_048_576)
+        {
+            return Err("Excel batch cell address exceeds worksheet bounds");
+        }
+        Ok(())
+    }
 }
 
 #[derive(
@@ -966,8 +1020,20 @@ pub enum PowerPointPatchAction {
 )]
 #[serde(tag = "kind", content = "params", rename_all = "snake_case")]
 pub enum SpreadsheetLivePatchAction {
-    SetCellValue { value: String },
-    SetCellFormula { formula: String },
+    SetCellValue {
+        value: String,
+    },
+    SetCellFormula {
+        formula: String,
+    },
+    /// Explicit scalar actions are appended; existing wire indices stay fixed.
+    /// Advertised only by adapters that preserve the requested storage type.
+    SetCellNumber {
+        value: String,
+    },
+    SetCellBoolean {
+        value: bool,
+    },
 }
 
 /// Provider-neutral bounded mutation surface for a live document host.
@@ -1583,45 +1649,50 @@ fn validate_actions(
     let snapshot_id = actions[0].target.snapshot_id.as_str();
     require_non_empty("object_ref.snapshot_id", snapshot_id)?;
     for step in actions {
-        let adapter_matches = matches!(
-            (&adapter.kind, &step.action),
-            (
-                ComputerUseAdapterKind::WindowsUia | ComputerUseAdapterKind::MacosAccessibility,
-                ComputerActionKind::UiInApplication { .. }
-            ) | (
-                ComputerUseAdapterKind::MacosBackgroundInput,
-                ComputerActionKind::BackgroundInput { .. }
-            ) | (
-                ComputerUseAdapterKind::WindowsRawInput,
-                ComputerActionKind::RawInput(_)
-            ) | (
-                ComputerUseAdapterKind::OfficeExcel,
-                ComputerActionKind::Excel(_)
-            ) | (
-                ComputerUseAdapterKind::OfficePowerPoint,
-                ComputerActionKind::PowerPoint(_)
-            ) | (
-                ComputerUseAdapterKind::IworkNumbers,
-                ComputerActionKind::SpreadsheetLive(_)
-                    | ComputerActionKind::SpreadsheetLiveBatch(_)
-            ) | (
-                ComputerUseAdapterKind::IworkPages,
-                ComputerActionKind::DocumentLive(_) | ComputerActionKind::DocumentLiveBatch(_)
-            ) | (
-                ComputerUseAdapterKind::IworkKeynote,
-                ComputerActionKind::PresentationLive(_)
-                    | ComputerActionKind::PresentationLiveBatch(_)
-            ) | (
-                ComputerUseAdapterKind::FileSystem,
-                ComputerActionKind::File(_)
-            ) | (
-                ComputerUseAdapterKind::BrowserExtension,
-                ComputerActionKind::Browser(_)
-            ) | (
-                ComputerUseAdapterKind::OutlookNewMailto,
-                ComputerActionKind::Communication(_)
-            )
-        );
+        let adapter_matches =
+            office_batch::action_support(adapter, &step.action).unwrap_or_else(|| {
+                matches!(
+                    (&adapter.kind, &step.action),
+                    (
+                        ComputerUseAdapterKind::WindowsUia
+                            | ComputerUseAdapterKind::MacosAccessibility,
+                        ComputerActionKind::UiInApplication { .. }
+                    ) | (
+                        ComputerUseAdapterKind::MacosBackgroundInput,
+                        ComputerActionKind::BackgroundInput { .. }
+                    ) | (
+                        ComputerUseAdapterKind::WindowsRawInput,
+                        ComputerActionKind::RawInput(_)
+                    ) | (
+                        ComputerUseAdapterKind::OfficeExcel,
+                        ComputerActionKind::Excel(_)
+                    ) | (
+                        ComputerUseAdapterKind::OfficePowerPoint,
+                        ComputerActionKind::PowerPoint(_)
+                    ) | (
+                        ComputerUseAdapterKind::IworkNumbers,
+                        ComputerActionKind::SpreadsheetLive(_)
+                            | ComputerActionKind::SpreadsheetLiveBatch(_)
+                    ) | (
+                        ComputerUseAdapterKind::IworkPages,
+                        ComputerActionKind::DocumentLive(_)
+                            | ComputerActionKind::DocumentLiveBatch(_)
+                    ) | (
+                        ComputerUseAdapterKind::IworkKeynote,
+                        ComputerActionKind::PresentationLive(_)
+                            | ComputerActionKind::PresentationLiveBatch(_)
+                    ) | (
+                        ComputerUseAdapterKind::FileSystem,
+                        ComputerActionKind::File(_)
+                    ) | (
+                        ComputerUseAdapterKind::BrowserExtension,
+                        ComputerActionKind::Browser(_)
+                    ) | (
+                        ComputerUseAdapterKind::OutlookNewMailto,
+                        ComputerActionKind::Communication(_)
+                    )
+                )
+            });
         if !adapter_matches {
             return Err(ComputerUseValidationError::IncompatibleActionAdapter);
         }
@@ -1753,8 +1824,17 @@ fn validate_actions(
                 require_non_empty(field, value)?;
             }
             let expected_extension = match &step.action {
+                ComputerActionKind::SpreadsheetLiveBatch(_) if office_batch::is_xlsx(adapter) => {
+                    ".xlsx"
+                }
                 ComputerActionKind::SpreadsheetLiveBatch(_) => ".numbers",
+                ComputerActionKind::DocumentLiveBatch(_) if office_batch::is_docx(adapter) => {
+                    ".docx"
+                }
                 ComputerActionKind::DocumentLiveBatch(_) => ".pages",
+                ComputerActionKind::PresentationLiveBatch(_) if office_batch::is_pptx(adapter) => {
+                    ".pptx"
+                }
                 ComputerActionKind::PresentationLiveBatch(_) => ".key",
                 _ => unreachable!(),
             };
@@ -1764,9 +1844,40 @@ fn validate_actions(
                     max: 255,
                 });
             }
+            if office_batch::is_pptx(adapter)
+                && !office_batch::valid_pptx_leaf(&output.native_file_name)
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "batch presentation output must be a safe Windows PPTX leaf name",
+                ));
+            }
+            if office_batch::is_docx(adapter)
+                && !office_batch::valid_docx_leaf(&output.native_file_name)
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "batch document output must be a safe Windows DOCX leaf name",
+                ));
+            }
+            if office_batch::is_xlsx(adapter)
+                && !office_batch::valid_xlsx_leaf(&output.native_file_name)
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "batch spreadsheet output must be a safe Windows XLSX leaf name",
+                ));
+            }
             if matches!(output.native_file_name.as_str(), "." | "..")
                 || output.native_file_name.contains(['/', '\\'])
-                || !output.native_file_name.ends_with(expected_extension)
+                || !(if office_batch::is_pptx(adapter)
+                    || office_batch::is_docx(adapter)
+                    || office_batch::is_xlsx(adapter)
+                {
+                    output
+                        .native_file_name
+                        .to_ascii_lowercase()
+                        .ends_with(expected_extension)
+                } else {
+                    output.native_file_name.ends_with(expected_extension)
+                })
                 || output.native_file_name.len() == expected_extension.len()
             {
                 return Err(ComputerUseValidationError::InvalidContextReference(
@@ -1844,6 +1955,20 @@ fn validate_live_document_action(
     action: &ComputerActionKind,
 ) -> Result<(), ComputerUseValidationError> {
     let (actual, max) = match action {
+        ComputerActionKind::SpreadsheetLive(SpreadsheetLivePatchAction::SetCellNumber {
+            value,
+        })
+        | ComputerActionKind::SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction {
+            action: SpreadsheetLivePatchAction::SetCellNumber { value },
+            ..
+        }) => {
+            if !office_batch::valid_number_literal(value) {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "spreadsheet number must be bounded and finite",
+                ));
+            }
+            (value.len(), 128)
+        }
         ComputerActionKind::SpreadsheetLive(SpreadsheetLivePatchAction::SetCellValue { value }) => {
             (value.len(), MAX_LIVE_SPREADSHEET_CELL_BYTES)
         }
@@ -2097,7 +2222,17 @@ impl CreatedFileArtifactOutput {
             || self.file.snapshot_id.is_empty()
             || self.file.expires_at.is_empty()
             || self.file_name.is_empty()
-            || self.file_name.len() > 200
+            || if self.media_type == office_batch::PPTX_MEDIA_TYPE {
+                !office_batch::valid_pptx_leaf(&self.file_name)
+            } else if self.media_type == office_batch::DOCX_MEDIA_TYPE && self.file_name.len() > 200
+            {
+                !office_batch::valid_docx_leaf(&self.file_name)
+            } else if self.media_type == office_batch::XLSX_MEDIA_TYPE && self.file_name.len() > 200
+            {
+                !office_batch::valid_xlsx_leaf(&self.file_name)
+            } else {
+                self.file_name.len() > 200
+            }
             || matches!(self.file_name.as_str(), "." | "..")
             || self.file_name.ends_with(['.', ' '])
             || self

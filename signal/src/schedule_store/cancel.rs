@@ -93,6 +93,15 @@ impl ScheduleStore {
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
         txn.commit().await?;
+        if task.kind == "conversation_resume"
+            && result.status == "awaiting_permission"
+            && matches!(self.cancel_continuation_wait(run_id).await, Ok(true))
+        {
+            return run::Entity::find_by_id(result.id)
+                .one(&self.db)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound);
+        }
         if task.kind == "fresh_task"
             && result.status == "awaiting_permission"
             && matches!(self.expire_fresh_approval_wait(run_id).await, Ok(true))

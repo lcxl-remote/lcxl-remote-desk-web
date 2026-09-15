@@ -132,6 +132,7 @@ mod tests {
     };
     use sea_orm::{ConnectionTrait, Database, Schema};
 
+    mod executor;
     mod model_gateway;
 
     async fn peer(id: &str, device: &str) -> ConnectionState {

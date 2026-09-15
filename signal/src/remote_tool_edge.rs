@@ -641,7 +641,18 @@ impl RemoteToolObserver for SignalRemoteToolObserver {
 }
 
 /// Per-turn Provider seam for the OSS Device Assistant.
-pub struct SignalDeviceAssistantTools {
+#[derive(Clone)]
+pub struct SignalDeviceAssistantTools(Arc<SignalDeviceAssistantToolState>);
+
+impl std::ops::Deref for SignalDeviceAssistantTools {
+    type Target = SignalDeviceAssistantToolState;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Shared state for one turn; fields remain private to the Provider implementation.
+pub struct SignalDeviceAssistantToolState {
     db: DatabaseConnection,
     provider_registry: ProviderRegistry,
     connections: Arc<SharedConnectionMap>,
@@ -786,10 +797,12 @@ fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind
         ComputerActionKind::RawInput(_) => Some(ObjectKind::Application),
         ComputerActionKind::SpreadsheetLive(_) => Some(ObjectKind::Range),
         ComputerActionKind::DocumentLive(_) => Some(ObjectKind::Document),
-        ComputerActionKind::PresentationLive(_) => Some(ObjectKind::Slide),
-        ComputerActionKind::SpreadsheetLiveBatch(_)
-        | ComputerActionKind::DocumentLiveBatch(_)
-        | ComputerActionKind::PresentationLiveBatch(_) => Some(ObjectKind::File),
+        ComputerActionKind::PresentationLive(_) | ComputerActionKind::PresentationLiveBatch(_) => {
+            Some(ObjectKind::Slide)
+        }
+        ComputerActionKind::SpreadsheetLiveBatch(_) | ComputerActionKind::DocumentLiveBatch(_) => {
+            Some(ObjectKind::File)
+        }
         _ => None,
     }
 }
@@ -840,7 +853,7 @@ impl SignalDeviceAssistantTools {
             available_exec_shells,
             max_command_runtime_ms,
         );
-        Self {
+        Self(Arc::new(SignalDeviceAssistantToolState {
             db,
             provider_registry,
             connections,
@@ -869,14 +882,16 @@ impl SignalDeviceAssistantTools {
             model_egress_policy: None,
             original_input: OnceLock::new(),
             verified_read_labels: Mutex::new(HashMap::new()),
-        }
+        }))
     }
 
     pub(crate) fn with_model_egress_policy(
         mut self,
         policy: Option<desk_diagnose_core::model_egress::ModelEgressPolicy>,
     ) -> Self {
-        self.model_egress_policy = policy;
+        Arc::get_mut(&mut self.0)
+            .expect("configure Provider before sharing")
+            .model_egress_policy = policy;
         self
     }
 
@@ -923,13 +938,9 @@ impl SignalDeviceAssistantTools {
         if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
             return Ok(());
         }
-        if matches!(
-            call.name.as_str(),
-            "inspect_selected_numbers_with_iwork"
-                | "inspect_selected_pages_with_iwork"
-                | "inspect_selected_keynote_with_iwork"
-        ) {
+        if desk_diagnose_core::input_read_context::object_read::is_batch_document_read(&call.name) {
             exact_selected_batch_file(&self.selected_file_roots)?;
+            return Ok(());
         }
         match capability {
             desk_agent_protocol::Capability::OfficeDocumentInspect
@@ -1142,7 +1153,31 @@ impl SignalDeviceAssistantTools {
         Ok(())
     }
 
-    async fn read_outcome(&self, call: &ToolCall) -> Result<ReadOutcome, AgentError> {
+    // Keep read polling outside the composition stack while sharing exact turn state.
+    // The owned task is aborted if its caller is cancelled.
+    #[inline(never)]
+    fn read_outcome(
+        &self,
+        call: &ToolCall,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<ReadOutcome, AgentError>>>>
+    {
+        let tools = self.clone();
+        let call = call.clone();
+        Box::pin(async move {
+            crate::owned_task::run(async move { tools.read_outcome_inner(&call).await })
+                .await
+                .unwrap_or_else(|_| {
+                    Err(error(
+                        AgentErrorKind::SessionUnavailable,
+                        "Provider read task ended without a verified outcome",
+                        false,
+                        false,
+                    ))
+                })
+        })
+    }
+
+    async fn read_outcome_inner(&self, call: &ToolCall) -> Result<ReadOutcome, AgentError> {
         self.verified_read_labels
             .lock()
             .map_err(|_| {
@@ -1235,7 +1270,18 @@ impl SignalDeviceAssistantTools {
         result
     }
 
-    async fn authorize_and_invoke(&self, call: &ToolCall) -> Result<ReadOutcome, AgentError> {
+    // Construct the large child future outside the caller's poll frame.
+    // The returned future remains owned and cancelled by the original caller.
+    #[inline(never)]
+    fn authorize_and_invoke<'a>(
+        &'a self,
+        call: &'a ToolCall,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<ReadOutcome, AgentError>> + 'a>>
+    {
+        Box::pin(self.authorize_and_invoke_inner(call))
+    }
+
+    async fn authorize_and_invoke_inner(&self, call: &ToolCall) -> Result<ReadOutcome, AgentError> {
         let capability = self
             .provider_registry
             .capability_for_tool(&call.name)
@@ -2272,17 +2318,18 @@ impl SignalDeviceAssistantTools {
         let shared_iwork =
             if desk_diagnose_core::provider_preflight::IworkCallPreflight::supports(&call.name) {
                 self.validate_original_objects().await?;
+                let current = crate::computer_use_readiness::global_computer_use_readiness_cache()
+                    .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                    .filter(|record| record.readiness.revision == self.readiness_revision)
+                    .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
                 Some(
-                    desk_diagnose_core::provider_preflight::IworkCallPreflight::build(
+                    desk_diagnose_core::provider_preflight::IworkCallPreflight::from_session(
                         &self.provider_registry,
                         ProductSurface::OssPersonalOwner,
                         call,
                         self.object_binding()?.original,
-                        &desk_diagnose_core::file_scope::approved_directories(
-                            &self.authoritative_session().await?,
-                            now_unix_ms,
-                        )
-                        .map_err(|_| desk_diagnose_core::directory_tools::unavailable())?,
+                        &self.authoritative_session().await?,
+                        &current.readiness.interactive_session_incarnation,
                         now_unix_ms,
                     )?,
                 )
@@ -2469,7 +2516,7 @@ impl SignalDeviceAssistantTools {
                     "presentation slide patch",
                 )
             }
-            "patch_selected_numbers_copy" => {
+            "patch_selected_numbers_copy" | "patch_selected_excel_copy" => {
                 let args: SpreadsheetBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
                 let authority_refs =
@@ -2482,11 +2529,15 @@ impl SignalDeviceAssistantTools {
                         action: args.action,
                     }),
                     desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
-                    ComputerUseAdapterKind::IworkNumbers,
-                    "selected Numbers copy patch",
+                    if call.name == "patch_selected_excel_copy" {
+                        ComputerUseAdapterKind::OfficeExcel
+                    } else {
+                        ComputerUseAdapterKind::IworkNumbers
+                    },
+                    "selected spreadsheet copy patch",
                 )
             }
-            "replace_selected_pages_copy_body" => {
+            "replace_selected_pages_copy_body" | "replace_selected_word_copy_body" => {
                 let args: DocumentBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
                 let authority_refs =
@@ -2499,11 +2550,15 @@ impl SignalDeviceAssistantTools {
                         action: DocumentLivePatchAction::ReplaceBodyText { text: args.text },
                     }),
                     desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
-                    ComputerUseAdapterKind::IworkPages,
-                    "selected Pages copy body replacement",
+                    if call.name == "replace_selected_word_copy_body" {
+                        ComputerUseAdapterKind::OfficeWord
+                    } else {
+                        ComputerUseAdapterKind::IworkPages
+                    },
+                    "selected document copy body replacement",
                 )
             }
-            "patch_selected_keynote_copy" => {
+            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy" => {
                 let args: PresentationBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
                 let authority_refs =
@@ -2516,8 +2571,12 @@ impl SignalDeviceAssistantTools {
                         action: args.action,
                     }),
                     desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
-                    ComputerUseAdapterKind::IworkKeynote,
-                    "selected Keynote copy patch",
+                    if call.name == "patch_selected_powerpoint_copy" {
+                        ComputerUseAdapterKind::OfficePowerPoint
+                    } else {
+                        ComputerUseAdapterKind::IworkKeynote
+                    },
+                    "selected presentation copy patch",
                 )
             }
             _ => {
@@ -2529,7 +2588,14 @@ impl SignalDeviceAssistantTools {
                 ));
             }
         };
-        if semantic_action_target_kind(&computer_action) != Some(target_ref.object_kind) {
+        let target_kind = if adapter_kind == ComputerUseAdapterKind::OfficeWord {
+            Some(ObjectKind::Document)
+        } else if adapter_kind == ComputerUseAdapterKind::OfficeExcel {
+            Some(ObjectKind::Range)
+        } else {
+            semantic_action_target_kind(&computer_action)
+        };
+        if target_kind != Some(target_ref.object_kind) {
             return Err(error(
                 AgentErrorKind::InvalidInput,
                 "semantic action target kind does not match the selected Provider",
@@ -4789,7 +4855,19 @@ impl SignalDeviceAssistantTools {
             .await
     }
 
-    async fn invoke(
+    #[inline(never)]
+    fn invoke<'a>(
+        &'a self,
+        call: &'a ToolCall,
+        grant: &'a CapabilityGrant,
+        authority_expiry: u64,
+    ) -> std::pin::Pin<
+        Box<impl std::future::Future<Output = Result<ToolRunOutput, ProviderInvokeError>> + 'a>,
+    > {
+        Box::pin(self.invoke_inner(call, grant, authority_expiry))
+    }
+
+    async fn invoke_inner(
         &self,
         call: &ToolCall,
         grant: &CapabilityGrant,
@@ -4885,8 +4963,9 @@ impl SignalDeviceAssistantTools {
             desk_agent_protocol::Capability::SpreadsheetLiveInspect
                 | desk_agent_protocol::Capability::DocumentLiveInspect
                 | desk_agent_protocol::Capability::PresentationLiveInspect
-        ) && !is_iwork_batch_inspect
-        {
+        ) && !desk_diagnose_core::input_read_context::object_read::is_batch_document_read(
+            &call.name,
+        ) {
             let target = live_target.ok_or_else(|| {
                 error(
                     AgentErrorKind::PermissionDenied,
@@ -5557,6 +5636,9 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 | "patch_selected_numbers_copy"
                 | "replace_selected_pages_copy_body"
                 | "patch_selected_keynote_copy"
+                | "patch_selected_powerpoint_copy"
+                | "replace_selected_word_copy_body"
+                | "patch_selected_excel_copy"
                 | "update_text_file"
                 | "delete_text_file"
         ) {
@@ -5966,6 +6048,97 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn office_batch_preflight_requires_file_without_live_selection() {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let tools_for = |roots| {
+            SignalDeviceAssistantTools::new(
+                db.clone(),
+                desk_diagnose_core::device_assistant::device_assistant_provider_registry(),
+                Arc::new(SharedConnectionMap::default()),
+                Arc::new(SignalRemoteToolPendingStore::default()),
+                "host".into(),
+                "device".into(),
+                "owner".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                roots,
+                vec![],
+                vec![],
+                None,
+                None,
+                "inspect selected file".into(),
+                "run".into(),
+                "turn".into(),
+                1,
+                1,
+                vec![],
+                30_000,
+            )
+        };
+        for (name, arguments) in [
+            (
+                "inspect_selected_excel_cell",
+                r#"{"sheet_name":"Sheet1","address":"B2","max_bytes":4096}"#,
+            ),
+            ("inspect_selected_word_file", r#"{"max_bytes":4096}"#),
+            ("inspect_selected_powerpoint_file", r#"{"max_bytes":4096}"#),
+            (
+                "inspect_selected_numbers_with_iwork",
+                r#"{"max_bytes":4096}"#,
+            ),
+            ("inspect_selected_pages_with_iwork", r#"{"max_bytes":4096}"#),
+            (
+                "inspect_selected_keynote_with_iwork",
+                r#"{"max_bytes":4096}"#,
+            ),
+        ] {
+            let call = ToolCall {
+                id: "read".into(),
+                name: name.into(),
+                arguments_json: arguments.into(),
+            };
+            let (capability, _) = build_read_operation(&call).unwrap();
+            let file = object_ref("source", ObjectKind::File);
+            tools_for(vec![file.clone()])
+                .preflight_selected_context(&call, capability)
+                .unwrap();
+            assert!(
+                tools_for(vec![])
+                    .preflight_selected_context(&call, capability)
+                    .is_err(),
+                "{name}"
+            );
+            assert!(
+                tools_for(vec![file, object_ref("other", ObjectKind::File)])
+                    .preflight_selected_context(&call, capability)
+                    .is_err(),
+                "{name}"
+            );
+        }
+        for name in [
+            "inspect_live_spreadsheet",
+            "inspect_live_document",
+            "inspect_live_presentation",
+        ] {
+            let call = ToolCall {
+                id: "live".into(),
+                name: name.into(),
+                arguments_json: "{}".into(),
+            };
+            let (capability, _) = build_read_operation(&call).unwrap();
+            assert!(
+                tools_for(vec![object_ref("source", ObjectKind::File)])
+                    .preflight_selected_context(&call, capability)
+                    .is_err()
+            );
+        }
+    }
+
     #[test]
     fn background_batch_preflight_targets_pass_signal_semantic_gate() {
         let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
@@ -6062,6 +6235,24 @@ mod tests {
             },
         });
         assert_eq!(semantic_action_target_kind(&action), Some(ObjectKind::File));
+    }
+
+    #[test]
+    fn presentation_batch_targets_observed_slide_not_source_file() {
+        let action = ComputerActionKind::PresentationLiveBatch(PresentationLiveBatchPatchAction {
+            output: desk_agent_protocol::computer_use::BatchDocumentOutput {
+                destination_parent: object_ref("destination", ObjectKind::Directory),
+                native_file_name: "copy.pptx".into(),
+            },
+            action:
+                desk_agent_protocol::computer_use::PresentationLivePatchAction::ReplaceSlideTitle {
+                    text: "reviewed title".into(),
+                },
+        });
+        assert_eq!(
+            semantic_action_target_kind(&action),
+            Some(ObjectKind::Slide)
+        );
     }
 
     #[test]

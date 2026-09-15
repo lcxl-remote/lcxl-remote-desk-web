@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { GetModelUsageQueryResponse, GetModelUsageQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import { getModelUsage } from "../../clients.ts";
+import type { GetModelUsageQueryResponse, GetModelUsageQueryParams } from "../../types.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
+import { getModelUsage } from "../../clients.ts";
 
 export const getModelUsageQueryKey = (params?: GetModelUsageQueryParams) => [{ url: '/api/model/usage' }, ...(params ? [params] : [])] as const
 

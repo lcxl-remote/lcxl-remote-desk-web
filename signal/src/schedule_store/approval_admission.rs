@@ -47,6 +47,12 @@ pub(crate) async fn lock_fresh_approval_on(
         return Ok(None);
     };
     let initial = PersistedAgentSession::decode_json(&peek.state_json).map_err(|_| invalid())?;
+    if initial.trigger_origin == TriggerOrigin::ScheduledContinuation {
+        super::continuation_wait::lock_approval_on(txn, &initial, request_id)
+            .await
+            .map_err(storage)?;
+        return Ok(None);
+    }
     if initial.trigger_origin != TriggerOrigin::ScheduledTask {
         return Ok(None);
     }

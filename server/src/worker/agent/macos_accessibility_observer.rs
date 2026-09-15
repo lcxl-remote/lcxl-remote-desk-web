@@ -855,10 +855,12 @@ fn apply_action_inner(
             } else {
                 "AXConfirm"
             };
+            super::native_ui_identity::check_mutation()?;
             perform_action(element.0, name)?;
             Ok(AppliedUiAction::accepted(true))
         }
         UiSemanticAction::Select => {
+            super::native_ui_identity::check_mutation()?;
             set_bool_attribute(element.0, "AXSelected", true)?;
             Ok(AppliedUiAction::accepted(true))
         }
@@ -871,11 +873,13 @@ fn apply_action_inner(
                 )
             })?;
             if before != *desired {
+                super::native_ui_identity::check_mutation()?;
                 perform_action(element.0, "AXPress")?;
             }
             Ok(AppliedUiAction::accepted(before != *desired))
         }
         UiSemanticAction::Focus => {
+            super::native_ui_identity::check_mutation()?;
             set_bool_attribute(element.0, "AXFocused", true)?;
             Ok(AppliedUiAction::accepted(true))
         }
@@ -892,6 +896,7 @@ fn apply_action_inner(
                     "Cannot read the native AXValue type; inspect the current UI before choosing another action. No write was attempted.", false)
             })?;
             let value_ref = encode_native_value(current.0, value)?;
+            super::native_ui_identity::check_mutation()?;
             set_attribute(element.0, "AXValue", value_ref.0)?;
             Ok(AppliedUiAction::accepted(true))
         }

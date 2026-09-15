@@ -49,7 +49,7 @@ async fn exercise(
     next_permission: bool,
     dispatch: bool,
 ) {
-    exercise_with_restart(
+    Box::pin(exercise_with_restart(
         cancel_before_resume,
         fail_model,
         permission,
@@ -57,7 +57,7 @@ async fn exercise(
         dispatch,
         false,
         false,
-    )
+    ))
     .await;
 }
 
@@ -330,7 +330,13 @@ async fn exercise_with_restart(
             )
             .unwrap();
         let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            tokio::join!(executor.scan_once(0), executor.scan_once(0))
+            let scan_a = executor.clone();
+            let scan_b = executor.clone();
+            let (a, b) = tokio::join!(
+                actix_web::rt::spawn(async move { scan_a.scan_once(0).await }),
+                actix_web::rt::spawn(async move { scan_b.scan_once(0).await }),
+            );
+            (a.unwrap(), b.unwrap())
         })
         .await
         .unwrap();
@@ -948,12 +954,18 @@ async fn scheduled_executor_accounts_persisted_model_failure_once() {
 
 #[actix_web::test]
 async fn scheduled_executor_reopens_durable_schedule_and_conversation_after_restart() {
-    exercise_with_restart(false, false, false, false, true, true, false).await;
+    Box::pin(exercise_with_restart(
+        false, false, false, false, true, true, false,
+    ))
+    .await;
 }
 
 #[actix_web::test]
 async fn scheduled_executor_preserves_approved_timer_after_real_new_user_input() {
-    exercise_with_restart(false, false, false, false, true, false, true).await;
+    Box::pin(exercise_with_restart(
+        false, false, false, false, true, false, true,
+    ))
+    .await;
 }
 
 mod process_restart;

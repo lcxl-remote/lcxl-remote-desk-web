@@ -22,6 +22,20 @@ pub struct ObjectReadBinding<'a> {
     pub now_unix_ms: u64,
 }
 
+/// File-backed document reads share capabilities with Live reads, but must
+/// bind an owner-selected file instead of requiring an application selection.
+pub fn is_batch_document_read(name: &str) -> bool {
+    matches!(
+        name,
+        "inspect_selected_numbers_with_iwork"
+            | "inspect_selected_pages_with_iwork"
+            | "inspect_selected_keynote_with_iwork"
+            | "inspect_selected_powerpoint_file"
+            | "inspect_selected_word_file"
+            | "inspect_selected_excel_cell"
+    )
+}
+
 pub fn requires_objects(name: &str) -> bool {
     super::live_read::target_kind(name).is_some()
         || matches!(
@@ -34,6 +48,9 @@ pub fn requires_objects(name: &str) -> bool {
                 | "inspect_selected_numbers_with_iwork"
                 | "inspect_selected_pages_with_iwork"
                 | "inspect_selected_keynote_with_iwork"
+                | "inspect_selected_powerpoint_file"
+                | "inspect_selected_word_file"
+                | "inspect_selected_excel_cell"
         )
 }
 
@@ -101,6 +118,9 @@ impl ObjectReadBinding<'_> {
                 | "inspect_selected_numbers_with_iwork"
                 | "inspect_selected_pages_with_iwork"
                 | "inspect_selected_keynote_with_iwork"
+                | "inspect_selected_powerpoint_file"
+                | "inspect_selected_word_file"
+                | "inspect_selected_excel_cell"
         ) {
             selected.retain(|object| object.kind == ContextAttachmentKind::File);
             if selected.len() != 1 {
@@ -152,6 +172,13 @@ impl ObjectReadBinding<'_> {
             return Err(denied());
         };
         match (call.name.as_str(), kind) {
+            ("inspect_selected_excel_cell", ContextKind::SpreadsheetBatchInspect(params)) => {
+                if refs[0].object_kind != ObjectKind::File {
+                    return Err(denied());
+                }
+                params.file = Some(refs[0].clone());
+                params.max_bytes = params.max_bytes.min(bytes);
+            }
             ("inspect_selected_file_metadata", ContextKind::FileMetadataInspect(params)) => {
                 params.roots = refs;
                 params.max_bytes = params.max_bytes.min(bytes);
@@ -190,9 +217,12 @@ impl ObjectReadBinding<'_> {
                 "inspect_selected_numbers_with_iwork",
                 ContextKind::SpreadsheetLiveInspect(params),
             )
-            | ("inspect_selected_pages_with_iwork", ContextKind::DocumentLiveInspect(params))
             | (
-                "inspect_selected_keynote_with_iwork",
+                "inspect_selected_pages_with_iwork" | "inspect_selected_word_file",
+                ContextKind::DocumentLiveInspect(params),
+            )
+            | (
+                "inspect_selected_keynote_with_iwork" | "inspect_selected_powerpoint_file",
                 ContextKind::PresentationLiveInspect(params),
             ) => {
                 if refs[0].object_kind != ObjectKind::File {
@@ -262,6 +292,7 @@ impl ObjectReadBinding<'_> {
             return Err(denied());
         };
         let max_bytes = u64::from(match kind {
+            ContextKind::SpreadsheetBatchInspect(params) => params.max_bytes,
             ContextKind::FileMetadataInspect(params) => params.max_bytes,
             ContextKind::FileContentRead(params) => params.max_bytes,
             ContextKind::SpreadsheetFileInspect(params) => params.max_bytes,

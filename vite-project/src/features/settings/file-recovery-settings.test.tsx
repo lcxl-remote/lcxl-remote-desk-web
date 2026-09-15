@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { RestResponseError } from '@/lib/kubb-client';
 import { FileRecoverySettings } from './file-recovery-settings';
@@ -9,6 +9,48 @@ beforeEach(() => {
     vi.clearAllMocks();
     api.query.mockResolvedValue({ data: { policy: { retention_days: 7, max_bytes: 104857600 }, used_bytes: 0, reserved_bytes: 0, records: [], next_cursor: null } });
     api.save.mockResolvedValue({ data: { retention_days: 1, max_bytes: 104857600 } });
+});
+it('drops a late page after switching devices and starts with a fresh authority', async () => {
+    let resolveOld!: (value: unknown) => void;
+    api.remote.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+    const view = render(<FileRecoverySettings target={{ connection: 'old', device_id: 'old-device' }} />);
+    fireEvent.click(screen.getByText('pages.fileRecovery.manage'));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.fileRecovery.refresh' }));
+    view.rerender(<FileRecoverySettings target={{ connection: 'new', device_id: 'new-device' }} />);
+    await act(async () => resolveOld({ data: { authority: 'old-authority', os_user: 'old-user', outcome: {
+        kind: 'page', page: { policy: { retention_days: 7, max_bytes: 104857600 }, used_bytes: 0, reserved_bytes: 0,
+            records: [{ recovery_id: 'old-backup', file_name: 'old-private.txt' }], next_cursor: 'old-cursor' },
+    } } }));
+    expect(screen.queryByText('old-private.txt')).not.toBeInTheDocument();
+    api.remote.mockResolvedValueOnce({ data: { authority: 'new-authority', os_user: 'new-user', outcome: {
+        kind: 'page', page: { policy: { retention_days: 7, max_bytes: 104857600 }, used_bytes: 0, reserved_bytes: 0, records: [], next_cursor: null },
+    } } });
+    fireEvent.click(screen.getByText('pages.fileRecovery.manage'));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.fileRecovery.refresh' }));
+    await waitFor(() => expect(api.remote).toHaveBeenLastCalledWith({ connection: 'new', device_id: 'new-device',
+        request: { expected_authority: undefined, expected_os_user: undefined, command: { operation: 'query', after: undefined } } }));
+    await screen.findByLabelText('pages.fileRecovery.days');
+});
+
+it('does not download a late backup after the local recovery view is closed', async () => {
+    let finish!: (value: Blob) => void;
+    api.query.mockResolvedValueOnce({ data: { policy: { retention_days: 7, max_bytes: 104857600 }, used_bytes: 100, reserved_bytes: 0,
+        records: [{ recovery_id: 'backup', conversation_id: 'conversation', file_name: 'notes.txt',
+            created_at_unix_ms: 1000, expires_at_unix_ms: 2000, size_bytes: 100,
+            material_state: 'saved', change_state: 'succeeded', cleanup_pending: false,
+            cleanup_reason: null, export_available: true }], next_cursor: null } });
+    api.download.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    try {
+        const view = render(<FileRecoverySettings />);
+        fireEvent.click(screen.getByText('pages.fileRecovery.manage'));
+        fireEvent.click(screen.getByRole('button', { name: 'pages.fileRecovery.refresh' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.fileRecovery.export' }));
+        expect(api.download).toHaveBeenCalledTimes(1);
+        view.unmount();
+        await act(async () => finish(new Blob(['archive'], { type: 'application/zip' })));
+        expect(click).not.toHaveBeenCalled();
+    } finally { click.mockRestore(); }
 });
 it('only confirms the displayed device time after explicit approval and does not repeat it on refresh failure', async () => {
     api.query.mockResolvedValueOnce({ data: { policy: { retention_days: 7, max_bytes: 104857600 }, used_bytes: 0, reserved_bytes: 0, records: [], next_cursor: null,

@@ -67,7 +67,13 @@ pub fn expire(
     stored_reference: &str,
     now: &str,
 ) -> Option<()> {
-    close(session, stored_reference, now, false)
+    close(
+        session,
+        stored_reference,
+        now,
+        false,
+        crate::session::TriggerOrigin::ScheduledTask,
+    )
 }
 
 /// Cancellation withdraws the pending request but does not count as a failure.
@@ -76,7 +82,28 @@ pub fn cancel(
     stored_reference: &str,
     now: &str,
 ) -> Option<()> {
-    close(session, stored_reference, now, true)
+    close(
+        session,
+        stored_reference,
+        now,
+        true,
+        crate::session::TriggerOrigin::ScheduledTask,
+    )
+}
+
+/// Cancel an original conversation occurrence after the store fences its wait.
+pub fn cancel_continuation(
+    session: &mut PersistedAgentSession,
+    stored_reference: &str,
+    now: &str,
+) -> Option<()> {
+    close(
+        session,
+        stored_reference,
+        now,
+        true,
+        crate::session::TriggerOrigin::ScheduledContinuation,
+    )
 }
 
 fn close(
@@ -84,10 +111,11 @@ fn close(
     stored_reference: &str,
     now: &str,
     cancelled: bool,
+    origin: crate::session::TriggerOrigin,
 ) -> Option<()> {
-    use crate::session::{ExecutionState, TriggerOrigin, TurnState};
+    use crate::session::{ExecutionState, TurnState};
     let (_, id) = stored_reference.split_once(':')?;
-    if session.trigger_origin != TriggerOrigin::ScheduledTask
+    if session.trigger_origin != origin
         || session.turn_state != TurnState::Idle
         || session.execution_state != ExecutionState::None
         || session.terminal_error.is_some()

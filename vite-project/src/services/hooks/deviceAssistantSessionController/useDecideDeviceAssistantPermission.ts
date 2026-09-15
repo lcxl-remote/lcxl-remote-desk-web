@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { DecideDeviceAssistantPermissionMutationRequest, DecideDeviceAssistantPermissionMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { decideDeviceAssistantPermission } from "../../clients.ts";
+import type { DecideDeviceAssistantPermissionMutationRequest, DecideDeviceAssistantPermissionMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { decideDeviceAssistantPermission } from "../../clients.ts";
 
 export const decideDeviceAssistantPermissionMutationKey = () => [{ url: '/api/my/device-assistant-session/permission-decision' }] as const
 

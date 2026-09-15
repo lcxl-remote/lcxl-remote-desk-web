@@ -980,7 +980,10 @@ impl SignalCapabilityGrantStore {
         request: PrepareCapabilityCall<'_>,
     ) -> Result<CapabilityGrant, DbErr> {
         validate_prepare(&request)?;
-        let txn = self.db.begin().await?;
+        // The scheduled-session fence below writes even though this check
+        // ultimately rolls back. Reserve the WAL writer before reading the
+        // outbox, so concurrent scheduler writes cannot stale this snapshot.
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
             let existing = load_prepared(&txn, request.call_id)
                 .await?
@@ -1699,6 +1702,7 @@ fn validate_completion(completion: &CapabilityDispatchCompletion) -> Result<(), 
 mod tests {
     mod computer_binding;
     mod observed;
+    mod office_directory;
     mod scheduled_admission;
 
     use std::path::Path;

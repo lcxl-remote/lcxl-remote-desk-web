@@ -28,8 +28,16 @@ pub(crate) fn execute(
         }
         if let Err((error, may_have_effect)) = result {
             tracing::warn!(step_number=index+1,total_steps=steps.len(),error_kind=?error.kind,may_have_effect,"application batch stopped at step");
-            return (ComputerActionResultClass::Failed, json!({
+            let class = if may_have_effect {
+                ComputerActionResultClass::OutcomeUnknown
+            } else if index == 0 {
+                ComputerActionResultClass::DefinitelyNotStarted
+            } else {
+                ComputerActionResultClass::PartiallyApplied
+            };
+            return (class, json!({
                 "status":"stopped_on_error", "failed_step_number":index+1,
+                "completed_steps":index,
                 "effect":if may_have_effect {"may_have_effect"} else {"no_effect"},
                 "error":{"kind":error.kind,"code":error.error_code,"message":error.message},
                 "recovery":"Earlier steps completed native dispatch; later steps were not executed. Read the current UI/window screenshot before replanning unfinished work. Do not replay the whole batch. Other authorized writes remain available; no user acknowledgement is required."
@@ -128,10 +136,82 @@ mod tests {
             });
             let value: serde_json::Value = serde_json::from_str(&message).unwrap();
             assert_eq!(calls, 2);
-            assert_eq!(class, ComputerActionResultClass::Failed);
+            assert_eq!(
+                class,
+                if may_have_effect {
+                    ComputerActionResultClass::OutcomeUnknown
+                } else {
+                    ComputerActionResultClass::PartiallyApplied
+                }
+            );
+            assert_eq!(value["completed_steps"], 1);
             assert_eq!(value["failed_step_number"], 2);
             assert_eq!(value["error"]["message"], "window closed");
             assert!(value.get("steps").is_none());
+        }
+    }
+
+    #[test]
+    fn first_step_rejection_has_no_completed_dispatches() {
+        let (class, message) = execute(&steps(), |_| {
+            Err((
+                AgentError {
+                    kind: AgentErrorKind::Cancelled,
+                    message: "lease revoked".into(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                },
+                false,
+            ))
+        });
+        assert_eq!(class, ComputerActionResultClass::DefinitelyNotStarted);
+        let value: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(value["completed_steps"], 0);
+    }
+
+    #[test]
+    fn native_failures_are_accepted_by_the_shared_center_projection() {
+        let steps = steps();
+        for failed_step in 1..=steps.len() {
+            for may_have_effect in [false, true] {
+                let mut calls = 0;
+                let (class, message) = execute(&steps, |_| {
+                    calls += 1;
+                    if calls == failed_step {
+                        Err((
+                            AgentError {
+                                kind: AgentErrorKind::Cancelled,
+                                message: "native dispatch stopped".into(),
+                                retryable: false,
+                                safe_for_model: true,
+                                error_code: None,
+                            },
+                            may_have_effect,
+                        ))
+                    } else {
+                        Ok(None)
+                    }
+                });
+                let completed = ComputerActionCompleted {
+                    work_id: "work".into(),
+                    action_request_id: "action".into(),
+                    execution_generation: "generation".into(),
+                    result: class,
+                    facts: vec![],
+                    output: None,
+                    message: Some(message.clone()),
+                };
+                let (failed, receipt) = desk_diagnose_core::application_batch::completion_receipt(
+                    &completed,
+                    Some(steps.len()),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(failed);
+                assert_eq!(calls, failed_step);
+                assert_eq!(receipt, message);
+            }
         }
     }
 }

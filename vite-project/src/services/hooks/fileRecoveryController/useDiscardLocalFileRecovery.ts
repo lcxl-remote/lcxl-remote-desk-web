@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { DiscardLocalFileRecoveryMutationRequest, DiscardLocalFileRecoveryMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { discardLocalFileRecovery } from "../../clients.ts";
+import type { DiscardLocalFileRecoveryMutationRequest, DiscardLocalFileRecoveryMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { discardLocalFileRecovery } from "../../clients.ts";
 
 export const discardLocalFileRecoveryMutationKey = () => [{ url: '/api/desk/file-recovery/discard' }] as const
 

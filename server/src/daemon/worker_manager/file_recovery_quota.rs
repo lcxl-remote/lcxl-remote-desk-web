@@ -20,6 +20,9 @@ impl WorkerManager {
             let Some(worker) = worker.filter(|worker| worker.incarnation == incarnation) else {
                 return;
             };
+            #[cfg(windows)]
+            let os_user = windows_identity::worker_user(worker);
+            #[cfg(not(windows))]
             let os_user = match worker_key {
                 None => {
                     #[cfg(unix)]
@@ -71,6 +74,14 @@ impl WorkerManager {
             ));
         });
     }
+}
+#[cfg(windows)]
+#[path = "windows_quota_identity.rs"]
+mod windows_identity;
+
+#[cfg(windows)]
+pub(super) fn windows_worker_user(worker: &WorkerHandle) -> Option<String> {
+    windows_identity::worker_user(worker)
 }
 fn apply(
     root: &std::path::Path,

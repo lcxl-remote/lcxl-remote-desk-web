@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { QueryAiPolicySettingsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import { queryAiPolicySettings } from "../../clients.ts";
+import type { QueryAiPolicySettingsQueryResponse } from "../../types.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
+import { queryAiPolicySettings } from "../../clients.ts";
 
 export const queryAiPolicySettingsQueryKey = () => [{ url: '/api/desk/settings/ai-policy' }] as const
 

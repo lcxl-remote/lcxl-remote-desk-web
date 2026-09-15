@@ -282,6 +282,10 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
+        // Cancellation may commit after the loop persisted its permission
+        // pause but before this occurrence checkpoint. Preserve that exact
+        // pause so cancellation cleanup can close it without redispatch.
+        let cancelled = cancelled || (waiting && work.cancel_requested_at.is_some());
         let mut session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let failures: desk_diagnose_core::schedule::lifecycle::FailureState =
@@ -551,7 +555,11 @@ impl ScheduleStore {
                 .filter(run::Column::Id.eq(work.id))
                 .filter(run::Column::Status.eq("running"))
                 .filter(run::Column::LeaseEpoch.eq(lease.run_epoch))
-                .filter(run::Column::CancelRequestedAt.is_null())
+                .filter(if cancelled {
+                    run::Column::CancelRequestedAt.is_not_null()
+                } else {
+                    run::Column::CancelRequestedAt.is_null()
+                })
                 .exec(&txn)
                 .await?;
             if changed.rows_affected != 1 {

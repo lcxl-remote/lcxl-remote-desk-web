@@ -47,8 +47,8 @@ pub(super) fn start(data_root: PathBuf, quota: super::QuotaClient) -> Maintenanc
                         Err(error) => tracing::warn!(error_kind = ?error.kind(), "File recovery namespace quota cleanup unconfirmed; retaining retry record"),
                     }
                 }
-                #[cfg(unix)]
-                locked.maintain_epoch_indexes(&unsafe { libc::geteuid() }.to_string(), &mut quota.clone(), 64)?;
+                let os_user = crate::file_recovery_service::platform_user::current()?;
+                locked.maintain_epoch_indexes(&os_user, &mut quota.clone(), 64)?;
                 Ok(Some(unknown))
             })
             .await;

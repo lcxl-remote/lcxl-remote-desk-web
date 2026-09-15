@@ -584,6 +584,7 @@ impl OperationInput {
                 ContextKind::DesktopUiInspect(_) => Capability::DesktopUiInspect,
                 ContextKind::OfficeDocumentInspect(_) => Capability::OfficeDocumentInspect,
                 ContextKind::SpreadsheetLiveInspect(_) => Capability::SpreadsheetLiveInspect,
+                ContextKind::SpreadsheetBatchInspect(_) => Capability::SpreadsheetLiveInspect,
                 ContextKind::DocumentLiveInspect(_) => Capability::DocumentLiveInspect,
                 ContextKind::PresentationLiveInspect(_) => Capability::PresentationLiveInspect,
                 ContextKind::FileMetadataInspect(_) => Capability::FileMetadataRead,
@@ -653,6 +654,8 @@ pub enum ContextKind {
     SpreadsheetFileInspect(computer_use::SpreadsheetFileInspectParams),
     SpreadsheetMergePreview(computer_use::SpreadsheetMergePreviewParams),
     TerminalOutputInspect(computer_use::TerminalOutputInspectParams),
+    // Append only: preserve all previous wincode discriminants.
+    SpreadsheetBatchInspect(computer_use::SpreadsheetBatchInspectParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]

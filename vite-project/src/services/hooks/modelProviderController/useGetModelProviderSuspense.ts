@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { GetModelProviderQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import { getModelProvider } from "../../clients.ts";
+import type { GetModelProviderQueryResponse } from "../../types.ts";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
+import { getModelProvider } from "../../clients.ts";
 
 export const getModelProviderSuspenseQueryKey = () => [{ url: '/api/model/provider' }] as const
 

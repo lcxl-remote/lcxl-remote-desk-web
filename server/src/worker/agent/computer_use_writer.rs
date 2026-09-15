@@ -13,6 +13,13 @@ use std::sync::Mutex;
 use chrono::{DateTime, Utc};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
+#[path = "computer_use_writer_scope.rs"]
+mod scope;
+pub(crate) use scope::scope_for_action;
+#[path = "computer_use_writer_task.rs"]
+mod task;
+pub(crate) use task::spawn_writer_task;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InputPreemptionSource {
     Browser,

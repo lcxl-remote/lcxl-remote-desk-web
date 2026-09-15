@@ -479,6 +479,9 @@ desk_error_codes! {
     /// The supplied opaque session target was revoked by logout, reconnect, or
     /// daemon restart and must not be rebound by a raw OS session identifier.
     SESSION_TARGET_STALE = 105,
+    /// A scheduled run cannot reserve the model tokens required for its next
+    /// request within the owner-approved budget. No provider call was made.
+    SCHEDULE_MODEL_BUDGET_EXCEEDED = 106,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the

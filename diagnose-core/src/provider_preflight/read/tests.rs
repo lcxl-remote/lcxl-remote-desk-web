@@ -278,6 +278,8 @@ fn file_terminal_and_iwork_batch_authority_uses_only_original_attachment_refs() 
         "inspect_selected_numbers_with_iwork",
         "inspect_selected_pages_with_iwork",
         "inspect_selected_keynote_with_iwork",
+        "inspect_selected_powerpoint_file",
+        "inspect_selected_word_file",
     ] {
         let reference = ObjectRef {
             token: format!("original-{name}"),
@@ -339,6 +341,20 @@ fn file_terminal_and_iwork_batch_authority_uses_only_original_attachment_refs() 
             destination: &destination,
             now_unix_ms: 1000,
         };
+        if name == "inspect_selected_powerpoint_file" {
+            let (_, mut input) = crate::read_tools::build_read_operation(&call).unwrap();
+            binding.bind(&call, &mut input).unwrap();
+            let desk_agent_protocol::OperationInput::ReadContext(
+                desk_agent_protocol::ReadContextInput {
+                    kind: desk_agent_protocol::ContextKind::PresentationLiveInspect(params),
+                },
+            ) = input
+            else {
+                panic!("expected file-bound presentation read")
+            };
+            assert_eq!(params.batch_file.as_ref(), Some(&reference));
+            assert!(params.target.is_none());
+        }
         for surface in [
             ProductSurface::OssPersonalOwner,
             ProductSurface::ManagerPersonalOwner,

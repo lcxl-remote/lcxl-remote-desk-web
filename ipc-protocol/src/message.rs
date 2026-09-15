@@ -291,6 +291,8 @@ pub enum ServiceToWorker {
 
     /// Local host UI cancelled the matching in-flight Portal operation.
     CancelWaylandPortal(CancelWaylandPortalPayload),
+    /// Local authenticated OS-user request; never forwarded from signaling.
+    ManageLocalFileRecovery(crate::local_file_recovery::LocalFileRecoveryRequest),
 }
 
 impl ServiceToWorker {
@@ -571,6 +573,8 @@ pub enum WorkerToService {
     /// daemon can store it, so the worker forwards the answer along with the
     /// capability's stamp from when the prompt went out.
     RememberSecurityDecision(RememberSecurityDecisionPayload),
+    /// Reply to the local HTTP waiter, never to a remote signaling connection.
+    LocalFileRecoveryManaged(crate::local_file_recovery::LocalFileRecoveryReply),
 }
 
 impl WorkerToService {
@@ -633,7 +637,8 @@ impl WorkerToService {
             Self::ExecSpawnReport(payload) => payload.connection_id.as_deref(),
             Self::ExecHeartbeat(payload) => payload.connection_id.as_deref(),
             Self::ExecPtyOpened(_) | Self::ExecPtyOutput(_) | Self::ExecPtyClosed(_) => None,
-            Self::FileRecoveryQuotaRequested(_)
+            Self::LocalFileRecoveryManaged(_)
+            | Self::FileRecoveryQuotaRequested(_)
             | Self::Ready
             | Self::Capabilities(_)
             | Self::WaylandPortalStatus(_)

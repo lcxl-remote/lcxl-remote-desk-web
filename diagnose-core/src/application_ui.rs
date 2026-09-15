@@ -15,7 +15,7 @@ pub struct PermissionInput {
 }
 
 pub fn invalid() -> AgentError {
-    AgentError { kind: AgentErrorKind::InvalidInput, message: "Application scope requires an observed application and 1–5 unique actions. UI actions: invoke/select/focus/toggle/set_value. Background input: click/double_click/scroll/type_text/key_press. Do not mix tool action sets. No permission or action was created.".into(), retryable: false, safe_for_model: true, error_code: None }
+    AgentError { kind: AgentErrorKind::InvalidInput, message: "Application scope requires an observed application and unique actions. UI allows 1–6 actions: invoke/select/focus/toggle/set_value/scroll. Background input allows 1–5: click/double_click/scroll/type_text/key_press. Scroll authority belongs only to the approved tool. Do not mix tool action sets. No permission or action was created.".into(), retryable: false, safe_for_model: true, error_code: None }
 }
 
 pub fn validate(scope: &UiApplicationScope) -> Result<(), AgentError> {
@@ -24,7 +24,7 @@ pub fn validate(scope: &UiApplicationScope) -> Result<(), AgentError> {
         || app.token.is_empty()
         || app.snapshot_id.is_empty()
         || scope.actions.is_empty()
-        || scope.actions.len() > 5
+        || scope.actions.len() > 6
         || scope
             .actions
             .iter()
@@ -51,10 +51,13 @@ pub fn supports(tool: &str) -> bool {
 pub fn validate_for_tool(tool: &str, scope: &UiApplicationScope) -> Result<(), AgentError> {
     validate(scope)?;
     if !supports(tool)
-        || scope
-            .actions
-            .iter()
-            .any(|a| a.is_background() != (tool == "execute_background_inputs"))
+        || scope.actions.iter().any(|a| {
+            if tool == "execute_background_inputs" {
+                !a.is_background()
+            } else {
+                a.is_background() && *a != ApplicationActionKind::Scroll
+            }
+        })
     {
         return Err(invalid());
     }
@@ -69,14 +72,25 @@ pub fn resource(application: &ObjectRef) -> Vec<String> {
 }
 
 pub fn operation(action: &UiSemanticAction) -> String {
-    operation_kind(match action {
-        UiSemanticAction::Invoke => ApplicationActionKind::Invoke,
-        UiSemanticAction::Select => ApplicationActionKind::Select,
-        UiSemanticAction::Focus => ApplicationActionKind::Focus,
-        UiSemanticAction::Toggle { .. } => ApplicationActionKind::Toggle,
-        UiSemanticAction::SetValue { .. } => ApplicationActionKind::SetValue,
-        UiSemanticAction::Scroll { .. } => ApplicationActionKind::Scroll,
-    })
+    operation_for_tool(
+        "execute_ui_actions",
+        match action {
+            UiSemanticAction::Invoke => ApplicationActionKind::Invoke,
+            UiSemanticAction::Select => ApplicationActionKind::Select,
+            UiSemanticAction::Focus => ApplicationActionKind::Focus,
+            UiSemanticAction::Toggle { .. } => ApplicationActionKind::Toggle,
+            UiSemanticAction::SetValue { .. } => ApplicationActionKind::SetValue,
+            UiSemanticAction::Scroll { .. } => ApplicationActionKind::Scroll,
+        },
+    )
+}
+
+pub fn operation_for_tool(tool: &str, action: ApplicationActionKind) -> String {
+    if tool == "execute_ui_actions" && action == ApplicationActionKind::Scroll {
+        "ui:scroll".into()
+    } else {
+        operation_kind(action)
+    }
 }
 
 pub fn operation_kind(action: ApplicationActionKind) -> String {
@@ -176,7 +190,7 @@ mod tests {
         duplicated.actions.push(duplicated.actions[0]);
         assert!(validate(&duplicated).is_err());
         duplicated.actions = vec![ApplicationActionKind::Scroll];
-        assert!(validate_for_tool("execute_ui_actions", &duplicated).is_err());
+        assert!(validate_for_tool("execute_ui_actions", &duplicated).is_ok());
         assert!(validate_for_tool("execute_background_inputs", &duplicated).is_ok());
     }
 

@@ -10,6 +10,21 @@ const tool: DeviceAssistantToolActivity = {
 };
 
 describe('tool call transcript', () => {
+    it('shows an associated unknown file result while folded without calling it success or ordinary failure', () => {
+        const output = { work_id: 'work', action_request_id: tool.callId, execution_generation: 'generation',
+            result: 'outcome_unknown', facts: [{ index: 0, changed: true, verified: false }], output: null };
+        const { container, rerender } = render(<AssistantToolCall running={false} tool={{ ...tool,
+            name: 'create_text_artifact_in_selected_directory', status: 'failed', output: JSON.stringify(output) }} />);
+        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.outcomeUnknown' })).toBeTruthy();
+        expect(screen.getByText(/pages.deviceAssistant.toolCall.inspectBeforeRetry/)).toBeTruthy();
+        expect(container.querySelector('pre')).toBeNull();
+        expect(screen.queryByRole('img', { name: 'pages.deviceAssistant.toolCall.failure' })).toBeNull();
+        rerender(<AssistantToolCall running={false} tool={{ ...tool, status: 'failed',
+            output: JSON.stringify({ ...output, action_request_id: 'another-call' }) }} />);
+        expect(screen.queryByRole('img', { name: 'pages.deviceAssistant.toolCall.outcomeUnknown' })).toBeNull();
+        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.failure' })).toBeTruthy();
+    });
+
     it('shows accessible status icons while folded and updates from running to success or failure', () => {
         const { container, rerender } = render(<AssistantToolCall tool={tool} running />);
         expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.waiting' }).querySelector('.animate-spin')).toBeTruthy();
@@ -51,6 +66,35 @@ describe('tool call transcript', () => {
         const { container } = render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', argumentsJson: '{"steps":[{"action":{"kind":"invoke"}}]}', output: '{"status":"stopped_on_error","failed_step_number":2,"error":{"message":"window closed"}}' }} running={false} />);
         expect(screen.getByText(/pages.deviceAssistant.toolCall.batchFailed/)).toBeTruthy();
         expect(container.querySelector('pre')).toBeNull();
+    });
+
+    it.each([
+        [0, 'no_effect', 'batchNotStarted'],
+        [1, 'no_effect', 'batchPartiallyDispatched'],
+        [0, 'may_have_effect', 'batchOutcomeUnknown'],
+        [1, 'may_have_effect', 'batchOutcomeUnknown'],
+    ])('shows the native execution stage for %s completed dispatches with %s', (count, effect, key) => {
+        const output = JSON.stringify({ status: 'stopped_on_error', failed_step_number: Number(count) + 1, completed_steps: count, effect });
+        const { container, rerender } = render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', output }} running={false} />);
+        expect(screen.getByText(new RegExp(`pages.deviceAssistant.toolCall.${key}`))).toBeTruthy();
+        expect(container.querySelector('pre')).toBeNull();
+        rerender(<AssistantToolCall tool={{ ...tool, name: 'execute_background_inputs', status: 'failed', output: JSON.stringify({ message: output }) }} running={false} />);
+        expect(screen.getByText(new RegExp(`pages.deviceAssistant.toolCall.${key}`))).toBeTruthy();
+    });
+
+    it('does not infer non-execution from an inconsistent receipt', () => {
+        render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', output: JSON.stringify({ status: 'stopped_on_error', failed_step_number: 2, completed_steps: 0, effect: 'no_effect' }) }} running={false} />);
+        expect(screen.getByText(/pages.deviceAssistant.toolCall.batchFailed/)).toBeTruthy();
+        expect(screen.queryByText(/pages.deviceAssistant.toolCall.batchNotStarted/)).toBeNull();
+    });
+
+    it.each([
+        ['definitely_not_started', 'batchNotStarted'],
+        ['outcome_unknown', 'batchOutcomeUnknown'],
+    ])('uses the typed %s result for an executor error without a step receipt', (result, key) => {
+        render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', output: JSON.stringify({ result, message: 'native UI request stopped' }) }} running={false} />);
+        expect(screen.getByText(new RegExp(`pages.deviceAssistant.toolCall.${key}`))).toBeTruthy();
+        expect(screen.queryByText(/pages.deviceAssistant.toolCall.batchFailed/)).toBeNull();
     });
 
 });

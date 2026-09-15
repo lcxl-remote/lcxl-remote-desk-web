@@ -23,6 +23,7 @@ desk-wayland-portal = { workspace = true }
 desk-agent-protocol = { workspace = true }
 desk-diagnose-core = { workspace = true }
 desk-file-recovery = { workspace = true }
+desk-office-batch = { workspace = true }
 desk-mcp-server = { workspace = true }
 desk-virtual-display = { workspace = true }
 desk-virtual-display-driver-ops = { workspace = true }
@@ -134,7 +135,7 @@ rand = { workspace = true }
 console-subscriber = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true }
+windows = { workspace = true, features = ["Win32_System_Registry"] }
 windows-result = { workspace = true }
 windows-core = { workspace = true }
 windows-numerics = { workspace = true }

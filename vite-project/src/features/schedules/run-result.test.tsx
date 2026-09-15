@@ -7,6 +7,52 @@ const message = (id: string) => ({ id, text: id, role: 'assistant', turnId: 'run
 const response = (id: string, more = false, seq = 1) => ({ ok: true, json: async () => ({ code: deskErrorCodeEnum.SUCCESS, data: { sessionId: 'private-session', seq, messages: [message(id)], messagePage: { hasMore: more, nextBeforeMessageId: more ? id : null } } }) });
 afterEach(() => vi.unstubAllGlobals());
 describe('scheduled run conversation', () => {
+    it('shows unknown action outcome before expanding its raw receipt', async () => {
+        const text = JSON.stringify({ result: 'outcome_unknown', work_id: 'work',
+            action_request_id: 'call', execution_generation: 'generation', facts: [] });
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+            code: deskErrorCodeEnum.SUCCESS, data: { sessionId: 'private-session', seq: 1,
+                messages: [{ id: 'output', role: 'tool', text, turnId: 'run-turn' }],
+                messagePage: { hasMore: false } },
+        }) }));
+        render(<RunResult scheduleId="task" runId="run" connected onBack={() => {}} />);
+        expect(await screen.findByRole('button', { name: /Outcome unknown; check the output or current state before retrying/ })).toBeVisible();
+        expect(screen.queryByRole('button', { name: /File result from device.*Succeeded/ })).not.toBeInTheDocument();
+    });
+    it.each(['xlsx', 'docx', 'pptx'])('uses the shared file result card for a scheduled %s artifact', async extension => {
+        const fileName = `报告 副本.${extension}`;
+        const text = JSON.stringify({ result: 'verified', output: { kind: 'file_artifact',
+            value: { file_name: fileName, size_bytes: 123, digest_sha256: 'a'.repeat(64) } } });
+        const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+            code: deskErrorCodeEnum.SUCCESS, data: { sessionId: 'private-session', seq: 1,
+                messages: [{ id: 'output', role: 'tool', text, turnId: 'run-turn' }],
+                messagePage: { hasMore: false } },
+        }) });
+        vi.stubGlobal('fetch', fetch);
+        render(<RunResult scheduleId="task" runId="run" connected onBack={() => {}} />);
+        const card = await screen.findByRole('button', { name: /File result from device.*Create.*Succeeded/ });
+        fireEvent.click(card);
+        expect(screen.getByText(fileName)).toBeVisible();
+        expect(screen.getByText('123')).toBeVisible();
+        expect(screen.getByText('a'.repeat(64))).toBeVisible();
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+    it('localizes the persisted terminal error without replaying the run', async () => {
+        const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+            code: deskErrorCodeEnum.SUCCESS, data: { sessionId: 'private-session', seq: 1,
+                messages: [], messagePage: { hasMore: false },
+                terminalError: { error_code: deskErrorCodeEnum.SCHEDULE_MODEL_BUDGET_EXCEEDED,
+                    message: 'raw backend budget message' } },
+        }) });
+        vi.stubGlobal('fetch', fetch);
+        render(<RunResult scheduleId="task" runId="run" connected onBack={() => {}} />);
+        expect(await screen.findByRole('alert')).toHaveTextContent('The scheduled task has insufficient model-token budget remaining.');
+        expect(screen.getByRole('alert')).toHaveTextContent('Current conversation error:');
+        expect(screen.queryByText('No saved messages yet.')).not.toBeInTheDocument();
+        expect(screen.queryByText('raw backend budget message')).not.toBeInTheDocument();
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(fetch.mock.calls[0][1].method).toBeUndefined();
+    });
     it('reads by public occurrence ids and pages the same snapshot', async () => {
         const fetch = vi.fn().mockResolvedValueOnce(response('new', true)).mockResolvedValueOnce(response('old'));
         vi.stubGlobal('fetch', fetch);

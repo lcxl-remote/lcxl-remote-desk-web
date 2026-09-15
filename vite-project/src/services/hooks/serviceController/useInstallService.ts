@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { installService } from "../../clients.ts";
+import type { InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503 } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { installService } from "../../clients.ts";
 
 export const installServiceMutationKey = () => [{ url: '/api/service/install' }] as const
 

@@ -20,7 +20,7 @@ export type DeviceAssistantEvent = {
     kind: DeviceAssistantEventKind;
     status?: string | null;
     partial_summary?: string | null;
-    error?: { message?: string | null } | null;
+    error?: { message?: string | null; error_code?: number | null } | null;
     tool_name?: string | null;
     tool_arguments_json?: string | null;
     tool_call_id?: string | null;

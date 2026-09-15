@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { ListFileRecoveryCleanupQueryResponse, ListFileRecoveryCleanupQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import { listFileRecoveryCleanup } from "../../clients.ts";
+import type { ListFileRecoveryCleanupQueryResponse, ListFileRecoveryCleanupQueryParams } from "../../types.ts";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
+import { listFileRecoveryCleanup } from "../../clients.ts";
 
 export const listFileRecoveryCleanupSuspenseQueryKey = (params?: ListFileRecoveryCleanupQueryParams) => [{ url: '/api/my/device-file-recovery/cleanup-status' }, ...(params ? [params] : [])] as const
 

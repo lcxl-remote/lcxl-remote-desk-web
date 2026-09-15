@@ -12,15 +12,26 @@ fn file_ref(plan: &SealedComputerActionPlan, kind: ObjectKind) -> ObjectRef {
 }
 
 #[tokio::test]
-async fn file_and_iwork_projections_require_exact_artifact_type_leaf_and_verified_fact() {
+async fn file_and_office_projections_require_exact_artifact_type_leaf_and_verified_fact() {
     let dir = tempfile::tempdir().unwrap();
     let f = Fixture::new(file_db(&dir.path().join("artifacts.db")).await).await;
-    for family in ["text", "numbers", "pages", "keynote"] {
+    for family in [
+        "text",
+        "numbers",
+        "pages",
+        "keynote",
+        "powerpoint",
+        "word",
+        "excel",
+    ] {
         let mut plan = f.plan.clone();
         let name = match family {
             "text" => "copy.txt",
             "numbers" => "copy.numbers",
             "pages" => "copy.pages",
+            "powerpoint" => "copy.pptx",
+            "word" => "copy.docx",
+            "excel" => "copy.xlsx",
             _ => "copy.key",
         };
         let destination = BatchDocumentOutput {
@@ -36,8 +47,12 @@ async fn file_and_iwork_projections_require_exact_artifact_type_leaf_and_verifie
                     content_utf8: "hello".into(),
                 }),
             ),
-            "numbers" => (
-                ComputerUseAdapterKind::IworkNumbers,
+            "numbers" | "excel" => (
+                if family == "excel" {
+                    ComputerUseAdapterKind::OfficeExcel
+                } else {
+                    ComputerUseAdapterKind::IworkNumbers
+                },
                 ObjectKind::Range,
                 ComputerActionKind::SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction {
                     output: destination,
@@ -46,8 +61,12 @@ async fn file_and_iwork_projections_require_exact_artifact_type_leaf_and_verifie
                     },
                 }),
             ),
-            "pages" => (
-                ComputerUseAdapterKind::IworkPages,
+            "pages" | "word" => (
+                if family == "word" {
+                    ComputerUseAdapterKind::OfficeWord
+                } else {
+                    ComputerUseAdapterKind::IworkPages
+                },
                 ObjectKind::Document,
                 ComputerActionKind::DocumentLiveBatch(DocumentLiveBatchPatchAction {
                     output: destination,
@@ -55,7 +74,11 @@ async fn file_and_iwork_projections_require_exact_artifact_type_leaf_and_verifie
                 }),
             ),
             _ => (
-                ComputerUseAdapterKind::IworkKeynote,
+                if family == "powerpoint" {
+                    ComputerUseAdapterKind::OfficePowerPoint
+                } else {
+                    ComputerUseAdapterKind::IworkKeynote
+                },
                 ObjectKind::Slide,
                 ComputerActionKind::PresentationLiveBatch(PresentationLiveBatchPatchAction {
                     output: destination,
@@ -64,22 +87,40 @@ async fn file_and_iwork_projections_require_exact_artifact_type_leaf_and_verifie
             ),
         };
         plan.adapter.kind = kind;
+        if family == "powerpoint" {
+            plan.adapter.version = office_batch::PPTX_ADAPTER_VERSION.into();
+        }
+        if family == "word" {
+            plan.adapter.version = office_batch::DOCX_ADAPTER_VERSION.into();
+        }
+        if family == "excel" {
+            plan.adapter.version = office_batch::XLSX_ADAPTER_VERSION.into();
+        }
         plan.actions[0].target.object_kind = target;
         plan.actions[0].action = action;
         plan.validate().unwrap();
         let file = file_ref(&plan, ObjectKind::File);
-        let output = if family == "text" {
+        let output = if matches!(family, "text" | "powerpoint" | "word" | "excel") {
+            let media_type = if family == "powerpoint" {
+                desk_diagnose_core::provider_preflight::batch_document::PPTX_MEDIA_TYPE
+            } else if family == "word" {
+                office_batch::DOCX_MEDIA_TYPE
+            } else if family == "excel" {
+                office_batch::XLSX_MEDIA_TYPE
+            } else {
+                "text/plain"
+            };
             ComputerActionOutput::FileArtifact(CreatedFileArtifactOutput {
                 file: file.clone(),
                 file_name: name.into(),
-                media_type: "text/plain".into(),
+                media_type: media_type.into(),
                 size_bytes: 5,
                 digest_sha256: "a".repeat(64),
                 content: ContentRef::Artifact {
                     artifact_id: file.token,
                     sha256: "a".repeat(64),
                     size_bytes: 5,
-                    media_type: "text/plain".into(),
+                    media_type: media_type.into(),
                 },
             })
         } else {
@@ -108,12 +149,18 @@ async fn file_and_iwork_projections_require_exact_artifact_type_leaf_and_verifie
             "wrong_leaf",
             "wrong_type",
             "invalid_digest",
+            "wrong_request",
+            "wrong_generation",
+            "wrong_work",
         ] {
             let mut bad = native.clone();
             match fault {
                 "no_fact" => bad.facts.clear(),
                 "no_change" => bad.facts[0].changed = false,
                 "wrong_type" => bad.output = verified(&f.plan).output,
+                "wrong_request" => bad.action_request_id.push_str("-other"),
+                "wrong_generation" => bad.execution_generation.push_str("-other"),
+                "wrong_work" => bad.work_id.push_str("-other"),
                 _ => match bad.output.as_mut().unwrap() {
                     ComputerActionOutput::FileArtifact(a) => {
                         if fault == "wrong_leaf" {

@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { DeleteAssistantImageMutationResponse, DeleteAssistantImageQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { deleteAssistantImage } from "../../clients.ts";
+import type { DeleteAssistantImageMutationResponse, DeleteAssistantImageQueryParams } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { deleteAssistantImage } from "../../clients.ts";
 
 export const deleteAssistantImageMutationKey = () => [{ url: '/api/my/device-assistant-session/image/delete' }] as const
 

@@ -367,6 +367,7 @@ pub async fn resume_agent_turn(
     run_or_resume(deps, claim, None, sink).await
 }
 
+mod artifact_registry;
 mod fresh_task;
 pub use fresh_task::{resume_claimed_fresh_task_permission_turn, resume_claimed_fresh_task_turn};
 
@@ -3784,10 +3785,13 @@ fn requested_artifact_registry_projection(
 
     let mut seen_tokens = HashSet::new();
     let mut selected = Vec::new();
+    let mut selected_batch = Vec::new();
     let mut completed_text_file_operations = Vec::new();
     let mut source_envelopes = Vec::new();
     for message in conversation.iter().rev() {
-        if selected.len() + completed_text_file_operations.len() >= MAX_REQUESTED_ARTIFACTS {
+        if selected.len() + selected_batch.len() + completed_text_file_operations.len()
+            >= MAX_REQUESTED_ARTIFACTS
+        {
             break;
         }
         if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
@@ -3857,10 +3861,21 @@ fn requested_artifact_registry_projection(
             }
             continue;
         }
+        if let Some(ComputerActionOutput::BatchDocumentArtifact(artifact)) = &completion.output {
+            if artifact_registry::valid_batch_artifact(artifact, now_unix_ms)
+                && latest_user.text.contains(&artifact.file_name)
+                && seen_tokens.insert(artifact.file.token.clone())
+            {
+                selected_batch.push(artifact.clone());
+                source_envelopes.push(source.clone());
+            }
+            continue;
+        }
         let Some(ComputerActionOutput::FileArtifact(artifact)) = completion.output else {
             continue;
         };
         if artifact.validate().is_err()
+            || !artifact_registry::live_reference(&artifact.file, now_unix_ms)
             || !latest_user.text.contains(&artifact.file_name)
             || !seen_tokens.insert(artifact.file.token.clone())
         {
@@ -3869,15 +3884,18 @@ fn requested_artifact_registry_projection(
         selected.push(artifact);
         source_envelopes.push(source.clone());
     }
-    if selected.is_empty() && completed_text_file_operations.is_empty() {
+    if selected.is_empty() && selected_batch.is_empty() && completed_text_file_operations.is_empty()
+    {
         return Ok(None);
     }
     selected.reverse();
+    selected_batch.reverse();
 
     let payload = serde_json::to_string(&serde_json::json!({
         "schema_version": 1,
         "kind": "requested_artifact_registry",
         "artifacts": selected,
+        "batch_document_artifacts": selected_batch,
         "completed_text_file_operations": completed_text_file_operations,
     }))
     .map_err(|error| AgentError {

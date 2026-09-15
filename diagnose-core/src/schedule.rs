@@ -26,6 +26,7 @@ pub mod due;
 pub mod fresh_session;
 pub mod history;
 pub mod lifecycle;
+pub mod model_admission;
 pub mod model_usage;
 pub mod permission_wait;
 pub mod policy;

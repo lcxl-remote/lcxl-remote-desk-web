@@ -36,7 +36,8 @@ pub fn owner_selection(
     else {
         return Err(FileScopeError::InvalidProposal);
     };
-    let exact_path = *path == resolved.canonical_path;
+    let exact_path = *path == resolved.canonical_path
+        || super::windows_path::differs_only_by_verbatim_prefix(path, &resolved.canonical_path);
     let proposal = DirectoryProposal {
         request_id: update.client_request_id.clone(),
         requested_path: path.clone(),

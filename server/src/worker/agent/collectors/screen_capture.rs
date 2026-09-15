@@ -1,4 +1,4 @@
-//! Worker-side full-display and independent macOS window screenshots.
+//! Worker-side full-display and independent window screenshots.
 //!
 //! Display capture uses the owner-selected configured output. Window capture
 //! uses a broker-validated native target and never falls back to desktop pixels.
@@ -26,13 +26,8 @@ use desk_signal_facade::model::desk_settings::DeskSettings;
 /// hard error later.
 const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 
-/// Native window identity freshly resolved from an authorized AXWindow.
-/// Process ids and coordinates never enter the model/tool input.
-#[cfg(target_os = "macos")]
-pub(crate) use desk_capture_engine::image_capture::mac_screencapturekit::MacWindowCaptureTarget as WindowCaptureTarget;
-#[cfg(not(target_os = "macos"))]
-#[derive(Clone)]
-pub(crate) struct WindowCaptureTarget;
+mod window;
+pub(crate) use window::WindowCaptureTarget;
 
 /// Capture one fresh frame of the configured display or selected window as PNG.
 pub(crate) fn collect(
@@ -44,48 +39,19 @@ pub(crate) fn collect(
     // owner-selected display. Capture-engine consumes the configured target.
     let _ = &params.display;
 
-    #[cfg(target_os = "macos")]
-    let window_geometry = window_target.as_ref().map(|t| {
-        desk_agent_protocol::background_input::WindowInputGeometry {
-            width_pixels: t.width.ceil() as u32,
-            height_pixels: t.height.ceil() as u32,
-            width_millipoints: (t.width * 1000.0).round() as u64,
-            height_millipoints: (t.height * 1000.0).round() as u64,
-        }
-    });
-    #[cfg(not(target_os = "macos"))]
-    let window_geometry: Option<desk_agent_protocol::background_input::WindowInputGeometry> = None;
-    #[cfg(target_os = "macos")]
-    let frame = if let Some(target) = window_target {
-        desk_capture_engine::image_capture::mac_screencapturekit::capture_independent_window(
-            &target,
-        )
-        .map_err(capture_err)?
+    let (frame, window_geometry, (dpi_x, dpi_y)) = if let Some(target) = window_target {
+        let captured = window::capture(target)?;
+        (captured.frame, captured.geometry, captured.dpi)
     } else {
         let mut capture = create_image_capture(desk_settings).map_err(capture_err)?;
-        capture
+        let frame = capture
             .capture(CaptureRequest {
                 cursor_mode: CursorCaptureMode::RenderInFrame,
             })
             .map_err(capture_err)?
-            .image
+            .image;
+        (frame, None, capture_dpi())
     };
-    #[cfg(not(target_os = "macos"))]
-    let frame = {
-        if window_target.is_some() {
-            return Err(internal(
-                "independent window capture is available only on macOS",
-            ));
-        }
-        let mut capture = create_image_capture(desk_settings).map_err(capture_err)?;
-        capture
-            .capture(CaptureRequest {
-                cursor_mode: CursorCaptureMode::RenderInFrame,
-            })
-            .map_err(capture_err)?
-            .image
-    };
-    let (dpi_x, dpi_y) = capture_dpi();
     let (png, width, height) = encode_png_with_dimensions(frame.as_ref())?;
     enforce_size_limit(png.len(), MAX_IMAGE_BYTES)?;
     let window_geometry = window_geometry.map(|mut geometry| {

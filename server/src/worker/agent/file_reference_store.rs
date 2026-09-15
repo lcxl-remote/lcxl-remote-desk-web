@@ -33,9 +33,29 @@ const MAX_FILE_REFS: usize = 8_192;
 const MAX_SELECTED_ROOTS: usize = 32;
 const MAX_DIRECTORY_ENTRIES: usize = 256;
 const MAX_TEXT_READ_BYTES: u32 = 64 * 1024;
+#[cfg(target_os = "macos")]
+mod macos_publish;
+pub(crate) mod publication;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod text_mutation;
+#[cfg(windows)]
+#[path = "file_reference_store/windows_text_mutation.rs"]
+pub(crate) mod text_mutation;
+#[cfg(any(windows, target_os = "macos"))]
+#[path = "file_reference_store/text_recovery_context.rs"]
+mod text_recovery_context;
+
+#[cfg(windows)]
+pub mod windows_batch;
+#[cfg(windows)]
+mod windows_directory;
+#[cfg(windows)]
+mod windows_path_anchor;
+#[cfg(windows)]
+use windows_directory::enumerate_directory;
+#[cfg(windows)]
+pub mod windows_publish;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileIdentity {
@@ -220,7 +240,7 @@ pub fn resolve_directory(
     )
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn issue_durable_artifact(path: &Path) -> Result<ObjectRef, AgentError> {
     issue_with_lifetime(path, DURABLE_ARTIFACT_REF_TTL_SECS, true)
 }
@@ -637,131 +657,6 @@ fn invalid_file_filter() -> AgentError {
 }
 
 #[cfg(windows)]
-fn enumerate_directory(
-    stored: &StoredFile,
-    opened: &OpenedFile,
-    max_entries: usize,
-    filter: &ValidatedDirectoryFilter,
-) -> Result<(Vec<DirectoryEntryProjection>, bool), AgentError> {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::{ERROR_NO_MORE_FILES, HANDLE};
-    use windows::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
-        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx,
-    };
-
-    let mut rows = Vec::new();
-    let mut restart = true;
-    loop {
-        let mut buffer = vec![0u8; 64 * 1024];
-        let class = if restart {
-            FileIdBothDirectoryRestartInfo
-        } else {
-            FileIdBothDirectoryInfo
-        };
-        restart = false;
-        let result = unsafe {
-            GetFileInformationByHandleEx(
-                HANDLE(opened.handle.as_raw_handle()),
-                class,
-                buffer.as_mut_ptr().cast(),
-                buffer.len() as u32,
-            )
-        };
-        if let Err(cause) = result {
-            if cause.code() == windows::core::HRESULT::from_win32(ERROR_NO_MORE_FILES.0) {
-                return Ok((rows, false));
-            }
-            return Err(error(
-                AgentErrorKind::InvalidInput,
-                format!("enumerate selected directory handle: {cause}"),
-                false,
-            ));
-        }
-
-        let mut offset = 0usize;
-        loop {
-            let header_len = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
-            if offset + header_len > buffer.len() {
-                return Err(error(
-                    AgentErrorKind::InvalidInput,
-                    "directory enumeration returned a malformed record",
-                    false,
-                ));
-            }
-            let info = unsafe {
-                std::ptr::read_unaligned(
-                    buffer.as_ptr().add(offset).cast::<FILE_ID_BOTH_DIR_INFO>(),
-                )
-            };
-            let name_len = info.FileNameLength as usize;
-            let name_start = offset + header_len;
-            if !name_len.is_multiple_of(2) || name_start + name_len > buffer.len() {
-                return Err(error(
-                    AgentErrorKind::InvalidInput,
-                    "directory enumeration returned an invalid file name",
-                    false,
-                ));
-            }
-            let name_utf16 = buffer[name_start..name_start + name_len]
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                .collect::<Vec<_>>();
-            let display_name = String::from_utf16_lossy(&name_utf16);
-            let reparse = info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
-            if display_name != "." && display_name != ".." && !reparse {
-                let is_directory = info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
-                let byte_len = (!is_directory).then_some(info.EndOfFile.max(0) as u64);
-                let modified_at = windows_file_time_value(info.LastWriteTime);
-                let matches = if is_directory {
-                    !filter.is_active()
-                } else {
-                    filter.matches_file(&display_name, byte_len.unwrap_or(0), modified_at)
-                };
-                if !matches {
-                    if info.NextEntryOffset == 0 {
-                        break;
-                    }
-                    let next = info.NextEntryOffset as usize;
-                    if next < header_len || offset + next >= buffer.len() {
-                        return Err(error(
-                            AgentErrorKind::InvalidInput,
-                            "directory enumeration returned an invalid record offset",
-                            false,
-                        ));
-                    }
-                    offset += next;
-                    continue;
-                }
-                if rows.len() >= max_entries {
-                    return Ok((rows, true));
-                }
-                rows.push(DirectoryEntryProjection {
-                    object_ref: None,
-                    parent_snapshot_id: stored.snapshot_id.clone(),
-                    display_name: display_name.chars().take(512).collect(),
-                    is_directory,
-                    byte_len,
-                    modified_at: modified_at.map(|timestamp| timestamp.to_rfc3339()),
-                });
-            }
-            if info.NextEntryOffset == 0 {
-                break;
-            }
-            let next = info.NextEntryOffset as usize;
-            if next < header_len || offset + next >= buffer.len() {
-                return Err(error(
-                    AgentErrorKind::InvalidInput,
-                    "directory enumeration returned an invalid record offset",
-                    false,
-                ));
-            }
-            offset += next;
-        }
-    }
-}
-
-#[cfg(windows)]
 fn windows_file_time_value(value: i64) -> Option<DateTime<Utc>> {
     const WINDOWS_TO_UNIX_100NS: i64 = 116_444_736_000_000_000;
     let unix_100ns = value.checked_sub(WINDOWS_TO_UNIX_100NS)?;
@@ -921,6 +816,9 @@ pub fn read_text(params: &FileContentReadParams) -> Result<FileContentReadOutput
         ));
     }
     let stored = resolve(&params.file)?;
+    #[cfg(windows)]
+    let (mut opened, _ancestors) = windows_path_anchor::open_text(&stored.path)?;
+    #[cfg(not(windows))]
     let mut opened = open_verified_for_read(&stored.path)?;
     if opened.identity != stored.identity || !opened.metadata.is_file() {
         return Err(error(
@@ -1843,189 +1741,8 @@ pub fn read_verified_spreadsheet_inputs(
     ))
 }
 
-/// Create one new artifact relative to the retained selected-directory handle.
-/// The local allowlist is intentionally stricter than path containment for this
-/// first production slice: the selected directory must have the same filesystem
-/// identity as one exact host-configured root. No string path is used after the
-/// handles have been opened and compared.
 #[cfg(windows)]
-pub fn create_binary_artifact(
-    directory: &ObjectRef,
-    file_name: &str,
-    content_bytes: &[u8],
-) -> Result<CreatedTextArtifact, AgentError> {
-    use anyhow::{Context, anyhow, bail};
-    use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
-    use windows::Wdk::Storage::FileSystem::{
-        FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
-        FILE_SYNCHRONOUS_IO_NONALERT, FILE_WRITE_THROUGH, NTCREATEFILE_CREATE_DISPOSITION,
-        NtCreateFile,
-    };
-    use windows::Win32::Foundation::{
-        HANDLE, OBJ_CASE_INSENSITIVE, STATUS_SUCCESS, UNICODE_STRING,
-    };
-    use windows::Win32::Storage::FileSystem::{
-        DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FileIdInfo, GetFileInformationByHandleEx, SYNCHRONIZE,
-    };
-    use windows::Win32::System::IO::IO_STATUS_BLOCK;
-    use windows::core::PWSTR;
-
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    struct Identity {
-        volume_serial: u64,
-        file_id: [u8; 16],
-    }
-
-    fn identity(handle: &File) -> anyhow::Result<Identity> {
-        let mut information = FILE_ID_INFO::default();
-        unsafe {
-            GetFileInformationByHandleEx(
-                HANDLE(handle.as_raw_handle()),
-                FileIdInfo,
-                std::ptr::addr_of_mut!(information).cast(),
-                std::mem::size_of::<FILE_ID_INFO>() as u32,
-            )
-            .context("read handle file identity")?;
-        }
-        Ok(Identity {
-            volume_serial: information.VolumeSerialNumber,
-            file_id: information.FileId.Identifier,
-        })
-    }
-
-    fn validate_name(name: &str) -> anyhow::Result<()> {
-        if name.is_empty()
-            || name.len() > 200
-            || matches!(name, "." | "..")
-            || name.ends_with(['.', ' '])
-            || name
-                .chars()
-                .any(|character| character.is_control() || "\\/:*?\"<>|".contains(character))
-        {
-            bail!("artifact name is not one safe Windows leaf component");
-        }
-        Ok(())
-    }
-
-    fn relative_file(
-        root: &File,
-        name: &str,
-        disposition: NTCREATEFILE_CREATE_DISPOSITION,
-    ) -> anyhow::Result<File> {
-        let mut utf16 = name.encode_utf16().collect::<Vec<_>>();
-        let byte_len = utf16
-            .len()
-            .checked_mul(std::mem::size_of::<u16>())
-            .and_then(|length| u16::try_from(length).ok())
-            .ok_or_else(|| anyhow!("artifact name exceeds UNICODE_STRING bounds"))?;
-        let unicode_name = UNICODE_STRING {
-            Length: byte_len,
-            MaximumLength: byte_len,
-            Buffer: PWSTR(utf16.as_mut_ptr()),
-        };
-        let attributes = OBJECT_ATTRIBUTES {
-            Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
-            RootDirectory: HANDLE(root.as_raw_handle()),
-            ObjectName: &unicode_name,
-            Attributes: OBJ_CASE_INSENSITIVE,
-            SecurityDescriptor: std::ptr::null(),
-            SecurityQualityOfService: std::ptr::null(),
-        };
-        let mut handle = HANDLE::default();
-        let mut io_status = IO_STATUS_BLOCK::default();
-        let status = unsafe {
-            NtCreateFile(
-                &mut handle,
-                FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE,
-                &attributes,
-                &mut io_status,
-                None,
-                FILE_ATTRIBUTE_NORMAL,
-                FILE_SHARE_READ | FILE_SHARE_DELETE,
-                disposition,
-                FILE_NON_DIRECTORY_FILE
-                    | FILE_OPEN_REPARSE_POINT
-                    | FILE_SYNCHRONOUS_IO_NONALERT
-                    | FILE_WRITE_THROUGH,
-                None,
-                0,
-            )
-        };
-        if status != STATUS_SUCCESS {
-            bail!(
-                "create-new artifact failed closed with NTSTATUS {:#x}",
-                status.0 as u32
-            );
-        }
-        Ok(unsafe { File::from_raw_handle(handle.0) })
-    }
-
-    let stored = resolve(directory)?;
-    if stored.object_kind != ObjectKind::Directory {
-        return Err(error(
-            AgentErrorKind::InvalidInput,
-            "artifact creation requires one selected directory reference",
-            false,
-        ));
-    }
-    if content_bytes.len() > 4 * 1024 * 1024 {
-        return Err(error(
-            AgentErrorKind::OutputLimitExceeded,
-            "artifact content exceeds the 4 MiB binary artifact ceiling",
-            false,
-        ));
-    }
-    let selected = open_verified(&stored.path)?;
-    if selected.identity != stored.identity || !selected.metadata.is_dir() {
-        return Err(error(
-            AgentErrorKind::InvalidInput,
-            "selected directory changed after reference issuance",
-            false,
-        ));
-    }
-    let result = (|| -> anyhow::Result<CreatedTextArtifact> {
-        validate_name(file_name)?;
-        let parent_identity = identity(&selected.handle)?;
-        let mut created = relative_file(&selected.handle, file_name, FILE_CREATE)?;
-        created.write_all(content_bytes)?;
-        created.sync_all()?;
-        let created_identity = identity(&created)?;
-        drop(created);
-        #[cfg(test)]
-        run_artifact_after_close_hook();
-        if identity(&selected.handle)? != parent_identity {
-            bail!("target parent identity changed during artifact creation");
-        }
-        let mut verified = relative_file(&selected.handle, file_name, FILE_OPEN)?;
-        if identity(&verified)? != created_identity {
-            bail!("artifact identity changed before read-back verification");
-        }
-        let mut bytes = Vec::new();
-        verified.seek(SeekFrom::Start(0))?;
-        verified.read_to_end(&mut bytes)?;
-        if bytes != content_bytes {
-            bail!("artifact read-back differs from requested bytes");
-        }
-        drop(verified);
-        let file = issue_durable_artifact(&stored.path.join(file_name))
-            .map_err(|error| anyhow!(error.message))?;
-        Ok(CreatedTextArtifact {
-            file,
-            file_name: file_name.to_string(),
-            byte_len: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
-        })
-    })();
-    result.map_err(|cause| {
-        error(
-            AgentErrorKind::InvalidInput,
-            format!("create verified artifact: {cause}"),
-            false,
-        )
-    })
-}
+pub use windows_publish::create_binary_artifact;
 
 #[cfg(windows)]
 pub fn create_text_artifact(
@@ -2049,108 +1766,8 @@ pub fn create_binary_artifact(
     file_name: &str,
     content_bytes: &[u8],
 ) -> Result<CreatedTextArtifact, AgentError> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-
-    if directory.object_kind != ObjectKind::Directory {
-        return Err(error(
-            AgentErrorKind::InvalidInput,
-            "artifact creation requires one selected directory reference",
-            false,
-        ));
-    }
-    if content_bytes.len() > 4 * 1024 * 1024 {
-        return Err(error(
-            AgentErrorKind::OutputLimitExceeded,
-            "artifact content exceeds the 4 MiB binary artifact ceiling",
-            false,
-        ));
-    }
-    if file_name.is_empty()
-        || file_name.len() > 200
-        || matches!(file_name, "." | "..")
-        || file_name
-            .chars()
-            .any(|character| character.is_control() || character == '/')
-    {
-        return Err(error(
-            AgentErrorKind::InvalidInput,
-            "artifact name is not one safe macOS leaf component",
-            false,
-        ));
-    }
-    let leaf = CString::new(file_name).map_err(|_| {
-        error(
-            AgentErrorKind::InvalidInput,
-            "artifact name contains an invalid NUL byte",
-            false,
-        )
-    })?;
-    let stored = resolve(directory)?;
-    let selected = open_verified(&stored.path)?;
-    if selected.identity != stored.identity || !selected.metadata.is_dir() {
-        return Err(error(
-            AgentErrorKind::InvalidInput,
-            "selected directory changed after reference issuance",
-            false,
-        ));
-    }
-
-    let result = (|| -> std::io::Result<CreatedTextArtifact> {
-        let parent_identity = unix_file_identity(&selected.handle)?;
-        let raw = unsafe {
-            libc::openat(
-                selected.handle.as_raw_fd(),
-                leaf.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if raw < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut created = unsafe { File::from_raw_fd(raw) };
-        created.write_all(content_bytes)?;
-        created.sync_all()?;
-        let created_identity = unix_file_identity(&created)?;
-        drop(created);
-        #[cfg(test)]
-        run_artifact_after_close_hook();
-        if unix_file_identity(&selected.handle)? != parent_identity {
-            return Err(std::io::Error::other(
-                "target parent identity changed during artifact creation",
-            ));
-        }
-        let mut verified = open_relative_unix(&selected.handle, &leaf)?;
-        if unix_file_identity(&verified)? != created_identity {
-            return Err(std::io::Error::other(
-                "artifact identity changed before read-back verification",
-            ));
-        }
-        let mut bytes = Vec::new();
-        verified.read_to_end(&mut bytes)?;
-        if unix_file_identity(&verified)? != created_identity {
-            return Err(std::io::Error::other(
-                "artifact identity changed during read-back verification",
-            ));
-        }
-        if bytes != content_bytes {
-            return Err(std::io::Error::other(
-                "artifact read-back differs from requested bytes",
-            ));
-        }
-        let file = issue_durable_artifact(&stored.path.join(file_name))
-            .map_err(|error| std::io::Error::other(error.message))?;
-        Ok(CreatedTextArtifact {
-            file,
-            file_name: file_name.to_string(),
-            byte_len: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
-        })
-    })();
-    result.map_err(|cause| io_error("create verified artifact", cause))
+    macos_publish::publish(directory, file_name, content_bytes, &mut false)
 }
-
 #[cfg(target_os = "macos")]
 pub fn create_text_artifact(
     directory: &ObjectRef,
@@ -3040,6 +2657,47 @@ mod tests {
             );
         }
 
+        #[cfg(windows)]
+        {
+            let reference = output
+                .directory_entries
+                .iter()
+                .find(|entry| entry.display_name == "a.txt")
+                .unwrap()
+                .object_ref
+                .clone()
+                .expect("native regular child reference");
+            assert_eq!(
+                read_text(&FileContentReadParams {
+                    file: reference.clone(),
+                    max_bytes: 1024,
+                })
+                .unwrap()
+                .content_utf8,
+                "alpha"
+            );
+            assert!(
+                output
+                    .directory_entries
+                    .iter()
+                    .find(|entry| entry.display_name == "nested")
+                    .unwrap()
+                    .object_ref
+                    .is_none()
+            );
+            // Retain the original inode so the replacement cannot reuse its ID.
+            std::fs::rename(temp.path().join("a.txt"), temp.path().join("old.txt")).unwrap();
+            std::fs::write(temp.path().join("a.txt"), b"alpha").unwrap();
+            assert!(
+                read_text(&FileContentReadParams {
+                    file: reference,
+                    max_bytes: 1024,
+                })
+                .is_err()
+            );
+            std::fs::remove_file(temp.path().join("old.txt")).unwrap();
+        }
+
         let bounded = inspect(&FileMetadataInspectParams {
             roots: vec![issue(temp.path()).unwrap()],
             max_entries: 2,
@@ -3236,6 +2894,27 @@ mod tests {
             output.sha256,
             format!("{:x}", Sha256::digest("hello, 世界"))
         );
+
+        #[cfg(windows)]
+        {
+            let alias = temp.path().join("alias.txt");
+            std::fs::hard_link(&path, &alias).unwrap();
+            assert!(
+                read_text(&FileContentReadParams {
+                    file: selected.clone(),
+                    max_bytes: 64 * 1024,
+                })
+                .is_err()
+            );
+            std::fs::remove_file(alias).unwrap();
+            assert!(
+                read_text(&FileContentReadParams {
+                    file: selected.clone(),
+                    max_bytes: 64 * 1024,
+                })
+                .is_ok()
+            );
+        }
 
         let binary_path = temp.path().join("binary.bin");
         std::fs::write(&binary_path, [0xff, 0xfe, 0x00]).unwrap();

@@ -210,7 +210,7 @@ pub fn project_schema(tool: &mut ToolSpec) {
         if background {
             "Click/double_click: action contains exactly one element_id or position {x,y} in original window screenshot pixels, origin top-left (0,0), x < screenshot width and y < screenshot height; these are pixels, not percentages. type_text supports Unicode. key_press uses named keys/modifiers. Scroll requires position {x,y}; element_id is not accepted. Choose a point inside the intended content using a current screenshot, avoiding sidebars, toolbars and dividers. AXScrollArea is only a candidate, not proof of the target region. The last_scroll receipt reports the dispatched pixel position, not verified content movement. After scrolling, read UI or a screenshot and compare identifiable content before claiming success. If unchanged, reconsider the target and choose a clearer point before increasing distance or changing direction. If repeated attempts fail, report that accurately and consider semantic alternatives; do not replay the whole batch. Scroll uses horizontal_pixels/vertical_pixels distances (e.g. vertical_pixels=-300 for 300 pixels down; -6 is only 6 pixels). TextEdit background Command+A is known ineffective; choose a different approach. Mouse support is experimental."
         } else {
-            "set_value uses action {kind: set_value, params: {value: text}}; toggle uses params.desired. invoke/select/focus need only kind."
+            "set_value uses action {kind: set_value, params: {value: text}}; toggle uses params.desired. invoke/select/focus need only kind. Scroll requires an observed element exposing scroll and params {horizontal,vertical}: each axis is 0 for none, -1/+1 for a small increment, -2/+2 for a large increment. Positive moves right/down; negative left/up. At least one axis must be nonzero. These are discrete increments, never pixel distances. Inspect afterward; do not retry unchanged content automatically."
         }
     );
 }
@@ -244,7 +244,7 @@ pub fn completion_receipt(
         || number > MAX_STEPS
         || expected_steps.is_some_and(|n| if failed { number > n } else { number != n })
         || if failed {
-            completed.result != Class::Failed
+            !failure_class_matches(&value, completed.result, number)
                 || !value["error"]["message"].is_string()
                 || !matches!(
                     value["effect"].as_str(),
@@ -257,6 +257,28 @@ pub fn completion_receipt(
         return Err(invalid("receipt", "invalid native batch receipt"));
     }
     Ok(Some((failed, message.into())))
+}
+
+fn failure_class_matches(
+    value: &Value,
+    class: desk_agent_protocol::computer_use::ComputerActionResultClass,
+    failed_step: usize,
+) -> bool {
+    use desk_agent_protocol::computer_use::ComputerActionResultClass as Class;
+    let expected_count = failed_step.saturating_sub(1) as u64;
+    let count_matches = value["completed_steps"].as_u64() == Some(expected_count);
+    match class {
+        // Older workers report a generic failure without a completed count.
+        Class::Failed => value.get("completed_steps").is_none() || count_matches,
+        Class::DefinitelyNotStarted => {
+            count_matches && failed_step == 1 && value["effect"] == "no_effect"
+        }
+        Class::PartiallyApplied => {
+            count_matches && failed_step > 1 && value["effect"] == "no_effect"
+        }
+        Class::OutcomeUnknown => count_matches && value["effect"] == "may_have_effect",
+        _ => false,
+    }
 }
 
 pub fn compact_failed(value: &Value) -> Option<bool> {
@@ -284,6 +306,62 @@ pub fn compact_failed(value: &Value) -> Option<bool> {
 mod receipt_tests {
     use super::*;
     use desk_agent_protocol::computer_use::*;
+    #[test]
+    fn failure_receipts_require_consistent_stage_effect_and_completed_count() {
+        use ComputerActionResultClass as Class;
+        for failed_step in [1, 2, MAX_STEPS] {
+            for may_have_effect in [false, true] {
+                let expected = if may_have_effect {
+                    Class::OutcomeUnknown
+                } else if failed_step == 1 {
+                    Class::DefinitelyNotStarted
+                } else {
+                    Class::PartiallyApplied
+                };
+                let message = json!({
+                    "status":"stopped_on_error", "failed_step_number":failed_step,
+                    "completed_steps":failed_step-1,
+                    "effect":if may_have_effect {"may_have_effect"} else {"no_effect"},
+                    "error":{"message":"native dispatch stopped"}
+                });
+                for class in [
+                    Class::DefinitelyNotStarted,
+                    Class::PartiallyApplied,
+                    Class::OutcomeUnknown,
+                    Class::Verified,
+                    Class::ChangedButUnverified,
+                ] {
+                    let mut completed = ComputerActionCompleted {
+                        work_id: "1".into(),
+                        action_request_id: "action".into(),
+                        execution_generation: "generation".into(),
+                        result: class,
+                        facts: vec![],
+                        output: None,
+                        message: Some(message.to_string()),
+                    };
+                    let result = completion_receipt(&completed, Some(MAX_STEPS));
+                    assert_eq!(
+                        result.is_ok(),
+                        class == expected,
+                        "step={failed_step}, effect={may_have_effect}, class={class:?}"
+                    );
+                    if class == expected {
+                        let (failed, receipt) = result.unwrap().unwrap();
+                        assert!(failed);
+                        assert_eq!(receipt, message.to_string());
+                        for count in [Value::Null, json!(failed_step), json!(-1)] {
+                            let mut invalid = message.clone();
+                            invalid["completed_steps"] = count;
+                            completed.message = Some(invalid.to_string());
+                            assert!(completion_receipt(&completed, Some(MAX_STEPS)).is_err());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn compact_completion_checks_counts_class_and_has_no_step_list() {
         let mut completed = ComputerActionCompleted {

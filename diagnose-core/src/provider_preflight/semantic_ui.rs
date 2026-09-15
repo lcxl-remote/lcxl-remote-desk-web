@@ -48,6 +48,12 @@ pub fn ui_action_from_call(call: &ToolCall) -> Result<(ObjectRef, UiSemanticActi
         | UiSemanticAction::Focus
         | UiSemanticAction::Toggle { .. } => {}
         UiSemanticAction::SetValue { value } if value.len() <= 16 * 1024 => {}
+        UiSemanticAction::Scroll {
+            horizontal,
+            vertical,
+        } if (-2..=2).contains(horizontal)
+            && (-2..=2).contains(vertical)
+            && (*horizontal != 0 || *vertical != 0) => {}
         _ => return Err(unavailable()),
     }
     Ok((input.target, input.action))

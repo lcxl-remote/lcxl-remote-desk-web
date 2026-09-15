@@ -866,9 +866,9 @@ export function DeviceAssistantWorkspace({
                         onOpenChange={(open) => setPermissionHistorySession(open ? permissionHistoryKey : null)}>
                             {(request) => (
                                 <AssistantPermissionRequest key={`${permissionHistoryKey}:${request.requestId}:${request.inputRevision}`}
-                                    request={request} canDecide={featureProfile.permission_decision}
-                                    disabled={!assistantEnabled || !isConnected || chat.hydrating}
-                                    busy={chat.permissionUpdating} onDecide={chat.decidePermissionItems} />
+                                    request={request} canDecide={featureProfile.permission_decision && request.inputRevision === chat.inputRevision}
+                                    disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.turnRunning}
+                                    busy={chat.permissionUpdating} waitingForTurn={chat.turnRunning} onDecide={chat.decidePermissionItems} />
                             )}
                     </AssistantPermissionRecords>
                     {featureProfile.exec_pty && Object.entries(exec.entries).map(([row, entry]) => {

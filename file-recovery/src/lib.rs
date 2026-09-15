@@ -4,21 +4,40 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
-    path::{Path, PathBuf},
+    io::{self, Write},
+    path::Path,
 };
+#[cfg(test)]
+use std::{fs, path::PathBuf};
+
+#[cfg(windows)]
+#[path = "storage_windows.rs"]
+mod storage;
+#[cfg(not(windows))]
+#[path = "storage_path.rs"]
+mod storage;
+#[cfg(not(windows))]
+mod storage_legacy;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(windows)]
+pub mod windows;
 
 mod clock_guard;
 mod epoch_cleanup;
+mod ledger_format;
 pub use epoch_cleanup::{EpochCleanupState, EpochCoordinator};
 pub mod quota;
 
 mod transaction;
 pub use transaction::Transaction;
+#[cfg(windows)]
+pub use transaction::{WindowsCommitError, WindowsCommitRequest};
+mod transaction_identity;
+pub use transaction_identity::{InodeIdentity, TransactionIdentity, WindowsIdentity};
+#[cfg(test)]
+mod transaction_identity_tests;
 
 const MAX_TEXT_BYTES: usize = 65_536;
 const MAX_METADATA_BYTES: usize = 256 * 1024;
@@ -147,6 +166,8 @@ struct DeletedConversation {
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Ledger {
+    #[serde(default)]
+    format_version: ledger_format::Version,
     policy: Policy,
     records: BTreeMap<String, Record>,
     deleted_conversations: BTreeMap<String, DeletedConversation>,
@@ -170,12 +191,13 @@ pub struct BackupRequest<'a> {
 }
 
 pub struct Vault {
+    storage: storage::Root,
+    #[cfg(test)]
     root: PathBuf,
 }
 /// The OS lock fences other workers, exports and cleanup until this transaction drops.
 pub struct LockedVault {
-    root: PathBuf,
-    _lock: File,
+    storage: storage::Locked,
     ledger: Ledger,
 }
 
@@ -215,126 +237,33 @@ fn identity(value: &str) -> io::Result<()> {
     }
 }
 
-#[cfg(unix)]
-fn private_dir(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => (),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => (),
-        Err(e) => return Err(e),
-    }
-    let meta = fs::symlink_metadata(path)?;
-    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "recovery directory is not private or has an unexpected owner",
-        ));
-    }
-    #[cfg(target_os = "macos")]
-    macos::make_private(&File::open(path)?)?;
-    Ok(())
-}
-#[cfg(not(unix))]
-fn private_dir(_: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "private recovery storage is unavailable on this platform",
-    ))
-}
-
-fn open_private(path: &Path, create: bool) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(create);
-    if create {
-        options.create(true);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let file = options.open(path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Err(invalid("recovery item is not a regular file"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 || meta.nlink() != 1
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "recovery item ownership or permissions changed",
-            ));
-        }
-    }
-    #[cfg(target_os = "macos")]
-    macos::make_private(&file)?;
-    Ok(file)
-}
-fn bounded_read(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
-    let file = open_private(path, false)?;
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(invalid("recovery record exceeds storage bound"));
-    }
-    Ok(bytes)
-}
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temporary = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().unwrap_or_default().to_string_lossy()
-    ));
-    let result = (|| {
-        let mut file = open_private(&temporary, true)?;
-        file.set_len(0)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        File::open(
-            path.parent()
-                .ok_or_else(|| invalid("recovery path has no parent"))?,
-        )?
-        .sync_all()
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
-}
-
 impl Vault {
     /// `data_root` is resolved by the host for the verified worker OS user.
     pub fn open(data_root: &Path) -> io::Result<Self> {
-        let root = data_root.join("file-recovery");
-        private_dir(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            storage: storage::Root::open(data_root)?,
+            #[cfg(test)]
+            root: data_root.join("file-recovery"),
+        })
     }
     pub fn lock(&self) -> io::Result<LockedVault> {
-        private_dir(&self.root)?;
-        let lock = open_private(&self.root.join("lock"), true)?;
-        lock.lock()?;
-        self.load_locked(lock)
+        self.load_locked(self.storage.lock()?)
     }
     /// Maintenance never waits behind an active file mutation or download.
     pub fn try_lock(&self) -> io::Result<Option<LockedVault>> {
-        private_dir(&self.root)?;
-        let lock = open_private(&self.root.join("lock"), true)?;
-        match lock.try_lock() {
-            Ok(()) => self.load_locked(lock).map(Some),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => Err(error),
-        }
+        self.storage
+            .try_lock()?
+            .map(|lock| self.load_locked(lock))
+            .transpose()
     }
-    fn load_locked(&self, lock: File) -> io::Result<LockedVault> {
-        let ledger: Ledger = match bounded_read(&self.root.join("index.json"), MAX_LEDGER_BYTES) {
+    fn load_locked(&self, storage: storage::Locked) -> io::Result<LockedVault> {
+        let ledger: Ledger = match storage.read("index.json", MAX_LEDGER_BYTES) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|_| invalid("recovery index is corrupt; refusing to recreate it"))?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ledger::default(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                storage.validate_missing_index()?;
+                Ledger::default()
+            }
             Err(e) => return Err(e),
         };
         ledger.policy.validate()?;
@@ -379,11 +308,7 @@ impl Vault {
                 transaction.validate(id)?;
             }
         }
-        Ok(LockedVault {
-            root: self.root.clone(),
-            _lock: lock,
-            ledger,
-        })
+        Ok(LockedVault { storage, ledger })
     }
 }
 impl LockedVault {
@@ -392,7 +317,7 @@ impl LockedVault {
         if bytes.len() as u64 > MAX_LEDGER_BYTES {
             return Err(invalid("recovery index capacity exhausted"));
         }
-        atomic_write(&self.root.join("index.json"), &bytes)
+        self.storage.write_index(&bytes)
     }
     pub fn policy(&self) -> &Policy {
         &self.ledger.policy
@@ -417,12 +342,15 @@ impl LockedVault {
             .records
             .values()
             .filter(|r| r.material != MaterialState::Purged)
-            .fold(index_bytes, |total, record| {
-                let indexed_bytes = serde_json::to_vec(record)
-                    .map(|bytes| bytes.len() as u64)
-                    .unwrap_or(0);
-                total.saturating_add(record.bytes.saturating_sub(indexed_bytes))
-            })
+            .fold(
+                index_bytes.saturating_add(self.storage.extra_used_bytes().unwrap_or(u64::MAX)),
+                |total, record| {
+                    let indexed_bytes = serde_json::to_vec(record)
+                        .map(|bytes| bytes.len() as u64)
+                        .unwrap_or(0);
+                    total.saturating_add(record.bytes.saturating_sub(indexed_bytes))
+                },
+            )
     }
     pub fn pending_cleanup_count(&self) -> u64 {
         u64::from(self.cleanup_clock_paused())
@@ -711,8 +639,10 @@ impl LockedVault {
             // The durable local record exists before requesting shared quota,
             // including when the response is lost after the daemon reserves it.
             reserve(&self.ledger.records[&id])?;
-            atomic_write(&self.root.join(format!("{id}.body")), content)?;
-            atomic_write(&self.root.join(format!("{id}.metadata")), metadata)
+            self.storage
+                .write_material(&format!("{id}.body"), content)?;
+            self.storage
+                .write_material(&format!("{id}.metadata"), metadata)
         })();
         if let Err(error) = result {
             let record = self.ledger.records.get_mut(&id).unwrap();
@@ -986,11 +916,10 @@ impl LockedVault {
         }
         Ok((
             record.clone(),
-            bounded_read(&self.root.join(format!("{id}.body")), MAX_TEXT_BYTES as u64)?,
-            bounded_read(
-                &self.root.join(format!("{id}.metadata")),
-                MAX_METADATA_BYTES as u64,
-            )?,
+            self.storage
+                .read(&format!("{id}.body"), MAX_TEXT_BYTES as u64)?,
+            self.storage
+                .read(&format!("{id}.metadata"), MAX_METADATA_BYTES as u64)?,
         ))
     }
     /// Fixed archive names prevent original paths from controlling extraction.
@@ -1107,17 +1036,7 @@ impl LockedVault {
             // No caller can still be committing while this exclusive lock is held.
             self.ledger.records.get_mut(&id).unwrap().material = MaterialState::Purging;
             self.persist()?;
-            let result = (|| {
-                for suffix in ["body", "metadata", "body.tmp", "metadata.tmp"] {
-                    let path = self.root.join(format!("{id}.{suffix}"));
-                    match open_private(&path, false) {
-                        Ok(_file) => fs::remove_file(&path)?,
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => (),
-                        Err(e) => return Err(e),
-                    }
-                }
-                File::open(&self.root)?.sync_all()
-            })();
+            let result = self.storage.remove_record_material(&id);
             let record = self.ledger.records.get_mut(&id).unwrap();
             match result {
                 Ok(()) => {

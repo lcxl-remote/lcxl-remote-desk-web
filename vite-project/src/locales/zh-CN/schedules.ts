@@ -182,6 +182,7 @@ export default {
     "schedules.result.note": "展示原始会话并标记本次运行首轮。查看不会继续执行；提交权限决定后可能允许本次运行继续。",
     "schedules.result.unavailable": "会话不可用或已发生变化，请刷新以重新核对访问权限和状态。",
     "schedules.result.empty": "暂无保存的消息。",
+    "schedules.result.currentConversationError": "会话当前错误：",
     "schedules.result.older": "更早的消息",
     "schedules.result.thisRun": "本次运行首轮",
     "schedules.result.role.user": "用户",

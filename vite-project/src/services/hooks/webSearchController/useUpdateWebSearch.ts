@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
-import type { UpdateWebSearchMutationRequest, UpdateWebSearchMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { updateWebSearch } from "../../clients.ts";
+import type { UpdateWebSearchMutationRequest, UpdateWebSearchMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { updateWebSearch } from "../../clients.ts";
 
 export const updateWebSearchMutationKey = () => [{ url: '/api/admin/system/web-search' }] as const
 

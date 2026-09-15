@@ -16,6 +16,30 @@ const entry = (id: string, ready: boolean, reason: CapabilityInventoryEntry['rea
 });
 
 describe('complete device capability inventory', () => {
+    it('shows Word batch names, replacement limits and unavailable state without starting an action', () => {
+        const read = entry('office.docx.batch.inspect', true, null);
+        read.provider_id = 'office.docx.batch';
+        read.capability.display_name_key = 'assistant.capability.wordBatchInspect';
+        read.capability.tool_name = 'inspect_selected_word_file';
+        read.capability.effect = 'read_file';
+        const write = entry('office.docx.batch.patch', false, 'permission_missing');
+        write.provider_id = 'office.docx.batch';
+        write.capability.display_name_key = 'assistant.capability.wordBatchPatch';
+        write.capability.tool_name = 'replace_selected_word_copy_body';
+        write.capability.effect = 'mutate_application';
+        write.context_selectable = false;
+        const refresh = vi.fn();
+        render(<AssistantCapabilityList entries={[read, write]} loading={false} error={false} refreshDisabled={false} onRefresh={refresh} />);
+        expect(screen.getByText(zh['assistant.capability.wordBatchInspect'])).toBeTruthy();
+        expect(screen.getByText(zh['assistant.capability.wordBatchPatch'])).toBeTruthy();
+        expect(screen.getByText(zh['assistant.capabilityDescription.wordBatchPatch'])).toBeTruthy();
+        expect(screen.getByText('permission_missing')).toBeTruthy();
+        expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+        expect(refresh).not.toHaveBeenCalled();
+        fireEvent.change(screen.getByRole('textbox'), { target: { value: '图片' } });
+        expect(screen.getByText('office.docx.batch.patch')).toBeTruthy();
+        expect(screen.queryByText('office.docx.batch.inspect')).toBeNull();
+    });
     it('shows the original key alongside localized name and searchable description', () => {
         const command = entry('system.command.execute', true, null);
         command.capability.display_name_key = 'assistant.capability.systemCommandExecute';

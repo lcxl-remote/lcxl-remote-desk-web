@@ -102,7 +102,7 @@ enum ResumeMode {
 }
 
 async fn run_case(change: Option<&str>, mode: ResumeMode) {
-    run_case_with_live(change, mode, false).await;
+    Box::pin(run_case_with_live(change, mode, false)).await;
 }
 
 async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) {
@@ -276,7 +276,12 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                         } else {
                             ComputerUseAdapterKind::FileSystem
                         },
-                        version: "1".into(),
+                        version: if live {
+                            desk_diagnose_core::device_assistant::IWORK_ADAPTER_VERSION
+                        } else {
+                            "1"
+                        }
+                        .into(),
                     },
                     supported: true,
                     ready: true,
@@ -534,8 +539,13 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                     let _ = runner.await;
                     completed.unwrap();
                 } else {
-                    let (first, second) =
-                        tokio::join!(executor.scan_once(0), executor.scan_once(0));
+                    let scan_a = executor.clone();
+                    let scan_b = executor.clone();
+                    let (first, second) = tokio::join!(
+                        actix_web::rt::spawn(async move { scan_a.scan_once(0).await }),
+                        actix_web::rt::spawn(async move { scan_b.scan_once(0).await }),
+                    );
+                    let (first, second) = (first.unwrap(), second.unwrap());
                     let (first, second) = (first.unwrap(), second.unwrap());
                     assert_eq!(first.settled + second.settled, 1);
                     assert_eq!(first.needs_reconciliation + second.needs_reconciliation, 0);
@@ -617,15 +627,21 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                     .await
                     .unwrap();
             }
-            let outcome = resume_scheduled_turn(
-                connections.clone(),
-                db.clone(),
-                &gate,
-                prepared.target_connection_id,
-                prepared.claimed,
-                90,
-            )
+            let continuation_connections = connections.clone();
+            let continuation_db = db.clone();
+            let outcome = actix_web::rt::spawn(async move {
+                resume_scheduled_turn(
+                    continuation_connections,
+                    continuation_db,
+                    &gate,
+                    prepared.target_connection_id,
+                    prepared.claimed,
+                    90,
+                )
+                .await
+            })
             .await
+            .unwrap()
             .unwrap();
             let LoopOutcome::Answered(answer) = outcome else {
                 panic!("scheduled read must finish with an answer")
@@ -669,12 +685,20 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
             return;
         }
         if scanner {
-            let (first, second) = tokio::join!(executor.scan_once(0), executor.scan_once(0));
+            let scan_a = executor.clone();
+            let scan_b = executor.clone();
+            let (first, second) = tokio::join!(
+                actix_web::rt::spawn(async move { scan_a.scan_once(0).await }),
+                actix_web::rt::spawn(async move { scan_b.scan_once(0).await }),
+            );
+            let (first, second) = (first.unwrap(), second.unwrap());
             first.unwrap();
             second.unwrap();
             return;
         }
-        resume_after_permission_decision(
+        // Match the HTTP controller's task boundary: the fixture's large poll
+        // frame must not remain on the production continuation's call stack.
+        actix_web::rt::spawn(resume_after_permission_decision(
             connections.clone(),
             db.clone(),
             format!("permission-resume-{}", request.request_id),
@@ -694,8 +718,9 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                 conversation_id: None,
                 ..Default::default()
             },
-        )
-        .await;
+        ))
+        .await
+        .unwrap();
     };
 
     if matches!(change, Some("readiness" | "legacy")) {
@@ -970,7 +995,8 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                         snapshot_id: live_reference.snapshot_id.clone(),
                         adapter: ComputerUseAdapterRef {
                             kind: ComputerUseAdapterKind::IworkPages,
-                            version: "1".into(),
+                            version: desk_diagnose_core::device_assistant::IWORK_ADAPTER_VERSION
+                                .into(),
                         },
                         projection: LiveDocumentProjection::Document {
                             document: live_reference.clone(),
