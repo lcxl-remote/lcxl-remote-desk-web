@@ -1,6 +1,6 @@
 //! Owner-authorized deletion fences the model turn before removing its history.
 use super::*;
-use crate::entity::{agent_image_attachment, agent_schedule};
+use crate::entity::{agent_attachment, agent_schedule};
 use sea_orm::ExprTrait;
 
 impl SignalAgentSessionStore {
@@ -58,9 +58,8 @@ impl SignalAgentSessionStore {
             .exec(&txn)
             .await
             .map_err(save_backend)?;
-        agent_image_attachment::Entity::update_many()
-            .col_expr(agent_image_attachment::Column::Deleted, Expr::value(true))
-            .filter(agent_image_attachment::Column::ConversationId.eq(id))
+        agent_attachment::Entity::delete_many()
+            .filter(agent_attachment::Column::ConversationId.eq(id))
             .exec(&txn)
             .await
             .map_err(save_backend)?;

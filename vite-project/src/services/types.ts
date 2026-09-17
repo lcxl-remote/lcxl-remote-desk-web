@@ -227,6 +227,161 @@ export type ApprovalAckParams = {
 */
 export type AssistantImageBytes = Blob;
 
+/**
+ * @description Binary download only; failures use the standard JSON business-error body.
+*/
+export type AttachmentBytes = Blob;
+
+export type AttachmentDto = {
+    /**
+     * @type string
+    */
+    attachment_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    created_at_unix_ms: number;
+    /**
+     * @type string
+    */
+    kind: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    last_accessed_at_unix_ms: number;
+    /**
+     * @type string
+    */
+    media_type: string;
+    /**
+     * @type string
+    */
+    message_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    original_bytes: number;
+    /**
+     * @type string
+    */
+    part: string;
+    /**
+     * @type boolean
+    */
+    source_truncated: boolean;
+    /**
+     * @type string
+    */
+    status: string;
+    /**
+     * @type boolean
+    */
+    storage_truncated: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    stored_bytes: number;
+    /**
+     * @type string
+    */
+    tool_call_id: string;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    unavailable_at_unix_ms?: number | null;
+};
+
+export type AttachmentLineDto = {
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    byte_offset_in_line: number;
+    /**
+     * @type boolean
+    */
+    context: boolean;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    line: number;
+    /**
+     * @type boolean
+    */
+    line_complete: boolean;
+    /**
+     * @type array
+    */
+    matched_queries: number[];
+    /**
+     * @type string
+    */
+    text: string;
+};
+
+export type AttachmentListDto = {
+    /**
+     * @type array
+    */
+    attachments: AttachmentDto[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    capacity_bytes: number;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    used_bytes: number;
+};
+
+export type AttachmentPageDto = {
+    /**
+     * @type string
+    */
+    attachment_id: string;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    body_bytes: number;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @type boolean
+    */
+    has_more: boolean;
+    /**
+     * @type boolean
+    */
+    json_fragment: boolean;
+    /**
+     * @type array
+    */
+    lines: AttachmentLineDto[];
+    /**
+     * @type array
+    */
+    queries: string[];
+    /**
+     * @type boolean
+    */
+    storage_truncated: boolean;
+};
+
 export const audioDataFlowEnum = {
     Render: "Render",
     Capture: "Capture"
@@ -752,8 +907,8 @@ export type CollectionPolicySettings = {
     */
     allow_logs?: boolean;
     /**
-     * @description Whether a screenshot may be collected and sent to a model. Default\n`false`. A screenshot additionally requires the per-request\n`include_screen` flag.
-     * @default false
+     * @description Whether a screenshot may be collected and sent to a model. Default\n`true`. A screenshot additionally requires the per-request\n`include_screen` flag.
+     * @default true
      * @type boolean | undefined
     */
     allow_screen?: boolean;
@@ -1531,6 +1686,17 @@ export type CurrentUserDto = {
      * @type integer,null, int32
     */
     user_id?: number | null;
+};
+
+export type DeleteAttachments = {
+    /**
+     * @type array
+    */
+    attachment_ids: string[];
+    /**
+     * @type string
+    */
+    session: string;
 };
 
 export type DeleteDeviceAssistantSessionBody = {
@@ -4931,6 +5097,49 @@ export type ProviderTestParams = {
     wire_protocol: string;
 };
 
+export type ReadAttachment = {
+    /**
+     * @minLength 0
+     * @type integer | undefined
+    */
+    after_context?: number;
+    /**
+     * @type string
+    */
+    attachment_id: string;
+    /**
+     * @minLength 0
+     * @type integer | undefined
+    */
+    before_context?: number;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null
+    */
+    end_line?: number | null;
+    /**
+     * @type boolean | undefined
+    */
+    ignore_case?: boolean;
+    /**
+     * @type array,null
+    */
+    queries?: string[] | null;
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @minLength 0
+     * @type integer,null
+    */
+    start_line?: number | null;
+};
+
 export const recipientDisplayWarningEnum = {
     unicode_address: "unicode_address",
     mixed_ascii_and_non_ascii: "mixed_ascii_and_non_ascii",
@@ -5649,6 +5858,97 @@ export type RestResponseAiExecutionPolicyPublic = {
     success: boolean;
 };
 
+export type RestResponseAttachmentListDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        attachments: AttachmentDto[];
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        capacity_bytes: number;
+        /**
+         * @type string,null
+        */
+        cursor?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        used_bytes: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAttachmentPageDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        attachment_id: string;
+        /**
+         * @minLength 0
+         * @type integer
+        */
+        body_bytes: number;
+        /**
+         * @type string,null
+        */
+        cursor?: string | null;
+        /**
+         * @type boolean
+        */
+        has_more: boolean;
+        /**
+         * @type boolean
+        */
+        json_fragment: boolean;
+        /**
+         * @type array
+        */
+        lines: AttachmentLineDto[];
+        /**
+         * @type array
+        */
+        queries: string[];
+        /**
+         * @type boolean
+        */
+        storage_truncated: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseBackendInfo = {
     /**
      * @type integer, int32
@@ -5881,8 +6181,8 @@ export type RestResponseCollectionPolicySettings = {
         */
         allow_logs?: boolean;
         /**
-         * @description Whether a screenshot may be collected and sent to a model. Default\n`false`. A screenshot additionally requires the per-request\n`include_screen` flag.
-         * @default false
+         * @description Whether a screenshot may be collected and sent to a model. Default\n`true`. A screenshot additionally requires the per-request\n`include_screen` flag.
+         * @default true
          * @type boolean | undefined
         */
         allow_screen?: boolean;
@@ -12121,6 +12421,75 @@ export type GetDeviceAssistantSessionQueryResponse = GetDeviceAssistantSession20
 export type GetDeviceAssistantSessionQuery = {
     Response: GetDeviceAssistantSession200;
     QueryParams: GetDeviceAssistantSessionQueryParams;
+    Errors: any;
+};
+
+export type GetAssistantAttachmentQueryParams = {
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @type string
+    */
+    attachment: string;
+};
+
+/**
+ * @description Attachment bytes or a JSON business error
+*/
+export type GetAssistantAttachment200 = AttachmentBytes;
+
+export type GetAssistantAttachmentQueryResponse = GetAssistantAttachment200;
+
+export type GetAssistantAttachmentQuery = {
+    Response: GetAssistantAttachment200;
+    QueryParams: GetAssistantAttachmentQueryParams;
+    Errors: any;
+};
+
+export type ReadAssistantAttachment200 = RestResponseAttachmentPageDto;
+
+export type ReadAssistantAttachmentMutationRequest = ReadAttachment;
+
+export type ReadAssistantAttachmentMutationResponse = ReadAssistantAttachment200;
+
+export type ReadAssistantAttachmentMutation = {
+    Response: ReadAssistantAttachment200;
+    Request: ReadAssistantAttachmentMutationRequest;
+    Errors: any;
+};
+
+export type ListAssistantAttachmentsQueryParams = {
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @type string | undefined
+    */
+    before?: string;
+};
+
+export type ListAssistantAttachments200 = RestResponseAttachmentListDto;
+
+export type ListAssistantAttachmentsQueryResponse = ListAssistantAttachments200;
+
+export type ListAssistantAttachmentsQuery = {
+    Response: ListAssistantAttachments200;
+    QueryParams: ListAssistantAttachmentsQueryParams;
+    Errors: any;
+};
+
+export type DeleteAssistantAttachments200 = RestResponseBool;
+
+export type DeleteAssistantAttachmentsMutationRequest = DeleteAttachments;
+
+export type DeleteAssistantAttachmentsMutationResponse = DeleteAssistantAttachments200;
+
+export type DeleteAssistantAttachmentsMutation = {
+    Response: DeleteAssistantAttachments200;
+    Request: DeleteAssistantAttachmentsMutationRequest;
     Errors: any;
 };
 

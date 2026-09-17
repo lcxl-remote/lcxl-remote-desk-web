@@ -937,3 +937,10 @@ mod tests {
 
 mod images;
 pub use images::{delete_assistant_image, get_assistant_image, list_assistant_images};
+
+mod attachments;
+pub use attachments::{
+    delete_assistant_attachments, get_assistant_attachment, list_assistant_attachments,
+};
+
+pub use attachments::read_assistant_attachment;

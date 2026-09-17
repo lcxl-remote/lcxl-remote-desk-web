@@ -292,7 +292,7 @@ struct ProjectionMetricsModel {
 // window realistic; tests that need a deliberately tight checkpoint window use
 // CompressionScriptModel below.
 const TEST_MODEL_CONTEXT_BYTES: usize = crate::MIN_MODEL_CONTEXT_BYTES * 16;
-const PROJECTION_TEST_MODEL_CONTEXT_BYTES: usize = crate::MIN_MODEL_CONTEXT_BYTES * 8;
+const PROJECTION_TEST_MODEL_CONTEXT_BYTES: usize = crate::MIN_MODEL_CONTEXT_BYTES * 512;
 
 #[async_trait(?Send)]
 impl ModelSeam for ProjectionMetricsModel {
@@ -487,6 +487,7 @@ impl ToolSeam for BackgroundReadTools {
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
         self.reads.borrow_mut().push(call.name.clone());
         Ok(ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: format!("{}: ok", call.name),
             image_data_url: None,
         })
@@ -523,6 +524,7 @@ impl ToolSeam for BackgroundReadTools {
         crate::seam::ReadCompletion {
             outcome: Ok(crate::seam::ReadOutcome::Completed {
                 output: ToolRunOutput {
+                    format: crate::seam::ToolOutputFormat::Text,
                     content: crate::chat::background_task_running_result("read-task"),
                     image_data_url: None,
                 },
@@ -564,6 +566,7 @@ impl ToolSeam for RecordingTools {
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
         self.calls.borrow_mut().push(call.name.clone());
         Ok(ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: format!("{}: {}", call.name, self.reply),
             image_data_url: None,
         })
@@ -1260,15 +1263,25 @@ async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
             delete_with_run: true,
         },
     });
-    seeded.conversation.push(ChatMessage::assistant_tool_calls(
-        "browser-request-followup",
-        "",
-        vec![ToolCallRef {
-            id: "browser-call-followup".into(),
-            name: "browser_open_page".into(),
-            arguments_json: r#"{"target":{"url":"https://mail.google.com/mail/u/0/"}}"#.into(),
-        }],
-    ));
+    seeded
+        .conversation
+        .push(ChatMessage::assistant_tool_calls_with_replay(
+            "browser-request-followup",
+            "",
+            vec![ToolCallRef {
+                id: "browser-call-followup".into(),
+                name: "browser_open_page".into(),
+                arguments_json: r#"{"target":{"url":"https://mail.google.com/mail/u/0/"}}"#.into(),
+            }],
+            crate::replay::ReplayDisposition::NotRequired {
+                source_context_key: SourceContextKey::derive(
+                    WireProtocol::OpenAiChatCompletions,
+                    "test",
+                    "test",
+                    "test",
+                ),
+            },
+        ));
     seeded.conversation.push(ChatMessage::tool_result(
         "browser-dispatched-followup",
         "browser-call-followup",
@@ -3546,7 +3559,7 @@ async fn trims_history_to_budget() {
 }
 
 #[tokio::test]
-async fn projection_metrics_capture_long_session_growth_but_bounded_model_input() {
+async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded() {
     let mut observed = Vec::new();
     let providers = crate::device_assistant::device_assistant_provider_registry();
     let inventory = providers
@@ -3752,8 +3765,8 @@ async fn projection_metrics_capture_long_session_growth_but_bounded_model_input(
         long.advertised_tool_json_bytes
     );
     assert!(
-        long.message_json_bytes <= short.message_json_bytes.saturating_add(256),
-        "the provider-bound window must remain bounded: short={short:?} long={long:?}"
+        long.message_json_bytes > short.message_json_bytes,
+        "durable history must remain in model input: short={short:?} long={long:?}"
     );
     assert_eq!(short.capability_catalog_utf8_bytes, 0);
     assert_eq!(
@@ -3805,6 +3818,7 @@ impl ToolSeam for ScriptedTools {
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
         self.reads.borrow_mut().push(call.name.clone());
         Ok(ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: format!("{}: ok", call.name),
             image_data_url: None,
         })
@@ -3945,6 +3959,7 @@ async fn mutating_executes_then_answers() {
     let scripted = tools(vec![ExecOutcome::Executed {
         data_envelope: None,
         output: ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
         },
@@ -4007,6 +4022,7 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
     let scripted = tools(vec![ExecOutcome::Executed {
         data_envelope: None,
         output: ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "action completed".into(),
             image_data_url: None,
         },
@@ -4210,6 +4226,7 @@ async fn exact_permission_resume_retries_one_precommit_protocol_error() {
     let scripted = tools(vec![ExecOutcome::Executed {
         data_envelope: None,
         output: ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "action completed".into(),
             image_data_url: None,
         },
@@ -4287,6 +4304,7 @@ async fn exact_permission_resume_retries_one_answer_without_invoking_the_approve
     let scripted = tools(vec![ExecOutcome::Executed {
         data_envelope: None,
         output: ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "action completed".into(),
             image_data_url: None,
         },
@@ -5029,6 +5047,7 @@ async fn wait_for_task_completes_clears_executing_and_acks() {
         vec![],
         vec![WaitOutcome::Completed {
             output: ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: "exit_code=0".into(),
                 image_data_url: None,
             },
@@ -5195,6 +5214,7 @@ async fn executed_keys_the_result_message_on_the_delivery_id() {
     let scripted = tools(vec![ExecOutcome::Executed {
         data_envelope: None,
         output: ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
         },
@@ -5475,6 +5495,7 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
                 Ok(ExecOutcome::Executed {
                     data_envelope: None,
                     output: ToolRunOutput {
+                        format: crate::seam::ToolOutputFormat::Text,
                         content: "exit_code=0".into(),
                         image_data_url: None,
                     },
@@ -5720,6 +5741,7 @@ async fn streams_awaiting_approval_event() {
     let scripted = tools(vec![ExecOutcome::Executed {
         data_envelope: None,
         output: ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
         },
@@ -6462,6 +6484,7 @@ impl ToolSeam for ImageTools {
     ) -> Result<ToolRunOutput, desk_agent_protocol::AgentError> {
         self.calls.borrow_mut().push(call.id.clone());
         Ok(ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: self.raw_content.clone(),
             image_data_url: Some(self.image_data_url.clone()),
         })
@@ -6600,6 +6623,7 @@ async fn rejected_mutating_result_image_is_not_persisted_and_delivery_is_acked()
     let scripted = tools(vec![ExecOutcome::Executed {
         data_envelope: None,
         output: ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: RAW_TOOL_CONTENT.into(),
             image_data_url: Some(image_data_url.clone()),
         },
@@ -6703,6 +6727,7 @@ async fn unavailable_wait_result_image_fails_closed_clears_task_and_acks() {
         vec![],
         vec![WaitOutcome::Completed {
             output: ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: RAW_TOOL_CONTENT.into(),
                 image_data_url: Some(image_data_url.clone()),
             },
@@ -8020,6 +8045,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
         ExecOutcome::Executed {
             data_envelope: None,
             output: ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: "xlsx created".into(),
                 image_data_url: None,
             },
@@ -8028,6 +8054,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
         ExecOutcome::Executed {
             data_envelope: None,
             output: ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: "docx created".into(),
                 image_data_url: None,
             },
@@ -8036,6 +8063,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
         ExecOutcome::Executed {
             data_envelope: None,
             output: ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: "gmail handed off".into(),
                 image_data_url: None,
             },
@@ -8044,6 +8072,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
         ExecOutcome::Executed {
             data_envelope: None,
             output: ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: "slack handed off".into(),
                 image_data_url: None,
             },

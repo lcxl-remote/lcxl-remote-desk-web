@@ -9,10 +9,7 @@ use desk_agent_protocol::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const READ_IMAGE_TOOL: &str = "read_conversation_image";
-pub const MAX_SESSION_IMAGE_BYTES: i64 = 100 * 1024 * 1024;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageAttachment {
     pub frame: VisualEvidenceFrame,
     /// Exact source text and model authorization; image bytes live separately.
@@ -30,6 +27,54 @@ pub fn error(message: impl Into<String>) -> AgentError {
 }
 
 impl ImageAttachment {
+    /// Preserve the reviewed image/source binding in the shared quota store.
+    pub fn attachment_record(
+        &self,
+        session: &PersistedAgentSession,
+        pixels: &[u8],
+    ) -> Result<crate::conversation_attachment::batch::PreparedAttachment, AgentError> {
+        use crate::conversation_attachment::{
+            AttachmentMetadata, Availability, ContentKind, digest,
+        };
+        if self.frame.conversation_id != session.conversation_id
+            || self.frame.device_id != session.device_id
+        {
+            return Err(error("Screenshot belongs to another conversation"));
+        }
+        let hash = digest(pixels);
+        let metadata = AttachmentMetadata {
+            attachment_id: self.frame.evidence_id.clone(),
+            conversation_id: session.conversation_id.clone(),
+            actor_id: session.actor_id.clone(),
+            device_id: session.device_id.clone(),
+            message_id: self.message.message_id.clone(),
+            tool_call_id: self.frame.tool_call_id.clone(),
+            part: "image".into(),
+            kind: ContentKind::Image,
+            media_type: self
+                .frame
+                .media_type
+                .clone()
+                .ok_or_else(|| error("Screenshot media type is missing"))?,
+            original_bytes: pixels.len() as u64,
+            size_bytes: pixels.len() as u64,
+            original_sha256: hash.clone(),
+            sha256: hash,
+            source_truncated: false,
+            storage_truncated: false,
+            created_at_unix_ms: self.frame.captured_at_unix_ms,
+            last_accessed_at_unix_ms: self.frame.captured_at_unix_ms,
+            availability: Availability::Available,
+            image_source: Some(self.clone()),
+            source_envelope: None,
+        };
+        metadata.verify(pixels)?;
+        Ok(crate::conversation_attachment::batch::PreparedAttachment {
+            metadata,
+            content: pixels.to_vec(),
+        })
+    }
+
     pub fn prepare(
         session: &PersistedAgentSession,
         frame: &VisualEvidenceFrame,
@@ -139,7 +184,7 @@ pub fn authorize_read(
         .data_envelope
         .as_ref()
         .ok_or_else(|| error("Screenshot authorization is missing"))?;
-    if !envelope.allowed_destinations.contains(&policy.destination) {
+    if envelope.validate().is_err() || !policy.has_gateway_authority(envelope) {
         return Err(error(
             "Stored screenshot is not authorized for the current model. Ask the owner for fresh authorized evidence.",
         ));
@@ -241,7 +286,27 @@ mod tests {
         assert!(attachment.restore(&pixels).is_err());
     }
     #[test]
-    fn stored_images_require_the_original_model_destination() {
+    fn unified_record_preserves_image_authority_and_rejects_rebinding() {
+        let (session, image, pixels) = fixture();
+        let mut part = image.attachment_record(&session, &pixels).unwrap();
+        assert_eq!(part.metadata.size_bytes, pixels.len() as u64);
+        let encoded = serde_json::to_string(&part.metadata).unwrap();
+        assert!(!encoded.contains("data:image"));
+        let restored: crate::conversation_attachment::AttachmentMetadata =
+            serde_json::from_str(&encoded).unwrap();
+        restored.verify(&part.content).unwrap();
+        assert_eq!(
+            restored.image_source.unwrap().restore(&pixels).unwrap(),
+            image.restore(&pixels).unwrap()
+        );
+        part.metadata.message_id = "different-result".into();
+        assert!(part.metadata.verify(&part.content).is_err());
+        let mut other = session.clone();
+        other.conversation_id = "another-conversation".into();
+        assert!(image.attachment_record(&other, &pixels).is_err());
+    }
+    #[test]
+    fn stored_images_transfer_within_gateway_but_never_across_connections() {
         let (_, attachment, pixels) = fixture();
         let message = attachment.restore(&pixels).unwrap();
         let mut policy = ModelEgressPolicy {
@@ -252,6 +317,16 @@ mod tests {
             byte_cap: 1024 * 1024,
             permission_resume: false,
         };
+        authorize_read(&message, Some(&policy)).unwrap();
+        if let desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            model_id,
+            profile_revision,
+            ..
+        } = &mut policy.destination
+        {
+            *model_id = "other-vision-model".into();
+            *profile_revision += 1;
+        }
         authorize_read(&message, Some(&policy)).unwrap();
         policy
             .authorize_request(crate::seam::ModelRequest::text_only(

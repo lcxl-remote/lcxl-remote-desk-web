@@ -1,0 +1,1 @@
+{"type":"string","format":"binary","description":"Binary download only; failures use the standard JSON business-error body.","x-readme-ref-name":"AttachmentBytes"}

@@ -641,6 +641,13 @@ pub struct TerminalOutputProjection {
     pub display_summary: String,
     pub content: String,
     pub redaction_count: u32,
+    /// This is a bounded recent suffix, never a complete terminal transcript.
+    pub recent_tail: bool,
+    /// Older bytes were discarded by the terminal capture cache.
+    pub source_truncated: bool,
+    /// This read's byte allowance omitted some captured bytes.
+    pub read_truncated: bool,
+    /// Either source capture or this read was incomplete.
     pub truncated: bool,
 }
 

@@ -853,6 +853,7 @@ impl SignalAgentTools {
             } => Ok(ExecOutcome::Executed {
                 data_envelope: None,
                 output: ToolRunOutput {
+                    format: desk_diagnose_core::seam::ToolOutputFormat::outcome(&outcome),
                     content: outcome_content(&outcome),
                     image_data_url: None,
                 },
@@ -909,6 +910,7 @@ impl ToolSeam for SignalAgentTools {
         };
         match &entry.outcome {
             AgentOutcome::Ok(output) => Ok(ToolRunOutput {
+                format: desk_diagnose_core::seam::ToolOutputFormat::operation(output),
                 content: serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string()),
                 image_data_url: entry.image_data_url.clone(),
             }),
@@ -1123,6 +1125,7 @@ impl ToolSeam for SignalAgentTools {
             } => Ok(ExecOutcome::Executed {
                 data_envelope: None,
                 output: ToolRunOutput {
+                    format: desk_diagnose_core::seam::ToolOutputFormat::outcome(&outcome),
                     content: outcome_content(&outcome),
                     image_data_url: None,
                 },
@@ -1185,6 +1188,7 @@ impl ToolSeam for SignalAgentTools {
                 crate::agent_exec_store::STATUS_DONE => {
                     return Ok(WaitOutcome::Completed {
                         output: ToolRunOutput {
+                            format: crate::agent_exec_store::output_format(&task),
                             content: task
                                 .result_text
                                 .unwrap_or_else(|| "execution completed".to_string()),
@@ -1221,6 +1225,7 @@ impl ToolSeam for SignalAgentTools {
                 }
                 return Ok(WaitOutcome::Completed {
                     output: ToolRunOutput {
+                        format: crate::agent_exec_store::output_format(&settled),
                         content: settled
                             .result_text
                             .unwrap_or_else(|| "execution completed".to_string()),

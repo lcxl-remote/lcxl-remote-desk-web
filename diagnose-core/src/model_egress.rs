@@ -72,160 +72,63 @@ impl ModelEgressPolicy {
                 })?;
                 let authority = parent.data_envelope.as_ref()?;
                 (authority.validate().is_ok()
-                    && authority.allowed_destinations.contains(&self.destination)
+                    && self.has_gateway_authority(authority)
                     && source.validate().is_ok()
                     && (source.allowed_destinations.is_empty()
-                        || source.allowed_destinations.contains(&self.destination)))
+                        || self.has_gateway_authority(source)))
                 .then(|| message.message_id.clone())
             })
             .collect()
     }
 
     pub(crate) fn retained_history_ids(&self, messages: &[ChatMessage]) -> HashSet<String> {
-        self.retained_history_ids_with_exports(messages, &self.history_export_ids(messages))
-    }
-
-    fn retained_history_ids_with_exports(
-        &self,
-        messages: &[ChatMessage],
-        history_exports: &HashSet<String>,
-    ) -> HashSet<String> {
-        let mut request =
-            ModelRequest::text_only(messages.to_vec(), crate::prompt::ResponseFormatSpec::None);
-        // Current source selection controls new exports, not immutable receipts
-        // from a tool call already bound to this model. A missing selection is
-        // not an explicit revocation of the conversation's historical facts.
-        let tool_call_turns = request
-            .messages
+        // Only this ephemeral, rebuilt operation-reference catalog may expire.
+        // Persisted facts must either be authorized in full or block the request.
+        messages
             .iter()
-            .filter_map(|message| message.turn_id.as_ref().map(|turn_id| (message, turn_id)))
-            .flat_map(|(message, turn_id)| {
-                message
-                    .tool_calls
-                    .iter()
-                    .map(move |call| (call.id.clone(), turn_id.clone()))
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let current_turn_id = request
-            .messages
-            .iter()
-            .rev()
-            .find_map(|message| message.turn_id.clone());
-        let deselected_turns = request
-            .messages
-            .iter()
-            .filter(|message| is_provider_output(message))
-            .filter_map(|message| {
-                let envelope = message.data_envelope.as_ref()?;
-                // Server-owned run-control results (for example the advisory
-                // task-status projection) contain no newly read device data.
-                // They inherit an already-authorized model envelope and must not
-                // be mistaken for a deselected Provider source: doing so would
-                // prune the *current* follow-up turn after its first internal
-                // tool call and resurrect an older user request.
-                (envelope.provenance.source_provider_id
-                    != crate::dynamic_run::RUN_CONTROL_PROVIDER_ID
-                    && !envelope.allowed_destinations.contains(&self.destination)
-                    && !history_exports.contains(&message.message_id)
-                    && !self
-                        .selected_source_tools
-                        .contains(&envelope.provenance.source_tool_name))
-                .then_some(message.turn_id.as_ref().or_else(|| {
-                    message
-                        .tool_call_id
-                        .as_ref()
-                        .and_then(|call_id| tool_call_turns.get(call_id))
-                }))
-                .flatten()
-            })
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        // A model/profile switch is a new sink identity. Historical turns that
-        // were authorized only for the old sink must not be replayed to the new
-        // model, but they also must not strand a freshly authorized follow-up.
-        // Omit the complete historical turn so tool-call/result grouping stays
-        // valid. The current turn is deliberately excluded and still fails
-        // closed below if its envelope is not bound to this exact destination.
-        let destination_mismatched_historical_turns = request
-            .messages
-            .iter()
-            .filter_map(|message| {
-                let envelope = message.data_envelope.as_ref()?;
-                let turn_id = message.turn_id.as_ref().or_else(|| {
-                    message
-                        .tool_call_id
-                        .as_ref()
-                        .and_then(|call_id| tool_call_turns.get(call_id))
-                })?;
-                (current_turn_id.as_ref() != Some(turn_id)
-                    && !envelope
-                        .allowed_destinations
-                        .iter()
-                        .any(|destination| destination == &self.destination)
-                    // An original Provider receipt intentionally has no model
-                    // sink. An explicitly retained source selection still has
-                    // to pass ExportData below; it is not an old-model grant.
-                    && !(envelope.allowed_destinations.is_empty()
-                        && is_provider_output(message)
-                        && (self.selected_source_tools.contains(&envelope.provenance.source_tool_name)
-                            || history_exports.contains(&message.message_id))))
-                .then_some(turn_id.clone())
-            })
-            .collect::<BTreeSet<_>>();
-        // This optional live reference catalog is rebuilt for a continuation.
-        // It is not a tool receipt or persisted conversation history. Do not
-        // advertise an expired operation reference as currently reusable.
-        if self.permission_resume {
-            request.messages.retain(|message| {
-                message.role != ChatRole::System
-                    || message.data_envelope.as_ref().is_none_or(|envelope| {
+            .filter(|message| {
+                !(self.permission_resume
+                    && message.role == ChatRole::System
+                    && message.data_envelope.as_ref().is_some_and(|envelope| {
                         envelope.provenance.source_tool_name
-                            != "reusable_provider_result_projection"
-                            || !envelope_expires_by(
+                            == "reusable_provider_result_projection"
+                            && envelope_expires_by(
                                 envelope,
                                 self.now_unix_ms
                                     .saturating_add(MODEL_CALL_RETENTION_HEADROOM_MS),
                             )
-                    })
-            });
-        }
-        // Historical results remain facts after their action/reference deadline.
-        // Original call authority, new source selection and sink identity apply here;
-        // the context planner independently applies the capacity budget.
-        let mut omitted_turns = deselected_turns;
-        // Unlabeled legacy content has no transferable export authority. Drop
-        // complete historical turns, never relabel them for the current model.
-        // Current/unattributed dynamic content still fails closed below.
-        omitted_turns.extend(request.messages.iter().filter_map(|message| {
-            (message.role != ChatRole::System && message.data_envelope.is_none())
-                .then_some(message.turn_id.as_ref().or_else(|| {
-                    message
-                        .tool_call_id
-                        .as_ref()
-                        .and_then(|id| tool_call_turns.get(id))
-                }))
-                .flatten()
-                .filter(|turn_id| current_turn_id.as_ref() != Some(*turn_id))
-                .cloned()
-        }));
-        omitted_turns.extend(destination_mismatched_historical_turns);
-        if !omitted_turns.is_empty() {
-            request.messages.retain(|message| {
-                let turn_id = message.turn_id.as_ref().or_else(|| {
-                    message
-                        .tool_call_id
-                        .as_ref()
-                        .and_then(|call_id| tool_call_turns.get(call_id))
-                });
-                turn_id.is_none_or(|turn_id| !omitted_turns.contains(turn_id))
-            });
-        }
-
-        request
-            .messages
-            .into_iter()
-            .map(|message| message.message_id)
+                    }))
+            })
+            .map(|message| message.message_id.clone())
             .collect()
+    }
+
+    /// A model/profile change within the same authorized gateway does not move
+    /// data to another recipient. Connection revisions still fence endpoint,
+    /// credential and account changes; model capabilities are checked separately.
+    fn same_gateway(&self, destination: &DestinationIdentity) -> bool {
+        match (&self.destination, destination) {
+            (
+                DestinationIdentity::Model {
+                    connection_id: current,
+                    connection_revision: current_revision,
+                    ..
+                },
+                DestinationIdentity::Model {
+                    connection_id: previous,
+                    connection_revision: previous_revision,
+                    ..
+                },
+            ) => current == previous && current_revision == previous_revision,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn has_gateway_authority(&self, envelope: &DataEnvelope) -> bool {
+        envelope
+            .allowed_destinations
+            .iter()
+            .any(|destination| self.same_gateway(destination))
     }
 
     pub fn authorize_request(
@@ -260,7 +163,7 @@ impl ModelEgressPolicy {
                 "invalid export authorization id or byte cap".into(),
             ));
         }
-        let retained = self.retained_history_ids_with_exports(&request.messages, history_exports);
+        let retained = self.retained_history_ids(&request.messages);
         request
             .messages
             .retain(|message| retained.contains(&message.message_id));
@@ -286,7 +189,7 @@ impl ModelEgressPolicy {
                     || source.provenance.source_tool_name != "read_current_screen"
                     || !(self.selected_source_tools.contains("read_current_screen")
                         || history_exports.contains(&message.message_id)
-                        || source.allowed_destinations.contains(&self.destination))
+                        || self.has_gateway_authority(&source))
                     || source.sensitivity != Sensitivity::Sensitive)
             {
                 return Err(ModelEgressError::ImageNotSupported);
@@ -299,11 +202,12 @@ impl ModelEgressPolicy {
             {
                 source
             } else {
-                if !is_provider_output(message)
-                    || !(self
-                        .selected_source_tools
-                        .contains(&source.provenance.source_tool_name)
-                        || history_exports.contains(&message.message_id))
+                if !self.has_gateway_authority(&source)
+                    && !(is_provider_output(message)
+                        && (self
+                            .selected_source_tools
+                            .contains(&source.provenance.source_tool_name)
+                            || history_exports.contains(&message.message_id)))
                 {
                     return Err(ModelEgressError::ExportNotSelected {
                         message_id: message.message_id.clone(),
@@ -980,18 +884,16 @@ mod tests {
             *model_id = "different-old-model".into();
         }
         receipt.data_envelope.as_mut().unwrap().allowed_destinations = vec![old_destination];
-        assert_eq!(
-            policy(&["browser_open_page"])
-                .authorize_request(request(receipt))
-                .unwrap()
-                .request
-                .messages,
-            vec![current]
-        );
+        let preserved = policy(&["browser_open_page"])
+            .authorize_request(request(receipt))
+            .unwrap();
+        assert_eq!(preserved.request.messages.len(), 2);
+        assert_eq!(preserved.request.messages[0].text, "original result");
+        assert_eq!(preserved.request.messages[1], current);
     }
 
     #[test]
-    fn legacy_unlabeled_history_is_omitted_as_a_whole_turn_not_reauthorized() {
+    fn unlabeled_history_blocks_instead_of_silently_discarding_a_turn() {
         let mut old = message("old-user", ChatRole::User, "old private question", None);
         old.turn_id = Some("old-turn".into());
         let mut old_answer = message(
@@ -1012,8 +914,10 @@ mod tests {
             vec![old, old_answer, current.clone()],
             ResponseFormatSpec::None,
         );
-        let projected = policy(&[]).authorize_request(request).unwrap();
-        assert_eq!(projected.request.messages, vec![current]);
+        assert!(matches!(
+            policy(&[]).authorize_request(request),
+            Err(ModelEgressError::MissingEnvelope { .. })
+        ));
     }
 
     #[test]
@@ -1555,9 +1459,9 @@ mod tests {
     }
 
     #[test]
-    fn old_model_turn_is_omitted_but_current_sink_mismatch_still_fails_closed() {
+    fn same_gateway_model_change_preserves_history_but_connection_change_is_denied() {
         let destination = destination();
-        let old_destination = DestinationIdentity::Model {
+        let mut old_destination = DestinationIdentity::Model {
             connection_id: "oss-ai-gateway:1".into(),
             connection_revision: 7,
             model_id: "old-model".into(),
@@ -1603,8 +1507,18 @@ mod tests {
             .iter()
             .map(|message| message.message_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(message_ids, vec!["system", "current-user"]);
+        assert_eq!(
+            message_ids,
+            vec!["system", "old-permission-resume", "current-user"]
+        );
 
+        if let DestinationIdentity::Model {
+            connection_revision,
+            ..
+        } = &mut old_destination
+        {
+            *connection_revision += 1;
+        }
         let current_mismatch = ModelRequest::text_only(
             vec![
                 message(
@@ -1850,9 +1764,32 @@ mod tests {
             *profile_revision += 1;
         }
         assert!(
-            !other_sink
+            other_sink
                 .retained_history_ids(&visible_history)
                 .contains("prior-tool")
+        );
+        let replay = other_sink
+            .authorize_request(ModelRequest::text_only(
+                visible_history.clone(),
+                ResponseFormatSpec::None,
+            ))
+            .unwrap();
+        assert_eq!(replay.request.messages.len(), visible_history.len());
+        assert_eq!(replay.request.messages[1].text, "sensitive old UI");
+        if let DestinationIdentity::Model {
+            connection_revision,
+            ..
+        } = &mut other_sink.destination
+        {
+            *connection_revision += 1;
+        }
+        assert!(
+            other_sink
+                .authorize_request(ModelRequest::text_only(
+                    visible_history,
+                    ResponseFormatSpec::None,
+                ))
+                .is_err()
         );
     }
 

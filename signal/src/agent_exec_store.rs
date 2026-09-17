@@ -21,6 +21,20 @@ pub const STATUS_UNKNOWN: &str = "unknown";
 pub const DELIVERY_PENDING: &str = "pending";
 pub const DELIVERY_CONSUMED: &str = "consumed";
 
+pub(crate) fn output_format(
+    task: &agent_exec_task::Model,
+) -> desk_diagnose_core::seam::ToolOutputFormat {
+    use desk_diagnose_core::seam::ToolOutputFormat;
+    match task
+        .disposition_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<EdgeExecDisposition>(json).ok())
+    {
+        Some(EdgeExecDisposition::Executed { outcome }) => ToolOutputFormat::outcome(&outcome),
+        _ => ToolOutputFormat::Text,
+    }
+}
+
 fn internal(message: impl Into<String>) -> AgentError {
     AgentError {
         kind: AgentErrorKind::Internal,
@@ -135,6 +149,7 @@ impl SignalAgentExecStore {
                 return Err(internal("command result does not match original dispatch"));
             }
             let output = desk_diagnose_core::seam::ToolRunOutput {
+                format: output_format(&task),
                 content: task
                     .result_text
                     .clone()
@@ -395,6 +410,7 @@ impl SignalAgentExecStore {
                         &task.exec_request_id,
                         task.result_text.as_deref().unwrap_or("execution completed"),
                         envelope,
+                        output_format(&task),
                         &now,
                     )
                     .await?

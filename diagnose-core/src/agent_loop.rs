@@ -107,6 +107,7 @@ fn model_context_error(error: crate::model_context::ModelContextError) -> AgentE
     let oversized = matches!(
         error,
         crate::model_context::ModelContextError::ContextItemTooLarge { .. }
+            | crate::model_context::ModelContextError::ProtectedStateTooLarge { .. }
     );
     AgentError {
         kind: if oversized {
@@ -539,7 +540,19 @@ async fn run_or_resume(
 }
 
 /// Shared execution/settlement path for ordinary and preclaimed turns.
-async fn drive_claimed(
+// Keep the turn state machine off callers' async stacks (including Windows
+// test threads and nested permission/resume drivers).
+fn drive_claimed<'a, 'd: 'a>(
+    deps: &'a LoopDeps<'d>,
+    session: PersistedAgentSession,
+    turn_id: String,
+    to_append: Option<ChatMessage>,
+    sink: &'a mut dyn TurnSink,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LoopOutcome, AgentError>> + 'a>> {
+    Box::pin(drive_claimed_inner(deps, session, turn_id, to_append, sink))
+}
+
+async fn drive_claimed_inner(
     deps: &LoopDeps<'_>,
     mut session: PersistedAgentSession,
     turn_id: String,
@@ -647,6 +660,9 @@ async fn drive_claimed(
         // CircuitBreak also return to Idle so a follow-up can be claimed.
         _ => TurnState::Idle,
     };
+    if matches!(&result, Ok(LoopOutcome::Answered(_))) {
+        crate::conversation_attachment::model_read::release_consumed(&mut session.conversation)?;
+    }
     session.finish_turn(terminal, (deps.clock)());
     session.terminal_permission_request_id = match &result {
         Ok(LoopOutcome::PermissionRequested { request_id }) => Some(request_id.clone()),
@@ -791,14 +807,22 @@ fn append_reviewed_tool_result<'a, 'd: 'a>(
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<ToolOutputSafetyFailure>, AgentError>> + 'a>,
 > {
-    Box::pin(append_reviewed_tool_result_inner(
-        deps,
-        session,
-        message_id,
-        call_id,
-        output,
-        data_envelope,
-    ))
+    Box::pin(async move {
+        let before = session.clone();
+        let result = append_reviewed_tool_result_inner(
+            deps,
+            session,
+            message_id,
+            call_id,
+            output,
+            data_envelope,
+        )
+        .await;
+        if result.is_err() {
+            *session = before;
+        }
+        result
+    })
 }
 
 async fn append_reviewed_tool_result_inner(
@@ -810,6 +834,7 @@ async fn append_reviewed_tool_result_inner(
     data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
 ) -> Result<Option<ToolOutputSafetyFailure>, AgentError> {
     let crate::seam::ToolRunOutput {
+        format,
         content,
         image_data_url,
     } = output;
@@ -818,6 +843,24 @@ async fn append_reviewed_tool_result_inner(
         // session image already satisfies the one-image invariant.
         let mut message = ChatMessage::tool_result(message_id, call_id, content);
         message.data_envelope = data_envelope;
+        if session.surface == AgentSessionSurface::DeviceAssistant {
+            message = match crate::conversation_attachment::delivery::externalize(
+                deps.session_seam,
+                session,
+                message.clone(),
+                format,
+                deps.model.model_egress_policy()?.as_ref(),
+                current_unix_ms(deps.clock),
+            )
+            .await
+            {
+                Ok(projected) => projected,
+                Err(error) if error.kind == AgentErrorKind::OutputLimitExceeded => {
+                    crate::conversation_attachment::delivery::failed_delivery(message, &error)?
+                }
+                Err(error) => return Err(error),
+            };
+        }
         session.conversation.push(message);
         return Ok(None);
     };
@@ -857,16 +900,62 @@ async fn append_reviewed_tool_result_inner(
                     safe_for_model: false,
                     error_code: None,
                 })?;
-                let (attachment, pixels) = crate::conversation_image::ImageAttachment::prepare(
+                let (mut attachment, pixels) = crate::conversation_image::ImageAttachment::prepare(
                     session,
                     &frame,
                     deps.model.model_egress_policy()?.as_ref(),
                 )?;
-                if deps
-                    .session_seam
-                    .store_image(session, &attachment, &pixels)
-                    .await?
-                {
+                let stored = if session.conversation.last().is_some_and(|message| {
+                    message.text.len() > crate::conversation_attachment::INLINE_BYTES
+                }) {
+                    let authorized_source = attachment.message.data_envelope.clone();
+                    let mut image_only = attachment.restore(&pixels)?;
+                    image_only.text = "Screenshot; the associated tool body is stored separately in this conversation's attachments.".into();
+                    let image_bytes = crate::model_egress::message_content_bytes(&image_only)
+                        .map_err(|error| error.agent_error())?;
+                    image_only.data_envelope =
+                        crate::conversation_attachment::delivery::projection_envelope(
+                            authorized_source.as_ref(),
+                            &image_bytes,
+                            "image-body",
+                        )?;
+                    image_only.image_data_url = None;
+                    attachment.message = image_only;
+                    let image_part = attachment.attachment_record(session, &pixels)?;
+                    let mut body = session
+                        .conversation
+                        .last()
+                        .cloned()
+                        .ok_or_else(invalid_original_result)?;
+                    body.image_data_url = None;
+                    body.data_envelope =
+                        crate::conversation_attachment::delivery::projection_envelope(
+                            attachment.message.data_envelope.as_ref(),
+                            body.text.as_bytes(),
+                            "image-text",
+                        )?;
+                    let mut delivered = crate::conversation_attachment::delivery::externalize_with(
+                        deps.session_seam,
+                        session,
+                        body,
+                        format,
+                        None,
+                        current_unix_ms(deps.clock),
+                        &[image_part],
+                    )
+                    .await?;
+                    delivered.image_data_url = Some(image_data_url.clone());
+                    *session
+                        .conversation
+                        .last_mut()
+                        .ok_or_else(invalid_original_result)? = delivered;
+                    true
+                } else {
+                    deps.session_seam
+                        .store_image(session, &attachment, &pixels)
+                        .await?
+                };
+                if stored {
                     if let Some(stored) = session
                         .visual_evidence
                         .iter_mut()
@@ -874,6 +963,29 @@ async fn append_reviewed_tool_result_inner(
                     {
                         *stored = attachment.frame;
                     }
+                    let message = session
+                        .conversation
+                        .last_mut()
+                        .ok_or_else(invalid_original_result)?;
+                    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&message.text)
+                        && value.is_object()
+                    {
+                        value["attachment_id"] = serde_json::json!(frame.evidence_id);
+                        message.text = value.to_string();
+                    } else {
+                        message.text.push_str(&format!(
+                            "\nScreenshot attachment_id: {}",
+                            frame.evidence_id
+                        ));
+                    }
+                    let bytes = crate::model_egress::message_content_bytes(message)
+                        .map_err(|error| error.agent_error())?;
+                    message.data_envelope =
+                        crate::conversation_attachment::delivery::projection_envelope(
+                            message.data_envelope.as_ref(),
+                            &bytes,
+                            "image-reference",
+                        )?;
                 }
             }
             Ok(None)
@@ -962,6 +1074,48 @@ async fn finish_tool_output_safety_failure<F: FnMut() -> String>(
     }
 }
 
+/// Background publishers persist the immutable original receipt and explicit
+/// output format. Delivery is completed under the claimed turn before any model
+/// request; storage failure leaves the receipt retryable without redispatch.
+async fn deliver_pending_results(
+    deps: &LoopDeps<'_>,
+    session: &mut PersistedAgentSession,
+) -> Result<(), AgentError> {
+    if session.surface != AgentSessionSurface::DeviceAssistant {
+        return Ok(());
+    }
+    let policy = deps.model.model_egress_policy()?;
+    let mut changed = false;
+    for index in 0..session.conversation.len() {
+        let Some(format) = session.conversation[index].pending_delivery_format else {
+            continue;
+        };
+        let mut original = session.conversation[index].clone();
+        original.pending_delivery_format = None;
+        let result = crate::conversation_attachment::delivery::externalize(
+            deps.session_seam,
+            session,
+            original.clone(),
+            format,
+            policy.as_ref(),
+            current_unix_ms(deps.clock),
+        )
+        .await;
+        session.conversation[index] = match result {
+            Ok(message) => message,
+            Err(error) if error.kind == AgentErrorKind::OutputLimitExceeded => {
+                crate::conversation_attachment::delivery::failed_delivery(original, &error)?
+            }
+            Err(error) => return Err(error),
+        };
+        changed = true;
+    }
+    if changed {
+        deps.session_seam.save(session).await?;
+    }
+    Ok(())
+}
+
 async fn prepare_model_context(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
@@ -1003,6 +1157,20 @@ async fn prepare_model_context(
             .await);
         }
         let protection = session.context_protection_set();
+        let configuration_changed = pinned_context.preserve_history
+            && !session.model_context_state.entries.is_empty()
+            && !session
+                .model_context_state
+                .entries
+                .iter()
+                .any(|entry| entry.policy_key == pinned_context.key());
+        let compatible_state = crate::model_context::adopt_compatible_checkpoint(
+            &session.model_context_state,
+            &session.conversation,
+            pinned_context,
+            deps.model.model_egress_policy()?.as_ref(),
+        )
+        .map_err(model_context_error)?;
         let eligibility = deps
             .model
             .model_egress_policy()?
@@ -1010,7 +1178,7 @@ async fn prepare_model_context(
                 crate::model_context::reconcile_context_eligibility(
                     &policy,
                     &session.conversation,
-                    &session.model_context_state,
+                    &compatible_state,
                     pinned_context,
                     &protection,
                     session.version,
@@ -1023,7 +1191,7 @@ async fn prepare_model_context(
             }
             Ok(_) => crate::model_context::plan_model_context(
                 &session.conversation,
-                &session.model_context_state,
+                &compatible_state,
                 pinned_context,
                 &protection,
                 session.version,
@@ -1052,7 +1220,7 @@ async fn prepare_model_context(
         ) && let Some(policy) = deps.model.model_egress_policy()?
             && crate::model_context::authorize_context_checkpoint(
                 &policy,
-                &session.model_context_state,
+                &compatible_state,
                 &pinned_context.key(),
                 &session.conversation,
             )
@@ -1161,6 +1329,12 @@ async fn prepare_model_context(
                 // Rebuild protection and re-plan against the new version/floor.
             }
             crate::model_context::ContextBuildPlan::NeedsCompression(plan) => {
+                if configuration_changed {
+                    return Err(AgentError { kind: AgentErrorKind::InvalidInput,
+                        message: "The current model cannot fit this conversation, including its existing summary, tools and output reserve. Select a model with a larger context or explicitly compress using the previous compatible configuration. No history was removed.".into(),
+                        retryable: false, safe_for_model: true,
+                        error_code: Some(desk_utils::error::DeskErrorCode::AI_CONTEXT_ITEM_TOO_LARGE.code()) });
+                }
                 use crate::seam::ContextCompressionFailureKind as FailureKind;
 
                 let audit_context = compression_audit_context(&plan, &deps.content_safety);
@@ -1503,6 +1677,9 @@ async fn run_inner_impl(
     turn_id: &str,
     sink: &mut dyn TurnSink,
 ) -> Result<LoopOutcome, AgentError> {
+    crate::conversation_attachment::delivery::resolve_session(deps.session_seam, session).await?;
+    crate::conversation_attachment::model_read::validate_pending_reads(deps.session_seam, session)
+        .await?;
     let mut seq: u32 = 0;
     let mut mint = move || {
         let id = format!("{turn_id}-{seq}");
@@ -1712,7 +1889,8 @@ async fn run_inner_impl(
                     .as_deref()
                     .unwrap_or(&session.conversation),
             ));
-        let pinned_context = deps.model.context_policy(request_requirements).await?;
+        let mut pinned_context = deps.model.context_policy(request_requirements).await?;
+        pinned_context.preserve_history = session.surface == AgentSessionSurface::DeviceAssistant;
         if disclosure_enabled {
             let selected = crate::capability_disclosure::select_advertised_tools(
                 &raw_provider_exposed,
@@ -1925,6 +2103,12 @@ async fn run_inner_impl(
             .clone()
             .with_request_overhead_bytes(request_overhead_bytes)
             .map_err(model_context_error)?;
+        deliver_pending_results(deps, session).await?;
+        crate::conversation_attachment::model_read::validate_pending_reads(
+            deps.session_seam,
+            session,
+        )
+        .await?;
         let mut context_view = prepare_model_context(
             deps,
             session,
@@ -2483,6 +2667,13 @@ async fn run_inner_impl(
             permission_continuation_pending = false;
         }
 
+        crate::conversation_attachment::model_read::mark_consumed(
+            &mut session.conversation,
+            &request_message_ids,
+        );
+        let mut attachment_read_budget = pinned_context
+            .max_context_bytes
+            .saturating_sub(assembled_request_cost.saturating_add(4096));
         match disposition {
             TurnDisposition::Answer => {
                 let mut message =
@@ -2783,6 +2974,7 @@ async fn run_inner_impl(
                                     }) => (output, ok, event_id, data_envelope, background_task),
                                     Err(e) => (
                                         crate::seam::ToolRunOutput {
+                                            format: crate::seam::ToolOutputFormat::Text,
                                             content: if e.safe_for_model {
                                                 crate::model_input::describe_error(
                                                     &call.name, &e.message,
@@ -3569,12 +3761,13 @@ async fn run_inner_impl(
                         }
                         ToolEffect::ConversationHistory => {
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
-                            if call.name == crate::conversation_image::READ_IMAGE_TOOL {
-                                let result = Box::pin(read_conversation_image(
+                            if call.name == crate::conversation_attachment::READ_ATTACHMENT_TOOL {
+                                let result = Box::pin(read_conversation_attachment(
                                     deps,
                                     session,
                                     call,
                                     turn.provider_meta.data_envelope.as_ref(),
+                                    &mut attachment_read_budget,
                                 ))
                                 .await;
                                 let (message, ok) = match result {
@@ -3771,6 +3964,7 @@ fn current_unix_ms(clock: &dyn Fn() -> String) -> Result<u64, AgentError> {
 }
 
 fn verified_browser_result(message: &ChatMessage) -> Option<BrowserActionResult> {
+    let message = message.trusted_tool_result();
     if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
         return None;
     }
@@ -3791,7 +3985,8 @@ fn verified_browser_result(message: &ChatMessage) -> Option<BrowserActionResult>
     ) {
         return None;
     }
-    if let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text)
+    if let Ok(completion) =
+        serde_json::from_str::<ComputerActionCompleted>(&message.trusted_tool_result().text)
         && completion.result == ComputerActionResultClass::Verified
         && let Some(ComputerActionOutput::Browser(result)) = completion.output
         && result.validate().is_ok()
@@ -3806,7 +4001,8 @@ fn verified_browser_result(message: &ChatMessage) -> Option<BrowserActionResult>
     if message.role != ChatRole::Tool {
         return None;
     }
-    let result = serde_json::from_str::<BrowserActionResult>(&message.text).ok()?;
+    let result =
+        serde_json::from_str::<BrowserActionResult>(&message.trusted_tool_result().text).ok()?;
     result.validate().ok()?;
     Some(result)
 }
@@ -3842,6 +4038,7 @@ fn requested_artifact_registry_projection(
     let mut completed_text_file_operations = Vec::new();
     let mut source_envelopes = Vec::new();
     for message in conversation.iter().rev() {
+        let message = message.trusted_tool_result();
         if selected.len() + selected_batch.len() + completed_text_file_operations.len()
             >= MAX_REQUESTED_ARTIFACTS
         {
@@ -3862,7 +4059,9 @@ fn requested_artifact_registry_projection(
         ) {
             continue;
         }
-        let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text) else {
+        let Ok(completion) =
+            serde_json::from_str::<ComputerActionCompleted>(&message.trusted_tool_result().text)
+        else {
             continue;
         };
         if completion.result
@@ -4001,7 +4200,7 @@ fn requested_artifact_registry_projection(
 /// Historical raw Provider results deliberately are not replayed across the
 /// egress boundary; the projection keeps only the worker-retained merge
 /// preview id, the exact same-run Web Search call reference it must pass to
-/// reviewed artifact Providers, and up to four recent validated browser page
+/// reviewed artifact Providers, and up to two recent validated browser page
 /// identities plus at most 32 prioritized closed element refs per origin needed
 /// for subsequent semantic browser actions. No rows, snippets, raw DOM, page
 /// titles, native paths, arbitrary result text, or authority are copied.
@@ -4033,6 +4232,7 @@ fn reusable_provider_result_projection(
     let mut browser_envelopes = Vec::new();
     let mut seen_browser_pages = HashSet::new();
     for message in conversation.iter().rev() {
+        let message = message.trusted_tool_result();
         if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
             continue;
         }
@@ -4049,7 +4249,8 @@ fn reusable_provider_result_projection(
         if message.role == ChatRole::Tool
             && preview.is_none()
             && envelope.provenance.source_tool_name == "preview_spreadsheet_merge"
-            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.text)
+            && let Ok(value) =
+                serde_json::from_str::<serde_json::Value>(&message.trusted_tool_result().text)
             && let Some(preview_id) = value
                 .pointer("/ReadContext/SpreadsheetMergePreview/preview_id")
                 .and_then(serde_json::Value::as_str)
@@ -4069,7 +4270,8 @@ fn reusable_provider_result_projection(
                         .iter()
                         .any(|call| call.id == call_id && call.name == "search_public_web")
             })
-            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.text)
+            && let Ok(value) =
+                serde_json::from_str::<serde_json::Value>(&message.trusted_tool_result().text)
             && value
                 .get("web_search_call_id")
                 .and_then(serde_json::Value::as_str)
@@ -4497,6 +4699,7 @@ fn append_mutating_result(
     mut message: ChatMessage,
 ) -> Result<(), AgentError> {
     let output = crate::seam::ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: message.text.clone(),
         image_data_url: message.image_data_url.clone(),
     };
@@ -4685,6 +4888,7 @@ pub(crate) fn bind_tool_input_envelopes(
     }
 
     source_ids.extend(session.conversation.iter().filter_map(|message| {
+        let message = message.trusted_tool_result();
         let source = message.data_envelope.as_ref()?;
         let direct_artifact_id = match &source.content {
             ContentRef::Artifact { artifact_id, .. } => Some(artifact_id.as_str()),
@@ -4704,16 +4908,17 @@ pub(crate) fn bind_tool_input_envelopes(
             .map(str::to_owned)
             .or(typed_result_artifact_id)
             .is_some_and(|artifact_id| artifact_ids.contains(&artifact_id));
-        let preview_match = serde_json::from_str::<serde_json::Value>(&message.text)
-            .ok()
-            .is_some_and(|value| {
-                let mut ignored_artifacts = HashSet::new();
-                let mut found_previews = HashSet::new();
-                collect_identity_values(&value, &mut ignored_artifacts, &mut found_previews);
-                found_previews
-                    .iter()
-                    .any(|preview_id| preview_ids.contains(preview_id))
-            });
+        let preview_match =
+            serde_json::from_str::<serde_json::Value>(&message.trusted_tool_result().text)
+                .ok()
+                .is_some_and(|value| {
+                    let mut ignored_artifacts = HashSet::new();
+                    let mut found_previews = HashSet::new();
+                    collect_identity_values(&value, &mut ignored_artifacts, &mut found_previews);
+                    found_previews
+                        .iter()
+                        .any(|preview_id| preview_ids.contains(preview_id))
+                });
         (artifact_match || preview_match).then(|| source.envelope_id.clone())
     }));
     source_ids.sort();
@@ -4781,13 +4986,16 @@ fn resolve_word_report_web_source_envelope<'a>(
             message.role == ChatRole::Tool && message.tool_call_id.as_deref() == Some(call_id)
         })
         .ok_or_else(|| "Word report Web Search result is not available yet".to_string())?;
+    let result = result.trusted_tool_result();
     let result_envelope = result
         .data_envelope
         .as_ref()
         .filter(|envelope| envelope.provenance.source_tool_name == "search_public_web")
         .ok_or_else(|| "Word report Web Search result has no authoritative envelope".to_string())?;
-    let result_json: serde_json::Value = serde_json::from_str(&result.text)
-        .map_err(|_| "Word report Web Search result is not valid structured data".to_string())?;
+    let result_json: serde_json::Value = serde_json::from_str(&result.trusted_tool_result().text)
+        .map_err(|_| {
+        "Word report Web Search result is not valid structured data".to_string()
+    })?;
     let observed = result_json
         .get("results")
         .and_then(serde_json::Value::as_array)
@@ -5249,10 +5457,12 @@ async fn run_wait<F: FnMut() -> String>(
                 &action.action_request_id,
                 &output.content,
                 Some(data_envelope.clone()),
+                output.format,
                 (deps.clock)(),
             ) {
                 return Err(invalid_original_result());
             }
+            deliver_pending_results(deps, session).await?;
             let text = if failed {
                 "background task failed; its original result is recorded in the conversation"
             } else {
@@ -5404,107 +5614,108 @@ mod tests;
 
 mod task_permission;
 
-async fn read_conversation_image(
+async fn read_conversation_attachment(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
     call: &crate::chat::ToolCall,
-    parent: Option<&desk_agent_protocol::data_lineage::DataEnvelope>,
+    _parent: Option<&desk_agent_protocol::data_lineage::DataEnvelope>,
+    remaining_budget: &mut usize,
 ) -> Result<ChatMessage, AgentError> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Input {
-        tool_call_id: Option<String>,
-        attachment_id: Option<String>,
-        before_attachment_id: Option<String>,
-    }
-    let input: Input = serde_json::from_str(&call.arguments_json)
-        .map_err(|_| crate::conversation_image::error("Invalid screenshot lookup input"))?;
-    if input.tool_call_id.is_none() && input.attachment_id.is_none() {
-        if input
-            .before_attachment_id
-            .as_ref()
-            .is_some_and(|id| id.is_empty() || id.len() > 256)
-        {
-            return Err(crate::conversation_image::error(
-                "Invalid screenshot cursor",
-            ));
-        }
-        let records = deps
-            .session_seam
-            .list_images(session, input.before_attachment_id.as_deref())
-            .await?;
-        let next = if records.len() == 32 {
-            records.last().map(|r| r.frame.evidence_id.clone())
-        } else {
-            None
-        };
-        let policy = deps.model.model_egress_policy()?;
-        let records = records
-            .into_iter()
-            .filter(|r| {
-                crate::conversation_image::authorize_read(&r.message, policy.as_ref()).is_ok()
-            })
-            .collect::<Vec<_>>();
-        let content = serde_json::json!({"images": records.iter().map(|r| serde_json::json!({
-            "attachment_id":r.frame.evidence_id, "tool_call_id":r.frame.tool_call_id,
-            "captured_at_unix_ms":r.frame.captured_at_unix_ms})).collect::<Vec<_>>(),
-            "next_before_attachment_id":next, "notice":"Historical images only; unavailable model destinations are omitted."}).to_string();
-        session
-            .focus_epoch
-            .record_history_result(content.len())
-            .map_err(crate::conversation_image::error)?;
-        let sources = records.into_iter().map(|r| r.message).collect::<Vec<_>>();
-        let envelope = crate::model_message_labels::conversation_history_result_envelope(
-            parent, &sources, &call.id, &content,
-        )?;
-        let mut message = ChatMessage::tool_result("image-index", &call.id, content);
-        message.data_envelope = envelope;
-        return Ok(message);
-    }
-    if input.before_attachment_id.is_some()
-        || (input.tool_call_id.is_some() && input.attachment_id.is_some())
-        || input
-            .tool_call_id
-            .as_ref()
-            .is_some_and(|id| id.is_empty() || id.len() > 512)
-        || input
-            .attachment_id
-            .as_ref()
-            .is_some_and(|id| id.is_empty() || id.len() > 256)
-    {
-        return Err(crate::conversation_image::error(
-            "Invalid screenshot tool_call_id",
-        ));
-    }
-    let message = deps
+    use crate::conversation_attachment::{ContentKind, digest, invalid, model_read};
+    let input: model_read::Input = serde_json::from_str(&call.arguments_json)
+        .map_err(|_| invalid("Invalid attachment read input"))?;
+    input.request()?;
+    let mut part = deps
         .session_seam
-        .read_image(
-            session,
-            input.tool_call_id.as_deref(),
-            input.attachment_id.as_deref(),
-        )
+        .read_attachment(session, &input.attachment_id, false)
         .await?;
-    crate::conversation_image::authorize_read(
-        &message,
-        deps.model.model_egress_policy()?.as_ref(),
-    )?;
-    let url = message
-        .image_data_url
-        .as_deref()
-        .ok_or_else(|| crate::conversation_image::error("Screenshot pixels are unavailable"))?;
-    let info = crate::image_input::validate_image_data_url(url).map_err(image_input_error)?;
-    if !matches!(
-        review_image(deps, url, &info.media_type).await,
-        Ok(ContentSafetyDecision::Allow)
-    ) {
-        return Err(crate::conversation_image::error(
-            "Stored screenshot was blocked by content safety policy",
-        ));
+    let policy = deps.model.model_egress_policy()?;
+    let mut message = if part.metadata.kind == ContentKind::Image {
+        input.validate_image()?;
+        let source = part
+            .metadata
+            .image_source
+            .as_ref()
+            .ok_or_else(|| invalid("Image source authorization is unavailable"))?;
+        let message = source.restore(&part.content)?;
+        crate::conversation_image::authorize_read(&message, policy.as_ref())?;
+        let url = message
+            .image_data_url
+            .as_deref()
+            .ok_or_else(|| invalid("Image pixels unavailable"))?;
+        let info = crate::image_input::validate_image_data_url(url).map_err(image_input_error)?;
+        if !matches!(
+            review_image(deps, url, &info.media_type).await,
+            Ok(ContentSafetyDecision::Allow)
+        ) {
+            return Err(invalid("Stored image was blocked by content safety policy"));
+        }
+        message
+    } else {
+        let envelope = part
+            .metadata
+            .source_envelope
+            .as_ref()
+            .ok_or_else(|| invalid("Attachment source authorization is unavailable"))?;
+        if let Some(policy) = &policy {
+            if !policy.has_gateway_authority(envelope) {
+                return Err(invalid(
+                    "Attachment is not authorized for the current model gateway",
+                ));
+            }
+        }
+        part.metadata.verify(&part.content)?;
+        let source_envelope = envelope.clone();
+        // Keep original authorization/hash separate from the stable model representation.
+        if part.metadata.kind == ContentKind::Json {
+            let mut projected = ChatMessage::tool_result(
+                "attachment-source",
+                &call.id,
+                String::from_utf8(part.content.clone())
+                    .map_err(|_| invalid("Invalid attachment encoding"))?,
+            );
+            crate::ui_model_ids::project_tool_message(&mut projected);
+            part.content = projected.text.into_bytes();
+            part.metadata.size_bytes = part.content.len() as u64;
+            part.metadata.original_bytes = part.metadata.size_bytes;
+            part.metadata.sha256 = digest(&part.content);
+            part.metadata.original_sha256 = part.metadata.sha256.clone();
+            part.metadata.storage_truncated = false;
+            part.metadata.source_envelope = None;
+        }
+        let (content, mut receipt) =
+            model_read::text_page(&part, &input, &call.id, *remaining_budget)?;
+        let mut message = ChatMessage::tool_result("attachment-page", &call.id, content);
+        message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            Some(&source_envelope),
+            &call.id,
+            &message.text,
+            crate::conversation_attachment::READ_ATTACHMENT_TOOL,
+        )?;
+        receipt.original_envelope = message.data_envelope.clone();
+        receipt.source_sha256 = source_envelope.digest_sha256.clone();
+        message.attachment_read = Some(Box::new(receipt));
+        message
+    };
+    if message.image_data_url.is_some() {
+        deps.model
+            .context_policy(crate::model_capability::ModelRequirements::for_messages(
+                std::slice::from_ref(&message),
+            ))
+            .await?;
+    }
+    let cost = crate::trim::model_context_cost(&message);
+    if cost > *remaining_budget {
+        return Err(invalid("Insufficient model context for attachment reading"));
     }
     session
         .focus_epoch
-        .record_history_result(message.text.len())
-        .map_err(crate::conversation_image::error)?;
-    // Historical pixels never advance the fresh-observation fence.
+        .record_history_result(cost)
+        .map_err(invalid)?;
+    deps.session_seam
+        .read_attachment(session, &input.attachment_id, true)
+        .await?;
+    *remaining_budget -= cost;
+    message.tool_call_id = Some(call.id.clone());
     Ok(message)
 }

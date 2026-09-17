@@ -70,6 +70,7 @@ async fn wait_selects_second_task_and_keeps_first_running() {
         vec![],
         vec![WaitOutcome::Completed {
             output: ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: "done".into(),
                 image_data_url: None,
             },

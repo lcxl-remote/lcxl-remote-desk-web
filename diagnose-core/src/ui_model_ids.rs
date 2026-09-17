@@ -89,7 +89,7 @@ fn resolve(history: &[ChatMessage], id: &str, _now_ms: u64) -> Result<ObjectRef,
         ) {
             continue;
         }
-        let Some(output) = observation_value(&message.text) else {
+        let Some(output) = observation_value(&message.trusted_tool_result().text) else {
             continue;
         };
         let mut observed = Vec::new();
@@ -220,7 +220,9 @@ pub(crate) fn resolve_single_call(
             if !from_capture {
                 continue;
             }
-            let Ok(output) = crate::image_input::structured_tool_result(&message.text) else {
+            let Ok(output) =
+                crate::image_input::structured_tool_result(&message.trusted_tool_result().text)
+            else {
                 continue;
             };
             if let Some(frame) = output.pointer("/ReadContext/ScreenCaptureCurrent") {
@@ -435,69 +437,74 @@ fn hide_references(value: &mut Value) {
     }
 }
 
+/// Convert the entire trusted result before attachment paging.
+pub(crate) fn project_tool_message(message: &mut ChatMessage) {
+    if message.role == ChatRole::Tool {
+        if let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
+            && (value.pointer("/ReadContext/DesktopUiInspect").is_some()
+                || value
+                    .pointer("/ReadContext/DesktopSessionInspect")
+                    .is_some())
+        {
+            // Expansion is needed to resolve compact internal references, but
+            // must not discard model guidance or duplicate fields on the wire.
+            let hints: Vec<_> = ["search_hint", "truncation_hint", "window_discovery_hint"]
+                .into_iter()
+                .filter_map(|key| {
+                    value
+                        .pointer("/ReadContext/DesktopUiInspect")
+                        .and_then(|body| body.get(key))
+                        .cloned()
+                        .map(|v| (key, v))
+                })
+                .collect();
+            crate::ui_model_output::expand_value(&mut value);
+            if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
+                for (key, hint) in hints {
+                    body[key] = hint;
+                }
+            }
+            crate::ui_model_output::add_window_discovery_hint(&mut value);
+            hide_references(&mut value);
+            // Omit default node fields without removing useful semantic IDs.
+            if let Some(nodes) = value
+                .pointer_mut("/ReadContext/DesktopUiInspect/nodes")
+                .and_then(Value::as_array_mut)
+            {
+                for node in nodes {
+                    let Some(fields) = node.as_object_mut() else {
+                        continue;
+                    };
+                    if fields.get("element_id").is_some_and(|id| {
+                        !id.is_null()
+                            && fields.get("object_ref")
+                                == Some(&json!({"id":id,"kind":"ui_element"}))
+                    }) {
+                        fields.remove("object_ref");
+                    }
+                    fields.retain(|key, value| {
+                        !value.is_null()
+                            && !(key == "enabled" && value == &Value::Bool(true))
+                            && !(key == "is_protected" && value == &Value::Bool(false))
+                            && !(key == "supported_actions"
+                                && value.as_array().is_some_and(Vec::is_empty))
+                    });
+                }
+            }
+            if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
+                body["node_defaults"] = json!({"enabled":true,"is_protected":false});
+            }
+            message.text = value.to_string();
+        }
+    }
+}
+
 /// A reducing wire projection after the original messages passed model-egress
 /// checks. Durable messages/envelopes remain unchanged and retain exact lineage.
 pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::ModelRequest {
     let mut request = request.clone();
     for message in &mut request.messages {
-        if message.role == ChatRole::Tool {
-            if let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
-                && (value.pointer("/ReadContext/DesktopUiInspect").is_some()
-                    || value
-                        .pointer("/ReadContext/DesktopSessionInspect")
-                        .is_some())
-            {
-                // Expansion is needed to resolve compact internal references, but
-                // must not discard model guidance or duplicate fields on the wire.
-                let hints: Vec<_> = ["search_hint", "truncation_hint", "window_discovery_hint"]
-                    .into_iter()
-                    .filter_map(|key| {
-                        value
-                            .pointer("/ReadContext/DesktopUiInspect")
-                            .and_then(|body| body.get(key))
-                            .cloned()
-                            .map(|v| (key, v))
-                    })
-                    .collect();
-                crate::ui_model_output::expand_value(&mut value);
-                if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
-                    for (key, hint) in hints {
-                        body[key] = hint;
-                    }
-                }
-                crate::ui_model_output::add_window_discovery_hint(&mut value);
-                hide_references(&mut value);
-                // Omit default node fields without removing useful semantic IDs.
-                if let Some(nodes) = value
-                    .pointer_mut("/ReadContext/DesktopUiInspect/nodes")
-                    .and_then(Value::as_array_mut)
-                {
-                    for node in nodes {
-                        let Some(fields) = node.as_object_mut() else {
-                            continue;
-                        };
-                        if fields.get("element_id").is_some_and(|id| {
-                            !id.is_null()
-                                && fields.get("object_ref")
-                                    == Some(&json!({"id":id,"kind":"ui_element"}))
-                        }) {
-                            fields.remove("object_ref");
-                        }
-                        fields.retain(|key, value| {
-                            !value.is_null()
-                                && !(key == "enabled" && value == &Value::Bool(true))
-                                && !(key == "is_protected" && value == &Value::Bool(false))
-                                && !(key == "supported_actions"
-                                    && value.as_array().is_some_and(Vec::is_empty))
-                        });
-                    }
-                }
-                if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
-                    body["node_defaults"] = json!({"enabled":true,"is_protected":false});
-                }
-                message.text = value.to_string();
-            }
-        }
+        project_tool_message(message);
         for call in &mut message.tool_calls {
             if let Ok(mut value) = serde_json::from_str::<Value>(&call.arguments_json) {
                 project_arguments(&call.name, &mut value);

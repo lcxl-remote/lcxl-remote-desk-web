@@ -1356,7 +1356,7 @@ mod tests {
         };
 
         let page = BrowserPageRef {
-            account_id: None,
+            account_id: Some("slack-web:T123:U456".into()),
             schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
             adapter: BrowserAdapterRef {
                 engine: BrowserEngineKind::ChromeExtension,
@@ -1407,7 +1407,7 @@ mod tests {
             adapter_id: "slack-web".into(),
             adapter_version: "1".into(),
             profile_id: page.adapter.profile_incarnation.clone(),
-            account_id: "slack-current-profile".into(),
+            account_id: desk_diagnose_core::communication::slack_web_account_id(&page).unwrap(),
             revision: page.adapter.connection_revision,
         };
         let body_plain_text = "Reviewed Slack body".to_string();
@@ -1508,10 +1508,16 @@ mod tests {
     #[test]
     fn exact_send_confirmation_projects_only_verified_owner_fields() {
         let canonical = slack_exact_send_json();
+        let input: SlackWebExactSendInput = serde_json::from_str(&canonical).unwrap();
+        desk_diagnose_core::communication::verify_slack_web_exact_send_input(&input).unwrap();
         let confirmation =
             external_send_confirmation("send_slack_message", Some(&canonical)).unwrap();
         assert_eq!(confirmation.channel, CommunicationChannel::Chat);
-        assert_eq!(confirmation.account_id, "slack-current-profile");
+        let input: SlackWebExactSendInput = serde_json::from_str(&canonical).unwrap();
+        assert_eq!(
+            confirmation.account_id,
+            desk_diagnose_core::communication::slack_web_account_id(&input.page).unwrap()
+        );
         assert_eq!(confirmation.destination, "Message #review");
         assert_eq!(confirmation.subject, None);
         assert_eq!(confirmation.body_plain_text, "Reviewed Slack body");

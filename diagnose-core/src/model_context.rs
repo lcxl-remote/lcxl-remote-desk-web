@@ -94,6 +94,9 @@ pub struct ContextPolicyKey(String);
 impl ContextPolicyKey {
     pub fn derive(policy: &PinnedContextPolicy) -> Self {
         let mut digest = Sha256::new();
+        if policy.preserve_history {
+            digest.update(b"durable-history-v1");
+        }
         digest.update(b"lrdm-context-policy-v1\0");
         for component in [
             policy.source_context_key.as_str().to_string(),
@@ -123,8 +126,9 @@ impl ContextPolicyKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedContextPolicy {
+    pub preserve_history: bool,
     pub source_context_key: SourceContextKey,
     pub profile_revision: i64,
     pub max_context_bytes: usize,
@@ -150,6 +154,7 @@ impl PinnedContextPolicy {
             return Err(ModelContextError::InvalidBudget(max_context_bytes));
         }
         Ok(Self {
+            preserve_history: false,
             source_context_key,
             profile_revision,
             max_context_bytes,
@@ -374,7 +379,7 @@ pub fn build_model_context_view(
         ));
     }
 
-    let groups = group_messages(conversation, &policy.source_context_key)?;
+    let groups = group_messages_for_policy(conversation, policy)?;
     let policy_key = policy.key();
     let existing_entry = state
         .entries
@@ -412,6 +417,11 @@ pub fn build_model_context_view(
         _ => None,
     };
     let initial_group_index = existing_group_index.unwrap_or(0).min(groups.len());
+    if policy.preserve_history && initial_group_index != 0 {
+        return Err(ModelContextError::InvalidCheckpoint(
+            "A plain history window cannot discard durable facts".into(),
+        ));
+    }
 
     // A replay-unsafe group advances the suffix floor beyond that group. This
     // preserves a stable, monotonic prefix boundary rather than creating holes.
@@ -430,6 +440,12 @@ pub fn build_model_context_view(
 
     let history_budget = policy.history_context_bytes();
     if total_cost > history_budget {
+        if policy.preserve_history {
+            return Err(ModelContextError::ProtectedStateTooLarge {
+                cost: total_cost,
+                high_watermark: history_budget,
+            });
+        }
         let Some(last) = safe_groups.last() else {
             selected_group_index = groups.len();
             return finish_view(
@@ -1091,3 +1107,7 @@ mod tests {
         );
     }
 }
+
+mod compatibility;
+pub use compatibility::adopt_compatible_checkpoint;
+pub(crate) use compatibility::{group_messages_for_policy, project_portable_replay};

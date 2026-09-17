@@ -510,6 +510,7 @@ mod tests {
             old_envelope
         );
         let output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "du completed".into(),
             image_data_url: None,
         };
@@ -587,6 +588,7 @@ mod tests {
         )
         .unwrap();
         let output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "DEVICE RESULT".into(),
             image_data_url: None,
         };
@@ -609,6 +611,7 @@ mod tests {
                     action(),
                     1,
                     &ToolRunOutput {
+                        format: crate::seam::ToolOutputFormat::Text,
                         content: "CHANGED RESULT".into(),
                         image_data_url: None
                     }
@@ -644,6 +647,7 @@ mod tests {
         )
         .unwrap();
         let output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "late result".into(),
             image_data_url: None,
         };

@@ -323,9 +323,6 @@ pub async fn cleanup_once(
     db: &DatabaseConnection,
     now: DateTimeUtc,
 ) -> Result<(u64, u64, u64, u64), DbErr> {
-    if let Err(error) = crate::agent_image_store::cleanup(db).await {
-        log::warn!("Screenshot attachment cleanup failed: {error}");
-    }
     if let Err(error) = crate::agent_attachment_store::cleanup(db).await {
         log::warn!("Conversation attachment cleanup failed: {error}");
     }

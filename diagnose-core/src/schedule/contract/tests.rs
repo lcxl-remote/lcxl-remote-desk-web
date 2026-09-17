@@ -1211,6 +1211,7 @@ fn rehearsal_graph_requires_each_original_read_even_when_it_has_known_parents() 
         arguments_json: "{}".into(),
     };
     let out = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: "system report".into(),
         image_data_url: None,
     };
@@ -1438,6 +1439,7 @@ fn compressed_answer_preserves_original_read_scope() {
         inputs: project_model_input_lineage(&projected.audit, &projected.input_envelopes).unwrap(),
     }];
     let out = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: "r".repeat(1000),
         image_data_url: None,
     };

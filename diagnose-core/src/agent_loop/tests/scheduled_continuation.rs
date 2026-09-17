@@ -458,6 +458,7 @@ impl ToolSeam for ExpiringTools<'_> {
         self.calls.set(self.calls.get() + 1);
         self.heartbeat.current.set(false);
         Ok(ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "first result".into(),
             image_data_url: None,
         })

@@ -197,11 +197,72 @@ pub async fn list(
     actor: &str,
     before: Option<&str>,
 ) -> Result<Vec<AttachmentMetadata>, DbErr> {
+    list_filtered(db, run, actor, before, false).await
+}
+
+pub async fn list_images(
+    db: &DatabaseConnection,
+    run: &str,
+    actor: &str,
+    before: Option<&str>,
+) -> Result<Vec<AttachmentMetadata>, DbErr> {
+    list_filtered(db, run, actor, before, true).await
+}
+
+fn image_filter(db: &DatabaseConnection) -> Result<sea_orm::sea_query::SimpleExpr, DbErr> {
+    Ok(Expr::cust(match db.get_database_backend() {
+        DbBackend::Sqlite => "json_extract(metadata_json, '$.kind') = 'image'",
+        DbBackend::Postgres => "(metadata_json::jsonb ->> 'kind') = 'image'",
+        _ => return Err(invalid()),
+    }))
+}
+
+pub async fn image_id_by_call(
+    db: &DatabaseConnection,
+    run: &str,
+    actor: &str,
+    call: &str,
+) -> Result<String, DbErr> {
+    let parent = subject(db, run, actor).await?;
+    let field = match db.get_database_backend() {
+        DbBackend::Sqlite => "json_extract(metadata_json, '$.tool_call_id') = ?",
+        DbBackend::Postgres => "(metadata_json::jsonb ->> 'tool_call_id') = ?",
+        _ => return Err(invalid()),
+    };
+    let ids = attachment::Entity::find()
+        .select_only()
+        .column(attachment::Column::Id)
+        .filter(attachment::Column::ConversationId.eq(run))
+        .filter(attachment::Column::ActorId.eq(actor))
+        .filter(attachment::Column::DeviceId.eq(parent.device_id))
+        .filter(image_filter(db)?)
+        .filter(Expr::cust_with_values(field, [call.to_string()]))
+        .limit(2)
+        .into_tuple::<String>()
+        .all(db)
+        .await?;
+    // Reused call IDs must not silently select an arbitrary historical image.
+    if ids.len() != 1 {
+        return Err(invalid());
+    }
+    Ok(ids.into_iter().next().unwrap())
+}
+
+async fn list_filtered(
+    db: &DatabaseConnection,
+    run: &str,
+    actor: &str,
+    before: Option<&str>,
+    images_only: bool,
+) -> Result<Vec<AttachmentMetadata>, DbErr> {
     let parent = subject(db, run, actor).await?;
     let mut query = attachment::Entity::find()
         .filter(attachment::Column::ConversationId.eq(run))
         .filter(attachment::Column::ActorId.eq(actor))
         .filter(attachment::Column::DeviceId.eq(&parent.device_id));
+    if images_only {
+        query = query.filter(image_filter(db)?);
+    }
     if let Some(id) = before {
         let cursor = query
             .clone()
@@ -221,6 +282,9 @@ pub async fn list(
                         .add(attachment::Column::Id.lt(id)),
                 ),
         );
+    }
+    if images_only {
+        query = query.filter(attachment::Column::Available.eq(true));
     }
     // Explicit projection prevents loading all attachment blobs for the list.
     let rows = query
@@ -289,7 +353,7 @@ pub async fn read(
     Ok(PreparedAttachment { metadata, content })
 }
 
-async fn content_root(db: &DatabaseConnection) -> Result<std::path::PathBuf, DbErr> {
+async fn content_root(db: &impl ConnectionTrait) -> Result<std::path::PathBuf, DbErr> {
     let row = db
         .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
@@ -525,3 +589,54 @@ pub async fn cleanup(db: &DatabaseConnection) -> Result<(), DbErr> {
 
 #[cfg(test)]
 mod tests;
+
+/// Internal original-result resolution under the caller's existing subject fence.
+/// This path never renews LRU or acquires a nested transaction.
+pub(crate) async fn restore_results(
+    db: &impl ConnectionTrait,
+    session: &mut PersistedAgentSession,
+) -> Result<(), desk_agent_protocol::AgentError> {
+    if !session.conversation.iter().any(|m| m.raw_result.is_some()) {
+        return Ok(());
+    }
+    let run = session.conversation_id.clone();
+    let actor = session.actor_id.clone();
+    let device = session.device_id.clone();
+    let root = content_root(db).await.map_err(|_| {
+        desk_diagnose_core::conversation_attachment::invalid("Attachment storage is unavailable")
+    })?;
+    desk_diagnose_core::conversation_attachment::delivery::resolve_with(session, |id| {
+        let run = &run;
+        let actor = &actor;
+        let device = &device;
+        let root = &root;
+        async move {
+            let read = async {
+                let row = attachment::Entity::find_by_id(id)
+                    .filter(attachment::Column::ConversationId.eq(run))
+                    .filter(attachment::Column::ActorId.eq(actor))
+                    .filter(attachment::Column::DeviceId.eq(device))
+                    .one(db)
+                    .await?
+                    .ok_or_else(invalid)?;
+                let metadata = decode(&row)?;
+                let content = if row.available {
+                    read_content(root, row.content_key.as_deref()).await?
+                } else {
+                    vec![]
+                };
+                metadata
+                    .verify(&content)
+                    .map_err(|error| DbErr::Custom(error.message))?;
+                Ok::<_, DbErr>(PreparedAttachment { metadata, content })
+            }
+            .await;
+            read.map_err(|_| {
+                desk_diagnose_core::conversation_attachment::invalid(
+                    "Original attachment is unavailable",
+                )
+            })
+        }
+    })
+    .await
+}

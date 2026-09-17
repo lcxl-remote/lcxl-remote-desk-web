@@ -259,6 +259,7 @@ async fn scheduled_command_recovery_uses_original_exec_identity_and_atomic_recei
                     &command.exec_request_id,
                     "not delivered outside schedule settlement",
                     None,
+                    desk_diagnose_core::seam::ToolOutputFormat::Text,
                     &now,
                 )
                 .await
@@ -472,6 +473,7 @@ async fn scheduled_command_recovery_uses_original_exec_identity_and_atomic_recei
                         &command.exec_request_id,
                         "stale publisher snapshot",
                         None,
+                        desk_diagnose_core::seam::ToolOutputFormat::Text,
                         &now,
                     )
                     .await

@@ -158,8 +158,11 @@ pub(crate) async fn reconcile_on(
                 .collect();
             if present.len() > 1
                 || present.first().is_some_and(|message| {
-                    message.text != original.output.content
-                        || message.image_data_url != original.output.image_data_url
+                    !desk_diagnose_core::conversation_attachment::delivery::matches_original(
+                        message,
+                        &original.output.content,
+                        Some(&original.receipt.envelope),
+                    ) || message.image_data_url != original.output.image_data_url
                 })
             {
                 return Err(invalid());
@@ -172,6 +175,7 @@ pub(crate) async fn reconcile_on(
                     &action.action_request_id,
                     &original.output.content,
                     Some(original.receipt.envelope),
+                    original.output.format,
                     timestamp(now_ms)?.to_rfc3339(),
                 );
             }

@@ -76,6 +76,7 @@ impl ToolSeam for TransactionalTools<'_> {
             _ => {}
         }
         let output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "confirmed result".into(),
             image_data_url: None,
         };

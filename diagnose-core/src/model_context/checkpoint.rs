@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use super::{
     ContextManagementStrategy, ContextNoticeKind, ContextPolicyKey, MessageGroup,
     ModelContextEntry, ModelContextError, ModelContextState, ModelContextView, PinnedContextPolicy,
-    checked_cost_sum, group_messages, upsert_entry, validate_state,
+    checked_cost_sum, group_messages_for_policy, upsert_entry, validate_state,
 };
 use crate::chat::{ChatMessage, ChatRole};
 use crate::redaction::{Redactor, RegexRedactor};
@@ -49,6 +49,7 @@ impl ContextCheckpoint {
 pub struct ContextCheckpointV1 {
     pub generation: u32,
     pub policy_key: ContextPolicyKey,
+    pub creation_policy: PinnedContextPolicy,
     pub covered_from_message_id: String,
     pub covered_through_message_id: String,
     pub covered_projection_sha256: String,
@@ -269,8 +270,28 @@ pub fn plan_model_context(
     protection: &ContextProtectionSet,
     session_version: i64,
 ) -> Result<ContextBuildPlan, ModelContextError> {
+    let mut plan =
+        plan_model_context_inner(conversation, state, policy, protection, session_version)?;
+    if let ContextBuildPlan::Ready(ready) = &mut plan {
+        super::project_portable_replay(&mut ready.view.messages, policy);
+    }
+    Ok(plan)
+}
+
+fn plan_model_context_inner(
+    conversation: &[ChatMessage],
+    state: &ModelContextState,
+    policy: &PinnedContextPolicy,
+    protection: &ContextProtectionSet,
+    session_version: i64,
+) -> Result<ContextBuildPlan, ModelContextError> {
     validate_state(state)?;
-    if policy.strategy == ContextManagementStrategy::Window {
+    let retained_checkpoint = policy.preserve_history
+        && state
+            .entries
+            .iter()
+            .any(|entry| entry.policy_key == policy.key() && entry.checkpoint.is_some());
+    if policy.strategy == ContextManagementStrategy::Window && !retained_checkpoint {
         let mut next_state = state.clone();
         let view = super::build_model_context_view(
             conversation,
@@ -283,7 +304,7 @@ pub fn plan_model_context(
             next_state,
         }));
     }
-    if policy.strategy != ContextManagementStrategy::CheckpointSummary
+    if (policy.strategy != ContextManagementStrategy::CheckpointSummary && !retained_checkpoint)
         || policy.context_strategy_schema_version != super::CONTEXT_STRATEGY_SCHEMA_VERSION
     {
         return Err(ModelContextError::UnsupportedStrategy);
@@ -300,7 +321,7 @@ pub fn plan_model_context(
         }
     }
 
-    let groups = group_messages(conversation, &policy.source_context_key)?;
+    let groups = group_messages_for_policy(conversation, policy)?;
     let protected_groups = protected_group_indices(conversation, &groups, protection)?;
     let protected_start = protected_groups.iter().next().copied();
     let policy_key = policy.key();
@@ -308,7 +329,7 @@ pub fn plan_model_context(
         .entries
         .iter()
         .find(|entry| entry.policy_key == policy_key);
-    if entry.is_some_and(|entry| entry.strategy != policy.strategy) {
+    if entry.is_some_and(|entry| entry.strategy != policy.strategy) && !retained_checkpoint {
         return Err(ModelContextError::UnsupportedStrategy);
     }
     let floor = resolve_floor(conversation, &groups, entry)?;
@@ -384,6 +405,12 @@ pub fn plan_model_context(
         )?));
     }
 
+    if policy.strategy == ContextManagementStrategy::Window {
+        return Err(ModelContextError::ProtectedStateTooLarge {
+            cost: checkpoint_and_raw_cost,
+            high_watermark: history_budget,
+        });
+    }
     let summary_reserve = summary_context_cost_limit(history_budget);
     let low = policy.low_watermark_bytes();
     let mut recent_start = groups.len();
@@ -471,7 +498,7 @@ pub fn plan_model_context(
         .position(|group| conversation[group.start].message_id == covered_from_message_id)
         .ok_or_else(|| ModelContextError::InvalidCheckpoint("covered start is missing".into()))?;
     let full_covered_projection =
-        project_groups(conversation, &groups, covered_start, suffix_start);
+        coverage_projection(conversation, &groups, covered_start, suffix_start)?;
     let allowed_source_message_ids = conversation
         [groups[covered_start].start..groups[suffix_start - 1].end]
         .iter()
@@ -612,7 +639,7 @@ pub fn apply_validated_checkpoint(
         Ok(ContextBuildPlan::NeedsCompression(rebuilt)) if rebuilt.as_ref() == plan => {}
         _ => return Err(ModelContextError::StaleCompressionPlan),
     }
-    let groups = group_messages(conversation, &plan.policy.source_context_key)?;
+    let groups = group_messages_for_policy(conversation, &plan.policy)?;
     if plan.raw_suffix_group_index == 0 || plan.raw_suffix_group_index > groups.len() {
         return Err(ModelContextError::StaleCompressionPlan);
     }
@@ -620,12 +647,12 @@ pub fn apply_validated_checkpoint(
         .iter()
         .position(|group| conversation[group.start].message_id == plan.covered_from_message_id)
         .ok_or(ModelContextError::StaleCompressionPlan)?;
-    let full = project_groups(
+    let full = coverage_projection(
         conversation,
         &groups,
         covered_start,
         plan.raw_suffix_group_index,
-    );
+    )?;
     if sha256_hex(&canonical_bytes(&full)?) != plan.covered_projection_sha256 {
         return Err(ModelContextError::StaleCompressionPlan);
     }
@@ -656,6 +683,7 @@ pub fn apply_validated_checkpoint(
     let checkpoint = ContextCheckpoint::V1(ContextCheckpointV1 {
         generation: plan.generation,
         policy_key: plan.policy_key.clone(),
+        creation_policy: plan.policy.clone(),
         covered_from_message_id: plan.covered_from_message_id.clone(),
         covered_through_message_id: plan.covered_through_message_id.clone(),
         covered_projection_sha256: plan.covered_projection_sha256.clone(),
@@ -868,7 +896,7 @@ fn floor_reconciliation_plan(
     })
 }
 
-fn validate_checkpoint(
+pub(super) fn validate_checkpoint(
     checkpoint: &ContextCheckpointV1,
     conversation: &[ChatMessage],
     groups: &[MessageGroup],
@@ -876,9 +904,12 @@ fn validate_checkpoint(
     floor: usize,
 ) -> Result<(), ModelContextError> {
     if checkpoint.generation == 0
-        || checkpoint.policy_key != policy.key()
-        || checkpoint.compressor.source_context_key != policy.source_context_key.as_str()
-        || checkpoint.compressor.model_profile_revision != policy.profile_revision
+        || checkpoint.policy_key != checkpoint.creation_policy.key()
+        || (!policy.preserve_history && checkpoint.policy_key != policy.key())
+        || checkpoint.compressor.source_context_key
+            != checkpoint.creation_policy.source_context_key.as_str()
+        || checkpoint.compressor.model_profile_revision
+            != checkpoint.creation_policy.profile_revision
         || checkpoint.compressor.prompt_version != CONTEXT_SUMMARY_PROMPT_VERSION
         || checkpoint.compressor.schema_version != CONTEXT_SUMMARY_SCHEMA_VERSION
     {
@@ -904,7 +935,7 @@ fn validate_checkpoint(
             "checkpoint coverage is not contiguous with floor".into(),
         ));
     }
-    let projection = project_groups(conversation, groups, start, through + 1);
+    let projection = coverage_projection(conversation, groups, start, through + 1)?;
     if sha256_hex(&canonical_bytes(&projection)?) != checkpoint.covered_projection_sha256 {
         return Err(ModelContextError::InvalidCheckpoint(
             "covered projection hash mismatch".into(),
@@ -945,7 +976,7 @@ fn validate_checkpoint(
         ));
     }
     if usize::try_from(cost).unwrap_or(usize::MAX)
-        > summary_context_cost_limit(policy.history_context_bytes())
+        > summary_context_cost_limit(checkpoint.creation_policy.history_context_bytes())
     {
         return Err(ModelContextError::InvalidCheckpoint(
             "summary context cost exceeds the policy limit".into(),
@@ -1154,7 +1185,7 @@ fn protected_group_indices(
     Ok(protected)
 }
 
-fn resolve_floor(
+pub(super) fn resolve_floor(
     conversation: &[ChatMessage],
     groups: &[MessageGroup],
     entry: Option<&ModelContextEntry>,
@@ -1183,6 +1214,23 @@ fn resolve_floor(
         }
         _ => Ok(0),
     }
+}
+
+fn coverage_projection(
+    conversation: &[ChatMessage],
+    groups: &[MessageGroup],
+    start: usize,
+    end: usize,
+) -> Result<Vec<CompressionMessageV1>, ModelContextError> {
+    groups[start..end]
+        .iter()
+        .flat_map(|group| conversation[group.start..group.end].iter())
+        .map(|message| {
+            crate::conversation_attachment::model_read::canonical_source(message)
+                .map(|message| project_message(&message))
+                .map_err(|error| ModelContextError::InvalidCheckpoint(error.message))
+        })
+        .collect()
 }
 
 fn project_groups(

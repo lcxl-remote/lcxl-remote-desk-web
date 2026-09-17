@@ -25,6 +25,7 @@ fn limit(bytes: u64, items: u32) -> CapabilityGrantLimits {
 }
 fn output(value: ReadContextOutput) -> ToolRunOutput {
     ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: serde_json::to_string(&OperationOutput::ReadContext(value)).unwrap(),
         image_data_url: None,
     }
@@ -101,6 +102,7 @@ fn read_output_limits_count_wire_bytes_and_actual_projections() {
     assert!(validate_output(&registry, &meta_call, &metadata, &limit(4096, 1)).is_err());
     validate_output(&registry, &meta_call, &metadata, &limit(4096, 2)).unwrap();
     let screen = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: "summary".into(),
         image_data_url: Some("data:image/png;base64,YQ==".into()),
     };
@@ -165,6 +167,7 @@ fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
         arguments_json: serde_json::json!({"query":"Rust language","max_results":2}).to_string(),
     };
     let search = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: serde_json::json!({
             "schema_version": 1,
             "configuration_revision": 3,
@@ -215,6 +218,7 @@ fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
             &registry,
             &search_call,
             &ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: forged.to_string(),
                 image_data_url: None
             },
@@ -229,6 +233,7 @@ fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
         arguments_json: serde_json::json!({"url":"https://example.com/"}).to_string(),
     };
     let fetch = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: serde_json::json!({
             "schema_version": 1,
             "untrusted_external_content": true,

@@ -53,6 +53,7 @@ async fn original_result_preserves_label_without_factory_or_new_input_binding() 
         let sess = MemSession::default();
         let model = model();
         let output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
         };
@@ -70,6 +71,7 @@ async fn original_result_preserves_label_without_factory_or_new_input_binding() 
         let mut user = ChatMessage::text("u", ChatRole::User, "restart it");
         let mut input_label = original(
             &ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: user.text.clone(),
                 image_data_url: None,
             },
@@ -108,6 +110,7 @@ async fn inconsistent_original_result_is_not_saved_acknowledged_or_relabelled() 
         let sess = MemSession::default();
         let model = model();
         let mut output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
         };
@@ -175,6 +178,7 @@ async fn original_result_save_failure_leaves_delivery_unacknowledged() {
     };
     let model = model();
     let output = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: "exit_code=0".into(),
         image_data_url: None,
     };
@@ -228,6 +232,7 @@ async fn original_failure_preserves_receipt_reports_failure_and_stops_the_group(
     };
     // Opaque content cannot determine success: the Provider's typed outcome does.
     let output = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: "a native receipt without an error keyword".into(),
         image_data_url: None,
     };
@@ -290,6 +295,7 @@ async fn original_failure_rejects_corruption_and_never_acks_before_save() {
         };
         let model = model();
         let mut output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "native failure".into(),
             image_data_url: None,
         };

@@ -85,9 +85,13 @@ pub(super) fn validate_destination(
                 .map_err(|_| invalid())?;
         if results.next().is_some()
             || (!recovered_image
-                && (existing.text != original.output.content
-                    || existing.image_data_url != original.output.image_data_url))
-            || existing.data_envelope.as_ref() != Some(&original.receipt.envelope)
+                && (!desk_diagnose_core::conversation_attachment::delivery::matches_original(
+                    existing,
+                    &original.output.content,
+                    Some(&original.receipt.envelope),
+                ) || existing.image_data_url != original.output.image_data_url))
+            || (existing.raw_result.is_none()
+                && existing.data_envelope.as_ref() != Some(&original.receipt.envelope))
             || existing.tool_call_id.as_deref() != Some(call)
             || !matches!(existing.role, ChatRole::Tool | ChatRole::UntrustedOutput)
             || existing
@@ -198,6 +202,7 @@ impl SignalCapabilityGrantStore {
                 &action.action_request_id,
                 &original.output.content,
                 Some(original.receipt.envelope.clone()),
+                original.output.format,
                 now.to_rfc3339(),
             );
             if !appended {

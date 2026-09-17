@@ -229,9 +229,22 @@ pub struct ChatMessage {
     /// projector authorizes it and then serializes only the message payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_read: Option<Box<crate::conversation_attachment::model_read::ReadReceipt>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_result: Option<Box<crate::conversation_attachment::delivery::RawResult>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery_format: Option<crate::seam::ToolOutputFormat>,
+    /// Internal, short-lived resolver cache. Never persisted or sent to a model.
+    #[serde(skip)]
+    pub resolved_result: Option<Box<ChatMessage>>,
 }
 
 impl ChatMessage {
+    pub fn trusted_tool_result(&self) -> &Self {
+        self.resolved_result.as_deref().unwrap_or(self)
+    }
+
     /// A plain text message (no image, no tool linkage).
     pub fn text(message_id: impl Into<String>, role: ChatRole, text: impl Into<String>) -> Self {
         Self {
@@ -245,6 +258,10 @@ impl ChatMessage {
             background_task_id: None,
             replay_disposition: None,
             data_envelope: None,
+            attachment_read: None,
+            raw_result: None,
+            pending_delivery_format: None,
+            resolved_result: None,
             reasoning: None,
         }
     }
@@ -292,6 +309,10 @@ impl ChatMessage {
             background_task_id: None,
             replay_disposition: Some(replay_disposition),
             data_envelope: None,
+            attachment_read: None,
+            raw_result: None,
+            pending_delivery_format: None,
+            resolved_result: None,
             reasoning: None,
         }
     }
@@ -330,6 +351,10 @@ impl ChatMessage {
             background_task_id: Some(background_task_id.into()),
             replay_disposition: None,
             data_envelope: None,
+            attachment_read: None,
+            raw_result: None,
+            pending_delivery_format: None,
+            resolved_result: None,
             reasoning: None,
         }
     }
@@ -351,6 +376,10 @@ impl ChatMessage {
             background_task_id: None,
             replay_disposition: None,
             data_envelope: None,
+            attachment_read: None,
+            raw_result: None,
+            pending_delivery_format: None,
+            resolved_result: None,
             reasoning: None,
         }
     }
@@ -376,6 +405,10 @@ impl ChatMessage {
             background_task_id: Some(background_task_id),
             replay_disposition: None,
             data_envelope: None,
+            attachment_read: None,
+            raw_result: None,
+            pending_delivery_format: None,
+            resolved_result: None,
             reasoning: None,
         }
     }

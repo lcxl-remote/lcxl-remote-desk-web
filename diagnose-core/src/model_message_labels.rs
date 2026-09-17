@@ -87,14 +87,15 @@ pub fn read_result_envelope(
     if payload.is_empty() || label.observed_at_unix_ms == 0 {
         return Err(invalid_label());
     }
-    let expires_at_unix_ms = label.observed_at_unix_ms.saturating_add(5 * 60 * 1000);
+    let digest_sha256 = format!("{:x}", Sha256::digest(&payload));
     let envelope = DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: label.envelope_id,
-        content: ContentRef::EphemeralObservation {
-            observation_id: label.observation_id,
+        content: ContentRef::ImmutableBlob {
+            blob_id: label.observation_id,
+            sha256: digest_sha256.clone(),
             size_bytes: payload.len() as u64,
-            expires_at_unix_ms,
+            media_type: "application/octet-stream".into(),
         },
         provenance: DataProvenance {
             source_provider_id: provider.wire.provider_id.clone(),
@@ -102,7 +103,7 @@ pub fn read_result_envelope(
             source_object_id: label.source_object_id,
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: format!("{:x}", Sha256::digest(&payload)),
+        digest_sha256,
         sensitivity: match capability.wire.capability_id.as_str() {
             crate::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
             | crate::device_assistant::WEB_RESEARCH_SEARCH_CAPABILITY_ID => Sensitivity::Public,
@@ -116,7 +117,7 @@ pub fn read_result_envelope(
         // Reading never implicitly grants export to any model or other sink.
         allowed_destinations: Vec::new(),
         retention: RetentionBoundary {
-            expires_at_unix_ms: Some(expires_at_unix_ms),
+            expires_at_unix_ms: None,
             delete_with_run: true,
         },
     };
@@ -349,6 +350,7 @@ mod tests {
     #[test]
     fn read_label_is_bounded_and_never_grants_export() {
         let output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "desktop metadata".into(),
             image_data_url: None,
         };
@@ -361,7 +363,7 @@ mod tests {
         .unwrap();
         assert!(envelope.allowed_destinations.is_empty());
         assert_eq!(envelope.sensitivity, Sensitivity::UserContent);
-        assert_eq!(envelope.retention.expires_at_unix_ms, Some(300_100));
+        assert_eq!(envelope.retention.expires_at_unix_ms, None);
         assert!(envelope.retention.delete_with_run);
         assert_eq!(
             envelope.digest_sha256,
@@ -377,6 +379,7 @@ mod tests {
                 &registry,
                 &call("invented-tool"),
                 &ToolRunOutput {
+                    format: crate::seam::ToolOutputFormat::Text,
                     content: "data".into(),
                     image_data_url: None
                 },

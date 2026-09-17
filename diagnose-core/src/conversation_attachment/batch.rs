@@ -279,10 +279,13 @@ pub fn prepare_delivery(
                 size_bytes: content.len() as u64,
                 original_sha256,
                 sha256: digest(&content),
+                source_truncated: part.source_truncated,
                 storage_truncated,
                 created_at_unix_ms,
                 last_accessed_at_unix_ms: created_at_unix_ms,
                 availability: Availability::Available,
+                image_source: None,
+                source_envelope: None,
             };
             metadata.verify(&content)?;
             result.stored_bytes = result

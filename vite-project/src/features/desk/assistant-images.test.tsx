@@ -21,12 +21,19 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 describe('durable assistant images', () => {
+    it('does not load durable pixels while listing conversation history', async () => {
+        render(<AssistantImages sessionId="stored-run" evidence={[]} />);
+        await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' });
+        expect(getAssistantImage).not.toHaveBeenCalled();
+        expect(screen.queryByRole('img')).toBeNull();
+    });
     it('inserts each screenshot after its tool record and before the next reply', async () => {
         render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
             { id: 'question', role: 'user', text: 'Capture the window' },
             { id: 'capture', role: 'tool_call', toolCallId: 'capture-call', text: 'Screenshot tool' },
             { id: 'answer', role: 'assistant', text: 'The result is visible' },
         ]} renderMessage={message => <p>{message.text}</p>} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
         const image = await screen.findByRole('img');
         expect(screen.getByText('Screenshot tool').compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(image.compareDocumentPosition(screen.getByText('The result is visible')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -37,6 +44,7 @@ describe('durable assistant images', () => {
         const view = render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
             { id: 'answer', role: 'assistant', text: 'Later reply' },
         ]} renderMessage={renderMessage} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
         await screen.findByRole('img');
         expect(screen.getByText('pages.deviceAssistant.imageEarlier')).toBeTruthy();
         view.rerender(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
@@ -44,11 +52,14 @@ describe('durable assistant images', () => {
             { id: 'answer', role: 'assistant', text: 'Later reply' },
         ]} renderMessage={renderMessage} />);
         await waitFor(() => expect(screen.queryByText('pages.deviceAssistant.imageEarlier')).toBeNull());
-        expect(screen.getAllByRole('img')).toHaveLength(1);
-        expect(screen.getByText('Earlier capture').compareDocumentPosition(screen.getByRole('img')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        const button = screen.getByRole('button', { name: 'pages.deviceAssistant.imageOpen' });
+        expect(screen.getAllByRole('button', { name: 'pages.deviceAssistant.imageOpen' })).toHaveLength(1);
+        expect(screen.getByText('Earlier capture').compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(getAssistantImage).toHaveBeenCalledTimes(1);
     });
     it('loads persisted images without any live preview and releases pixel URLs', async () => {
         const view = render(<AssistantImages sessionId="stored-run" evidence={[]} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
         const image = await screen.findByRole('img');
         expect(image.getAttribute('src')).toBe('blob:stored-image');
         expect(getAssistantImage).toHaveBeenCalledWith({ session: 'stored-run', attachment: 'visual-image' }, expect.objectContaining({ responseType: 'blob' }));
@@ -57,6 +68,7 @@ describe('durable assistant images', () => {
     });
     it('removes deleted attachments even when a stale snapshot still contains them', async () => {
         const view = render(<AssistantImages sessionId="stored-run" evidence={[frame]} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
         await screen.findByRole('img');
         fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.imageDelete' }));
         await waitFor(() => expect(screen.queryByRole('img')).toBeNull());
@@ -74,6 +86,7 @@ describe('durable assistant images', () => {
     it('does not treat an unavailable attachment as a retained live preview', async () => {
         vi.mocked(getAssistantImage).mockRejectedValue(new Error('not found'));
         render(<AssistantImages sessionId="stored-run" evidence={[{ ...frame, preview_data_url: 'data:image/png;base64,AQID' }]} />);
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
         await screen.findByText('pages.deviceAssistant.imageUnavailable');
         expect(screen.queryByRole('img')).toBeNull();
     });

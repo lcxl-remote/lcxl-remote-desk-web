@@ -542,6 +542,7 @@ async fn shared_object_binding_clamps_all_file_reads_and_rejects_expired_or_chan
         };
         assert!(changed.bind(&call, &mut operation).is_err());
         let oversized = desk_diagnose_core::seam::ToolRunOutput {
+            format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: "x".repeat(4097),
             image_data_url: None,
         };
@@ -551,6 +552,7 @@ async fn shared_object_binding_clamps_all_file_reads_and_rejects_expired_or_chan
                 .is_err()
         );
         let image = desk_diagnose_core::seam::ToolRunOutput {
+            format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: "".into(),
             image_data_url: Some("data:image/png;base64,synthetic".into()),
         };

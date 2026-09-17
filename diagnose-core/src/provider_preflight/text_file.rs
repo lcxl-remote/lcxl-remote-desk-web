@@ -282,28 +282,33 @@ pub fn resolve_file_result(
         {
             continue;
         }
-        let Some(envelope) = &message.data_envelope else {
+        let Some(envelope) = &message.trusted_tool_result().data_envelope else {
             continue;
         };
         if envelope.validate().is_err()
             || crate::model_egress::envelope_expires_by(envelope, now_unix_ms)
             || envelope.provenance.source_tool_name != source_call.name
             || envelope.provenance.source_provider_id != provider.wire.provider_id
-            || envelope.digest_sha256 != format!("{:x}", Sha256::digest(message.text.as_bytes()))
+            || envelope.digest_sha256
+                != format!(
+                    "{:x}",
+                    Sha256::digest(message.trusted_tool_result().text.as_bytes())
+                )
         {
             continue;
         }
         let mut evidence = if source_call.name == "read_text_file" {
             let Ok(desk_agent_protocol::OperationOutput::ReadContext(
                 desk_agent_protocol::ReadContextOutput::FileContentRead(output),
-            )) = serde_json::from_str(&message.text)
+            )) = serde_json::from_str(&message.trusted_tool_result().text)
             else {
                 continue;
             };
             VerifiedTextFile::from_read(result_call_id, &output)?
         } else {
-            let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(&message.text)
-            else {
+            let Ok(completion) = serde_json::from_str::<ComputerActionCompleted>(
+                &message.trusted_tool_result().text,
+            ) else {
                 continue;
             };
             if completion.result != ComputerActionResultClass::Verified {
@@ -614,7 +619,7 @@ fn read_evidence(
         {
             continue;
         }
-        let Some(envelope) = &message.data_envelope else {
+        let Some(envelope) = &message.trusted_tool_result().data_envelope else {
             continue;
         };
         if envelope.validate().is_err()
@@ -622,13 +627,17 @@ fn read_evidence(
             || envelope.provenance.source_tool_name != source_call.name
             || envelope.provenance.source_provider_id
                 != crate::device_assistant::FILE_WORKSPACE_PROVIDER_ID
-            || envelope.digest_sha256 != format!("{:x}", Sha256::digest(message.text.as_bytes()))
+            || envelope.digest_sha256
+                != format!(
+                    "{:x}",
+                    Sha256::digest(message.trusted_tool_result().text.as_bytes())
+                )
         {
             continue;
         }
         let Ok(desk_agent_protocol::OperationOutput::ReadContext(
             desk_agent_protocol::ReadContextOutput::FileMetadataInspect(output),
-        )) = serde_json::from_str(&message.text)
+        )) = serde_json::from_str(&message.trusted_tool_result().text)
         else {
             continue;
         };
@@ -1706,6 +1715,7 @@ mod tests {
             crate::session::WorkKind::CapabilityProvider,
         );
         let output = crate::seam::ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "New device completion metadata".into(),
             image_data_url: None,
         };

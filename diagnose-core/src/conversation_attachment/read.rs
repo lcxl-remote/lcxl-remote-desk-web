@@ -204,6 +204,8 @@ pub fn read_page(
             ),
         );
     }
+    page.json_fragment = metadata.kind == ContentKind::Json
+        && (request.cursor.is_some() || page.body_bytes != bytes.len());
     Ok(page)
 }
 

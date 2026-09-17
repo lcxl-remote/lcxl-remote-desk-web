@@ -5,7 +5,10 @@ use sha2::{Digest, Sha256};
 
 pub mod batch;
 pub mod command;
+pub mod delivery;
+pub mod model_read;
 pub mod read;
+pub mod source;
 #[cfg(test)]
 mod tests;
 
@@ -47,10 +50,17 @@ pub struct AttachmentMetadata {
     pub size_bytes: u64,
     pub original_sha256: String,
     pub sha256: String,
+    pub source_truncated: bool,
     pub storage_truncated: bool,
     pub created_at_unix_ms: u64,
     pub last_accessed_at_unix_ms: u64,
     pub availability: Availability,
+    /// Screenshot lineage only; pixels never live in metadata or session JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_source: Option<crate::conversation_image::ImageAttachment>,
+    /// Authorized immutable source for text/JSON; never exposed in REST metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
 }
 
 impl AttachmentMetadata {
@@ -117,6 +127,46 @@ impl AttachmentMetadata {
                     return Err(invalid("Invalid image attachment"));
                 }
             }
+        }
+        if let Some(envelope) = &self.source_envelope {
+            envelope
+                .validate()
+                .map_err(|_| invalid("Invalid attachment source label"))?;
+            if envelope.digest_sha256 != self.sha256
+                || match &envelope.content {
+                    desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob {
+                        size_bytes,
+                        ..
+                    }
+                    | desk_agent_protocol::data_lineage::ContentRef::EphemeralObservation {
+                        size_bytes,
+                        ..
+                    }
+                    | desk_agent_protocol::data_lineage::ContentRef::Artifact {
+                        size_bytes, ..
+                    } => *size_bytes,
+                } != self.size_bytes
+            {
+                return Err(invalid(
+                    "Attachment source label does not match saved bytes",
+                ));
+            }
+        }
+        if let Some(source) = &self.image_source {
+            if self.kind != ContentKind::Image
+                || source.frame.evidence_id != self.attachment_id
+                || source.frame.conversation_id != self.conversation_id
+                || source.frame.device_id != self.device_id
+                || source.frame.tool_call_id != self.tool_call_id
+                || source.frame.media_type.as_deref() != Some(self.media_type.as_str())
+                || source.message.message_id != self.message_id
+                || source.message.image_data_url.is_some()
+                || source.frame.preview_data_url.is_some()
+                || source.message.text.len() > MAX_JSON_BYTES
+            {
+                return Err(invalid("Screenshot attachment lineage mismatch"));
+            }
+            source.restore(content)?;
         }
         Ok(())
     }
@@ -240,7 +290,7 @@ pub(crate) fn utf8_end(text: &str, max: usize) -> usize {
     end
 }
 
-pub(crate) fn invalid(message: &str) -> AgentError {
+pub fn invalid(message: &str) -> AgentError {
     AgentError {
         kind: AgentErrorKind::InvalidInput,
         message: message.into(),

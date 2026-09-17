@@ -180,6 +180,70 @@ async fn local_attachments_are_durable_scoped_atomic_and_do_not_resurrect() {
             .len(),
         6000
     );
+
+    let image = prepare_delivery(
+        &DeliveryIdentity {
+            conversation_id: "conversation",
+            actor_id: "owner",
+            device_id: "device",
+            message_id: "image-message",
+            tool_call_id: "image-call",
+        },
+        vec![OutputPart {
+            name: "image".into(),
+            content: PartContent::ImageDataUrl("data:image/png;base64,AQID".into()),
+            source_truncated: false,
+        }],
+        2,
+    )
+    .unwrap();
+    let before_image = usage(&db, "conversation", "owner").await.unwrap();
+    let image_saved = store_batch(&db, &session, &image.attachments)
+        .await
+        .unwrap();
+    assert_eq!(
+        usage(&db, "conversation", "owner").await.unwrap(),
+        before_image + 3
+    );
+    let images = list_images(&db, "conversation", "owner", None)
+        .await
+        .unwrap();
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].attachment_id, image_saved[0].attachment_id);
+    assert_eq!(
+        image_id_by_call(&db, "conversation", "owner", "image-call")
+            .await
+            .unwrap(),
+        images[0].attachment_id
+    );
+    assert!(
+        image_id_by_call(&db, "conversation", "other", "image-call")
+            .await
+            .is_err()
+    );
+    delete(
+        &db,
+        "conversation",
+        "owner",
+        &[images[0].attachment_id.clone()],
+    )
+    .await
+    .unwrap();
+    assert!(
+        list_images(&db, "conversation", "owner", None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        usage(&db, "conversation", "owner").await.unwrap(),
+        before_image
+    );
+    assert!(
+        read(&db, "conversation", "owner", &images[0].attachment_id, true)
+            .await
+            .is_err()
+    );
     db.close().await.unwrap();
     std::fs::remove_dir_all(directory).unwrap();
 }

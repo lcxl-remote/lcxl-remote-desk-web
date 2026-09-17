@@ -16,10 +16,13 @@ fn metadata(id: &str, kind: ContentKind, content: &str) -> AttachmentMetadata {
         size_bytes: content.len() as u64,
         original_sha256: digest(content.as_bytes()),
         sha256: digest(content.as_bytes()),
+        source_truncated: false,
         storage_truncated: false,
         created_at_unix_ms: 1,
         last_accessed_at_unix_ms: 1,
         availability: Availability::Available,
+        image_source: None,
+        source_envelope: None,
     }
 }
 
@@ -88,6 +91,26 @@ fn json_cannot_be_searched_and_tampering_is_rejected() {
         end_line: None,
     };
     assert!(read_page(&meta, b"{}", &req).is_err());
+}
+
+#[test]
+fn json_page_marks_fragments_even_when_a_fragment_is_itself_valid_json() {
+    let content = "[\n1234\n]";
+    let meta = metadata("a", ContentKind::Json, content);
+    let mut req = request();
+    assert!(
+        !read_page(&meta, content.as_bytes(), &req)
+            .unwrap()
+            .json_fragment
+    );
+    req.selection = ReadMode::Read {
+        start_line: Some(2),
+        end_line: Some(2),
+    };
+    let page = read_page(&meta, content.as_bytes(), &req).unwrap();
+    assert!(page.json_fragment);
+    assert!(!page.has_more);
+    assert!(serde_json::from_str::<serde_json::Value>(&page.lines[0].text).is_ok());
 }
 
 #[test]

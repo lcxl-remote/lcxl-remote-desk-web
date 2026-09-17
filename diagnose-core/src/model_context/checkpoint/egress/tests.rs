@@ -751,7 +751,7 @@ fn prompt_permission_resume_keeps_fresh_history_without_a_notice() {
 }
 
 #[test]
-fn model_switch_reports_restriction_in_both_context_strategies() {
+fn unauthorized_history_is_preserved_and_blocks_egress_in_both_strategies() {
     let mut conversation = vec![user("old", 100), user("current", 100)];
     conversation[0]
         .data_envelope
@@ -766,29 +766,37 @@ fn model_switch_reports_restriction_in_both_context_strategies() {
         let mut pinned = context_policy();
         pinned.strategy = strategy;
         let state = ModelContextState::default();
-        let repair = reconcile_context_eligibility(
-            &policy(),
+        assert!(
+            reconcile_context_eligibility(
+                &policy(),
+                &conversation,
+                &state,
+                &pinned,
+                &ContextProtectionSet::default(),
+                1
+            )
+            .unwrap()
+            .is_none()
+        );
+        let ContextBuildPlan::Ready(ready) = plan_model_context(
             &conversation,
             &state,
             &pinned,
             &ContextProtectionSet::default(),
             1,
         )
-        .unwrap()
-        .unwrap();
-        assert_eq!(repair.notice_kind, ContextNoticeKind::Restricted);
-        let next = apply_floor_reconciliation(&repair, &conversation, &state).unwrap();
-        let ContextBuildPlan::Ready(ready) = plan_model_context(
-            &conversation,
-            &next,
-            &pinned,
-            &ContextProtectionSet::default(),
-            1,
-        )
         .unwrap() else {
-            panic!("retained tail fits");
+            panic!("short history must fit");
         };
-        assert_eq!(ready.view.messages, vec![conversation[1].clone()]);
+        assert_eq!(ready.view.messages, conversation);
+        assert!(
+            policy()
+                .authorize_request(ModelRequest::text_only(
+                    ready.view.messages,
+                    ResponseFormatSpec::None,
+                ))
+                .is_err()
+        );
     }
 }
 

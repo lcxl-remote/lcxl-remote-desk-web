@@ -112,7 +112,7 @@ fn invalid(error: CapabilityDisclosureError) -> AgentError {
                     | "describe_tools"
                     | "update_task_status"
                     | "load_conversation_history"
-                    | "read_conversation_image"
+                    | "read_conversation_attachment"
                     | "request_directory"
             ) {
                 format!(

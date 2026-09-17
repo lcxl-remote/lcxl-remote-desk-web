@@ -6,6 +6,7 @@ impl ToolSeam for IdReadTools {
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
         self.0.borrow_mut().push(call.clone());
         Ok(ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "observed UI".into(),
             image_data_url: None,
         })

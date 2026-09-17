@@ -84,6 +84,7 @@ impl SignalDeviceAssistantTools {
                     .await
                     .map_err(|_| invalid())?;
                 let output = ToolRunOutput {
+                    format: desk_diagnose_core::seam::ToolOutputFormat::Json,
                     content: projection.content,
                     image_data_url: None,
                 };

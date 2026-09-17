@@ -7,7 +7,6 @@ use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::{seam::ToolRunOutput, web_research::ValidatedFetch};
 
 const MAX_BODY_BYTES: usize = 128 * 1024;
-const MAX_EXCERPT_CHARS: usize = 24_000;
 const MAX_REDIRECTS: usize = 3;
 
 pub async fn fetch_public_web_page(validated: ValidatedFetch) -> Result<ToolRunOutput, AgentError> {
@@ -111,9 +110,10 @@ pub async fn fetch_public_web_page(validated: ValidatedFetch) -> Result<ToolRunO
             "content_type": content_type,
             "body_bytes": body.len(),
             "sha256": format!("{:x}", Sha256::digest(&body)),
-            "excerpt": excerpt.chars().take(MAX_EXCERPT_CHARS).collect::<String>(),
+            "excerpt": excerpt,
         });
         return Ok(ToolRunOutput {
+            format: desk_diagnose_core::seam::ToolOutputFormat::WebDocument,
             content: serde_json::to_string(&result)
                 .map_err(|_| internal("failed to encode Web Research result"))?,
             image_data_url: None,

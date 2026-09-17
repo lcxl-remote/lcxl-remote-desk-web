@@ -27,12 +27,19 @@ struct StoredOutput {
     snapshot_id: String,
     expires_at: DateTime<Utc>,
     content: String,
+    source_truncated: bool,
+}
+
+#[derive(Default)]
+struct RecentOutput {
+    content: String,
+    truncated: bool,
 }
 
 struct StoreState {
     incarnation: String,
     sequence: u64,
-    recent_by_terminal: HashMap<String, String>,
+    recent_by_terminal: HashMap<String, RecentOutput>,
     objects: HashMap<String, StoredOutput>,
 }
 
@@ -93,9 +100,11 @@ pub fn append_and_issue(terminal_id: &str, chunk: &str) -> Result<ObjectRef, Age
         .recent_by_terminal
         .entry(terminal_id.to_string())
         .or_default();
-    recent.push_str(chunk);
-    truncate_utf8_prefix(recent, MAX_RECENT_OUTPUT_BYTES);
-    let content = recent.clone();
+    recent.content.push_str(chunk);
+    recent.truncated |= recent.content.len() > MAX_RECENT_OUTPUT_BYTES;
+    truncate_utf8_prefix(&mut recent.content, MAX_RECENT_OUTPUT_BYTES);
+    let content = recent.content.clone();
+    let source_truncated = recent.truncated;
     state.sequence = state.sequence.saturating_add(1);
     let snapshot_id = format!("{}:{}", state.incarnation, state.sequence);
     let token = uuid::Uuid::new_v4().to_string();
@@ -106,6 +115,7 @@ pub fn append_and_issue(terminal_id: &str, chunk: &str) -> Result<ObjectRef, Age
             snapshot_id: snapshot_id.clone(),
             expires_at,
             content,
+            source_truncated,
         },
     );
     Ok(ObjectRef {
@@ -155,9 +165,12 @@ pub fn inspect(
             display_summary: "explicitly attached recent terminal output".into(),
             content,
             redaction_count: redacted.kinds.len() as u32,
-            truncated: entry_truncated,
+            recent_tail: true,
+            source_truncated: stored.source_truncated,
+            read_truncated: entry_truncated,
+            truncated: stored.source_truncated || entry_truncated,
         });
-        truncated |= entry_truncated;
+        truncated |= stored.source_truncated || entry_truncated;
         if entry_truncated {
             break;
         }
@@ -275,6 +288,36 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn rolling_tail_retains_source_loss_independently_of_read_limit() {
+        let _guard = test_lock();
+        reset_worker_incarnation();
+        let original = append_and_issue("tail", "original").unwrap();
+        append_and_issue("tail", &"中".repeat(MAX_RECENT_OUTPUT_BYTES)).unwrap();
+        let tail = append_and_issue("tail", "end").unwrap();
+        let output = inspect(&TerminalOutputInspectParams {
+            roots: vec![original, tail.clone()],
+            max_bytes: 64 * 1024,
+        })
+        .unwrap();
+        assert!(output.truncated);
+        assert!(!output.entries[0].source_truncated);
+        assert!(output.entries[1].recent_tail);
+        assert!(output.entries[1].source_truncated);
+        assert!(!output.entries[1].read_truncated);
+        assert!(output.entries[1].content.ends_with("end"));
+        let limited = inspect(&TerminalOutputInspectParams {
+            roots: vec![tail],
+            max_bytes: 512,
+        })
+        .unwrap();
+        assert!(limited.entries[0].read_truncated);
+        assert!(limited.entries[0].source_truncated);
+        reset_terminal("tail");
+        let fresh = append_and_issue("tail", "new").unwrap();
+        assert!(!resolve(&fresh).unwrap().source_truncated);
     }
 
     #[test]

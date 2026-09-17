@@ -20,10 +20,11 @@
     let elementIds = new WeakMap();
     let snapshotAccount = null;
 
-    function boundedText(value, maximum = 1024) {
+    function boundedText(value, maximum = 1024, onTruncated) {
         const normalized = String(value || "").replace(/\s+/gu, " ").trim();
         const bytes = textEncoder.encode(normalized);
         if (bytes.length <= maximum) return normalized;
+        onTruncated?.();
         let end = maximum;
         while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
         return new TextDecoder().decode(bytes.slice(0, end));
@@ -54,7 +55,7 @@
         );
     }
 
-    function accessibleName(element, role) {
+    function accessibleName(element, role, onTruncated) {
         if (isGmail() && element instanceof HTMLInputElement && element.type === "file") {
             return "Gmail attachment file input";
         }
@@ -63,7 +64,7 @@
             element.getAttribute("title") ||
             element.getAttribute("placeholder") ||
             element.getAttribute("name"),
-            MAX_ACCESSIBLE_NAME_BYTES
+            MAX_ACCESSIBLE_NAME_BYTES, onTruncated
         );
         if (explicit) return explicit;
         // Container roles can contain an entire inbox or channel. Never turn
@@ -72,18 +73,18 @@
         if (!["button", "link", "checkbox", "combobox", "option", "tab", "textbox"].includes(role)) {
             return "";
         }
-        return boundedText(element.innerText || element.textContent, MAX_ACCESSIBLE_NAME_BYTES);
+        return boundedText(element.innerText || element.textContent, MAX_ACCESSIBLE_NAME_BYTES, onTruncated);
     }
 
-    function currentValue(element) {
+    function currentValue(element, onTruncated) {
         if (element instanceof HTMLInputElement && element.type === "password") {
             return null;
         }
         if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-            return boundedText(element.value, MAX_FORM_VALUE_BYTES);
+            return boundedText(element.value, MAX_FORM_VALUE_BYTES, onTruncated);
         }
         if (element.isContentEditable) {
-            return boundedText(element.innerText, MAX_FORM_VALUE_BYTES);
+            return boundedText(element.innerText, MAX_FORM_VALUE_BYTES, onTruncated);
         }
         return null;
     }
@@ -193,9 +194,11 @@
         let truncated = false;
         for (const element of candidates) {
             const role = roleOf(element);
-            const name = accessibleName(element, role);
+            // Field caps are source loss too, even when all elements fit.
+            const markTruncated = () => { truncated = true; };
+            const name = accessibleName(element, role, markTruncated);
             if (!name) continue;
-            const value = currentValue(element);
+            const value = currentValue(element, markTruncated);
             const elementBytes = textEncoder.encode(name).length + (value ? textEncoder.encode(value).length : 0);
             if (projected.length >= limit || projectedBytes + elementBytes > MAX_SNAPSHOT_TOTAL_BYTES) {
                 truncated = true;

@@ -1,3 +1,4 @@
+import { AssistantAttachments, AssistantResultAttachments } from './assistant-attachments';
 import { requireRecoveryZip } from '@/lib/file-recovery-error';
 import { Textarea } from '@/components/ui/textarea';
 import { Disclosure } from '@/components/ui/disclosure';
@@ -730,6 +731,7 @@ export function DeviceAssistantWorkspace({
                             </CardTitle>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
+                            <AssistantAttachments sessionId={chat.sessionId} />
                             <AssistantHistory deskId={deskId} deviceId={recoveryConnections.data?.find(item => item.connection_id === deskId)?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
                                 onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
                                 onSelect={(id) => {
@@ -785,7 +787,7 @@ export function DeviceAssistantWorkspace({
                                         : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
                                 }`}
                             >
-                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.deviceAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} onExportBackup={exportBackup} /></> : message.role === 'assistant'
+                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.deviceAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} onExportBackup={exportBackup} /><AssistantResultAttachments sessionId={chat.sessionId} text={message.text} /></> : message.role === 'assistant'
                                     ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
                                     : <p className="whitespace-pre-wrap">{message.text}</p>}
                             </div>

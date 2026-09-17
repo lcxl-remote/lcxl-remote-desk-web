@@ -120,7 +120,9 @@ pub fn bind_request(
             .rev()
             .filter(|m| m.role == crate::chat::ChatRole::Tool)
             .find_map(|message| {
-                let output = crate::ui_model_output::deserialize(&message.text).ok()?;
+                let output =
+                    crate::ui_model_output::deserialize(&message.trusted_tool_result().text)
+                        .ok()?;
                 match output {
                     desk_agent_protocol::OperationOutput::ReadContext(
                         desk_agent_protocol::ReadContextOutput::DesktopUiInspect(ui),

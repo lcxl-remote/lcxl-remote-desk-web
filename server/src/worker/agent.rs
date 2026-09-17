@@ -244,6 +244,10 @@ impl DeviceAgent for LocalDeviceAgent {
             OperationInput::Exec(_) => Err(unsupported("exec is not available until M2")),
         };
 
+        let result = result.and_then(|output| {
+            desk_diagnose_core::conversation_attachment::source::validate_output(&output)?;
+            Ok(output)
+        });
         let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
         match &result {
             Ok(output) => {

@@ -293,6 +293,7 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
             target(&selection, name, now()).unwrap().object_ref
         );
         let output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "synthetic document content".into(),
             image_data_url: None,
         };
@@ -331,11 +332,13 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
                 .contains(&reference.token)
         );
         let oversized = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "x".repeat(1025),
             image_data_url: None,
         };
         assert!(binding.label(&call, &oversized, envelope.clone()).is_err());
         let image = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "".into(),
             image_data_url: Some("data:image/png;base64,x".into()),
         };

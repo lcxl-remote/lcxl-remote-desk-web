@@ -237,7 +237,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                     "scope": {"type": "string", "enum": ["content", "menus", "all"], "default": "content"},
                     "max_depth": {"type": "integer", "minimum": 1, "maximum": 12, "default": 12},
                     "max_nodes": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 300},
-                    "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576, "default": 262144}
+                    "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 32768, "default": 32768}
                 },
                 "additionalProperties": false
             }),
@@ -267,7 +267,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                     },
                     "selection_only": {"type": "boolean", "const": true, "default": true},
                     "max_objects": {"type": "integer", "minimum": 1, "maximum": 16, "default": 16},
-                    "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 262144, "default": 262144}
+                    "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 32768, "default": 32768}
                 },
                 "additionalProperties": false
             }),
@@ -556,7 +556,7 @@ const fn default_ui_nodes() -> u32 {
 }
 
 const fn default_ui_bytes() -> u32 {
-    262_144
+    32_768
 }
 
 const fn default_office_objects() -> u32 {
@@ -564,7 +564,7 @@ const fn default_office_objects() -> u32 {
 }
 
 const fn default_office_bytes() -> u32 {
-    262_144
+    32_768
 }
 
 /// Parse a params struct from the model's `arguments_json`, treating empty / `{}`
@@ -674,7 +674,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 root: args.root,
                 max_depth: args.max_depth,
                 max_nodes: args.max_nodes,
-                max_bytes: args.max_bytes,
+                max_bytes: json_result_budget(Some(args.max_bytes))?,
             };
             params.validate_selection().map_err(bad_arguments)?;
             ContextKind::DesktopUiInspect(params)
@@ -685,7 +685,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 document: args.document,
                 selection_only: args.selection_only,
                 max_objects: args.max_objects,
-                max_bytes: args.max_bytes,
+                max_bytes: json_result_budget(Some(args.max_bytes))?,
             })
         }
         "inspect_live_spreadsheet" => {
@@ -693,7 +693,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             ContextKind::SpreadsheetLiveInspect(LiveDocumentInspectParams {
                 target: args.target,
                 batch_file: None,
-                max_bytes: args.max_bytes,
+                max_bytes: json_result_budget(Some(args.max_bytes))?,
             })
         }
         "inspect_numbers_file" => {
@@ -701,7 +701,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             ContextKind::SpreadsheetLiveInspect(LiveDocumentInspectParams {
                 target: None,
                 batch_file: None,
-                max_bytes: args.max_bytes,
+                max_bytes: json_result_budget(Some(args.max_bytes))?,
             })
         }
         "inspect_excel_cell" => {
@@ -713,7 +713,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 file: None,
                 sheet_name: args.sheet_name,
                 address: args.address,
-                max_bytes: args.max_bytes,
+                max_bytes: json_result_budget(Some(args.max_bytes))?,
             };
             params.validate_selection().map_err(bad_arguments)?;
             ContextKind::SpreadsheetBatchInspect(params)
@@ -723,7 +723,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             ContextKind::DocumentLiveInspect(LiveDocumentInspectParams {
                 target: args.target,
                 batch_file: None,
-                max_bytes: args.max_bytes,
+                max_bytes: json_result_budget(Some(args.max_bytes))?,
             })
         }
         "inspect_pages_file" | "inspect_word_file" => {
@@ -731,7 +731,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             ContextKind::DocumentLiveInspect(LiveDocumentInspectParams {
                 target: None,
                 batch_file: None,
-                max_bytes: args.max_bytes,
+                max_bytes: json_result_budget(Some(args.max_bytes))?,
             })
         }
         "inspect_live_presentation" => {
@@ -739,7 +739,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             ContextKind::PresentationLiveInspect(LiveDocumentInspectParams {
                 target: args.target,
                 batch_file: None,
-                max_bytes: args.max_bytes,
+                max_bytes: json_result_budget(Some(args.max_bytes))?,
             })
         }
         "inspect_keynote_file" | "inspect_powerpoint_file" => {
@@ -747,7 +747,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             ContextKind::PresentationLiveInspect(LiveDocumentInspectParams {
                 target: None,
                 batch_file: None,
-                max_bytes: args.max_bytes,
+                max_bytes: json_result_budget(Some(args.max_bytes))?,
             })
         }
         "inspect_files" => {

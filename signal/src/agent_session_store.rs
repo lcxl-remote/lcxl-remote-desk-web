@@ -669,6 +669,7 @@ impl SignalAgentSessionStore {
             background_task_id,
             result_text,
             None,
+            desk_diagnose_core::seam::ToolOutputFormat::Text,
             now,
         )
         .await
@@ -686,6 +687,7 @@ impl SignalAgentSessionStore {
         background_task_id: &str,
         result_text: &str,
         result_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+        result_format: desk_diagnose_core::seam::ToolOutputFormat,
         now: &str,
     ) -> Result<EventAppend, AgentError> {
         let now_dt = now_from(now);
@@ -744,6 +746,7 @@ impl SignalAgentSessionStore {
                 background_task_id,
                 result_text,
                 result_envelope.clone(),
+                result_format,
                 now,
             ) {
                 return Ok(EventAppend::AlreadyPresent);
@@ -1113,7 +1116,17 @@ impl SessionSeam for SignalAgentSessionStore {
             consume,
         )
         .await
-        .map_err(|e| internal(format!("Attachment reading failed: {e}")))
+        .map_err(|e| match &e {
+            sea_orm::DbErr::Custom(reason)
+                if reason == "Attachment was deleted"
+                    || reason.starts_with(
+                        "Attachment was automatically evicted by the conversation storage quota;",
+                    ) =>
+            {
+                desk_diagnose_core::conversation_attachment::invalid(reason)
+            }
+            _ => internal("Attachment reading failed"),
+        })
     }
 
     async fn store_image(
@@ -2079,7 +2092,7 @@ mod tests {
             .db
             .execute(
                 &schema
-                    .create_table_from_entity(crate::entity::agent_image_attachment::Entity)
+                    .create_table_from_entity(crate::entity::agent_attachment::Entity)
                     .if_not_exists()
                     .to_owned(),
             )

@@ -139,10 +139,15 @@ pub(super) async fn reconcile_on(
         if existing.len() > 1
             || existing.first().is_some_and(|m| {
                 !matches!(m.role, ChatRole::Tool | ChatRole::UntrustedOutput)
-                    || m.text != output.content
+                    || !desk_diagnose_core::conversation_attachment::delivery::matches_original(
+                        m,
+                        &output.content,
+                        Some(&receipt.envelope),
+                    )
                     || m.image_data_url != output.image_data_url
                     || m.tool_call_id.as_deref() != Some(call.id.as_str())
-                    || m.data_envelope.as_ref() != Some(&receipt.envelope)
+                    || (m.raw_result.is_none()
+                        && m.data_envelope.as_ref() != Some(&receipt.envelope))
             })
         {
             return Err(invalid());
@@ -172,6 +177,7 @@ pub(super) async fn reconcile_on(
                 &task.exec_request_id,
                 output.content,
                 Some(receipt.envelope),
+                output.format,
                 timestamp(now_ms)?.to_rfc3339(),
             );
         }

@@ -1061,7 +1061,7 @@ impl SignalDeviceAssistantTools {
                     true,
                 )
             })?;
-        let session =
+        let mut session =
             desk_diagnose_core::session::PersistedAgentSession::decode_json(&row.state_json)
                 .map_err(|decode_error| {
                     error(
@@ -1082,6 +1082,7 @@ impl SignalDeviceAssistantTools {
                 true,
             ));
         }
+        crate::agent_attachment_store::restore_results(&self.db, &mut session).await?;
         Ok(session)
     }
 
@@ -1240,6 +1241,7 @@ impl SignalDeviceAssistantTools {
         };
         if let Err(provider_error) = &result {
             let output = ToolRunOutput {
+                format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                 content: if provider_error.safe_for_model {
                     format!("tool error: {}", provider_error.message)
                 } else {
@@ -1628,6 +1630,7 @@ impl SignalDeviceAssistantTools {
             if call.name == PREVIEW_COMPUTER_ACTION_TOOL {
                 validate_preview_call(call)
                     .map(|content| ToolRunOutput {
+                        format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                         content,
                         image_data_url: None,
                     })
@@ -5405,6 +5408,7 @@ impl SignalDeviceAssistantTools {
         match output.outcome {
             AgentOutcome::Ok(value) => {
                 let output = ToolRunOutput {
+                    format: desk_diagnose_core::seam::ToolOutputFormat::operation(&value),
                     content: serde_json::to_string(&value).unwrap_or_else(|_| "{}".into()),
                     image_data_url: output.image.map(|image| image.data_url),
                 };
@@ -5422,6 +5426,7 @@ impl SignalDeviceAssistantTools {
                     )
                 })?;
                 Ok(ToolRunOutput {
+                    format: desk_diagnose_core::seam::ToolOutputFormat::operation(&value),
                     content: desk_diagnose_core::ui_model_output::serialize(&value).map_err(
                         |_| {
                             ProviderInvokeError::known(
@@ -5586,6 +5591,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
             }),
             ExecOutcome::Dispatched(action) => Ok(ReadOutcome::Completed {
                 output: ToolRunOutput {
+                    format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                     content: desk_diagnose_core::chat::background_task_running_result(
                         &action.action_request_id,
                     ),
@@ -5881,7 +5887,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
             verify_read_label(output, &verified, observed_at_unix_ms)?;
             Some(verified)
         };
-        let mut envelope = desk_diagnose_core::model_message_labels::read_result_envelope(
+        let envelope = desk_diagnose_core::model_message_labels::read_result_envelope(
             &registry,
             call,
             output,
@@ -5892,28 +5898,10 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 observed_at_unix_ms,
             },
         )?;
-        if let Some(verified) = &verified {
-            envelope.retention.expires_at_unix_ms = Some(
-                envelope
-                    .retention
-                    .expires_at_unix_ms
-                    .unwrap_or(verified.expires_at_unix_ms)
-                    .min(verified.expires_at_unix_ms),
-            );
-        }
         if verified.as_ref().is_some_and(|verified| verified.failed) {
             Ok(Some(envelope))
         } else if self.uses_selected_objects(call)? {
-            let mut envelope = self.object_binding()?.label(call, output, envelope)?;
-            if let Some(verified) = verified {
-                envelope.retention.expires_at_unix_ms = Some(
-                    envelope
-                        .retention
-                        .expires_at_unix_ms
-                        .unwrap_or(verified.expires_at_unix_ms)
-                        .min(verified.expires_at_unix_ms),
-                );
-            }
+            let envelope = self.object_binding()?.label(call, output, envelope)?;
             Ok(Some(envelope))
         } else {
             Ok(Some(envelope))
@@ -6196,6 +6184,7 @@ mod tests {
     #[test]
     fn verified_read_label_rejects_changed_or_expired_result() {
         let output = ToolRunOutput {
+            format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: "bounded result".into(),
             image_data_url: None,
         };
@@ -6210,6 +6199,7 @@ mod tests {
         assert!(
             verify_read_label(
                 &ToolRunOutput {
+                    format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                     content: "changed result".into(),
                     image_data_url: None,
                 },
@@ -6807,10 +6797,12 @@ mod tests {
     #[test]
     fn screen_envelope_fingerprint_binds_the_image_bytes() {
         let text_only = ToolRunOutput {
+            format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: "screen metadata".into(),
             image_data_url: None,
         };
         let with_image = ToolRunOutput {
+            format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: text_only.content.clone(),
             image_data_url: Some("data:image/jpeg;base64,AQID".into()),
         };

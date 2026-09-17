@@ -50,8 +50,6 @@ pub async fn test_connection(config: &SearchConfig) -> Result<SearchTestResult, 
 
 const SEARCH_ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
-const MAX_TITLE_CHARS: usize = 512;
-const MAX_SNIPPET_CHARS: usize = 2_000;
 const MAX_URL_BYTES: usize = 2_048;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -323,7 +321,7 @@ fn project_results(
         let Some(url) = validated_public_result_url(&item.url) else {
             continue;
         };
-        let title = bounded_text(&item.title, MAX_TITLE_CHARS);
+        let title = bounded_text(&item.title, usize::MAX);
         if title.is_empty()
             || results
                 .iter()
@@ -334,7 +332,7 @@ fn project_results(
         results.push(WebSearchResult {
             title,
             url,
-            snippet: bounded_text(&item.description, MAX_SNIPPET_CHARS),
+            snippet: bounded_text(&item.description, usize::MAX),
             published_at: item
                 .page_age
                 .as_deref()
@@ -361,6 +359,7 @@ fn project_results(
         "results": results,
     });
     Ok(ToolRunOutput {
+        format: desk_diagnose_core::seam::ToolOutputFormat::Json,
         content: serde_json::to_string(&result)
             .map_err(|_| internal("failed to encode Web Search result"))?,
         image_data_url: None,

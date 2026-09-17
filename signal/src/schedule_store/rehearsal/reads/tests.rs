@@ -230,6 +230,7 @@ async fn fixture_with_text(
             &registry,
             &call,
             &desk_diagnose_core::seam::ToolRunOutput {
+                format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                 content: result.text.clone(),
                 image_data_url: None,
             },

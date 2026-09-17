@@ -198,6 +198,7 @@ fn decode(
             return Err(invalid());
         }
         let output = ToolRunOutput {
+            format: desk_diagnose_core::seam::ToolOutputFormat::Json,
             content: terminal.projection.content.clone(),
             image_data_url: None,
         };
@@ -233,6 +234,7 @@ pub(super) fn terminal_result(
         work,
         original_call_id: binding.origin.tool_call_id,
         output: ToolRunOutput {
+            format: desk_diagnose_core::seam::ToolOutputFormat::Json,
             content: terminal.projection.content,
             image_data_url: None,
         },
@@ -432,6 +434,7 @@ impl SignalCapabilityGrantStore {
                     1,
                     now_ms,
                     &ToolRunOutput {
+                        format: desk_diagnose_core::seam::ToolOutputFormat::Json,
                         content: projection.content.clone(),
                         image_data_url: None,
                     },

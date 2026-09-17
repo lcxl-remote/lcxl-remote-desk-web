@@ -12,10 +12,11 @@ function StoredImage({ frame, onDelete }: { frame: DeviceAssistantVisualEvidence
     const [failed, setFailed] = useState(false);
     const [open, setOpen] = useState(false);
     const [deleting, setDeleting] = useState(false);
+    const [requested, setRequested] = useState(false);
     // Only an explicit artifact reference denotes durable storage.
     const durable = frame.status === 'available' && frame.content?.kind === 'artifact' && frame.content.artifact_id === frame.evidence_id;
     useEffect(() => {
-        if (!durable) return;
+        if (!durable || !requested) return;
         const controller = new AbortController();
         let objectUrl: string | null = null;
         setFailed(false);
@@ -27,7 +28,7 @@ function StoredImage({ frame, onDelete }: { frame: DeviceAssistantVisualEvidence
                 setUrl(objectUrl);
             }).catch(() => { if (!controller.signal.aborted) setFailed(true); });
         return () => { controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
-    }, [durable, frame.conversation_id, frame.evidence_id]);
+    }, [durable, requested, frame.conversation_id, frame.evidence_id]);
     const source = url ?? (!durable ? frame.preview_data_url : null);
     const remove = async () => {
         if (!window.confirm(t('pages.deviceAssistant.imageDeleteConfirm'))) return;
@@ -40,7 +41,7 @@ function StoredImage({ frame, onDelete }: { frame: DeviceAssistantVisualEvidence
     return <div className="overflow-hidden rounded-md border bg-muted/30">
         {source ? <Button variant="unstyled" type="button" className="block w-full" onClick={() => setOpen(true)} aria-label={t('pages.deviceAssistant.imageOpen')}>
             <img src={source} alt={t('pages.deviceAssistant.visualEvidenceAlt')} loading="lazy" className="max-h-56 w-full object-contain" />
-        </Button> : <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">
+        </Button> : durable && !requested ? <Button type="button" variant="ghost" className="w-full" onClick={() => setRequested(true)}>{t('pages.deviceAssistant.imageOpen')}</Button> : <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">
             {t(durable ? (failed ? 'pages.deviceAssistant.imageUnavailable' : 'pages.deviceAssistant.imageLoading')
                 : frame.status === 'expired' ? 'pages.deviceAssistant.visualEvidenceExpired' : 'pages.deviceAssistant.visualEvidenceNotRetained')}
         </div>}

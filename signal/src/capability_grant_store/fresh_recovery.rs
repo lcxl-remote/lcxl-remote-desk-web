@@ -177,6 +177,7 @@ pub(crate) async fn restore_completed_calls(
                 &original.receipt.action.action_request_id,
                 &content,
                 Some(original.receipt.envelope.clone()),
+                original.output.format,
                 now,
             );
         }

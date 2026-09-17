@@ -39,6 +39,7 @@ fn waiter() -> ScriptModel {
 
 fn failed_receipt() -> WaitOutcome {
     let output = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: "original native failure".into(),
         image_data_url: None,
     };
@@ -269,6 +270,7 @@ async fn background_receipt_wait_in_a_batch_does_not_split_or_ack_an_open_tool_g
         requests: Rc::new(RefCell::new(vec![])),
     };
     let output = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: "original native result".into(),
         image_data_url: None,
     };
@@ -320,6 +322,7 @@ async fn background_receipt_keeps_original_call_and_label_separate_from_wait_sta
     let sess = original_task_session();
     let model = waiter();
     let output = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: "original native result".into(),
         image_data_url: None,
     };
@@ -383,6 +386,7 @@ async fn background_receipt_keeps_original_call_and_label_separate_from_wait_sta
         "exec_task9",
         "original native result",
         Some(envelope),
+        crate::seam::ToolOutputFormat::Text,
         "2026-06-20T00:02:00Z"
     ));
 }
@@ -401,6 +405,7 @@ async fn background_receipt_rejects_mismatched_identity_or_bytes_without_ack() {
         let sess = original_task_session();
         let model = waiter();
         let mut output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "original native result".into(),
             image_data_url: None,
         };
@@ -471,6 +476,7 @@ async fn background_unknown_wait_retains_original_anchor_for_late_completion() {
     };
     let action = crate::session::ActionIdentity::agent_exec(8, "exec_task9", "e9");
     let output = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: "late original result".into(),
         image_data_url: None,
     };
@@ -558,6 +564,7 @@ async fn background_wait_rejects_missing_duplicate_or_wrong_original_anchor() {
             let model = waiter();
             let action = crate::session::ActionIdentity::agent_exec(8, "exec_task9", "e9");
             let output = ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: "late original result".into(),
                 image_data_url: None,
             };
@@ -624,6 +631,7 @@ fn background_status_inherits_proposal_boundary_without_requesting_a_native_rece
     );
     let parent = original_results::original(
         &ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "proposal".into(),
             image_data_url: None,
         },

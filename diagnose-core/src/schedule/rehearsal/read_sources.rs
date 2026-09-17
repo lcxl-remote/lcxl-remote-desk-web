@@ -127,6 +127,7 @@ pub fn verified_action_source(
         return Err(InvalidReadSource::Conflict);
     }
     let output = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: results[0].text.clone(),
         image_data_url: results[0].image_data_url.clone(),
     };
@@ -208,6 +209,7 @@ fn project_tool_result_source(
         arguments_json: proposals[0].arguments_json.clone(),
     };
     let output = ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
         content: result.text.clone(),
         image_data_url: result.image_data_url.clone(),
     };
@@ -281,6 +283,7 @@ mod tests {
             arguments_json: "{}".into(),
         };
         let output = ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "original result".into(),
             image_data_url: None,
         };

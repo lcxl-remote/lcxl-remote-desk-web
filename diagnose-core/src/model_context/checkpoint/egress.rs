@@ -12,7 +12,6 @@ use crate::{
     model_egress::{ModelEgressPolicy, model_turn_content_bytes},
     prompt::ResponseFormatSpec,
     seam::ModelRequest,
-    sink_authorizer::SinkInput,
 };
 
 // Reserve one lineage slot for a prior checkpoint's own model-output envelope.
@@ -31,7 +30,7 @@ pub fn reconcile_context_eligibility(
     if conversation.is_empty() {
         return Ok(None);
     }
-    let groups = group_messages(conversation, &policy.source_context_key)?;
+    let groups = group_messages_for_policy(conversation, policy)?;
     let protected = protected_group_indices(conversation, &groups, protection)?;
     let key = policy.key();
     let entry = state.entries.iter().find(|entry| entry.policy_key == key);
@@ -110,6 +109,9 @@ pub fn reconcile_context_eligibility(
     if entry.and_then(|entry| entry.checkpoint.as_ref()).is_some()
         && authorize_context_checkpoint(egress, state, &key, conversation).is_err()
     {
+        if policy.preserve_history {
+            return Err(lineage_error());
+        }
         // A checkpoint summarizes only groups before its floor. Keep that
         // monotonic floor when dropping a summary that may no longer be sent.
         if floor == 0 {
@@ -331,7 +333,10 @@ pub(super) fn compression_source_bindings(
             let message = messages.get(id).ok_or_else(lineage_error)?;
             Ok(ContextSummarySourceV1 {
                 message_id: id.into(),
-                message_sha256: sha256_hex(&canonical_bytes(message)?),
+                message_sha256: sha256_hex(&canonical_bytes(
+                    &crate::conversation_attachment::model_read::canonical_source(message)
+                        .map_err(|_| lineage_error())?,
+                )?),
             })
         })
         .collect()
@@ -375,7 +380,11 @@ fn validate_source_bindings(
         let message = messages
             .get(source.message_id.as_str())
             .ok_or_else(lineage_error)?;
-        if sha256_hex(&canonical_bytes(message)?) != source.message_sha256 {
+        if sha256_hex(&canonical_bytes(
+            &crate::conversation_attachment::model_read::canonical_source(message)
+                .map_err(|_| lineage_error())?,
+        )?) != source.message_sha256
+        {
             return Err(lineage_error());
         }
         previous = Some(&source.message_id);
@@ -530,14 +539,19 @@ fn authorize_bytes(
     envelope: &DataEnvelope,
     bytes: &[u8],
 ) -> Result<(), ModelContextError> {
-    crate::sink_authorizer::authorize_model_history(
-        &policy.destination,
-        &[SinkInput { envelope, bytes }],
-        policy.now_unix_ms,
-        policy.byte_cap,
-    )
-    .map(|_| ())
-    .map_err(|_| lineage_error())
+    let mut message = ChatMessage::text(
+        "checkpoint-authority",
+        ChatRole::ContextSummary,
+        std::str::from_utf8(bytes).map_err(|_| lineage_error())?,
+    );
+    message.data_envelope = Some(envelope.clone());
+    policy
+        .authorize_request(ModelRequest::text_only(
+            vec![message],
+            ResponseFormatSpec::None,
+        ))
+        .map(|_| ())
+        .map_err(|_| lineage_error())
 }
 
 fn derive_projection(

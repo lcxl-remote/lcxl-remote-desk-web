@@ -1728,6 +1728,7 @@ impl PersistedAgentSession {
             background_task_id,
             result_text,
             None,
+            crate::seam::ToolOutputFormat::Text,
             now,
         )
     }
@@ -1744,6 +1745,7 @@ impl PersistedAgentSession {
         background_task_id: &str,
         result_text: impl Into<String>,
         result_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+        result_format: crate::seam::ToolOutputFormat,
         now: impl Into<String>,
     ) -> bool {
         if self.execution_state.tasks().into_iter().any(|action| {
@@ -1763,6 +1765,7 @@ impl PersistedAgentSession {
                 background_task_id,
                 result_text,
                 result_envelope,
+                result_format,
                 now,
             )
         })
@@ -1777,6 +1780,7 @@ impl PersistedAgentSession {
         background_task_id: &str,
         result_text: impl Into<String>,
         result_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+        result_format: crate::seam::ToolOutputFormat,
         now: impl Into<String>,
     ) -> bool {
         // Idempotent: a message keyed by this event is already in the conversation.
@@ -1826,6 +1830,7 @@ impl PersistedAgentSession {
             msg.message_id = event_id.to_string();
             msg.background_task_id = Some(background_task_id.to_string());
             msg.data_envelope = result_envelope;
+            msg.pending_delivery_format = Some(result_format);
             msg.image_data_url = None;
             self.execution_state = ExecutionState::None;
             self.updated_at = now;
@@ -1843,6 +1848,7 @@ impl PersistedAgentSession {
                 crate::chat::ChatMessage::tool_result(event_id, tool_call_id, result_text);
             message.background_task_id = Some(background_task_id.to_string());
             message.data_envelope = result_envelope;
+            message.pending_delivery_format = Some(result_format);
             self.conversation.push(message);
         } else {
             let mut message = crate::chat::ChatMessage::untrusted_output(
@@ -1852,6 +1858,7 @@ impl PersistedAgentSession {
                 result_text,
             );
             message.data_envelope = result_envelope;
+            message.pending_delivery_format = Some(result_format);
             self.conversation.push(message);
         }
         if matches!(

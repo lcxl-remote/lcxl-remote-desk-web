@@ -397,8 +397,37 @@ pub trait ModelSeam {
 /// on the edge). The loop never sees un-redacted tool output.
 #[derive(Debug, Clone, Default)]
 pub struct ToolRunOutput {
+    pub format: ToolOutputFormat,
     pub content: String,
     pub image_data_url: Option<String>,
+}
+
+/// The producer declares the format; JSON-looking text is still text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ToolOutputFormat {
+    #[default]
+    Text,
+    Json,
+    Operation,
+    WebDocument,
+}
+
+impl ToolOutputFormat {
+    pub fn operation(output: &desk_agent_protocol::OperationOutput) -> Self {
+        match crate::conversation_attachment::source::source_format(output) {
+            crate::conversation_attachment::source::SourceFormat::Image => Self::Text,
+            crate::conversation_attachment::source::SourceFormat::Json
+            | crate::conversation_attachment::source::SourceFormat::FileText
+            | crate::conversation_attachment::source::SourceFormat::TerminalText
+            | crate::conversation_attachment::source::SourceFormat::Command => Self::Operation,
+        }
+    }
+    pub fn outcome(outcome: &desk_agent_protocol::AgentOutcome) -> Self {
+        match outcome {
+            desk_agent_protocol::AgentOutcome::Ok(output) => Self::operation(output),
+            desk_agent_protocol::AgentOutcome::Err(_) => Self::Text,
+        }
+    }
 }
 
 /// The immutable identity of a dispatched mutating execution, used to fence a late

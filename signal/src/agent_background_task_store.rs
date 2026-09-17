@@ -770,6 +770,7 @@ impl SignalBackgroundTaskStore {
                     &row.action_request_id,
                     &result_text,
                     result_envelope,
+                    desk_diagnose_core::seam::ToolOutputFormat::Json,
                     &now,
                 )
                 .await
@@ -1625,6 +1626,7 @@ mod tests {
                     "task-1",
                     &output.text,
                     Some(output.envelope.clone()),
+                    desk_diagnose_core::seam::ToolOutputFormat::Json,
                     "2026-08-26T00:00:03Z",
                 )
                 .await

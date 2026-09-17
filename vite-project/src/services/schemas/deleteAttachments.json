@@ -1,0 +1,1 @@
+{"type":"object","required":["session","attachment_ids"],"properties":{"attachment_ids":{"type":"array","items":{"type":"string"}},"session":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"DeleteAttachments"}

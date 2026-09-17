@@ -422,6 +422,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                 assert!(dispatcher.send_original(work.id).await.unwrap());
                 foreground_closed.notify_one();
                 return Ok(desk_diagnose_core::seam::ToolRunOutput {
+                    format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                     content: "background".into(),
                     image_data_url: None,
                 });
@@ -454,6 +455,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                 ExecOutcome::Unknown(_) if late => {
                     foreground_closed.notify_one();
                     Ok(desk_diagnose_core::seam::ToolRunOutput {
+                        format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                         content: "unknown".into(),
                         image_data_url: None,
                     })
@@ -502,6 +504,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                     assert!(dispatcher.send_original(action.work_id).await.unwrap());
                     foreground_closed.notify_one();
                     Ok(desk_diagnose_core::seam::ToolRunOutput {
+                        format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                         content: "background".into(),
                         image_data_url: None,
                     })

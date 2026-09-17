@@ -23,6 +23,7 @@ impl ToolSeam for GrantTools {
         Ok(ExecOutcome::Executed {
             data_envelope: None,
             output: ToolRunOutput {
+                format: crate::seam::ToolOutputFormat::Text,
                 content: "launch accepted by test seam".into(),
                 image_data_url: None,
             },
@@ -33,6 +34,7 @@ impl ToolSeam for GrantTools {
         self.reads.set(self.reads.get() + 1);
         self.snapshot.borrow_mut().grants[0].remaining_uses = 0;
         Ok(ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
             content: "immutable observation".into(),
             image_data_url: None,
         })

@@ -15,7 +15,7 @@ pub const MAX_IMAGES_PER_REQUEST: usize = 4;
 pub const MAX_REQUEST_IMAGE_DECODED_BYTES: usize = MAX_IMAGE_DECODED_BYTES * MAX_IMAGES_PER_REQUEST;
 
 pub const ALLOWED_IMAGE_MEDIA_TYPES: [&str; 3] = ["image/jpeg", "image/png", "image/webp"];
-pub const IMAGE_NOT_RETAINED_PLACEHOLDER: &str = "[image omitted from model history; use read_conversation_image with this result's original tool_call_id to retrieve a stored attachment if available]";
+pub const IMAGE_NOT_RETAINED_PLACEHOLDER: &str = "[image omitted from model history; use read_conversation_attachment with the screenshot attachment_id to retrieve stored pixels if available]";
 
 /// Parse persisted tool JSON while accepting only our exact trailing image
 /// placeholder. Arbitrary trailing text remains invalid.

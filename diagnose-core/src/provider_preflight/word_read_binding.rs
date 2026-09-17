@@ -111,20 +111,24 @@ pub fn resolve_word_read(
         if calls.next().is_some() || call.name != windows_word::INSPECT_TOOL {
             continue;
         }
-        let Some(envelope) = &message.data_envelope else {
+        let Some(envelope) = &message.trusted_tool_result().data_envelope else {
             continue;
         };
         if envelope.validate().is_err()
             || crate::model_egress::envelope_expires_by(envelope, now)
             || envelope.provenance.source_tool_name != call.name
             || envelope.provenance.source_provider_id != windows_word::PROVIDER_ID
-            || envelope.digest_sha256 != format!("{:x}", Sha256::digest(message.text.as_bytes()))
+            || envelope.digest_sha256
+                != format!(
+                    "{:x}",
+                    Sha256::digest(message.trusted_tool_result().text.as_bytes())
+                )
         {
             continue;
         }
         let Ok(desk_agent_protocol::OperationOutput::ReadContext(
             desk_agent_protocol::ReadContextOutput::DocumentLiveInspect(output),
-        )) = serde_json::from_str(&message.text)
+        )) = serde_json::from_str(&message.trusted_tool_result().text)
         else {
             continue;
         };

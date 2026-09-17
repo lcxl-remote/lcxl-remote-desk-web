@@ -183,6 +183,7 @@ impl SignalCapabilityGrantStore {
             }
             let receipt = payload.command_receipt.ok_or_else(invalid)?;
             let output = desk_diagnose_core::seam::ToolRunOutput {
+                format: crate::agent_exec_store::output_format(&task),
                 content: task.result_text.clone().ok_or_else(invalid)?,
                 image_data_url: None,
             };
@@ -222,8 +223,11 @@ impl SignalCapabilityGrantStore {
                 || !session.conversation.iter().any(|message| {
                     message.message_id == event_id
                         && message.tool_call_id.as_deref() == Some(task.tool_call_id.as_str())
-                        && message.text == output.content
-                        && message.data_envelope.as_ref() == Some(&receipt.envelope)
+                        && desk_diagnose_core::conversation_attachment::delivery::matches_original(
+                            message,
+                            &output.content,
+                            Some(&receipt.envelope),
+                        )
                 })
             {
                 return Err(invalid());
