@@ -8,9 +8,9 @@
 //! a thin edge needs the data-egress gate independently of the execution policy,
 //! and holds no model credentials at all (those live on the central brain).
 //!
-//! Both flags default to `false` (most restrictive / fail-closed), so a config
-//! written before this section existed — or one where the operator never opted
-//! in — never lets logs or screenshots leave the host.
+//! Screenshot collection is enabled by default; log collection is disabled.
+//! Explicit saved values are preserved. Collection still requires the applicable
+//! request scope and authorization.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -18,16 +18,25 @@ use utoipa::ToSchema;
 /// Persisted edge collection policy. Mirrors the runtime
 /// [`desk_diagnose_core::selection::CollectionPolicy`] gate, read live at
 /// collection time.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
 pub struct CollectionPolicySettings {
     /// Whether logs (`log.recent`, `container.logs`, raw `container.inspect`) may
     /// be collected and sent to a model. Default `false`.
     pub allow_logs: bool,
     /// Whether a screenshot may be collected and sent to a model. Default
-    /// `false`. A screenshot additionally requires the per-request
+    /// `true`. A screenshot additionally requires the per-request
     /// `include_screen` flag.
     pub allow_screen: bool,
+}
+
+impl Default for CollectionPolicySettings {
+    fn default() -> Self {
+        Self {
+            allow_logs: false,
+            allow_screen: true,
+        }
+    }
 }
 
 impl CollectionPolicySettings {
@@ -60,15 +69,21 @@ pub struct CollectionPolicySettingsUpdate {
 mod tests {
     use super::*;
 
-    /// Both flags default to false (fail-closed) and a config without the section
-    /// deserializes to that default.
     #[test]
-    fn defaults_are_fail_closed() {
+    fn defaults_allow_screen_but_not_logs() {
         let p = CollectionPolicySettings::default();
         assert!(!p.allow_logs);
-        assert!(!p.allow_screen);
+        assert!(p.allow_screen);
         let parsed: CollectionPolicySettings = serde_json::from_str("{}").expect("empty config");
         assert_eq!(parsed, CollectionPolicySettings::default());
+    }
+
+    #[test]
+    fn saved_screen_opt_out_is_preserved() {
+        let parsed: CollectionPolicySettings =
+            serde_json::from_str(r#"{"allow_screen":false}"#).expect("saved config");
+        assert!(!parsed.allow_screen);
+        assert!(!parsed.allow_logs);
     }
 
     /// Update semantics: `Some` sets, `None` leaves unchanged.
@@ -80,18 +95,18 @@ mod tests {
             allow_screen: None,
         });
         assert!(p.allow_logs);
-        assert!(!p.allow_screen);
+        assert!(p.allow_screen);
 
         p.apply_update(CollectionPolicySettingsUpdate {
             allow_logs: None,
-            allow_screen: Some(true),
+            allow_screen: Some(false),
         });
         assert!(p.allow_logs); // untouched
-        assert!(p.allow_screen);
+        assert!(!p.allow_screen);
 
         // An all-None update changes nothing.
         p.apply_update(CollectionPolicySettingsUpdate::default());
         assert!(p.allow_logs);
-        assert!(p.allow_screen);
+        assert!(!p.allow_screen);
     }
 }

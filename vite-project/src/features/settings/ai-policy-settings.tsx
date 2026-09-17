@@ -97,7 +97,7 @@ export function AiPolicySettings() {
     })
     const collectionForm = useForm<CollectionPolicyFormValues>({
         resolver: zodResolver(collectionPolicySchema),
-        defaultValues: { allow_screen: false, allow_logs: false },
+        defaultValues: { allow_screen: true, allow_logs: false },
     })
 
     const didHydratePolicyRef = useRef(false)
@@ -122,7 +122,7 @@ export function AiPolicySettings() {
         if (collectionResponse?.data && !isCollectionLoading && !didHydrateCollectionRef.current) {
             didHydrateCollectionRef.current = true
             collectionForm.reset({
-                allow_screen: collectionResponse.data.allow_screen ?? false,
+                allow_screen: collectionResponse.data.allow_screen ?? true,
                 allow_logs: collectionResponse.data.allow_logs ?? false,
             })
         }
