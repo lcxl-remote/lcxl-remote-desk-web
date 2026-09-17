@@ -17,7 +17,6 @@ use windows::{
         },
         System::{
             Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock},
-            JobObjects::IsProcessInJob,
             StationsAndDesktops::{GetThreadDesktop, GetUserObjectInformationW, UOI_NAME},
             Threading::{
                 CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, CreateProcessW,
@@ -27,7 +26,7 @@ use windows::{
         },
         UI::Shell::GetUserProfileDirectoryW,
     },
-    core::{BOOL, PCWSTR, PWSTR},
+    core::{PCWSTR, PWSTR},
 };
 
 struct OwnedHandle(HANDLE);
@@ -105,19 +104,6 @@ fn token_sid(token: HANDLE) -> Result<String, LaunchFailureReason> {
         let _ = LocalFree(Some(HLOCAL(sid.0.cast())));
         text.map_err(|_| LaunchFailureReason::SessionUnavailable)
     }
-}
-
-fn require_interactive_host() -> Result<(), LaunchFailureReason> {
-    require_default_desktop()?;
-    unsafe {
-        let mut in_job = BOOL::default();
-        IsProcessInJob(GetCurrentProcess(), None, &mut in_job)
-            .map_err(|_| LaunchFailureReason::LifetimeIsolationUnavailable)?;
-        if in_job.as_bool() {
-            return Err(LaunchFailureReason::LifetimeIsolationUnavailable);
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn current_elevated() -> Result<bool, LaunchFailureReason> {
@@ -203,7 +189,7 @@ pub(crate) fn prepare(
     if request.target.kind != ApplicationTargetKind::Executable {
         return Err(LaunchFailureReason::Unsupported);
     }
-    require_interactive_host()?;
+    require_default_desktop()?;
     if expected_user_sid.is_empty() || expected_session_id == 0 {
         return Err(LaunchFailureReason::SessionUnavailable);
     }
@@ -407,7 +393,9 @@ impl PreparedExecutable {
             created_process_elevated: None,
             observations: vec![],
         };
-        if let Err(reason) = require_interactive_host() {
+        // External host Jobs are inherited normally; native launch does not
+        // reject or escape them. It only avoids our per-command containment.
+        if let Err(reason) = require_default_desktop() {
             result.failure_reason = Some(reason);
             return result;
         }
