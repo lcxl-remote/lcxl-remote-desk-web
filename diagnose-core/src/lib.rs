@@ -141,3 +141,5 @@ pub mod conversation_image;
 pub mod ui_model_ids;
 
 pub mod model_input;
+
+pub mod tool_exposure;

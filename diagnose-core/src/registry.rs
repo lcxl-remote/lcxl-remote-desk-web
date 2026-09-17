@@ -98,39 +98,52 @@ pub fn is_exposed(
     execution_state: &ExecutionState,
     origin: TriggerOrigin,
 ) -> bool {
+    exposure_block_reason(tool, scope, execution_state, origin).is_none()
+}
+
+/// Stable server-side reason for the scope/state exposure gate.
+pub fn exposure_block_reason(
+    tool: &RegisteredTool,
+    scope: &AgentScope,
+    execution_state: &ExecutionState,
+    origin: TriggerOrigin,
+) -> Option<&'static str> {
     // The wait tool operates on the session's own task, not the device: it needs no
     // capability grant and is offered only while there is a task to wait on.
     if tool.effect == ToolEffect::WaitTask {
-        return !execution_state.tasks().is_empty();
+        return execution_state
+            .tasks()
+            .is_empty()
+            .then_some("no_pending_task");
     }
     if tool.effect == ToolEffect::RunProjection {
-        return true;
+        return None;
     }
     if tool.effect == ToolEffect::PermissionPlanning {
-        return true;
+        return None;
     }
     if tool.effect == ToolEffect::CapabilityDiscovery {
-        return true;
+        return None;
     }
     if tool.effect == ToolEffect::ConversationHistory {
-        return true;
+        return None;
     }
     if tool.effect == ToolEffect::SchedulePlanning {
-        return origin == TriggerOrigin::User;
+        return (origin != TriggerOrigin::User).then_some("trigger_origin_disallows_planning");
     }
     if tool.effect == ToolEffect::DirectoryPlanning {
-        return origin.allows_new_mutation();
+        return (!origin.allows_new_mutation()).then_some("trigger_origin_disallows_mutation");
     }
     if !scope.granted.contains(&tool.required_capability) {
-        return false;
+        return Some("missing_scope_capability");
     }
     if !mode_allows_effect(scope.mode, tool.effect) {
-        return false;
+        return Some("execution_mode_disallows_effect");
     }
     if tool.effect == ToolEffect::Mutating && !origin.allows_new_mutation() {
-        return false;
+        return Some("trigger_origin_disallows_mutation");
     }
-    true
+    None
 }
 
 /// The registered tools exposed for a turn (server-authoritative). Used to build

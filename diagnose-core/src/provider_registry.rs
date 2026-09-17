@@ -22,6 +22,7 @@ pub const MAX_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDescriptor {
+    pub exposure: crate::tool_exposure::ExposureRequirement,
     pub wire: CapabilityWireDescriptor,
     pub tool_spec: ToolSpec,
     pub required_capability: Capability,
@@ -435,6 +436,7 @@ mod tests {
             surfaces: vec![ProductSurface::OssPersonalOwner],
         };
         let capability = CapabilityDescriptor {
+            exposure: crate::tool_exposure::ExposureRequirement::NoAttachment,
             wire: wire.clone(),
             tool_spec: ToolSpec {
                 name: tool_name.into(),

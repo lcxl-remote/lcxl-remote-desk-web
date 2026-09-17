@@ -2042,9 +2042,47 @@ async fn run_inner_impl(
                 );
                 let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. Re-read CURRENT AUTHORIZED GRANTS. If a required tool has state=active with approved_exact_input, call that tool now with exactly approved_exact_input and no changed fields. Do not inspect again, create another preview, or request the same permission before that call, because doing so can replace the approved ephemeral object reference. If no matching active grant exists, adapt to the recorded decision or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
                 let marker_text = if permission_continuation_blocked {
-                    "PERMISSION CONTINUATION BLOCKED (server authoritative): the approved tool is not currently executable under the runtime state/scope. Approval does not override this restriction. Do not retry the mutation or request the same permission. Available read/discovery tools remain usable. If an earlier action failed, inspect the current UI before choosing the next action. Previous failures do not block other authorized operations. Explain the blocker instead of claiming the approved action ran."
+                    let reasons = deps
+                        .permission_continuation_exact_tools
+                        .iter()
+                        .map(|name| {
+                            let reason = if let Some(tool) =
+                                deps.registry.iter().find(|tool| tool.name() == name)
+                            {
+                                crate::registry::exposure_block_reason(
+                                    tool,
+                                    &session.scope_snapshot,
+                                    &session.execution_state,
+                                    session.trigger_origin,
+                                )
+                                .or_else(|| {
+                                    step_inventory
+                                        .as_deref()
+                                        .and_then(|items| {
+                                            items.iter().find(|item| item.tool_name == *name)
+                                        })
+                                        .filter(|item| !item.callable())
+                                        .map(|_| "capability_not_ready")
+                                })
+                                .or_else(|| {
+                                    authority_names
+                                        .as_ref()
+                                        .filter(|names| !names.contains(name))
+                                        .map(|_| "no_active_matching_grant")
+                                })
+                                .unwrap_or("tool_not_selected_for_advertisement")
+                            } else {
+                                "tool_not_in_runtime_registry"
+                            };
+                            format!("{name}: {reason}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "PERMISSION CONTINUATION BLOCKED (server authoritative): {reasons}. Approval does not override this restriction. Do not retry the mutation or request the same permission. Available read/discovery tools remain usable. Explain the specific blocker instead of claiming the approved action ran."
+                    )
                 } else {
-                    marker_text
+                    marker_text.to_string()
                 };
                 let parent = session
                     .conversation
@@ -2052,11 +2090,11 @@ async fn run_inner_impl(
                     .rev()
                     .find(|message| message.role == ChatRole::User)
                     .and_then(|message| message.data_envelope.as_ref());
-                let mut marker = ChatMessage::system_event(&marker_id, marker_text);
+                let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
                 marker.data_envelope = derive_internal_tool_result_envelope(
                     parent,
                     &marker_id,
-                    marker_text,
+                    &marker_text,
                     "permission_continuation_checkpoint",
                 )?;
                 messages.push(marker);

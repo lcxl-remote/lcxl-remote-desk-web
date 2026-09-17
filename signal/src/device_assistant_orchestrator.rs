@@ -40,7 +40,6 @@ use desk_diagnose_core::model_capability::{
     ModelCapabilities, apply_model_compatibility, filter_model_compatible_tools,
 };
 use desk_diagnose_core::prompt::ResponseFormatSpec;
-use desk_diagnose_core::registry::RegisteredTool;
 #[cfg(test)]
 use desk_diagnose_core::seam::ModelRequest;
 use desk_diagnose_core::seam::{
@@ -95,58 +94,6 @@ use desk_diagnose_core::permission_resume::model_bound_permission_resume_message
 use desk_diagnose_core::permission_resume::{
     authorized_permission_resume_message, bind_exact_authorization_system_message,
 };
-
-/// Keep action tools in the planning scope without attaching an observation.
-/// The grant store still checks the current application/action or exact grant.
-fn extend_application_and_exact_action_capabilities(
-    registry: &[RegisteredTool],
-    granted: &mut Vec<desk_agent_protocol::Capability>,
-) {
-    use desk_agent_protocol::Capability;
-    use desk_diagnose_core::device_assistant::*;
-    for (tool, capability) in [
-        (
-            EXECUTE_CONFIRMED_UI_ACTION_TOOL,
-            Capability::DesktopUiActionConfirmed,
-        ),
-        (
-            EXECUTE_BACKGROUND_INPUT_TOOL,
-            Capability::DesktopBackgroundInputConfirmed,
-        ),
-        (
-            EXECUTE_CONFIRMED_RAW_INPUT_TOOL,
-            Capability::DesktopInputFallbackConfirmed,
-        ),
-    ] {
-        if registry.iter().any(|entry| entry.name() == tool) && !granted.contains(&capability) {
-            granted.push(capability);
-        }
-    }
-}
-
-fn capability_enables_mutation(capability: &desk_agent_protocol::Capability) -> bool {
-    matches!(
-        capability,
-        desk_agent_protocol::Capability::DesktopUiActionConfirmed
-            | desk_agent_protocol::Capability::DesktopBackgroundInputConfirmed
-            | desk_agent_protocol::Capability::DesktopInputFallbackConfirmed
-            | desk_agent_protocol::Capability::FileArtifactCreateConfirmed
-            | desk_agent_protocol::Capability::FilePatchConfirmed
-            | desk_agent_protocol::Capability::FileDeleteConfirmed
-            | desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed
-            | desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed
-            | desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed
-            | desk_agent_protocol::Capability::WordDocumentCreateConfirmed
-            | desk_agent_protocol::Capability::ShellExecConfirmed
-            | desk_agent_protocol::Capability::BrowserPageNavigateConfirmed
-            | desk_agent_protocol::Capability::BrowserInputFallbackConfirmed
-            | desk_agent_protocol::Capability::BrowserExternalDraftWriteConfirmed
-            | desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
-            | desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed
-            | desk_agent_protocol::Capability::DocumentLivePatchConfirmed
-            | desk_agent_protocol::Capability::PresentationLivePatchConfirmed
-    )
-}
 
 fn has_active_resume_desktop_read_grant(
     grants: &[desk_agent_protocol::capability_grant::CapabilityGrant],
@@ -1248,15 +1195,22 @@ async fn compose_turn_inner(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let resumed_desktop_reads = [
-        "list_applications",
-        "inspect_desktop_session",
-        "inspect_desktop_ui",
-        "read_current_screen",
-    ]
-    .into_iter()
-    .filter(|name| has_active_resume_desktop_read_grant(&current_desktop_grants, name, now_unix_ms))
-    .collect::<Vec<_>>();
+    let resumed_desktop_reads = provider_registry
+        .registered_tools()
+        .into_iter()
+        .filter(|tool| {
+            provider_registry
+                .capability_for_tool(tool.name())
+                .is_some_and(|descriptor| {
+                    descriptor.exposure
+                        == desk_diagnose_core::tool_exposure::ExposureRequirement::DesktopRead
+                })
+        })
+        .filter(|tool| {
+            has_active_resume_desktop_read_grant(&current_desktop_grants, tool.name(), now_unix_ms)
+        })
+        .map(|tool| tool.spec.name)
+        .collect::<Vec<_>>();
     let mut selected_source_tools = ask
         .selected_capability_ids
         .iter()
@@ -1736,108 +1690,20 @@ async fn compose_turn_inner(
             store: sessions.clone(),
         }),
     };
-    let mut granted = desk_diagnose_core::device_assistant::selected_context_capabilities(
-        &ask.selected_capability_ids,
-    )
-    .expect("control authorizer validated selected Device Assistant context");
-    for name in &resumed_desktop_reads {
-        let capability = provider_registry
-            .capability_for_tool(name)
-            .unwrap()
-            .required_capability;
-        if !granted.contains(&capability) {
-            granted.push(capability);
-        }
+    let mut granted = Vec::new();
+    desk_diagnose_core::tool_exposure::extend_candidate_scope(
+        &provider_registry,
+        &registry,
+        &selected_tool_capability_ids,
+        &resumed_desktop_reads,
+        &mut granted,
+    );
+    // The sealed command classifier can dispatch the read-only protocol variant.
+    if granted.contains(&desk_agent_protocol::Capability::ShellExecConfirmed) {
+        granted.push(desk_agent_protocol::Capability::ShellExecReadonly);
     }
-    extend_application_and_exact_action_capabilities(&registry, &mut granted);
-    granted.extend(desk_diagnose_core::device_assistant::system_diagnostic_capabilities());
-    // The command Provider itself remains a fixed R3 one-shot exact grant.
-    // These two edge capabilities only let the daemon accept the server-owned
-    // classifier's read-only vs mutating effect after it reproduces the sealed
-    // safe-template plan; neither one exposes the legacy free-form exec tool.
-    granted.push(desk_agent_protocol::Capability::ShellExecReadonly);
-    // Capability candidates, not directory consent or a tool execution grant.
-    // Issuance and dispatch independently resolve the current conversation root.
-    granted.push(desk_agent_protocol::Capability::FileArtifactCreateConfirmed);
-    granted.push(desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed);
-    granted.push(desk_agent_protocol::Capability::FileMetadataRead);
-    granted.push(desk_agent_protocol::Capability::FileContentRead);
-    granted.push(desk_agent_protocol::Capability::FilePatchConfirmed);
-    granted.push(desk_agent_protocol::Capability::FileDeleteConfirmed);
-    granted.push(desk_agent_protocol::Capability::ShellExecConfirmed);
-    if !selected_file_roots.is_empty() {
-        granted.push(desk_agent_protocol::Capability::FileMetadataRead);
-        if selected_file_roots.iter().any(|object_ref| {
-            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::File
-        }) {
-            granted.push(desk_agent_protocol::Capability::FileContentRead);
-        }
-        if selected_file_roots.iter().any(|object_ref| {
-            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
-        }) {
-            granted.push(desk_agent_protocol::Capability::FileArtifactCreateConfirmed);
-            granted.push(desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed);
-            if selected_file_roots
-                .iter()
-                .filter(|object_ref| {
-                    object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::File
-                })
-                .count()
-                == 1
-            {
-                // File batch actions use the same protocol capabilities as Live
-                // actions. They still require their own exact Provider grant.
-                granted.extend([
-                    desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
-                    desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
-                    desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
-                ]);
-            }
-        }
-    }
-    if !selected_spreadsheet_roots.is_empty() {
-        granted.push(desk_agent_protocol::Capability::SpreadsheetFileInspect);
-        granted.push(desk_agent_protocol::Capability::SpreadsheetMergePreview);
-        if selected_file_roots.iter().any(|object_ref| {
-            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
-        }) {
-            granted.push(desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed);
-            granted
-                .push(desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed);
-            granted.push(desk_agent_protocol::Capability::WordDocumentCreateConfirmed);
-        }
-    }
-    if !selected_terminal_roots.is_empty() {
-        granted.push(desk_agent_protocol::Capability::TerminalOutputRead);
-    }
-    if !selected_window_roots.is_empty() {
-        granted.push(desk_agent_protocol::Capability::ScreenCaptureCurrent);
-    }
-    if selected_browser_surface.is_some() {
-        desk_diagnose_core::device_assistant::extend_browser_context_capabilities(&mut granted);
-    }
-    if selected_outlook_surface.is_some() {
-        granted.push(desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed);
-    }
-    if selected_live_spreadsheet.is_some() {
-        granted.extend([
-            desk_agent_protocol::Capability::SpreadsheetLiveInspect,
-            desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
-        ]);
-    }
-    if selected_live_document.is_some() {
-        granted.extend([
-            desk_agent_protocol::Capability::DocumentLiveInspect,
-            desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
-        ]);
-    }
-    if selected_live_presentation.is_some() {
-        granted.extend([
-            desk_agent_protocol::Capability::PresentationLiveInspect,
-            desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
-        ]);
-    }
-    let mutation_enabled = granted.iter().any(capability_enables_mutation);
+    let mutation_enabled =
+        desk_diagnose_core::tool_exposure::scope_has_mutation(&provider_registry, &granted);
     let scope = AgentScope {
         granted,
         // Even a provider configured for confirmed exec is hard-clamped here.
@@ -2370,7 +2236,13 @@ mod tests {
         let mut granted =
             desk_diagnose_core::device_assistant::selected_context_capabilities(&[]).unwrap();
 
-        extend_application_and_exact_action_capabilities(&tools, &mut granted);
+        desk_diagnose_core::tool_exposure::extend_candidate_scope(
+            &device_assistant_provider_registry(),
+            &tools,
+            &[],
+            &[],
+            &mut granted,
+        );
 
         assert!(
             granted.contains(&desk_agent_protocol::Capability::DesktopUiActionConfirmed),
@@ -2383,18 +2255,21 @@ mod tests {
         assert!(
             granted.contains(&desk_agent_protocol::Capability::DesktopBackgroundInputConfirmed)
         );
-        assert!(granted.iter().any(capability_enables_mutation));
+        assert!(desk_diagnose_core::tool_exposure::scope_has_mutation(
+            &device_assistant_provider_registry(),
+            &granted
+        ));
 
-        tools.retain(|tool| {
-            !matches!(
-                tool.name(),
-                desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
-                    | desk_diagnose_core::device_assistant::EXECUTE_BACKGROUND_INPUT_TOOL
-                    | desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL
-            )
-        });
+        assert!(granted.contains(&desk_agent_protocol::Capability::ApplicationLaunchConfirmed));
+        tools.clear();
         let mut unavailable = Vec::new();
-        extend_application_and_exact_action_capabilities(&tools, &mut unavailable);
+        desk_diagnose_core::tool_exposure::extend_candidate_scope(
+            &device_assistant_provider_registry(),
+            &tools,
+            &[],
+            &[],
+            &mut unavailable,
+        );
         assert!(unavailable.is_empty());
     }
 

@@ -141,13 +141,14 @@ pub async fn claim_scheduled_permission(
             scope.granted.push(capability.required_capability);
         }
     }
-    scope.mode = if scope.granted.iter().any(capability_enables_mutation) {
-        config
-            .execution_mode
-            .restrict_to(ExecutionMode::ConfirmEachAction)
-    } else {
-        ExecutionMode::ReadOnly
-    };
+    scope.mode =
+        if desk_diagnose_core::tool_exposure::scope_has_mutation(&providers, &scope.granted) {
+            config
+                .execution_mode
+                .restrict_to(ExecutionMode::ConfirmEachAction)
+        } else {
+            ExecutionMode::ReadOnly
+        };
     let claimed = ScheduleStore::new(db.clone())
         .claim_continuation_permission(ContinuationPermissionClaim {
             continuation: ContinuationClaim {
