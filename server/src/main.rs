@@ -143,6 +143,10 @@ fn confirm_cli_lock() -> anyhow::Result<()> {
 
 fn main() {
     #[cfg(windows)]
+    if let Some(code) = lcxl_remote_desk_server::windows_application_host::run_if_requested() {
+        std::process::exit(code);
+    }
+    #[cfg(windows)]
     {
         let mut args = std::env::args_os();
         let _ = args.next();

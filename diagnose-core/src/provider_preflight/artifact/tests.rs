@@ -10,7 +10,7 @@ const NOW: u64 = 1_800_000_000_000;
 #[test]
 fn directory_selector_is_in_exact_input_but_never_becomes_a_native_path() {
     let with_selector = call(
-        "create_text_artifact_in_selected_directory",
+        "create_text_file",
         json!({"directory_request_id":"approved-directory", "file_name":"notes.txt", "content_utf8":"hello"}),
     );
     let action = artifact_action_from_call(&with_selector).unwrap();
@@ -30,7 +30,7 @@ fn directory_selector_is_in_exact_input_but_never_becomes_a_native_path() {
             .contains("approved-directory")
     );
     let bad = call(
-        "create_text_artifact_in_selected_directory",
+        "create_text_file",
         json!({"directory_request_id":{"token":"forged"}, "file_name":"notes.txt", "content_utf8":"hello"}),
     );
     assert!(artifact_action_from_call(&bad).is_err());
@@ -41,7 +41,7 @@ fn text_creation_accepts_empty_files_but_enforces_the_utf8_byte_budget() {
     for content in [String::new(), "文".repeat(21_845)] {
         assert!(
             artifact_action_from_call(&call(
-                "create_text_artifact_in_selected_directory",
+                "create_text_file",
                 json!({"file_name":"notes.txt", "content_utf8":content})
             ))
             .is_ok()
@@ -49,7 +49,7 @@ fn text_creation_accepts_empty_files_but_enforces_the_utf8_byte_budget() {
     }
     assert!(
         artifact_action_from_call(&call(
-            "create_text_artifact_in_selected_directory",
+            "create_text_file",
             json!({"file_name":"notes.txt", "content_utf8":"文".repeat(21_846)})
         ))
         .is_err()
@@ -80,21 +80,21 @@ fn both_orchestrators_derive_closed_create_new_artifacts() {
     let cases = [
         (
             call(
-                "create_text_artifact_in_selected_directory",
+                "create_text_file",
                 json!({"file_name":"notes.txt","content_utf8":"hello"}),
             ),
             Capability::FileArtifactCreateConfirmed,
         ),
         (
             call(
-                "create_workbook_from_merge_preview",
+                "create_workbook",
                 json!({"preview_id":"preview-1","file_name":"merged.xlsx"}),
             ),
             Capability::SpreadsheetWorkbookCreateConfirmed,
         ),
         (
             call(
-                "create_formula_workbook_from_merge_preview",
+                "create_formula_workbook",
                 json!({
                     "preview_id":"preview-1",
                     "file_name":"formula.xlsx",
@@ -107,7 +107,7 @@ fn both_orchestrators_derive_closed_create_new_artifacts() {
         ),
         (
             call(
-                "create_word_report_from_merge_preview",
+                "create_word_report",
                 json!({
                     "preview_id":"preview-1",
                     "file_name":"report.docx",
@@ -120,7 +120,7 @@ fn both_orchestrators_derive_closed_create_new_artifacts() {
         ),
         (
             call(
-                "create_local_communication_draft",
+                "create_local_message_draft",
                 json!({
                     "file_name":"message.draft.txt",
                     "draft":{
@@ -170,7 +170,7 @@ fn both_orchestrators_derive_closed_create_new_artifacts() {
 fn artifact_preflight_rejects_ambiguous_directory_and_unbounded_inputs() {
     let registry = device_assistant_provider_registry();
     let valid = call(
-        "create_text_artifact_in_selected_directory",
+        "create_text_file",
         json!({"file_name":"notes.txt","content_utf8":"hello"}),
     );
     assert!(
@@ -195,19 +195,19 @@ fn artifact_preflight_rejects_ambiguous_directory_and_unbounded_inputs() {
     );
     for invalid in [
         call(
-            "create_text_artifact_in_selected_directory",
+            "create_text_file",
             json!({"file_name":"notes.txt","content_utf8":null}),
         ),
         call(
-            "create_text_artifact_in_selected_directory",
+            "create_text_file",
             json!({"file_name":"../notes.txt","content_utf8":"hello"}),
         ),
         call(
-            "create_workbook_from_merge_preview",
+            "create_workbook",
             json!({"preview_id":"preview-1","file_name":"merged.txt"}),
         ),
         call(
-            "create_word_report_from_merge_preview",
+            "create_word_report",
             json!({
                 "preview_id":"preview-1",
                 "file_name":"report.docx",
@@ -232,7 +232,7 @@ fn artifact_preflight_rejects_ambiguous_directory_and_unbounded_inputs() {
 #[test]
 fn formula_policy_digest_is_computed_by_the_shared_validator() {
     let call = call(
-        "create_formula_workbook_from_merge_preview",
+        "create_formula_workbook",
         json!({
             "preview_id":"preview-1",
             "file_name":"formula.xlsx",

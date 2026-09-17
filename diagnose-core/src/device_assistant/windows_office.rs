@@ -3,8 +3,8 @@ use super::*;
 pub const PROVIDER_ID: &str = "office.pptx.batch";
 pub const INSPECT_CAPABILITY_ID: &str = "office.pptx.batch.inspect";
 pub const ADAPTER_ID: &str = "windows.office.pptx.batch";
-pub const INSPECT_TOOL: &str = "inspect_selected_powerpoint_file";
-pub const PATCH_TOOL: &str = "patch_selected_powerpoint_copy";
+pub const INSPECT_TOOL: &str = "inspect_powerpoint_file";
+pub const PATCH_TOOL: &str = "patch_powerpoint_copy";
 pub const PATCH_CAPABILITY_ID: &str = "office.pptx.batch.patch";
 pub(super) const PATCH_READINESS_IDENTITIES: [(&str, &str, &str, &str); 1] = [(
     PROVIDER_ID,
@@ -65,7 +65,7 @@ pub(super) fn provider() -> ProviderDescriptor {
 pub(super) fn patch_tool() -> RegisteredTool {
     let mut tool = presentation_batch_patch_tool();
     tool.spec.name = PATCH_TOOL.into();
-    tool.spec.description = "Apply one exact title or presenter-notes change to a fresh slide returned by inspect_selected_powerpoint_file, then create a new PPTX in an owner-approved directory. Revalidate the selected source and read back the new file; never overwrite the source. No Office application, Live session, or native export is used.".into();
+    tool.spec.description = "Apply one exact title or presenter-notes change to a fresh slide returned by inspect_powerpoint_file, then create a new PPTX in an owner-approved directory. Revalidate the selected source and read back the new file; never overwrite the source. No Office application, Live session, or native export is used.".into();
     tool.spec.parameters_schema["properties"]["output"] = batch_output_schema("pptx");
     tool
 }

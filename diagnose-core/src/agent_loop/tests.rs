@@ -95,7 +95,7 @@ fn selected_object_lineage_keeps_explicit_sources_without_later_context_expansio
     session.conversation.push(user);
     let call = ToolCall {
         id: "read".into(),
-        name: "read_selected_text_file".into(),
+        name: "read_text_file".into(),
         arguments_json: "{}".into(),
     };
     for explicit in [
@@ -677,7 +677,15 @@ fn answer(text: &str) -> ModelTurn {
 }
 
 fn tool_use(id: &str, name: &str) -> ModelTurn {
-    tool_use_args(id, name, "{}")
+    tool_use_args(
+        id,
+        name,
+        if name == "exec_command" {
+            r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#
+        } else {
+            "{}"
+        },
+    )
 }
 
 fn tool_meta() -> ProviderResponseMeta {
@@ -3222,7 +3230,7 @@ async fn repeated_visual_fence_rejections_hit_repeat_limit() {
     let model = ScriptModel {
         turns: RefCell::new(
             (0..=crate::MAX_SAME_TOOL_PER_TURN)
-                .map(|i| tool_use(&format!("c{i}"), "execute_background_inputs"))
+                .map(|i| tool_use(&format!("c{i}"), "send_background_input"))
                 .collect(),
         ),
         requests: Rc::new(RefCell::new(vec![])),
@@ -3231,10 +3239,7 @@ async fn repeated_visual_fence_rejections_hit_repeat_limit() {
         calls: Rc::new(RefCell::new(vec![])),
         reply: "unused".into(),
     };
-    let reg = vec![read_tool(
-        "execute_background_inputs",
-        Capability::SystemInfo,
-    )];
+    let reg = vec![read_tool("send_background_input", Capability::SystemInfo)];
     let clock = || "t".to_string();
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
     let config = LoopDeps {
@@ -3620,7 +3625,7 @@ async fn projection_metrics_capture_long_session_growth_but_bounded_model_input(
             "",
             vec![ToolCallRef {
                 id: "unknown-call".into(),
-                name: "execute_confirmed_command".into(),
+                name: "exec_command".into(),
                 arguments_json: r#"{"schema_version":1,"shell":"bash","command":"printf safe","timeout_ms":1000}"#.into(),
             }],
         );
@@ -3668,9 +3673,10 @@ async fn projection_metrics_capture_long_session_growth_but_bounded_model_input(
                 state: crate::dynamic_run::PermissionRequestState::Pending,
                 items: vec![crate::dynamic_run::GrantRequestItem {
                     command_confirmation: None,
+                    launch_confirmation: None,
                     item_id: "read-file".into(),
                     provider_id: "file.read".into(),
-                    tool_name: "read_selected_text_file".into(),
+                    tool_name: "read_text_file".into(),
                     expected_effect:
                         desk_agent_protocol::capability_provider::CapabilityEffect::ReadFile,
                     resource_scope: Vec::new(),
@@ -3759,7 +3765,7 @@ async fn projection_metrics_capture_long_session_growth_but_bounded_model_input(
         long.loaded_capability_detail_utf8_bytes
     );
     assert_eq!(short.loaded_capability_count, long.loaded_capability_count);
-    assert_eq!(long.capability_registry_count, 58);
+    assert_eq!(long.capability_registry_count, 60);
     assert!(long.conversation_message_count > short.conversation_message_count);
     assert!(long.session_snapshot_json_bytes > short.session_snapshot_json_bytes);
     println!(
@@ -5235,12 +5241,12 @@ async fn mutating_rejected_skips_remaining_in_turn() {
             ToolCall {
                 id: "c1".into(),
                 name: "exec_command".into(),
-                arguments_json: "{}".into(),
+                arguments_json: r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#.into(),
             },
             ToolCall {
                 id: "c2".into(),
                 name: "exec_command".into(),
-                arguments_json: "{}".into(),
+                arguments_json: r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#.into(),
             },
         ],
         provider_meta: tool_meta(),
@@ -5486,12 +5492,12 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
                 tool_use_args(
                     "c1",
                     "exec_command",
-                    r#"{"command":"sleep 1","shell":"bash"}"#,
+                    r#"{"command":"sleep 1","shell":"bash","timeout_ms":10000}"#,
                 ),
                 tool_use_args(
                     "c2",
                     "exec_command",
-                    r#"{"command":"Start-Sleep 1","shell":"powershell"}"#,
+                    r#"{"command":"Start-Sleep 1","shell":"powershell","timeout_ms":10000}"#,
                 ),
                 answer("done"),
             ]
@@ -5738,7 +5744,8 @@ async fn streams_awaiting_approval_event() {
     assert_eq!(
         *log.borrow(),
         vec![
-            "approval:exec_command:c1:{}".to_string(),
+            r#"approval:exec_command:c1:{"command":"pwd","schema_version":1,"shell":"bash","timeout_ms":10000}"#
+                .to_string(),
             "finished:c1:true:exit_code=0".to_string(),
             "answer:ok".to_string(),
         ]
@@ -6907,7 +6914,7 @@ fn artifact_consumer_lineage_resolves_a_prior_typed_artifact_result() {
 
     let call = ToolCall {
         id: "gmail-1".into(),
-        name: "prepare_gmail_web_draft_handoff".into(),
+        name: "prepare_gmail_draft".into(),
         arguments_json: serde_json::json!({
             "attachment": {"artifact": {"content": {
                 "kind": "artifact",
@@ -7059,7 +7066,7 @@ fn artifact_producer_lineage_resolves_preview_and_current_requirement() {
 
     let call = ToolCall {
         id: "docx-1".into(),
-        name: "create_word_report_from_merge_preview".into(),
+        name: "create_word_report".into(),
         arguments_json: serde_json::json!({
             "preview_id": "preview-1",
             "file_name": "report.docx",
@@ -7080,7 +7087,7 @@ fn artifact_producer_lineage_resolves_preview_and_current_requirement() {
     let mut result = Some(envelope(
         "docx-envelope-1",
         "word.document",
-        "create_word_report_from_merge_preview",
+        "create_word_report",
         'c',
     ));
     bind_tool_input_envelopes(&session, &call, &mut result).unwrap();
@@ -7178,7 +7185,7 @@ fn requested_artifact_projection_restores_only_verbatim_named_typed_artifact() {
     let mut artifact = ChatMessage::tool_result("artifact", "call", artifact_json.to_string());
     artifact.data_envelope = Some(envelope(
         "artifact-envelope",
-        "create_word_report_from_merge_preview",
+        "create_word_report",
         Sensitivity::Sensitive,
     ));
     let mut user = ChatMessage::text(
@@ -7797,6 +7804,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
         state: PermissionRequestState::Pending,
         items: vec![GrantRequestItem {
             command_confirmation: None,
+            launch_confirmation: None,
             item_id: "activate-compose".into(),
             provider_id: "browser.element.activate".into(),
             tool_name: "browser_activate_element".into(),
@@ -7995,13 +8003,13 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
     let model = ScriptModel {
         turns: RefCell::new(
             [
-                tool_use("read-1", "inspect_selected_spreadsheets"),
+                tool_use("read-1", "inspect_spreadsheets"),
                 tool_use("read-2", "preview_spreadsheet_merge"),
                 tool_use("read-3", "search_public_web"),
-                tool_use("xlsx-1", "create_workbook_from_merge_preview"),
-                tool_use("docx-1", "create_word_report_from_merge_preview"),
-                tool_use_args("gmail-1", "prepare_gmail_web_draft_handoff", &gmail_args),
-                tool_use("slack-1", "prepare_slack_web_message_handoff"),
+                tool_use("xlsx-1", "create_workbook"),
+                tool_use("docx-1", "create_word_report"),
+                tool_use_args("gmail-1", "prepare_gmail_draft", &gmail_args),
+                tool_use("slack-1", "prepare_slack_message"),
                 answer("combined task complete"),
             ]
             .into(),
@@ -8049,25 +8057,13 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
         Some(handoff_envelope("slack-envelope-1", "slack-result-1", 'd')),
     ]);
     let registry = vec![
-        read_tool("inspect_selected_spreadsheets"),
+        read_tool("inspect_spreadsheets"),
         read_tool("preview_spreadsheet_merge"),
         read_tool("search_public_web"),
-        mutating_tool(
-            "create_workbook_from_merge_preview",
-            Capability::ShellExecConfirmed,
-        ),
-        mutating_tool(
-            "create_word_report_from_merge_preview",
-            Capability::ShellExecConfirmed,
-        ),
-        mutating_tool(
-            "prepare_gmail_web_draft_handoff",
-            Capability::ShellExecConfirmed,
-        ),
-        mutating_tool(
-            "prepare_slack_web_message_handoff",
-            Capability::ShellExecConfirmed,
-        ),
+        mutating_tool("create_workbook", Capability::ShellExecConfirmed),
+        mutating_tool("create_word_report", Capability::ShellExecConfirmed),
+        mutating_tool("prepare_gmail_draft", Capability::ShellExecConfirmed),
+        mutating_tool("prepare_slack_message", Capability::ShellExecConfirmed),
     ];
     let clock = || "t".to_string();
     let outcome = run_agent_turn(
@@ -8157,6 +8153,7 @@ async fn scheduled_permission_pause_saves_exact_request_without_executing_remain
             canonical_input_json: Some("{}".into()),
             canonical_input_digest_sha256: Some(format!("{:x}", Sha256::digest(b"{}"))),
             command_confirmation: None,
+            launch_confirmation: None,
             suggested_ttl_seconds: 60,
             suggested_max_uses: 1,
             reason: "Approve this exact read".into(),

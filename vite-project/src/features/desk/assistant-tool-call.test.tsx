@@ -14,7 +14,7 @@ describe('tool call transcript', () => {
         const output = { work_id: 'work', action_request_id: tool.callId, execution_generation: 'generation',
             result: 'outcome_unknown', facts: [{ index: 0, changed: true, verified: false }], output: null };
         const { container, rerender } = render(<AssistantToolCall running={false} tool={{ ...tool,
-            name: 'create_text_artifact_in_selected_directory', status: 'failed', output: JSON.stringify(output) }} />);
+            name: 'create_text_file', status: 'failed', output: JSON.stringify(output) }} />);
         expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.outcomeUnknown' })).toBeTruthy();
         expect(screen.getByText(/pages.deviceAssistant.toolCall.inspectBeforeRetry/)).toBeTruthy();
         expect(container.querySelector('pre')).toBeNull();
@@ -78,7 +78,7 @@ describe('tool call transcript', () => {
         const { container, rerender } = render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', output }} running={false} />);
         expect(screen.getByText(new RegExp(`pages.deviceAssistant.toolCall.${key}`))).toBeTruthy();
         expect(container.querySelector('pre')).toBeNull();
-        rerender(<AssistantToolCall tool={{ ...tool, name: 'execute_background_inputs', status: 'failed', output: JSON.stringify({ message: output }) }} running={false} />);
+        rerender(<AssistantToolCall tool={{ ...tool, name: 'send_background_input', status: 'failed', output: JSON.stringify({ message: output }) }} running={false} />);
         expect(screen.getByText(new RegExp(`pages.deviceAssistant.toolCall.${key}`))).toBeTruthy();
     });
 

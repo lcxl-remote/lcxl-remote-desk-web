@@ -66,13 +66,18 @@ pub enum ObjectKind {
     Directory,
     TerminalOutput,
     BrowserSurface,
+    ApplicationLaunchTarget,
 }
 
 impl ObjectKind {
     pub fn is_lifecycle_bound(self) -> bool {
         matches!(
             self,
-            Self::DesktopSession | Self::Application | Self::Window | Self::UiElement
+            Self::DesktopSession
+                | Self::Application
+                | Self::Window
+                | Self::UiElement
+                | Self::ApplicationLaunchTarget
         )
     }
 }
@@ -135,6 +140,7 @@ pub enum ComputerUseAdapterKind {
     BrowserExtension,
     OutlookNewMailto,
     OfficeWord,
+    NativeApplication,
 }
 
 #[derive(
@@ -1344,6 +1350,7 @@ pub enum ComputerActionKind {
         application: ObjectRef,
         action: UiSemanticAction,
     },
+    LaunchApplication(crate::application_launch::LaunchApprovalBinding),
 }
 
 impl ComputerActionKind {
@@ -1421,6 +1428,7 @@ impl ComputerActionKind {
                 },
             },
             Self::Communication(_) => Capability::CommunicationOutlookNewHandoffConfirmed,
+            Self::LaunchApplication(_) => Capability::ApplicationLaunchConfirmed,
         }
     }
 }
@@ -1560,6 +1568,19 @@ impl SealedComputerActionPlan {
         validate_adapter(&self.adapter)?;
         validate_actions(&self.adapter, &self.actions)?;
         for step in &self.actions {
+            if let ComputerActionKind::LaunchApplication(binding) = &step.action {
+                let subject = binding.subject();
+                // Manager's logical device id differs from the wire audience.
+                // The durable issuer binds the logical id; daemon admission
+                // separately authenticates this plan's transport audience.
+                if subject.actor_id != self.approved_actor_id
+                    || subject.session_id != self.interactive_session_incarnation
+                {
+                    return Err(ComputerUseValidationError::InvalidContextReference(
+                        "launch approval subject mismatch",
+                    ));
+                }
+            }
             if let ComputerActionKind::Browser(request) = &step.action
                 && request.call_id != self.action_request_id
             {
@@ -1688,6 +1709,9 @@ fn validate_actions(
                         ComputerUseAdapterKind::BrowserExtension,
                         ComputerActionKind::Browser(_)
                     ) | (
+                        ComputerUseAdapterKind::NativeApplication,
+                        ComputerActionKind::LaunchApplication(_)
+                    ) | (
                         ComputerUseAdapterKind::OutlookNewMailto,
                         ComputerActionKind::Communication(_)
                     )
@@ -1695,6 +1719,18 @@ fn validate_actions(
             });
         if !adapter_matches {
             return Err(ComputerUseValidationError::IncompatibleActionAdapter);
+        }
+        if let ComputerActionKind::LaunchApplication(binding) = &step.action {
+            if actions.len() != 1
+                || binding.target() != Some(&step.target)
+                || binding
+                    .revalidate(binding.subject(), binding.request(), binding.identity())
+                    .is_err()
+            {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "invalid exact launch binding",
+                ));
+            }
         }
         if let ComputerActionKind::BackgroundInput {
             application, input, ..
@@ -1755,6 +1791,10 @@ fn validate_actions(
                             | FilePatchAction::DeleteText { .. }
                     ),
                     ObjectKind::File
+                )
+                | (
+                    ComputerActionKind::LaunchApplication(_),
+                    ObjectKind::ApplicationLaunchTarget
                 )
                 | (ComputerActionKind::Browser(_), ObjectKind::BrowserSurface)
                 | (
@@ -2182,6 +2222,7 @@ pub enum ComputerActionOutput {
     BatchDocumentArtifact(BatchDocumentArtifact),
     FileArtifact(CreatedFileArtifactOutput),
     TextFileMutation(TextFileMutationOutput),
+    ApplicationLaunch(crate::application_launch::LaunchApplicationResult),
 }
 
 #[derive(

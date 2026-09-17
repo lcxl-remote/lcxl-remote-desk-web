@@ -130,10 +130,10 @@ pub async fn claim_scheduled_permission(
                     && tool.effect == desk_diagnose_core::registry::ToolEffect::ReadOnly
             }) || matches!(
                 grant.tool_name.as_str(),
-                "create_text_artifact_in_selected_directory"
-                    | "create_workbook_from_merge_preview"
-                    | "create_word_report_from_merge_preview"
-                    | "create_local_communication_draft"
+                "create_text_file"
+                    | "create_workbook"
+                    | "create_word_report"
+                    | "create_local_message_draft"
             ));
         if (scoped || exact.contains(&grant.tool_name))
             && !scope.granted.contains(&capability.required_capability)

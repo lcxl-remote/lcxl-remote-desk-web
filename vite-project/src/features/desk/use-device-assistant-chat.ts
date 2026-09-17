@@ -256,7 +256,7 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 argumentsJson: existing?.argumentsJson ?? '{}',
                 output: message.text,
             });
-            if (!backgroundRunning && message.text && (existing?.name === 'execute_confirmed_command' || nativeFileResult || message.backgroundTaskId || (nativeFailed && permissionReason))) {
+            if (!backgroundRunning && message.text && (existing?.name === 'exec_command' || nativeFileResult || message.backgroundTaskId || (nativeFailed && permissionReason))) {
                 messages.push({ id: message.id, role: 'tool_result', text: message.text, permissionReason });
             }
         }

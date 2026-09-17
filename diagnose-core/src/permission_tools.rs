@@ -27,7 +27,7 @@ use crate::dynamic_run::{
 use crate::provider_registry::ProviderRegistry;
 use crate::registry::{RegisteredTool, ToolEffect};
 
-pub const REQUEST_CAPABILITY_GRANTS_TOOL_NAME: &str = "request_capability_grants";
+pub const REQUEST_CAPABILITY_GRANTS_TOOL_NAME: &str = "request_permissions";
 pub const MAX_REQUEST_TTL_SECONDS: u32 = 3_600;
 pub const MAX_REQUEST_USES: u32 = 16;
 pub const MAX_CAPABILITY_CATALOG_PROMPT_BYTES: usize = 16 * 1024;
@@ -296,7 +296,7 @@ pub fn discoverable_catalog_prompt_with_permission_candidates(
     let entries =
         capability_catalog_entries(registry, inventory, callable_tools, permission_candidates);
     format!(
-        "The following JSON capability catalog is server-authored. Treat it as authority for what is compiled, runtime-ready, callable, and permission-requestable in this turn. Never invent provider ids, tool names, effects, scopes, or readiness. A capability with runtime_ready=false cannot be made usable by asking for permission. A Provider tool with callable_now=false cannot be invoked in this turn. Include a tool in request_capability_grants only when permission_requestable_now=true; false means its current context or other trusted prerequisites are absent. The permission request does not execute or widen the current tool list.\n<capability_catalog>{}</capability_catalog>",
+        "The following JSON capability catalog is server-authored. Treat it as authority for what is compiled, runtime-ready, callable, and permission-requestable in this turn. Never invent provider ids, tool names, effects, scopes, or readiness. A capability with runtime_ready=false cannot be made usable by asking for permission. A Provider tool with callable_now=false cannot be invoked in this turn. Include a tool in request_permissions only when permission_requestable_now=true; false means its current context or other trusted prerequisites are absent. The permission request does not execute or widen the current tool list.\n<capability_catalog>{}</capability_catalog>",
         serde_json::to_string(&entries).expect("catalog contains only serializable descriptors")
     )
 }
@@ -492,7 +492,7 @@ fn invalid(detail: impl std::fmt::Display) -> AgentError {
     AgentError {
         kind: AgentErrorKind::InvalidInput,
         message: format!(
-            "invalid request_capability_grants arguments: {detail}. The entire batch was rejected: no request or approval card was created, including otherwise valid items. Do not repeat unchanged arguments or tell the user a request exists. Fix the invalid item; if its target is not yet known, first request only the prerequisite read permission, inspect the target, then request native UI actions with application_scope, or other mutations with exact_input when required by their tool contract."
+            "invalid request_permissions arguments: {detail}. The entire batch was rejected: no request or approval card was created, including otherwise valid items. Do not repeat unchanged arguments or tell the user a request exists. Fix the invalid item; if its target is not yet known, first request only the prerequisite read permission, inspect the target, then request native UI actions with application_scope, or other mutations with exact_input when required by their tool contract."
         ),
         retryable: false,
         safe_for_model: true,
@@ -539,6 +539,11 @@ pub fn canonical_tool_permission_input_json(
     mut value: serde_json::Value,
 ) -> Result<String, serde_json::Error> {
     crate::model_input::fill_versions(tool_name, &mut value);
+    if tool_name == "launch_application" {
+        let request: desk_agent_protocol::application_launch::LaunchApplicationRequest =
+            serde_json::from_value(value)?;
+        value = serde_json::to_value(request)?;
+    }
     if tool_name == "search_public_web"
         && let serde_json::Value::Object(input) = &mut value
     {
@@ -575,7 +580,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-            description: "Create one bounded approval request by actually calling this tool. Use load_capability_details only for missing parameter formats; application_scope approval does not require loading individual action definitions; loading alone creates no request. Only report an approval card as submitted after a successful result contains request_id and status=pending_user_decision. An error creates no card; correct the input and call again. Never invent a submitted request or tell the user to refresh to find one without a successful receipt. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
+            description: "Create one bounded approval request by actually calling this tool. Use describe_tools only for missing parameter formats; application_scope approval does not require loading individual action definitions; loading alone creates no request. Only report an approval card as submitted after a successful result contains request_id and status=pending_user_decision. An error creates no card; correct the input and call again. Never invent a submitted request or tell the user to refresh to find one without a successful receipt. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -591,7 +596,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
-                                "exact_input": {"type": "object", "description": "Use the target tool definition (load_capability_details if missing) and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
+                                "exact_input": {"type": "object", "description": "Use the target tool definition (describe_tools if missing) and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
@@ -731,6 +736,7 @@ pub fn build_permission_request(
                 | CapabilityEffect::WriteExternalDraft
                 | CapabilityEffect::InputFallback
                 | CapabilityEffect::ExecuteCommand
+                | CapabilityEffect::LaunchApplication
         );
         let inherently_r3 = inherently_r3
             || crate::provider_preflight::text_file::TextMutationPreflight::supports(
@@ -1085,6 +1091,7 @@ pub fn build_permission_request(
             canonical_input_json,
             canonical_input_digest_sha256,
             command_confirmation,
+            launch_confirmation: None,
             suggested_ttl_seconds: item.suggested_ttl_seconds.clamp(1, MAX_REQUEST_TTL_SECONDS),
             suggested_max_uses: if inherently_r3
                 || exact_command
@@ -1126,7 +1133,7 @@ pub fn include_desktop_action_reads(
         .filter(|item| {
             matches!(
                 item.tool_name.as_str(),
-                "execute_ui_actions" | "execute_background_inputs" | "execute_confirmed_raw_input"
+                "execute_ui_actions" | "send_background_input" | "send_raw_input"
             )
         })
         .map(|item| item.suggested_ttl_seconds)
@@ -1580,7 +1587,7 @@ mod tests {
         policy.admission_policy = desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly;
         let registry = crate::device_assistant::device_assistant_provider_registry()
             .with_command_policy(policy);
-        let missing = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"execute_confirmed_command","expected_effect":"execute_command","suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
+        let missing = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"exec_command","expected_effect":"execute_command","suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
         assert!(
             build_permission_request(
                 &call(missing),
@@ -1592,7 +1599,7 @@ mod tests {
             .is_err()
         );
 
-        let exact = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"execute_confirmed_command","expected_effect":"execute_command","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"schema_version":1,"shell":"powershell","command":"Restart-Service -Name Spooler","timeout_ms":10000},"suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
+        let exact = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"exec_command","expected_effect":"execute_command","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"schema_version":1,"shell":"powershell","command":"Restart-Service -Name Spooler","timeout_ms":10000},"suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -1602,7 +1609,7 @@ mod tests {
         )
         .unwrap();
         let item = &request.items[0];
-        assert_eq!(item.operation_scope, vec!["execute_confirmed_command"]);
+        assert_eq!(item.operation_scope, vec!["exec_command"]);
         assert!(item.resource_scope[0].starts_with("command_input:sha256:"));
         assert_eq!(item.suggested_max_uses, 1);
         assert!(
@@ -1612,7 +1619,7 @@ mod tests {
                 .any(|scope| scope == "model:chosen")
         );
 
-        let off_template = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"execute_confirmed_command","expected_effect":"execute_command","exact_input":{"schema_version":1,"shell":"powershell","command":"Remove-Item C:\\temp\\anything","timeout_ms":10000},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Delete files"}]}"#;
+        let off_template = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"exec_command","expected_effect":"execute_command","exact_input":{"schema_version":1,"shell":"powershell","command":"Remove-Item C:\\temp\\anything","timeout_ms":10000},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Delete files"}]}"#;
         let error = build_permission_request(
             &call(off_template),
             &registry,
@@ -1760,7 +1767,7 @@ mod tests {
     #[test]
     fn raw_input_permission_is_r3_one_shot_and_binds_application_screen_and_step() {
         let registry = crate::device_assistant::device_assistant_provider_registry();
-        let exact = r#"{"items":[{"item_id":"raw","provider_id":"desktop.input.fallback","tool_name":"execute_confirmed_raw_input","expected_effect":"input_fallback","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"application-token","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"action":{"screen":{"display":"\\\\.\\DISPLAY1","width":1920,"height":1080,"dpi_x":96,"dpi_y":96},"step":{"kind":"click","params":{"x":100,"y":200,"button":"primary"}}}},"suggested_ttl_seconds":300,"suggested_max_uses":9,"reason":"Last-resort click after semantic controls were unavailable"}]}"#;
+        let exact = r#"{"items":[{"item_id":"raw","provider_id":"desktop.input.fallback","tool_name":"send_raw_input","expected_effect":"input_fallback","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"application-token","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"action":{"screen":{"display":"\\\\.\\DISPLAY1","width":1920,"height":1080,"dpi_x":96,"dpi_y":96},"step":{"kind":"click","params":{"x":100,"y":200,"button":"primary"}}}},"suggested_ttl_seconds":300,"suggested_max_uses":9,"reason":"Last-resort click after semantic controls were unavailable"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -1791,7 +1798,7 @@ mod tests {
     #[test]
     fn batch_iwork_permission_binds_target_and_selected_output_directory() {
         let registry = crate::device_assistant::device_assistant_provider_registry();
-        let missing = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_selected_numbers_copy","expected_effect":"mutate_application","suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
+        let missing = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_numbers_copy","expected_effect":"mutate_application","suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
         assert!(
             build_permission_request(
                 &call(missing),
@@ -1805,7 +1812,7 @@ mod tests {
             .contains("require exact_input")
         );
 
-        let exact = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_selected_numbers_copy","expected_effect":"mutate_application","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"cell-token","snapshot_id":"batch-snapshot","object_kind":"range","expires_at":"2026-08-28T00:01:00Z"},"output":{"destination_parent":{"token":"directory-token","snapshot_id":"directory-snapshot","object_kind":"directory","expires_at":"2026-08-28T00:01:00Z"},"native_file_name":"reviewed-copy.numbers"},"action":{"kind":"set_cell_value","params":{"value":"42"}}},"suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
+        let exact = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_numbers_copy","expected_effect":"mutate_application","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"cell-token","snapshot_id":"batch-snapshot","object_kind":"range","expires_at":"2026-08-28T00:01:00Z"},"output":{"destination_parent":{"token":"directory-token","snapshot_id":"directory-snapshot","object_kind":"directory","expires_at":"2026-08-28T00:01:00Z"},"native_file_name":"reviewed-copy.numbers"},"action":{"kind":"set_cell_value","params":{"value":"42"}}},"suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -1837,7 +1844,7 @@ mod tests {
         };
         let mut args = serde_json::json!({"items":[{
             "item_id":"excel", "provider_id":"office.xlsx.batch",
-            "tool_name":"patch_selected_excel_copy", "expected_effect":"mutate_application",
+            "tool_name":"patch_excel_copy", "expected_effect":"mutate_application",
             "exact_input": {"target":reference("cell", "range"),
                 "output":{"destination_parent":reference("output", "directory"), "native_file_name":"copy.xlsx"},
                 "action":{"kind":"set_cell_number","params":{"value":"84"}}},
@@ -1873,7 +1880,7 @@ mod tests {
     #[test]
     fn formula_workbook_permission_requires_and_binds_exact_input() {
         let registry = crate::device_assistant::device_assistant_provider_registry();
-        let missing = r#"{"items":[{"item_id":"formula","provider_id":"spreadsheet.formula_artifact","tool_name":"create_formula_workbook_from_merge_preview","expected_effect":"write_artifact","suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Create the requested formula workbook copy"}]}"#;
+        let missing = r#"{"items":[{"item_id":"formula","provider_id":"spreadsheet.formula_artifact","tool_name":"create_formula_workbook","expected_effect":"write_artifact","suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Create the requested formula workbook copy"}]}"#;
         let error = build_permission_request(
             &call(missing),
             &registry,
@@ -1888,7 +1895,7 @@ mod tests {
                 .contains("formula workbook creation requires exact_input")
         );
 
-        let exact = r#"{"items":[{"item_id":"formula","provider_id":"spreadsheet.formula_artifact","tool_name":"create_formula_workbook_from_merge_preview","expected_effect":"write_artifact","resource_scope":["directory:current"],"operation_scope":["create_new_artifact"],"exact_input":{"preview_id":"preview-1","file_name":"regional-formula.xlsx","target_cell":"Merged!C2","formula":"=B2*1.1","locale":"en-US-a1"},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Create the requested formula workbook copy"}]}"#;
+        let exact = r#"{"items":[{"item_id":"formula","provider_id":"spreadsheet.formula_artifact","tool_name":"create_formula_workbook","expected_effect":"write_artifact","resource_scope":["directory:current"],"operation_scope":["create_new_artifact"],"exact_input":{"preview_id":"preview-1","file_name":"regional-formula.xlsx","target_cell":"Merged!C2","formula":"=B2*1.1","locale":"en-US-a1"},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Create the requested formula workbook copy"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -1994,7 +2001,7 @@ mod tests {
         assert_eq!(office_entry["callable_now"], false);
         assert_eq!(office_entry["permission_requestable_now"], false);
         assert!(requestable_catalog.contains(
-            "Include a tool in request_capability_grants only when permission_requestable_now=true"
+            "Include a tool in request_permissions only when permission_requestable_now=true"
         ));
 
         let request = build_permission_request(
@@ -2027,7 +2034,7 @@ mod tests {
         }];
         let request = build_permission_request(
             &call(
-                r#"{"items":[{"item_id":"file","provider_id":"spreadsheet.file","tool_name":"inspect_selected_spreadsheets","expected_effect":"read_file","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the selected workbook"}]}"#,
+                r#"{"items":[{"item_id":"file","provider_id":"spreadsheet.file","tool_name":"inspect_spreadsheets","expected_effect":"read_file","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the selected workbook"}]}"#,
             ),
             &registry,
             "permission-file".into(),
@@ -2252,6 +2259,7 @@ mod tests {
             state: PermissionRequestState::Approved,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                launch_confirmation: None,
                 item_id: "activate".into(),
                 provider_id: grant.provider_id.clone(),
                 tool_name: grant.tool_name.clone(),
@@ -2399,7 +2407,7 @@ mod tests {
         let registry = crate::device_assistant::device_assistant_provider_registry();
         let request = build_permission_request(
             &call(
-                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_new_draft_handoff","expected_effect":"write_external_draft","resource_scope":[],"operation_scope":[],"export_destinations":[],"exact_input":{"draft":{"schema_version":4,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":5,"reason":"Prepare a manual Outlook draft"}]}"#,
+                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_draft","expected_effect":"write_external_draft","resource_scope":[],"operation_scope":[],"export_destinations":[],"exact_input":{"draft":{"schema_version":4,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":5,"reason":"Prepare a manual Outlook draft"}]}"#,
             ),
             &registry,
             "permission-outlook".into(),
@@ -2421,7 +2429,7 @@ mod tests {
 
         let invalid = build_permission_request(
             &call(
-                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_new_draft_handoff","expected_effect":"write_external_draft","exact_input":{"schema_version":4,"draft":{"schema_version":4,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Prepare a manual Outlook draft"}]}"#,
+                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_draft","expected_effect":"write_external_draft","exact_input":{"schema_version":4,"draft":{"schema_version":4,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Prepare a manual Outlook draft"}]}"#,
             ),
             &registry,
             "permission-outlook-invalid".into(),
@@ -2474,7 +2482,7 @@ mod tests {
             "items": [{
                 "item_id": "slack",
                 "provider_id": crate::device_assistant::SLACK_WEB_HANDOFF_PROVIDER_ID,
-                "tool_name": "prepare_slack_web_message_handoff",
+                "tool_name": "prepare_slack_message",
                 "expected_effect": "write_external_draft",
                 "resource_scope": ["model:chosen"],
                 "operation_scope": ["anything"],
@@ -2575,7 +2583,7 @@ mod tests {
             "items": [{
                 "item_id": "gmail",
                 "provider_id": crate::device_assistant::GMAIL_WEB_HANDOFF_PROVIDER_ID,
-                "tool_name": "prepare_gmail_web_draft_handoff",
+                "tool_name": "prepare_gmail_draft",
                 "expected_effect": "write_external_draft",
                 "resource_scope": ["model:chosen"],
                 "operation_scope": ["anything"],
@@ -2633,7 +2641,7 @@ mod tests {
         let registry = crate::device_assistant::device_assistant_provider_registry();
         for (tool_name, provider_id, input, expected_destination) in [
             (
-                "send_gmail_web_exact",
+                "send_gmail_message",
                 GMAIL_WEB_SEND_PROVIDER_ID,
                 serde_json::to_value(gmail_exact_send_input()).unwrap(),
                 DestinationIdentity::EmailAccount {
@@ -2641,7 +2649,7 @@ mod tests {
                 },
             ),
             (
-                "send_slack_web_exact",
+                "send_slack_message",
                 SLACK_WEB_SEND_PROVIDER_ID,
                 serde_json::to_value(slack_exact_send_input()).unwrap(),
                 DestinationIdentity::ChatAccount {

@@ -46,12 +46,12 @@ pub fn requires_directory_scope(tool_name: &str) -> bool {
         || crate::provider_preflight::text_file::TextMutationPreflight::supports(tool_name)
         || matches!(
             tool_name,
-            "patch_selected_numbers_copy"
-                | "replace_selected_pages_copy_body"
-                | "patch_selected_keynote_copy"
-                | "patch_selected_powerpoint_copy"
-                | "replace_selected_word_copy_body"
-                | "patch_selected_excel_copy"
+            "patch_numbers_copy"
+                | "replace_pages_copy_body"
+                | "patch_keynote_copy"
+                | "patch_powerpoint_copy"
+                | "replace_word_copy_body"
+                | "patch_excel_copy"
         )
 }
 
@@ -112,12 +112,12 @@ pub fn validate_artifact_scope(
         } else if crate::provider_preflight::text_file::TextMutationPreflight::supports(tool_name)
             || matches!(
                 tool_name,
-                "patch_selected_numbers_copy"
-                    | "replace_selected_pages_copy_body"
-                    | "patch_selected_keynote_copy"
-                    | "patch_selected_powerpoint_copy"
-                    | "replace_selected_word_copy_body"
-                    | "patch_selected_excel_copy"
+                "patch_numbers_copy"
+                    | "replace_pages_copy_body"
+                    | "patch_keynote_copy"
+                    | "patch_powerpoint_copy"
+                    | "replace_word_copy_body"
+                    | "patch_excel_copy"
             )
         {
             // The other exact reference is the selected source file/live target.

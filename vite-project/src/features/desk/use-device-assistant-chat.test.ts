@@ -439,7 +439,7 @@ describe('useDeviceAssistantChat', () => {
             json: async () => ({ data: {
                 sessionId: 'session-1', seq: 34, active: false,
                 messages: [
-                    { id: 'call', role: 'assistant', text: '', toolCalls: [{ id: 'command-1', name: 'execute_confirmed_command', argumentsJson: '{}' }] },
+                    { id: 'call', role: 'assistant', text: '', toolCalls: [{ id: 'command-1', name: 'exec_command', argumentsJson: '{}' }] },
                     { id: 'running', role: 'tool', toolCallId: 'command-1', text: '{"status":"background_running"}' },
                     { id: 'waiting', role: 'assistant', text: 'Waiting for the background command.' },
                     { id: 'finished', role: 'untrusted_output', toolCallId: 'command-1', backgroundTaskId: 'exec-1', text: output },
@@ -944,7 +944,7 @@ describe('useDeviceAssistantChat', () => {
                 callId: 'call-1',
                 providerId: 'browser.control',
                 capabilityId: 'browser.control.semantic',
-                toolName: 'prepare_gmail_web_draft_handoff',
+                toolName: 'prepare_gmail_draft',
                 effect: 'write_external_draft',
                 state: 'running',
                 progressSequence: 4,
@@ -955,7 +955,7 @@ describe('useDeviceAssistantChat', () => {
                 grantId: 'grant-1',
                 providerId: 'browser.control',
                 capabilityId: 'browser.control.semantic',
-                toolName: 'prepare_gmail_web_draft_handoff',
+                toolName: 'prepare_gmail_draft',
                 riskTier: 'r2',
                 resourceScope: ['browser-extension-surface'],
                 operationScope: ['write_external_draft'],
@@ -1728,9 +1728,9 @@ describe('useDeviceAssistantChat', () => {
 });
 
 it.each([
-    ['file_artifact', 'patch_selected_powerpoint_copy', 'copy.pptx'],
-    ['file_artifact', 'replace_selected_word_copy_body', `${'a'.repeat(250)}.DOCX`],
-    ['batch_document_artifact', 'patch_selected_keynote_copy', 'copy.key'],
+    ['file_artifact', 'patch_powerpoint_copy', 'copy.pptx'],
+    ['file_artifact', 'replace_word_copy_body', `${'a'.repeat(250)}.DOCX`],
+    ['batch_document_artifact', 'patch_keynote_copy', 'copy.key'],
 ])('restores %s from %s as a visible file result after refresh', async (kind, tool, fileName) => {
     localStorage.setItem('device-assistant-conversation:copy-device', 'copy-conversation');
     const value = kind === 'file_artifact'

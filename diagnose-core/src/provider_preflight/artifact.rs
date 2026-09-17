@@ -92,7 +92,7 @@ fn preview_id(value: &str) -> bool {
 pub fn artifact_action_from_call(call: &ToolCall) -> Result<FilePatchAction, AgentError> {
     let call = without_directory_selector(call)?;
     match call.name.as_str() {
-        "create_text_artifact_in_selected_directory" => {
+        "create_text_file" => {
             let args: TextArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
             if !safe_leaf(&args.file_name, None) || args.content_utf8.len() > 65_536 {
@@ -103,7 +103,7 @@ pub fn artifact_action_from_call(call: &ToolCall) -> Result<FilePatchAction, Age
                 content_utf8: args.content_utf8,
             })
         }
-        "create_workbook_from_merge_preview" => {
+        "create_workbook" => {
             let args: SpreadsheetArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
             if !preview_id(&args.preview_id) || !safe_leaf(&args.file_name, Some(".xlsx")) {
@@ -114,7 +114,7 @@ pub fn artifact_action_from_call(call: &ToolCall) -> Result<FilePatchAction, Age
                 file_name: args.file_name,
             })
         }
-        "create_formula_workbook_from_merge_preview" => {
+        "create_formula_workbook" => {
             let args: SpreadsheetFormulaArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
             if !preview_id(&args.preview_id) || !safe_leaf(&args.file_name, Some(".xlsx")) {
@@ -143,7 +143,7 @@ pub fn artifact_action_from_call(call: &ToolCall) -> Result<FilePatchAction, Age
                 formula_policy_digest_sha256: validated.ast_digest_sha256,
             })
         }
-        "create_word_report_from_merge_preview" => {
+        "create_word_report" => {
             let args: WordArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
             if !preview_id(&args.preview_id)
@@ -179,7 +179,7 @@ pub fn artifact_action_from_call(call: &ToolCall) -> Result<FilePatchAction, Age
                 web_sources: args.web_sources,
             })
         }
-        "create_local_communication_draft" => {
+        "create_local_message_draft" => {
             let args: LocalDraftArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
             if !safe_leaf(&args.file_name, Some(".draft.txt")) || args.draft.validate().is_err() {
@@ -232,11 +232,11 @@ impl ArtifactCallPreflight {
     pub fn supports(tool_name: &str) -> bool {
         matches!(
             tool_name,
-            "create_text_artifact_in_selected_directory"
-                | "create_workbook_from_merge_preview"
-                | "create_formula_workbook_from_merge_preview"
-                | "create_word_report_from_merge_preview"
-                | "create_local_communication_draft"
+            "create_text_file"
+                | "create_workbook"
+                | "create_formula_workbook"
+                | "create_word_report"
+                | "create_local_message_draft"
         )
     }
 

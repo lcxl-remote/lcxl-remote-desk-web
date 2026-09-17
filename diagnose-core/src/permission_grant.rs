@@ -100,6 +100,24 @@ pub fn build_permission_grants(
             .registry
             .provider(&requested.provider_id)
             .ok_or_else(|| internal("approved permission Provider is no longer registered"))?;
+        if requested.tool_name == "launch_application" {
+            let binding = requested.launch_confirmation.as_ref().ok_or_else(|| {
+                internal("application identity is missing; request permission again")
+            })?;
+            let subject = binding.subject();
+            if binding.target().is_none()
+                || subject.actor_id != session.actor_id
+                || subject.device_id != session.device_id
+                || subject.policy_revision != session.policy_revision
+                || subject.input_revision != session.input_revision
+                || subject.readiness_revision != context.readiness_revision
+                || binding.resource_scope() != *resource_scope
+            {
+                return Err(internal(
+                    "application identity no longer matches this owner decision",
+                ));
+            }
+        }
         if requested.tool_name == crate::command_confirmation::COMMAND_TOOL {
             let confirmation = requested.command_confirmation.as_ref().ok_or_else(|| {
                 internal("command confirmation is missing; request permission again")
@@ -680,7 +698,7 @@ pub fn permission_request_can_renew(
                         // A renewed action still requires a new owner decision.
                         || (item.item_id == format!("included-{}", item.tool_name)
                             && matches!(item.tool_name.as_str(), "inspect_desktop_session" | "inspect_desktop_ui")
-                            && request.items.iter().any(|item| matches!(item.tool_name.as_str(), "execute_ui_actions" | "execute_confirmed_raw_input" | "execute_background_inputs"))))
+                            && request.items.iter().any(|item| matches!(item.tool_name.as_str(), "execute_ui_actions" | "send_raw_input" | "send_background_input"))))
             })
         })
 }

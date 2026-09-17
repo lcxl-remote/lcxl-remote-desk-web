@@ -270,28 +270,28 @@ fn file_terminal_and_iwork_batch_authority_uses_only_original_attachment_refs() 
     let registry = device_assistant_provider_registry();
     let destination = destination();
     for name in [
-        "inspect_selected_file_metadata",
-        "read_selected_text_file",
-        "inspect_selected_spreadsheets",
+        "inspect_files",
+        "read_text_file",
+        "inspect_spreadsheets",
         "preview_spreadsheet_merge",
-        "inspect_selected_terminal_output",
-        "inspect_selected_numbers_with_iwork",
-        "inspect_selected_pages_with_iwork",
-        "inspect_selected_keynote_with_iwork",
-        "inspect_selected_powerpoint_file",
-        "inspect_selected_word_file",
+        "read_terminal_output",
+        "inspect_numbers_file",
+        "inspect_pages_file",
+        "inspect_keynote_file",
+        "inspect_powerpoint_file",
+        "inspect_word_file",
     ] {
         let reference = ObjectRef {
             token: format!("original-{name}"),
             snapshot_id: "snapshot".into(),
-            object_kind: if name == "inspect_selected_terminal_output" {
+            object_kind: if name == "read_terminal_output" {
                 ObjectKind::TerminalOutput
             } else {
                 ObjectKind::File
             },
             expires_at: "2030-01-01T00:00:00Z".into(),
         };
-        let operation = if name == "inspect_selected_terminal_output" {
+        let operation = if name == "read_terminal_output" {
             Op::AttachTerminalOutput {
                 object_ref: reference.clone(),
                 display_summary: "fixture".into(),
@@ -341,7 +341,7 @@ fn file_terminal_and_iwork_batch_authority_uses_only_original_attachment_refs() 
             destination: &destination,
             now_unix_ms: 1000,
         };
-        if name == "inspect_selected_powerpoint_file" {
+        if name == "inspect_powerpoint_file" {
             let (_, mut input) = crate::read_tools::build_read_operation(&call).unwrap();
             binding.bind(&call, &mut input).unwrap();
             let desk_agent_protocol::OperationInput::ReadContext(
@@ -438,8 +438,8 @@ fn unselected_desktop_preflight_requires_explicit_r1_authority_on_both_surfaces(
         }
         for name in [
             "inspect_office_selection",
-            "inspect_selected_file_metadata",
-            "inspect_selected_terminal_output",
+            "inspect_files",
+            "read_terminal_output",
         ] {
             let call = ToolCall {
                 id: "read".into(),

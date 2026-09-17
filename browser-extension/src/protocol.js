@@ -1,3 +1,4 @@
+import { browserOriginMatchesUrl } from "./host-permissions.js";
 export const SCHEMA_VERSION = 1;
 export const MAX_MESSAGE_BYTES = 24 * 1024 * 1024;
 export const MAX_FIELDS = 64;
@@ -57,15 +58,10 @@ function validateTarget(target) {
     if (parsed.username || parsed.password || parsed.hash) {
         throw new Error("invalid_navigation_target");
     }
-    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname))) {
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
         throw new Error("invalid_navigation_target");
     }
-    const expectedPort = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
-    if (
-        !target.origin ||
-        target.origin.host_ascii !== parsed.hostname.toLowerCase() ||
-        String(target.origin.port) !== expectedPort
-    ) {
+    if (!browserOriginMatchesUrl(target.origin, target.url)) {
         throw new Error("origin_mismatch");
     }
 }

@@ -80,11 +80,11 @@ fn fill(schema: &Value, input: &mut Value) {
 }
 
 pub fn fill_versions(name: &str, input: &mut Value) {
-    if name == "request_capability_grants" {
+    if name == "request_permissions" {
         if let Some(items) = input.get_mut("items").and_then(Value::as_array_mut) {
             for item in items {
                 if let Some(name) = item["tool_name"].as_str().map(str::to_owned) {
-                    if name != "request_capability_grants" {
+                    if name != "request_permissions" {
                         if let Some(exact) = item.get_mut("exact_input") {
                             fill_versions(&name, exact);
                         }
@@ -315,7 +315,7 @@ pub fn describe_error(name: &str, reason: &str) -> String {
         example(schema)
     };
     format!(
-        "tool error: {reason}. Tool: {name}. Required fields: {}. Structural example (replace placeholders with observed IDs and intended values): {sample}. Load the target Provider tool with load_capability_details for field constraints before requesting permission (built-in conversation tools must not be loaded); correct the arguments rather than repeating them or asking the user to supply the format.",
+        "tool error: {reason}. Tool: {name}. Required fields: {}. Structural example (replace placeholders with observed IDs and intended values): {sample}. Load the target Provider tool with describe_tools for field constraints before requesting permission (built-in conversation tools must not be loaded); correct the arguments rather than repeating them or asking the user to supply the format.",
         schema.get("required").unwrap_or(&Value::Null)
     )
 }
@@ -346,20 +346,20 @@ mod tests {
             check(&schema);
         }
         let mut input = json!({"draft":{"recipients":[],"subject":"test","body_plain_text":"test","attachment_labels":[]}});
-        fill_versions("prepare_outlook_new_draft_handoff", &mut input);
+        fill_versions("prepare_outlook_draft", &mut input);
         assert_eq!(
             input["draft"]["schema_version"],
             desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION
         );
         let mut command = json!({"shell":"bash","command":"pwd","timeout_ms":10000});
-        fill_versions("execute_confirmed_command", &mut command);
+        fill_versions("exec_command", &mut command);
         assert_eq!(command["schema_version"], 1);
-        let grant = json!({"items":[{"tool_name":"execute_confirmed_command","exact_input":{"shell":"bash","command":"pwd","timeout_ms":10000}}]});
+        let grant = json!({"items":[{"tool_name":"exec_command","exact_input":{"shell":"bash","command":"pwd","timeout_ms":10000}}]});
         let mut resolved = grant.clone();
-        fill_versions("request_capability_grants", &mut resolved);
+        fill_versions("request_permissions", &mut resolved);
         assert_eq!(resolved["items"][0]["exact_input"]["schema_version"], 1);
         assert!(crate::ui_model_ids::same_call_input(
-            "request_capability_grants",
+            "request_permissions",
             &grant.to_string(),
             &resolved.to_string()
         ));
@@ -368,35 +368,30 @@ mod tests {
     fn command_without_version_preserves_exact_approval_identity() {
         let input = json!({"shell":"bash","command":"pwd","timeout_ms":10000});
         let original = input.to_string();
-        let canonical = crate::permission_tools::canonical_tool_permission_input_json(
-            "execute_confirmed_command",
-            input,
-        )
-        .unwrap();
+        let canonical =
+            crate::permission_tools::canonical_tool_permission_input_json("exec_command", input)
+                .unwrap();
         let policy = crate::command_confirmation::test_policy();
         let confirmation = policy.prepare(&canonical, 1).unwrap();
         policy.revalidate(&confirmation, &canonical, 1).unwrap();
         assert!(crate::ui_model_ids::same_call_input(
-            "execute_confirmed_command",
+            "exec_command",
             &original,
             &canonical
         ));
         assert!(!crate::ui_model_ids::same_call_input(
-            "execute_confirmed_command",
+            "exec_command",
             &original,
             &canonical.replace("pwd", "date")
         ));
-        let error = validate_format(
-            "execute_confirmed_command",
-            &json!({"schema_version":1,"command":"pwd"}),
-        )
-        .unwrap_err();
+        let error = validate_format("exec_command", &json!({"schema_version":1,"command":"pwd"}))
+            .unwrap_err();
         assert!(error.contains("$.shell"));
         assert!(error.contains("Structural example"));
     }
     #[test]
     fn input_error_explains_required_fields_and_example_without_versions() {
-        let text = describe_error("execute_confirmed_command", "missing field `shell`");
+        let text = describe_error("exec_command", "missing field `shell`");
         assert!(text.contains("missing field `shell`"));
         assert!(text.contains("timeout_ms"));
         assert!(text.contains("\"command\":\"pwd\""));

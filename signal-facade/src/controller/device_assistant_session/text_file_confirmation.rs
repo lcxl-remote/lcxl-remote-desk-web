@@ -84,7 +84,7 @@ pub(super) fn project(
     if envelope.digest_sha256 != format!("{:x}", Sha256::digest(source.text.as_bytes())) {
         return None;
     }
-    let (file_name, digest) = if envelope.provenance.source_tool_name == "read_selected_text_file"
+    let (file_name, digest) = if envelope.provenance.source_tool_name == "read_text_file"
         && envelope.provenance.source_provider_id == "file.content"
     {
         let desk_agent_protocol::OperationOutput::ReadContext(
@@ -107,11 +107,10 @@ pub(super) fn project(
         let artifact = match completed.output? {
             ComputerActionOutput::FileArtifact(artifact)
                 if (envelope.provenance.source_provider_id == "file.artifact"
-                    && envelope.provenance.source_tool_name
-                        == "create_text_artifact_in_selected_directory")
+                    && envelope.provenance.source_tool_name == "create_text_file")
                     || (envelope.provenance.source_provider_id == "communication.local_draft"
                         && envelope.provenance.source_tool_name
-                            == "create_local_communication_draft") =>
+                            == "create_local_message_draft") =>
             {
                 artifact
             }
@@ -172,7 +171,7 @@ mod tests {
                 owner.data_envelope.as_ref(),
                 "read-call",
                 &text,
-                "read_selected_text_file",
+                "read_text_file",
             )
             .unwrap();
         receipt

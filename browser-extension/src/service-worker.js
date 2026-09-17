@@ -1,5 +1,8 @@
 import { SCHEMA_VERSION, parseHostCommand, response } from "./protocol.js";
 import { assertHostPermissionForUrl, assertTabHostPermission } from "./host-permissions.js";
+import { registerContentDigest } from "./content-digest.js";
+
+registerContentDigest(chrome);
 
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8091/browser-extension/v1";
 const RECONNECT_ALARM = "lcxl-browser-extension-reconnect";

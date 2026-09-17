@@ -199,23 +199,9 @@ mod artifact_matching_tests {
             media_type: text_artifact.media_type.clone(),
         };
         let input = r#"{"file_name":"report.txt","content_utf8":"test"}"#;
-        assert!(
-            verify_text_artifact_output(
-                "create_text_artifact_in_selected_directory",
-                input,
-                &text_artifact
-            )
-            .is_ok()
-        );
+        assert!(verify_text_artifact_output("create_text_file", input, &text_artifact).is_ok());
         text_artifact.digest_sha256 = "b".repeat(64);
-        assert!(
-            verify_text_artifact_output(
-                "create_text_artifact_in_selected_directory",
-                input,
-                &text_artifact
-            )
-            .is_err()
-        );
+        assert!(verify_text_artifact_output("create_text_file", input, &text_artifact).is_err());
         requested.file_name = "renamed.txt".into();
         assert_eq!(
             unique_attachment_artifact(&requested, &[artifact]),
@@ -235,7 +221,7 @@ pub fn verify_text_artifact_output(
     artifact
         .validate()
         .map_err(|_| super::TaskSourceError::InvalidNode)?;
-    if tool_name != "create_text_artifact_in_selected_directory" {
+    if tool_name != "create_text_file" {
         return Ok(());
     }
     let call = crate::chat::ToolCall {

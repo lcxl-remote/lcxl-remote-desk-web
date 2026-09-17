@@ -3,6 +3,10 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if let Some(code) = lcxl_remote_desk_server::windows_application_host::run_if_requested() {
+        return ExitCode::from(code as u8);
+    }
     let run_result = lcxl_remote_desk_tauri::run();
     match run_result {
         Ok(_) => {

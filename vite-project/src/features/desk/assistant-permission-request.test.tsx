@@ -17,7 +17,7 @@ const submit = () => screen.getByRole('button', { name: 'pages.deviceAssistant.p
 describe('shared permission review', () => {
     it.each([
         ['execute_ui_actions', 'ui:scroll'],
-        ['execute_background_inputs', 'background_input:scroll'],
+        ['send_background_input', 'background_input:scroll'],
     ])('preserves the %s scroll authority when approving', (toolName, operation) => {
         const onDecide = vi.fn().mockResolvedValue(true);
         const value = request([item({ itemId: 'app', toolName, expectedEffect: 'mutate_application',
@@ -44,7 +44,7 @@ describe('shared permission review', () => {
     });
     it('shows background input scope and narrows actions independently of semantic UI', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
-        const value = request([item({ itemId: 'app', toolName: 'execute_background_inputs', expectedEffect: 'mutate_application',
+        const value = request([item({ itemId: 'app', toolName: 'send_background_input', expectedEffect: 'mutate_application',
             resourceScope: ['ui_application:sha256:opaque'], operationScope: ['background_input:click', 'background_input:type_text'], suggestedMaxUses: 8,
             applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Calendar', actions: ['click', 'type_text'] },
         })]);
@@ -64,7 +64,7 @@ describe('shared permission review', () => {
     });
     it('submits narrowed scope and explicit denial for missing action reviews', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
-        const value = request([item(), item({ itemId: 'command', toolName: 'execute_confirmed_command' }),
+        const value = request([item(), item({ itemId: 'command', toolName: 'exec_command' }),
             item({ itemId: 'file', toolName: 'delete_text_file' }), item({ itemId: 'send', expectedEffect: 'send_external' })]);
         render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
         fireEvent.click(screen.getByRole('checkbox', { name: 'target:b' }));

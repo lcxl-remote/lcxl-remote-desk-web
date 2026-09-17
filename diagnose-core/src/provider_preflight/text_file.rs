@@ -261,12 +261,10 @@ pub fn resolve_file_result(
     if source_calls.next().is_some() {
         return Err(unavailable());
     }
-    let supported = source_call.name == "read_selected_text_file"
+    let supported = source_call.name == "read_text_file"
         || matches!(
             source_call.name.as_str(),
-            "create_text_artifact_in_selected_directory"
-                | "create_local_communication_draft"
-                | UPDATE_TEXT_TOOL
+            "create_text_file" | "create_local_message_draft" | UPDATE_TEXT_TOOL
         );
     if !supported {
         return Err(unavailable());
@@ -295,7 +293,7 @@ pub fn resolve_file_result(
         {
             continue;
         }
-        let mut evidence = if source_call.name == "read_selected_text_file" {
+        let mut evidence = if source_call.name == "read_text_file" {
             let Ok(desk_agent_protocol::OperationOutput::ReadContext(
                 desk_agent_protocol::ReadContextOutput::FileContentRead(output),
             )) = serde_json::from_str(&message.text)
@@ -393,7 +391,7 @@ impl VerifiedTextFile {
 /// Optional selector for a separately authorized read. It is an immutable
 /// receipt identity, never a model-supplied path or opaque device token.
 pub fn read_result_id(call: &ToolCall) -> Result<Option<String>, AgentError> {
-    if call.name != "read_selected_text_file" {
+    if call.name != "read_text_file" {
         return Ok(None);
     }
     #[derive(serde::Deserialize)]
@@ -430,7 +428,7 @@ pub fn uses_session_file_read(call: &ToolCall) -> Result<bool, AgentError> {
     if read_result_id(call)?.is_some() {
         return Ok(true);
     }
-    if call.name != "inspect_selected_file_metadata" {
+    if call.name != "inspect_files" {
         return Ok(false);
     }
     let value: serde_json::Value =
@@ -464,11 +462,11 @@ pub fn validate_mutation_permission_input(
         .conversation
         .iter()
         .flat_map(|message| &message.tool_calls)
-        .any(|source| source.id == id && source.name == "inspect_selected_file_metadata")
+        .any(|source| source.id == id && source.name == "inspect_files")
     {
         return Err(error(
             AgentErrorKind::InvalidInput,
-            r#"A directory metadata result cannot authorize a text mutation. First request read_selected_text_file with exact_input={"file_result_call_id":"<metadata call ID>","entry_name":"<exact file name>"}, then execute that read. For delete_text_file, required exact_input fields are {"file_result_call_id":"<successful read/create/update call ID>","expected_sha256":"<full SHA-256 from that result>"}. update_text_file also requires change and the approved directory selector from its tool definition. If an existing successful read/create/update result already supplies the needed file and SHA-256, reuse it directly. No approval card was created; correct the source rather than asking the user to confirm again."#,
+            r#"A directory metadata result cannot authorize a text mutation. First request read_text_file with exact_input={"file_result_call_id":"<metadata call ID>","entry_name":"<exact file name>"}, then execute that read. For delete_text_file, required exact_input fields are {"file_result_call_id":"<successful read/create/update call ID>","expected_sha256":"<full SHA-256 from that result>"}. update_text_file also requires change and the approved directory selector from its tool definition. If an existing successful read/create/update result already supplies the needed file and SHA-256, reuse it directly. No approval card was created; correct the source rather than asking the user to confirm again."#,
             false,
             true,
         ));
@@ -484,16 +482,13 @@ pub fn validate_read_permission_input(
     exact_input: Option<&str>,
     now: u64,
 ) -> Result<(), AgentError> {
-    if !matches!(
-        tool_name,
-        "inspect_selected_file_metadata" | "read_selected_text_file"
-    ) {
+    if !matches!(tool_name, "inspect_files" | "read_text_file") {
         return Ok(());
     }
     let invalid = || {
         error(
             AgentErrorKind::InvalidInput,
-            r#"File read permission needs an exact source. For metadata use exact_input={"directory_request_id":"<approved directory ID>"}. For a creation/read/update receipt use exact_input={"file_result_call_id":"<receipt tool call ID>"}, without entry_name. For a directory child use exact_input={"file_result_call_id":"<metadata tool call ID>","entry_name":"<exact child name>"}. An owner-selected attachment is another supported source. This validation failure does not establish expiry. Directory metadata grants do not authorize file-content reading; request read_selected_text_file separately when needed."#,
+            r#"File read permission needs an exact source. For metadata use exact_input={"directory_request_id":"<approved directory ID>"}. For a creation/read/update receipt use exact_input={"file_result_call_id":"<receipt tool call ID>"}, without entry_name. For a directory child use exact_input={"file_result_call_id":"<metadata tool call ID>","entry_name":"<exact child name>"}. An owner-selected attachment is another supported source. This validation failure does not establish expiry. Directory metadata grants do not authorize file-content reading; request read_text_file separately when needed."#,
             false,
             true,
         )
@@ -542,13 +537,10 @@ fn validate_read_selector(
         return Err(unavailable());
     }
     let has_entry = args.get("entry_name").is_some_and(|v| !v.is_null());
-    let metadata = source.name == "inspect_selected_file_metadata";
+    let metadata = source.name == "inspect_files";
     let direct_file = matches!(
         source.name.as_str(),
-        "create_text_artifact_in_selected_directory"
-            | "create_local_communication_draft"
-            | "read_selected_text_file"
-            | UPDATE_TEXT_TOOL
+        "create_text_file" | "create_local_message_draft" | "read_text_file" | UPDATE_TEXT_TOOL
     );
     if direct_file && has_entry {
         let example = serde_json::json!({"file_result_call_id":id});
@@ -575,7 +567,7 @@ fn validate_read_selector(
     if !metadata && !direct_file {
         return Err(error(
             AgentErrorKind::InvalidInput,
-            "file_result_call_id must identify a verified text creation/read/update result or inspect_selected_file_metadata result, not an unrelated tool call.",
+            "file_result_call_id must identify a verified text creation/read/update result or inspect_files result, not an unrelated tool call.",
             false,
             true,
         ));
@@ -603,7 +595,7 @@ fn read_evidence(
         .flat_map(|m| &m.tool_calls)
         .filter(|c| c.id == id);
     let source_call = calls.next().ok_or_else(unavailable)?;
-    if calls.next().is_some() || source_call.name != "inspect_selected_file_metadata" {
+    if calls.next().is_some() || source_call.name != "inspect_files" {
         return Err(unavailable());
     }
     let source_call = ToolCall {
@@ -688,7 +680,7 @@ impl ResultFileRead {
         destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
         now: u64,
     ) -> Result<Self, AgentError> {
-        if call.name == "inspect_selected_file_metadata" {
+        if call.name == "inspect_files" {
             let owner = crate::permission_resume::latest_user_requirement(&session.conversation)
                 .and_then(|m| m.data_envelope.as_ref())
                 .ok_or_else(unavailable)?;
@@ -1109,7 +1101,7 @@ mod tests {
                 "Inspect the directory",
                 vec![crate::chat::ToolCallRef {
                     id: "metadata-call".into(),
-                    name: "inspect_selected_file_metadata".into(),
+                    name: "inspect_files".into(),
                     arguments_json: "{}".into(),
                 }],
             ));
@@ -1265,16 +1257,14 @@ mod tests {
         .unwrap();
         let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
         let registry = crate::device_assistant::device_assistant_provider_registry();
-        let cap = registry
-            .capability_for_tool("read_selected_text_file")
-            .unwrap();
+        let cap = registry.capability_for_tool("read_text_file").unwrap();
         let provider = registry
             .provider_for_capability(&cap.wire.capability_id)
             .unwrap();
         let mut parent = ChatMessage::text("proposal", ChatRole::Assistant, "");
         parent.tool_calls.push(ToolCallRef {
             id: "read-call".into(),
-            name: "read_selected_text_file".into(),
+            name: "read_text_file".into(),
             arguments_json: "{}".into(),
         });
         let mut result = ChatMessage::tool_result("receipt", "read-call", text.clone());
@@ -1289,7 +1279,7 @@ mod tests {
             },
             provenance: DataProvenance {
                 source_provider_id: provider.wire.provider_id.clone(),
-                source_tool_name: "read_selected_text_file".into(),
+                source_tool_name: "read_text_file".into(),
                 source_object_id: Some("device:read-call".into()),
                 source_envelope_ids: vec![],
             },
@@ -1311,7 +1301,7 @@ mod tests {
         };
         let call = ToolCall {
             id: "next-read".into(),
-            name: "read_selected_text_file".into(),
+            name: "read_text_file".into(),
             arguments_json: serde_json::json!({"file_result_call_id":"read-call"}).to_string(),
         };
         assert!(ResultFileRead::build(&session, &call, &destination, 1).is_err());
@@ -1382,7 +1372,7 @@ mod tests {
         .unwrap();
         let source = ToolCall {
             id: "metadata".into(),
-            name: "inspect_selected_file_metadata".into(),
+            name: "inspect_files".into(),
             arguments_json: serde_json::json!({"directory_request_id":"directory"}).to_string(),
         };
         let root = crate::file_scope::select_output_directory(&session, &source, 1000).unwrap();
@@ -1439,7 +1429,7 @@ mod tests {
         assert_eq!(session.conversation[2].text, text);
         let mut call = ToolCall {
             id: "read-child".into(),
-            name: "read_selected_text_file".into(),
+            name: "read_text_file".into(),
             arguments_json:
                 serde_json::json!({"file_result_call_id":"metadata","entry_name":"notes.txt"})
                     .to_string(),
@@ -1536,7 +1526,7 @@ mod tests {
         };
         use desk_agent_protocol::data_lineage::{ContentRef, DestinationIdentity};
         let (mut session, evidence, call) = fixture();
-        let tool = "create_text_artifact_in_selected_directory";
+        let tool = "create_text_file";
         let destination = DestinationIdentity::Model {
             connection_id: "test".into(),
             connection_revision: 1,
@@ -1615,13 +1605,11 @@ mod tests {
                 .conversation
                 .iter()
                 .flat_map(|m| &m.tool_calls)
-                .all(|c| c.name != "read_selected_text_file"
-                    && c.name != "inspect_selected_file_metadata")
+                .all(|c| c.name != "read_text_file" && c.name != "inspect_files")
         );
         let bad = r#"{"file_result_call_id":"read-call","entry_name":"notes.txt"}"#;
-        let failure =
-            validate_read_permission_input(&session, "read_selected_text_file", Some(bad), 1000)
-                .unwrap_err();
+        let failure = validate_read_permission_input(&session, "read_text_file", Some(bad), 1000)
+            .unwrap_err();
         assert!(failure.message.contains("Remove entry_name"));
         assert!(failure.message.contains("not evidence of expiry"));
         assert!(
@@ -1631,13 +1619,8 @@ mod tests {
         );
         let corrected = r#"{"file_result_call_id":"read-call"}"#;
         assert!(
-            validate_read_permission_input(
-                &session,
-                "read_selected_text_file",
-                Some(corrected),
-                1000
-            )
-            .is_ok()
+            validate_read_permission_input(&session, "read_text_file", Some(corrected), 1000)
+                .is_ok()
         );
         let mut altered = call.clone();
         let mut arguments: serde_json::Value =
@@ -1828,7 +1811,7 @@ mod tests {
                 assert_eq!(grants[0].resource_scope.len(), 2);
                 crate::capability_grant::match_capability_grant(&grants[0], &authority).unwrap();
                 let mut wrong = grants[0].clone();
-                wrong.tool_name = "create_text_artifact_in_selected_directory".into();
+                wrong.tool_name = "create_text_file".into();
                 assert!(
                     crate::capability_grant::match_capability_grant(&wrong, &authority).is_err()
                 );

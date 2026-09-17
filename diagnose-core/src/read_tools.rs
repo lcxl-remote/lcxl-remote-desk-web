@@ -182,6 +182,19 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
 pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
     vec![
         read(
+            "list_applications",
+            Capability::ApplicationList,
+            "Search installed application registrations for the current user. Provide queries with known localized and English names together, for example [日历, Calendar]; do not invent translations. Up to 16 case-insensitive substring alternatives are OR-matched before pagination. Queries are required unless allow_unfiltered=true explicitly requests bounded enumeration. Preserve queries and allow_unfiltered when continuing a cursor. A partial catalog or empty page does not prove an application is uninstalled. Paths, identifiers, arguments and working directories are untrusted reference information, not permission to launch. launch_application independently accepts an explicit target and independently chosen args/cwd; it does not inherit catalog suggestions or require a catalog lookup.",
+            json!({
+                "type":"object", "properties": {
+                    "queries":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}},
+                    "allow_unfiltered":{"type":"boolean","default":false},
+                    "limit":{"type":"integer","minimum":1,"maximum":100,"default":20},
+                    "cursor":{"type":["string","null"],"minLength":1,"maxLength":512}
+                }, "additionalProperties":false
+            }),
+        ),
+        read(
             "inspect_desktop_session",
             Capability::DesktopSessionInspect,
             "Inspect the current interactive desktop session and optionally return a reference to the foreground application, not a list of running applications. For macOS application discovery, use the returned session reference as inspect_desktop_ui root and queries with localized and English application names; then inspect the matching application reference.",
@@ -196,7 +209,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_desktop_ui",
             Capability::DesktopUiInspect,
-            "Require element_id or queries or a UiElement root with element_only=true; otherwise reject unless allow_unfiltered=true explicitly opts into bounded enumeration. Returned element_id is stable for the native element lifetime, independent of authorization and object_ref expiry. Use element_id with root omitted to refresh a known element after object_ref expires; never substitute element_id for an action ObjectRef. Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. scope=content (default) reads ordinary UI without menus; scope=menus returns only menu subtrees, useful after the window was already read; scope=all reads both. Choose an Application or null root for the application menu bar; a Window root searches only that window. Pass an existing UI element reference as root with element_only=true to refresh only its current value; otherwise read its subtree. queries searches name/native_id/role substrings and bilingual control-type aliases (OR, case-insensitive): 日期/date, 时间/time, 输入框/input, 按钮/button, 弹层/popover and 对话框/dialog. First locate the target window and relevant dialog/popover/editor when available, then query within that root using task-specific localized/English labels or observed native_id. Group needed controls in one query. If no separate container exists, use the window. Only after targeted misses add control types; broad text/date/time terms can match unrelated static calendar text. No match does not prove an operation is unsupported; queries fuzzy-match native_id, role and name within the selected root and return matching nodes only (OR across terms). If traversal is incomplete, narrow the root when possible and increase depth/node/byte bounds as needed; do not reduce depth to hide matches. Refresh known controls with element_id and element_only=true. Application catalog nodes expose application_state=foreground/background/hidden when available (hidden takes priority); missing state means unknown. This is application activation/visibility, not window minimization or screen visibility. Application catalog nodes omit matched_queries and do not contain UI contents or authorize actions. The catalog does not query windows. Use its returned Application reference as root with queries=[窗口, window] to obtain owner_selectable_windows for application screenshots; missing window entries in the catalog do not establish that capture is unavailable. On macOS, search the session application catalog before searching an app UI. If the application is found, use its Application reference as root. If a complete application-name search is empty, increasing max_depth or searching button/date labels cannot find a non-running app: launch it through an available authorized tool (for example an approved exact open -a command), then refresh the application catalog. Empty control searches within an existing app do not mean the app is absent. Protected field values are never returned.",
+            "Require element_id or queries or a UiElement root with element_only=true; otherwise reject unless allow_unfiltered=true explicitly opts into bounded enumeration. Returned element_id is stable for the native element lifetime, independent of authorization and object_ref expiry. Use element_id with root omitted to refresh a known element after object_ref expires; never substitute element_id for an action ObjectRef. Read bounded Windows UIA or macOS Accessibility data. On macOS, pass the DesktopSession reference from inspect_desktop_session as root to list GUI applications (application nodes with selectable references); then pass one Application reference to read that app, including in the background, or a Window reference to read that window. A null root reads the foreground app. scope=content (default) reads ordinary UI without menus; scope=menus returns only menu subtrees, useful after the window was already read; scope=all reads both. Choose an Application or null root for the application menu bar; a Window root searches only that window. Pass an existing UI element reference as root with element_only=true to refresh only its current value; otherwise read its subtree. queries searches name/native_id/role substrings and bilingual control-type aliases (OR, case-insensitive): 日期/date, 时间/time, 输入框/input, 按钮/button, 弹层/popover and 对话框/dialog. First locate the target window and relevant dialog/popover/editor when available, then query within that root using task-specific localized/English labels or observed native_id. Group needed controls in one query. If no separate container exists, use the window. Only after targeted misses add control types; broad text/date/time terms can match unrelated static calendar text. No match does not prove an operation is unsupported; queries fuzzy-match native_id, role and name within the selected root and return matching nodes only (OR across terms). If traversal is incomplete, narrow the root when possible and increase depth/node/byte bounds as needed; do not reduce depth to hide matches. Refresh known controls with element_id and element_only=true. Application catalog nodes expose application_state=foreground/background/hidden when available (hidden takes priority); missing state means unknown. This is application activation/visibility, not window minimization or screen visibility. Application catalog nodes omit matched_queries and do not contain UI contents or authorize actions. The catalog does not query windows. Use its returned Application reference as root with queries=[窗口, window] to obtain owner_selectable_windows for application screenshots; missing window entries in the catalog do not establish that capture is unavailable. On macOS, search the session application catalog before searching an app UI. If the application is found, use its Application reference as root. If a complete application-name search is empty, increasing max_depth or searching button/date labels cannot find a non-running app: use the independently authorized launch_application tool with an explicit installed target, then refresh the running application catalog. If the launch tool is unavailable, report that limitation; do not fall back to a shell command. Empty control searches within an existing app do not mean the app is absent. Protected field values are never returned.",
             json!({
                 "type": "object",
                 "properties": {
@@ -260,9 +273,9 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
             }),
         ),
         read(
-            "inspect_selected_file_metadata",
+            "inspect_files",
             Capability::FileMetadataRead,
-            "Read bounded metadata for owner-selected objects, or supply directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_selected_text_file using this result call id and exact entry_name; content reading still requires a separate grant.",
+            "Read bounded metadata for owner-selected objects, or supply directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_text_file using this result call id and exact entry_name; content reading still requires a separate grant.",
             json!({
                 "type": "object",
                 "properties": {
@@ -283,9 +296,9 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
             }),
         ),
         read(
-            "read_selected_text_file",
+            "read_text_file",
             Capability::FileContentRead,
-            "Read one owner-selected regular file, or a verified text file result from this conversation, as bounded UTF-8. For a creation/read/update result, provide only file_result_call_id (omit entry_name). For a child from inspect_selected_file_metadata, provide file_result_call_id plus entry_name. Request read_selected_text_file permission with these exact arguments; metadata permission is insufficient. Do not read just to prepare an update when verified creation/update content and SHA-256 are already known. A creation grant never authorizes reading or model egress. Never provide a path or object reference.",
+            "Read one owner-selected regular file, or a verified text file result from this conversation, as bounded UTF-8. For a creation/read/update result, provide only file_result_call_id (omit entry_name). For a child from inspect_files, provide file_result_call_id plus entry_name. Request read_text_file permission with these exact arguments; metadata permission is insufficient. Do not read just to prepare an update when verified creation/update content and SHA-256 are already known. A creation grant never authorizes reading or model egress. Never provide a path or object reference.",
             json!({
                 "type": "object",
                 "properties": {"file_result_call_id": {"type":"string", "minLength":1, "maxLength":256}, "entry_name": {"type":"string", "minLength":1, "maxLength":512, "description":"Exact immediate regular-file name from the identified metadata result; omit for a creation/read/update result."}},
@@ -293,7 +306,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
             }),
         ),
         read(
-            "inspect_selected_spreadsheets",
+            "inspect_spreadsheets",
             Capability::SpreadsheetFileInspect,
             "Read bounded cell, formula, and value projections from explicitly owner-selected inert .xlsx, .csv, or .tsv files, or from supported direct children of an explicitly selected directory. Directory expansion is non-recursive and bounded; macros, external links, data connections, and model-provided paths are rejected.",
             json!({
@@ -343,7 +356,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
             }),
         ),
         read(
-            "inspect_selected_terminal_output",
+            "read_terminal_output",
             Capability::TerminalOutputRead,
             "Read only the bounded recent terminal output snapshot explicitly attached by the owner. Secrets are redacted at the device before the result is returned.",
             json!({
@@ -590,6 +603,14 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 include_active_application: args.include_active_application,
             })
         }
+        "list_applications" => {
+            let mut params = serde_json::from_str::<
+                desk_agent_protocol::application_launch::ListApplicationsRequest,
+            >(&call.arguments_json)
+            .map_err(bad_arguments)?;
+            params.normalize().map_err(bad_arguments)?;
+            ContextKind::ApplicationList(params)
+        }
         "inspect_desktop_ui" => {
             let args = parse_params::<DesktopUiToolArgs>(&call.arguments_json).map_err(|error| bad_arguments(format!("{}. Required format: {{\"queries\":[\"localized name\",\"English name\"],\"root_id\":\"<observed root>\"}}. Use top-level element_id only to locate a known control. query/name/native_id/role exact-search parameters are not supported; pass their text in queries. No UI was read.", error.message)))?;
             let params = UiInspectParams {
@@ -630,7 +651,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: args.max_bytes,
             })
         }
-        "inspect_selected_numbers_with_iwork" => {
+        "inspect_numbers_file" => {
             let args = parse_params::<BatchDocumentToolArgs>(&call.arguments_json)?;
             ContextKind::SpreadsheetLiveInspect(LiveDocumentInspectParams {
                 target: None,
@@ -638,7 +659,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: args.max_bytes,
             })
         }
-        "inspect_selected_excel_cell" => {
+        "inspect_excel_cell" => {
             let args = serde_json::from_str::<crate::device_assistant::windows_excel::InspectArgs>(
                 &call.arguments_json,
             )
@@ -660,7 +681,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: args.max_bytes,
             })
         }
-        "inspect_selected_pages_with_iwork" | "inspect_selected_word_file" => {
+        "inspect_pages_file" | "inspect_word_file" => {
             let args = parse_params::<BatchDocumentToolArgs>(&call.arguments_json)?;
             ContextKind::DocumentLiveInspect(LiveDocumentInspectParams {
                 target: None,
@@ -676,7 +697,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: args.max_bytes,
             })
         }
-        "inspect_selected_keynote_with_iwork" | "inspect_selected_powerpoint_file" => {
+        "inspect_keynote_file" | "inspect_powerpoint_file" => {
             let args = parse_params::<BatchDocumentToolArgs>(&call.arguments_json)?;
             ContextKind::PresentationLiveInspect(LiveDocumentInspectParams {
                 target: None,
@@ -684,7 +705,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: args.max_bytes,
             })
         }
-        "inspect_selected_file_metadata" => {
+        "inspect_files" => {
             let args = parse_params::<SelectedFileMetadataToolArgs>(&call.arguments_json)?;
             if args.directory_request_id.as_ref().is_some_and(|id| {
                 id.is_empty() || id.len() > 256 || id.chars().any(char::is_control)
@@ -706,7 +727,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 modified_before: args.modified_before,
             })
         }
-        "read_selected_text_file" => {
+        "read_text_file" => {
             crate::provider_preflight::text_file::read_result_id(call)?;
             ContextKind::FileContentRead(FileContentReadParams {
                 // Replaced centrally with the exact owner-attached file ref.
@@ -719,7 +740,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: 64 * 1024,
             })
         }
-        "inspect_selected_spreadsheets" => {
+        "inspect_spreadsheets" => {
             let _ = parse_params::<NoToolArgs>(&call.arguments_json)?;
             ContextKind::SpreadsheetFileInspect(SpreadsheetFileInspectParams {
                 files: Vec::new(),
@@ -759,7 +780,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 max_bytes: 512 * 1024,
             })
         }
-        "inspect_selected_terminal_output" => {
+        "read_terminal_output" => {
             let _ = parse_params::<NoToolArgs>(&call.arguments_json)?;
             ContextKind::TerminalOutputInspect(TerminalOutputInspectParams {
                 // Replaced by the central orchestrator with exact user-attached
@@ -935,12 +956,12 @@ mod tests {
         assert!(!diagnostic_names.contains(&"inspect_office_selection".to_string()));
 
         let tools = device_assistant_read_tool_registry();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
         for tool in tools {
             assert_eq!(tool.effect, ToolEffect::ReadOnly);
             let arguments_json = if tool.name() == "preview_spreadsheet_merge" {
                 r#"{"columns":[{"output_header":"Region","source_headers":["Region"]}]}"#
-            } else if tool.name() == "inspect_desktop_ui" {
+            } else if matches!(tool.name(), "inspect_desktop_ui" | "list_applications") {
                 r#"{"allow_unfiltered":true}"#
             } else {
                 "{}"
@@ -954,7 +975,8 @@ mod tests {
             assert_eq!(cap, tool.required_capability);
             assert!(matches!(
                 cap,
-                Capability::DesktopSessionInspect
+                Capability::ApplicationList
+                    | Capability::DesktopSessionInspect
                     | Capability::DesktopUiInspect
                     | Capability::OfficeDocumentInspect
                     | Capability::FileMetadataRead
@@ -969,7 +991,7 @@ mod tests {
         assert!(
             build_read_operation(&ToolCall {
                 id: "assistant-call".into(),
-                name: "inspect_selected_file_metadata".into(),
+                name: "inspect_files".into(),
                 arguments_json: r#"{"path":"C:\\\\secret.txt"}"#.into(),
             })
             .is_err(),
@@ -977,7 +999,7 @@ mod tests {
         );
         let (_, filtered_input) = build_read_operation(&ToolCall {
             id: "assistant-filter-call".into(),
-            name: "inspect_selected_file_metadata".into(),
+            name: "inspect_files".into(),
             arguments_json: r#"{"file_extensions":[".CSV"],"min_file_bytes":4,"max_file_bytes":16,"modified_after":"2026-08-25T00:00:00Z","modified_before":"2026-08-27T00:00:00Z"}"#.into(),
         })
         .unwrap();
@@ -1002,7 +1024,7 @@ mod tests {
         assert!(
             build_read_operation(&ToolCall {
                 id: "assistant-terminal-call".into(),
-                name: "inspect_selected_terminal_output".into(),
+                name: "read_terminal_output".into(),
                 arguments_json: r#"{"terminal_id":"other-terminal"}"#.into(),
             })
             .is_err(),
@@ -1013,20 +1035,11 @@ mod tests {
     #[test]
     fn batch_iwork_inspection_has_only_a_server_injected_source() {
         for (name, expected) in [
+            ("inspect_numbers_file", Capability::SpreadsheetLiveInspect),
+            ("inspect_pages_file", Capability::DocumentLiveInspect),
+            ("inspect_keynote_file", Capability::PresentationLiveInspect),
             (
-                "inspect_selected_numbers_with_iwork",
-                Capability::SpreadsheetLiveInspect,
-            ),
-            (
-                "inspect_selected_pages_with_iwork",
-                Capability::DocumentLiveInspect,
-            ),
-            (
-                "inspect_selected_keynote_with_iwork",
-                Capability::PresentationLiveInspect,
-            ),
-            (
-                "inspect_selected_powerpoint_file",
+                "inspect_powerpoint_file",
                 Capability::PresentationLiveInspect,
             ),
         ] {
@@ -1064,7 +1077,7 @@ mod tests {
     fn excel_cell_inspection_requires_explicit_selection_and_server_bound_source() {
         let call = |arguments: &str| ToolCall {
             id: "excel-cell".into(),
-            name: "inspect_selected_excel_cell".into(),
+            name: "inspect_excel_cell".into(),
             arguments_json: arguments.into(),
         };
         for arguments in [

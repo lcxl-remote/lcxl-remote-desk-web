@@ -11,7 +11,7 @@ function formatPayload(value: string) {
 }
 
 function batchResult(tool: DeviceAssistantToolActivity) {
-    if (!['execute_ui_actions', 'execute_background_inputs'].includes(tool.name) || !tool.output) return null;
+    if (!['execute_ui_actions', 'send_background_input'].includes(tool.name) || !tool.output) return null;
     try {
         let value = JSON.parse(tool.output);
         if (typeof value.message === 'string') {

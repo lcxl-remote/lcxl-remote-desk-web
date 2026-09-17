@@ -4,8 +4,8 @@ pub const PROVIDER_ID: &str = "office.docx.batch";
 pub const INSPECT_CAPABILITY_ID: &str = "office.docx.batch.inspect";
 pub const PATCH_CAPABILITY_ID: &str = "office.docx.batch.patch";
 pub const ADAPTER_ID: &str = "windows.office.docx.batch";
-pub const INSPECT_TOOL: &str = "inspect_selected_word_file";
-pub const PATCH_TOOL: &str = "replace_selected_word_copy_body";
+pub const INSPECT_TOOL: &str = "inspect_word_file";
+pub const PATCH_TOOL: &str = "replace_word_copy_body";
 pub(super) const READINESS_IDENTITIES: [(&str, &str, &str, &str); 1] = [(
     PROVIDER_ID,
     INSPECT_CAPABILITY_ID,
@@ -29,7 +29,7 @@ pub(super) fn inspect_tool() -> RegisteredTool {
 pub(super) fn patch_tool() -> RegisteredTool {
     let mut tool = document_batch_patch_tool();
     tool.spec.name = PATCH_TOOL.into();
-    tool.spec.description = "Replace the body of a fresh document returned by inspect_selected_word_file with exact bounded plain text and create a new DOCX in an owner-approved directory. Existing body formatting, tables and images are replaced; section settings and other package parts are preserved. Revalidate the source and read back the copy. Never overwrite the source. No Word application, Live session or native export is used.".into();
+    tool.spec.description = "Replace the body of a fresh document returned by inspect_word_file with exact bounded plain text and create a new DOCX in an owner-approved directory. Existing body formatting, tables and images are replaced; section settings and other package parts are preserved. Revalidate the source and read back the copy. Never overwrite the source. No Word application, Live session or native export is used.".into();
     tool.spec.parameters_schema["properties"]["output"] = batch_output_schema("docx");
     tool
 }

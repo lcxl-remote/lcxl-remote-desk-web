@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AssistantFileResult, parseFileReceipt } from './assistant-file-result';
 import { hasUnknownActionResult } from './action-result-status';
+import { AssistantLaunchResult, parseLaunchReceipt } from './assistant-launch-result';
 
 type CommandReceipt = {
     exit_code: number;
@@ -42,7 +43,9 @@ export function AssistantCommandResult({ text, onExportBackup }: { text: string;
     const { t, i18n } = useTranslation();
     const receipt = useMemo(() => parseCommandReceipt(text), [text]);
     const fileReceipt = useMemo(() => parseFileReceipt(text), [text]);
+    const launchReceipt = useMemo(() => parseLaunchReceipt(text), [text]);
     const outcomeUnknown = useMemo(() => hasUnknownActionResult(text), [text]);
+    if (launchReceipt) return <AssistantLaunchResult receipt={launchReceipt} text={text} />;
     if (fileReceipt) return <AssistantFileResult receipt={fileReceipt} text={text} onExportBackup={onExportBackup} />;
     const output = (label: string, content: string, truncated: boolean) => (
         <div className="min-w-0 space-y-1">

@@ -271,7 +271,7 @@ mod tests {
             user.data_envelope.as_ref(),
             "call",
             &result.text,
-            "execute_confirmed_command",
+            "exec_command",
         )
         .unwrap();
         result.tool_call_id = Some("call".into());

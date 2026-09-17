@@ -44,8 +44,8 @@ pub fn blocks_targeting(session: &PersistedAgentSession, tool_name: &str) -> boo
             tool_name,
             "preview_computer_action"
                 | "execute_ui_actions"
-                | "execute_background_inputs"
-                | "execute_confirmed_raw_input"
+                | "send_background_input"
+                | "send_raw_input"
         )
 }
 
@@ -388,7 +388,7 @@ mod tests {
         ));
         note_successful_observation(&mut session, "screen-1", "read_current_screen").unwrap();
         assert!(blocks_targeting(&session, "preview_computer_action"));
-        assert!(blocks_targeting(&session, "execute_confirmed_raw_input"));
+        assert!(blocks_targeting(&session, "send_raw_input"));
 
         note_successful_observation(&mut session, "ui-same-batch", "inspect_desktop_ui").unwrap();
         assert!(session.pending_visual_verification.is_some());
@@ -402,12 +402,12 @@ mod tests {
                 arguments_json: "{}".into(),
             }],
         ));
-        assert!(!blocks_targeting(&session, "execute_background_inputs"));
+        assert!(!blocks_targeting(&session, "send_background_input"));
         note_successful_observation(&mut session, "screen-2", "read_current_screen").unwrap();
-        assert!(blocks_targeting(&session, "execute_background_inputs"));
+        assert!(blocks_targeting(&session, "send_background_input"));
         session
             .conversation
             .push(ChatMessage::assistant_tool_calls("assistant-3", "", vec![]));
-        assert!(!blocks_targeting(&session, "execute_confirmed_raw_input"));
+        assert!(!blocks_targeting(&session, "send_raw_input"));
     }
 }

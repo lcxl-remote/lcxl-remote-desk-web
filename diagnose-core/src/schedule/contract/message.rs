@@ -593,7 +593,7 @@ impl ValidatedTaskContract {
             return Err(TaskContractError::InvalidInput);
         };
         if rule.effect != CapabilityEffect::WriteExternalDraft
-            || rule.tool_name != "prepare_slack_web_message_handoff"
+            || rule.tool_name != "prepare_slack_message"
             || input.body_plain_text.is_empty()
             || input.body_plain_text.len() > *max_body_bytes as usize
         {

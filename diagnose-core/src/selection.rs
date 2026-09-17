@@ -114,6 +114,8 @@ fn is_allowed(cap: Capability, request: &DiagnoseRequestData, policy: &Collectio
         | Capability::BrowserInputFallbackConfirmed
         | Capability::BrowserExternalDraftWriteConfirmed
         | Capability::BrowserExternalSendConfirmed
+        | Capability::ApplicationList
+        | Capability::ApplicationLaunchConfirmed
         | Capability::FileDeleteConfirmed => false,
     }
 }
@@ -199,6 +201,8 @@ pub fn capability_name(cap: Capability) -> Option<&'static str> {
         | Capability::BrowserInputFallbackConfirmed
         | Capability::BrowserExternalDraftWriteConfirmed
         | Capability::BrowserExternalSendConfirmed
+        | Capability::ApplicationList
+        | Capability::ApplicationLaunchConfirmed
         | Capability::FileDeleteConfirmed => return None,
     })
 }
@@ -307,6 +311,8 @@ pub fn context_input_for(cap: Capability) -> Option<ReadContextInput> {
         | Capability::BrowserInputFallbackConfirmed
         | Capability::BrowserExternalDraftWriteConfirmed
         | Capability::BrowserExternalSendConfirmed
+        | Capability::ApplicationList
+        | Capability::ApplicationLaunchConfirmed
         | Capability::FileDeleteConfirmed => return None,
     };
     Some(ReadContextInput { kind })

@@ -98,7 +98,7 @@ async fn check_completion_usage(with_usage: bool, invalid_count: usize) {
             user.data_envelope.as_ref(),
             &event,
             &result.text,
-            "execute_confirmed_command",
+            "exec_command",
         )
         .unwrap();
         session.conversation.push(result);

@@ -23,8 +23,8 @@ import { AssistantPermissionRequest } from './assistant-permission-request';
 import { AssistantPermissionRecords } from './assistant-permission-records';
 import { AssistantHistory } from './assistant-history';
 import { capabilityDescriptionKey } from './assistant-capability-copy';
-import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Fragment, type FormEvent, useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, MessageSquarePlus, Check, Copy, Eye, LoaderCircle, Monitor, Puzzle, RefreshCw, Send, ShieldCheck, X } from 'lucide-react';
 
@@ -209,7 +209,6 @@ export function DeviceAssistantWorkspace({
     localPairingAvailable,
     featureProfile,
     assistantEnabled,
-    onBrowserTakeover,
 }: {
     rehearsal?: RehearsalConversation;
     deskId: string;
@@ -217,7 +216,6 @@ export function DeviceAssistantWorkspace({
     localPairingAvailable: boolean;
     featureProfile: DeviceAssistantFeatureProfile;
     assistantEnabled: boolean;
-    onBrowserTakeover: () => void;
 }) {
     const { t } = useTranslation();
     const { i18n } = useTranslation();
@@ -229,6 +227,7 @@ export function DeviceAssistantWorkspace({
         sendMessage,
     });
     const scheduleNavigate = useNavigate();
+    const setupOrigin = useLocation();
     const chat = useDeviceAssistantChat({
         rehearsal,
         deskId,
@@ -237,7 +236,9 @@ export function DeviceAssistantWorkspace({
         subscribe,
         sendMessage,
     });
-    const capabilities = useDeviceAssistantCapabilities({ deskId, subscribe, sendMessage });
+    const capabilities = useDeviceAssistantCapabilities({
+        deskId, subscribe, sendMessage, enabled: assistantEnabled && isConnected,
+    });
     const recoveryConnections = useListConnections();
     const exportBackup = async (id: string) => {
         // Recovery records use the durable server session key, not the client
@@ -283,13 +284,6 @@ export function DeviceAssistantWorkspace({
     }, [pendingDirectoryKey, permissionHistoryKey]);
     useEffect(() => { setPermissionHistorySession(null); }, [permissionHistoryKey]);
     const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
-    const started = useRef(false);
-
-    useEffect(() => {
-        if (!assistantEnabled || !isConnected || started.current) return;
-        started.current = true;
-        capabilities.refresh();
-    }, [assistantEnabled, capabilities.refresh, isConnected]);
 
     const contextCapabilities = featureProfile.object_context
         ? (capabilities.snapshot?.entries ?? []).filter((entry) => entry.context_selectable)
@@ -718,31 +712,13 @@ export function DeviceAssistantWorkspace({
                 </Alert>
             )}
             {browserTakeoverRequired && (
-                <Card data-testid="browser-remote-takeover">
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-base">
-                            <Monitor className="h-4 w-4" />
-                            {t('pages.deviceAssistant.browserTakeoverTitle')}
-                        </CardTitle>
-                        <CardDescription>
-                            {t('pages.deviceAssistant.browserTakeoverDescription')}
-                        </CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                        <Button
-                            variant="outline"
-                            disabled={!assistantEnabled || chat.running}
-                            onClick={onBrowserTakeover}
-                        >
-                            {t('pages.deviceAssistant.browserTakeoverAction')}
-                        </Button>
-                        {chat.running && (
-                            <p className="text-xs text-muted-foreground">
-                                {t('pages.deviceAssistant.browserTakeoverBusy')}
-                            </p>
-                        )}
-                    </CardContent>
-                </Card>
+                <Link to={`/desk/${encodeURIComponent(deskId)}/browser-setup`}
+                    state={{ returnTo: setupOrigin.pathname + setupOrigin.search }} data-testid="browser-remote-takeover"
+                    className="mx-auto flex w-full max-w-4xl shrink-0 items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    <Monitor className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    <span className="min-w-0 flex-1">{t('pages.deviceAssistant.browserTakeoverTitle')}</span>
+                    <span className="shrink-0 text-xs text-primary">{t('pages.deviceAssistant.browserSetup.open')}</span>
+                </Link>
             )}
             <Card className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col border-0 shadow-none">
                 <CardHeader className="assistant-header shrink-0 px-0 py-3">
@@ -779,7 +755,7 @@ export function DeviceAssistantWorkspace({
                 <CardContent className="flex min-h-0 flex-1 flex-col gap-3 p-0">
                     <div className="relative min-h-0 flex-1">
                     <div ref={scrollRef} onScroll={onScroll} data-testid="assistant-scroll-area"
-                        className="h-full overflow-y-auto overscroll-contain [overflow-wrap:anywhere]">
+                        className="assistant-scrollbar h-full overflow-y-auto overscroll-contain [overflow-wrap:anywhere]">
                     <div ref={contentRef} className="space-y-4 pb-4">
                     <div data-testid="device-assistant-transcript" className="min-h-48 space-y-5 py-4">
                         {chat.hydrating && <Skeleton className="h-20 w-full" />}
@@ -1040,7 +1016,6 @@ export default function DeviceAssistantPage({
                     localPairingAvailable={!connection.device_id}
                     featureProfile={featureProfile}
                     assistantEnabled={isDeviceAssistantEnabled(connection.version_info)}
-                    onBrowserTakeover={() => navigate(`/desk/${deskId}/control`)}
                 />}
             </DeviceAssistantRehearsalGate> : (
                 <DeviceAssistantWorkspace
@@ -1049,7 +1024,6 @@ export default function DeviceAssistantPage({
                     localPairingAvailable={!connection.device_id}
                     featureProfile={featureProfile}
                     assistantEnabled={isDeviceAssistantEnabled(connection.version_info)}
-                    onBrowserTakeover={() => navigate(`/desk/${deskId}/control`)}
                 />
             )}
         </div>

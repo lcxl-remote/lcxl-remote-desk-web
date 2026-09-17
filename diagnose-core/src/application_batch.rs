@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 pub const MAX_STEPS: usize = 20;
 pub fn supports(name: &str) -> bool {
-    matches!(name, "execute_ui_actions" | "execute_background_inputs")
+    matches!(name, "execute_ui_actions" | "send_background_input")
 }
 fn invalid(path: &str, detail: impl std::fmt::Display) -> AgentError {
     AgentError {
@@ -27,7 +27,7 @@ pub fn resolve(call: &ToolCall, history: &[ChatMessage], now: u64) -> Result<Too
     let obj = value
         .as_object()
         .ok_or_else(|| invalid("$", "expected object"))?;
-    let background = call.name == "execute_background_inputs";
+    let background = call.name == "send_background_input";
     for key in obj.keys() {
         if !matches!(key.as_str(), "application_id" | "steps")
             && !(background && key == "window_id")
@@ -117,7 +117,7 @@ pub fn actions(call: &ToolCall) -> Result<Vec<ComputerActionStep>, AgentError> {
     for (index, args) in args.into_iter().enumerate() {
         if args.get("remaining_steps").is_some()
             || args["application"] != app
-            || (call.name == "execute_background_inputs" && args["target"] != window)
+            || (call.name == "send_background_input" && args["target"] != window)
         {
             return Err(invalid(
                 &format!("steps[{index}]"),
@@ -138,7 +138,7 @@ pub fn actions(call: &ToolCall) -> Result<Vec<ComputerActionStep>, AgentError> {
                     action,
                 },
             )
-        } else if call.name == "execute_background_inputs" {
+        } else if call.name == "send_background_input" {
             let (target, input) = crate::provider_preflight::background_input_from_call(&child)?;
             (
                 target,
@@ -183,7 +183,7 @@ pub fn project_schema(tool: &mut ToolSpec) {
     if !supports(&tool.name) {
         return;
     }
-    let background = tool.name == "execute_background_inputs";
+    let background = tool.name == "send_background_input";
     let p = &tool.parameters_schema["properties"];
     let mut properties = json!({"application_id":p["application_id"],"steps":{"type":"array","minItems":1,"maxItems":MAX_STEPS,"items":{"type":"object","properties":{"action":p["action"]},"required":["action"],"additionalProperties":false}}});
     let mut required = vec!["application_id", "steps"];

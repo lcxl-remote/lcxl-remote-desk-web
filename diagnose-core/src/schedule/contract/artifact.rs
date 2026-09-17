@@ -7,7 +7,7 @@ mod windows_directory;
 pub fn generated_text_input(
     tool: &crate::chat::ToolCall,
 ) -> Result<TaskGeneratedTextArtifact, TaskContractError> {
-    if tool.name != "create_text_artifact_in_selected_directory" {
+    if tool.name != "create_text_file" {
         return Err(TaskContractError::InvalidInput);
     }
     let action = crate::provider_preflight::artifact_action_from_call(tool)
@@ -29,7 +29,7 @@ mod tests {
     use super::*;
     #[test]
     fn projection_preserves_text_without_promoting_directory_selector_to_authority() {
-        let call = crate::chat::ToolCall { id: "create".into(), name: "create_text_artifact_in_selected_directory".into(),
+        let call = crate::chat::ToolCall { id: "create".into(), name: "create_text_file".into(),
             arguments_json: serde_json::json!({"file_name":"report.txt","content_utf8":"New report\n", "directory_request_id":"this-run-directory"}).to_string() };
         let projected = generated_text_input(&call).unwrap();
         assert_eq!(projected.file_name, "report.txt");

@@ -8,10 +8,11 @@ import { Input } from '@/components/ui/input';
 import type { PermissionDecisionBody, PermissionRequestDto } from '@/services/types';
 import { AssistantPermissionDisclosure } from './assistant-permission-disclosure';
 import { CommandConfirmationCard, validCommandReview } from './device-assistant-command';
+import { LaunchConfirmationCard, validLaunchReview } from './device-assistant-launch';
 import { TextFileConfirmationCard, validTextFileReview, fileApprovalBlocked } from './device-assistant-file-confirmation';
 
 function needsApplicationScope(tool: string) {
-    return ['execute_ui_actions', 'execute_background_inputs'].includes(tool);
+    return ['execute_ui_actions', 'send_background_input'].includes(tool);
 }
 
 function formatByteCount(value: number) {
@@ -103,7 +104,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     {t(`pages.deviceAssistant.permissionState.${request.state}`)}
                 </Badge>
             </div>
-            {request.items.some((item) => ['execute_ui_actions', 'execute_background_inputs', 'execute_confirmed_raw_input'].includes(item.toolName))
+            {request.items.some((item) => ['execute_ui_actions', 'send_background_input', 'send_raw_input'].includes(item.toolName))
                 && ['inspect_desktop_session', 'inspect_desktop_ui'].every((name) => request.items.some((item) => item.toolName === name)) && (
                 <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.permissionIncludedDesktopReads')}</p>
             )}
@@ -115,7 +116,8 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     const defaultItemIds = request.items
                         .filter((entry) => (entry.expectedEffect !== 'send_external'
                             || Boolean(entry.externalSendConfirmation))
-                            && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
+                            && (entry.toolName !== 'exec_command' || validCommandReview(entry.commandConfirmation))
+                            && (entry.toolName !== 'launch_application' || validLaunchReview(entry.launchConfirmation))
                             && (!needsApplicationScope(entry.toolName) || Boolean(entry.applicationScope))
                             && !fileApprovalBlocked(entry))
                         .map((entry) => entry.itemId);
@@ -125,8 +127,9 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     const isExternalSend = item.expectedEffect === 'send_external';
                     const sendConfirmation = item.externalSendConfirmation;
                     const commandConfirmation = item.commandConfirmation;
-                    const commandBlocked = item.toolName === 'execute_confirmed_command' && !validCommandReview(commandConfirmation);
-                    const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || (needsApplicationScope(item.toolName) && !item.applicationScope) || fileApprovalBlocked(item);
+                    const commandBlocked = item.toolName === 'exec_command' && !validCommandReview(commandConfirmation);
+                    const launchBlocked = item.toolName === 'launch_application' && !validLaunchReview(item.launchConfirmation);
+                    const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || launchBlocked || (needsApplicationScope(item.toolName) && !item.applicationScope) || fileApprovalBlocked(item);
                     const edit = permissionEdits[request.requestId]?.[item.itemId]
                         ?? {};
                     const resourceScope = edit.resourceScope
@@ -165,6 +168,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                     </div>
                                 )}
                                 {validCommandReview(commandConfirmation) && <CommandConfirmationCard value={commandConfirmation} />}
+                                {validLaunchReview(item.launchConfirmation) && <LaunchConfirmationCard value={item.launchConfirmation} />}
                                 {validTextFileReview(item.textFileConfirmation) && <TextFileConfirmationCard value={item.textFileConfirmation} />}
                                 {sendConfirmation && (
                                     <div data-testid="external-send-confirmation" className="mt-3 space-y-2 rounded-md border border-red-500/50 bg-red-500/5 p-3 text-xs">
@@ -207,7 +211,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 {approvalBlocked && (
                                     <p className="mt-2 text-xs font-medium text-red-700 dark:text-red-300">
                                         {t(needsApplicationScope(item.toolName) && !item.applicationScope ? 'pages.deviceAssistant.applicationUiScopeMissing' : fileApprovalBlocked(item) ? 'pages.deviceAssistant.fileConfirmMissing'
-                                            : commandBlocked ? 'pages.deviceAssistant.commandSummaryMissing' : 'pages.deviceAssistant.externalSendSummaryMissing')}
+                                            : launchBlocked ? 'pages.deviceAssistant.launchSummaryMissing' : commandBlocked ? 'pages.deviceAssistant.commandSummaryMissing' : 'pages.deviceAssistant.externalSendSummaryMissing')}
                                     </p>
                                 )}
                                 {!item.applicationScope && (item.resourceScope.length > 0 || item.operationScope.length > 0) && (
@@ -361,14 +365,16 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                     ?? request.items
                                         .filter((entry) => (entry.expectedEffect !== 'send_external'
                                             || Boolean(entry.externalSendConfirmation))
-                                            && (entry.toolName !== 'execute_confirmed_command' || validCommandReview(entry.commandConfirmation))
+                                            && (entry.toolName !== 'exec_command' || validCommandReview(entry.commandConfirmation))
+                            && (entry.toolName !== 'launch_application' || validLaunchReview(entry.launchConfirmation))
                                             && (!needsApplicationScope(entry.toolName) || Boolean(entry.applicationScope))
                                             && !fileApprovalBlocked(entry))
                                         .map((entry) => entry.itemId);
                                 if (!selected.includes(item.itemId)
                                     || (item.expectedEffect === 'send_external'
                                         && !item.externalSendConfirmation)
-                                    || (item.toolName === 'execute_confirmed_command' && !validCommandReview(item.commandConfirmation))
+                                    || (item.toolName === 'exec_command' && !validCommandReview(item.commandConfirmation))
+                                    || (item.toolName === 'launch_application' && !validLaunchReview(item.launchConfirmation))
                                     || fileApprovalBlocked(item) || (needsApplicationScope(item.toolName) && !item.applicationScope)) {
                                     return {
                                         itemId: item.itemId,

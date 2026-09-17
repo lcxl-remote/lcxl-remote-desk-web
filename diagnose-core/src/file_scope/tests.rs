@@ -73,7 +73,7 @@ fn artifact_boundary_requires_exact_current_directory_without_granting_tools() {
         "2026-09-05T00:00:00Z",
     );
     session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::DeviceAssistant);
-    let tool = "create_text_artifact_in_selected_directory";
+    let tool = "create_text_file";
     let resources = crate::capability_grant::fresh_object_resource_scope(&[proposal().directory]);
     assert!(validate_artifact_scope(&session, tool, &resources, 1).is_err());
     session.file_scope = approved();
@@ -136,11 +136,11 @@ fn all_native_file_writes_require_a_current_directory_but_live_edits_do_not() {
     for tool in [
         "update_text_file",
         "delete_text_file",
-        "patch_selected_numbers_copy",
-        "replace_selected_pages_copy_body",
-        "patch_selected_keynote_copy",
-        "patch_selected_powerpoint_copy",
-        "replace_selected_word_copy_body",
+        "patch_numbers_copy",
+        "replace_pages_copy_body",
+        "patch_keynote_copy",
+        "patch_powerpoint_copy",
+        "replace_word_copy_body",
     ] {
         assert!(
             validate_artifact_scope(&session, tool, &resources, 1).is_ok(),
@@ -163,11 +163,11 @@ fn all_native_file_writes_require_a_current_directory_but_live_edits_do_not() {
     for tool in [
         "update_text_file",
         "delete_text_file",
-        "patch_selected_numbers_copy",
-        "replace_selected_pages_copy_body",
-        "patch_selected_keynote_copy",
-        "patch_selected_powerpoint_copy",
-        "replace_selected_word_copy_body",
+        "patch_numbers_copy",
+        "replace_pages_copy_body",
+        "patch_keynote_copy",
+        "patch_powerpoint_copy",
+        "replace_word_copy_body",
     ] {
         assert!(
             validate_artifact_scope(&session, tool, &resources, 1).is_err(),

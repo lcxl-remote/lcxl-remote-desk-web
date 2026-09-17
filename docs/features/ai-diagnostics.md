@@ -1,5 +1,9 @@
 # AI Diagnostics
 
+The extension offers Allow current site and Allow all HTTP and HTTPS websites. The latter requests optional access only after a click and Chrome approval. It excludes local files, and browser internal pages, and does not replace AI action authorization. Manage or revoke site access in Chrome extension settings.
+
+
+When the browser needs pairing or is disconnected, a compact notice above the conversation opens a separate setup guide. It covers extension installation, local pairing, site permissions, and checking readiness, with remote desktop access and troubleshooting. Pairing codes remain in the controlled device local interface and must not be pasted into AI chat.
 Desktop context can be selected manually with **Add context**, or requested by the assistant for the current question: desktop session inspection, semantic UI inspection, or current-screen capture. A new conversation with no attached context can request these reads. Approving the permission card automatically continues the original question; rejecting it performs no read. Authorization is bound to the device and current input, with expiry and usage limits; a new request is required when it expires or is exhausted. Screenshots require an image-capable model. Read approval does not authorize mouse or keyboard input, and cannot bypass an offline device, missing OS permissions, or locally disabled capabilities.
 
 When adding a file or directory to the Assistant from the file list, wait for confirmation of that request. After switching devices, a late receipt from the previous request is not shown as a successful addition to the new device. Switching pages does not cancel a request already sent. If confirmation times out, check the original conversation before trying again; the page does not resend automatically. Selecting a file or directory does not approve model export or subsequent modifications.
@@ -97,6 +101,18 @@ desktop view. While the view is at the bottom, streaming output follows the
 latest text automatically. Scrolling up pauses that behavior and shows a
 down-arrow button that returns to the latest content without losing the
 reader's place unexpectedly.
+
+## Launch applications and run commands
+
+For applications and long-running programs, the assistant uses `launch_application`. It requires a separate approval from `exec_command`: command execution collects output and reclaims its managed process tree when it ends; application launch does not collect stdout and does not close the application when the task finishes or is cancelled.
+
+`list_applications` supplies reference information about installed applications. Its `queries` accepts multiple fuzzy search terms; localized and English names can be searched together. Search terms are required by default. Only explicit `allow_unfiltered=true` permits unfiltered, paginated discovery. Catalog paths, arguments, and working directories are suggestions; the independently supplied and approved launch request determines what runs.
+
+Before approving, review the target, complete arguments, working directory, and administrator option. Each launch approval is single use; changing arguments or privileges requires new approval. A URL or document alone does not select its associated application: specify an executable and pass the URL or document as an argument. Observing windows, controlling browsers, and sending content still require their own permissions.
+
+Windows supports explicit executable paths and packaged application IDs. Ordinary user privileges are the default; the launcher fails when elevation is required instead of invoking UAC. Explicit administrator launch applies only to executables and requires an already available elevated token for the same user. Administrator group membership alone does not guarantee that the current host can obtain it. A third-party application can still request elevation after it starts. macOS uses application bundles; Linux uses executables and an available systemd user session. Administrator launch is unsupported on macOS/Linux. The working directory is optional and is unsupported for macOS bundles and Windows packaged applications.
+
+An accepted launch does not prove that a window or page is ready. If the outcome is unknown, observe the application or process before attempting another launch. If a browser still needs extension setup, open the conversation's setup notice and follow the dedicated setup page.
 
 ## AI Assistant Exact Command Grants
 
@@ -280,7 +296,7 @@ When AI requests a conversation timer, only a pending review request is saved, n
 
 Relative requests such as “in five minutes” count from successful server activation after confirmation. The pending review retains and displays the delay without calculating an absolute execution time; activation stores an absolute UTC instant, displayed in the selected timezone. The activation receipt is preserved in the original conversation without creating new user input or granting tool permissions. Independent automations still require rehearsal, permission review and publication.
 
-The assistant can query current-conversation tasks with `list_conversation_scheduled_tasks`, including server state, creation source, execution time and cancellation eligibility. It can cancel AI-created tasks with `cancel_conversation_scheduled_task` without another permission request or approval dialog. Manually created tasks are read-only to AI and must be cancelled by the user in task management; requesting permission cannot bypass this boundary. Origin is recorded by the server at creation; approving an AI proposal does not make it manual. Cancellation stops future scheduling and requests cancellation of any started occurrence, without undoing external effects.
+The assistant can query current-conversation tasks with `list_scheduled_tasks`, including server state, creation source, execution time and cancellation eligibility. It can cancel AI-created tasks with `cancel_scheduled_task` without another permission request or approval dialog. Manually created tasks are read-only to AI and must be cancelled by the user in task management; requesting permission cannot bypass this boundary. Origin is recorded by the server at creation; approving an AI proposal does not make it manual. Cancellation stops future scheduling and requests cancellation of any started occurrence, without undoing external effects.
 
 After a service restart or interrupted execution, an expired execution lease no longer keeps the conversation marked as running. Refreshing the server snapshot clears a pending stop and allows a new conversation while retaining history. Background commands retain their independent lifecycle and are not cancelled by this recovery.
 
@@ -315,7 +331,7 @@ For multiple native UI steps, the assistant can request application-scoped permi
 Ordinary messages, permission continuations and conversation schedule resumes restore tools from effective database grants. A new message does not discard existing permission. An invalid permission batch creates no review card, including for otherwise valid items; the assistant receives the invalid item, required input structure and prerequisite-read guidance.
 
 
-Native UI permission requests use `application_scope` exclusively; `exact_input` is rejected. Every execution requires the approved `application_id`, an observed `element_id` and `action`. Loading tool details does not create an approval request. The assistant may report a submitted card only after `request_capability_grants` returns a successful `request_id` with `pending_user_decision`.
+Native UI permission requests use `application_scope` exclusively; `exact_input` is rejected. Every execution requires the approved `application_id`, an observed `element_id` and `action`. Loading tool details does not create an approval request. The assistant may report a submitted card only after `request_permissions` returns a successful `request_id` with `pending_user_decision`.
 
 
 Desktop UI tools expose IDs to the model: reads take optional `root_id`, semantic actions take `application_id`, `element_id` and `action`, application permission requests take `application_scope.application_id`, and window screenshots take `window_id` (omitting it still captures the current display). The model supplies neither snapshot IDs nor reference expiry. The server resolves full references from observations in the current conversation and continues to validate native lifetime, object kind, application ownership and authorization. A partial read never replaces references for other controls. Invalidated references explicitly require another read; unknown IDs neither trigger unfiltered searches nor request new permission automatically. Historical observations remain intact, and native object lifetime and permission validity are checked separately. Windows fallback input also uses `application_id` while retaining exact-input approval.
@@ -330,7 +346,7 @@ UI search guidance combines localized labels with English names, native identifi
 
 Prefer semantic UI actions. When semantic UI cannot express the operation or observations and results show it is impractical or unreliable, combine background input with a current screenshot of the target application window. Obtain that screenshot with `read_current_screen` and `window_id`, refreshing it when needed. Do not default to background input when a suitable semantic UI action can accomplish the task.
 
-`execute_background_inputs` supports click, double click, scroll, Unicode text input or named key with modifiers to an observed application window. It accepts application/window IDs. Click/double-click accept either a control ID or original window screenshot pixel coordinates; scroll requires screenshot pixel coordinates (top-left origin; x < image width, y < image height). The server resolves PID, geometry and reference metadata. Mouse clicks currently use the primary button; dragging is not supported.
+`send_background_input` supports click, double click, scroll, Unicode text input or named key with modifiers to an observed application window. It accepts application/window IDs. Click/double-click accept either a control ID or original window screenshot pixel coordinates; scroll requires screenshot pixel coordinates (top-left origin; x < image width, y < image height). The server resolves PID, geometry and reference metadata. Mouse clicks currently use the primary button; dragging is not supported.
 
 The permission card approves an application and action scope in the current conversation, with editable duration, use count and actions. Approved operations reuse that grant and include desktop/UI observation; screenshots require separate permission. Background input and semantic UI actions use separate tool grants. Existing device application access rules still apply.
 
@@ -340,7 +356,7 @@ A receipt confirms event dispatch, not application state. The AI should read the
 
 ### Batch UI and background input (trial)
 
-The AI currently sees only `execute_ui_actions` (semantic UI) and `execute_background_inputs` (background mouse/keyboard). Single-action entry points are hidden. Use `steps` with 1–20 entries, even for one action. Each batch targets one application; background batches also bind one window. The two action families are not mixed in a batch.
+The AI currently sees only `execute_ui_actions` (semantic UI) and `send_background_input` (background mouse/keyboard). Single-action entry points are hidden. Use `steps` with 1–20 entries, even for one action. Each batch targets one application; background batches also bind one window. The two action families are not mixed in a batch.
 
 Existing application approval must cover every action kind. One batch consumes one grant use. A sealed batch holds one writer lease, executes sequentially and stops at the first error, without rollback or automatic retries. Existing 30-second dispatch deadlines and authorization/cancellation constraints still apply.
 

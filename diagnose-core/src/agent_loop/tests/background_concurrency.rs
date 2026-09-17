@@ -7,7 +7,7 @@ async fn multiple_dispatches_in_one_turn_preserve_ids_and_allow_sync_queries() {
     first.tool_calls.push(ToolCall {
         id: "c2".into(),
         name: "exec_command".into(),
-        arguments_json: "{}".into(),
+        arguments_json: r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#.into(),
     });
     let model = ScriptModel {
         turns: RefCell::new([first, tool_use("c3", "read_sys"), answer("running")].into()),

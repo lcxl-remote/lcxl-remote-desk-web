@@ -8,8 +8,8 @@ use desk_agent_protocol::schedule::ScheduleDraft;
 use serde::Deserialize;
 use serde_json::json;
 
-pub const LIST: &str = "list_conversation_scheduled_tasks";
-pub const CANCEL: &str = "cancel_conversation_scheduled_task";
+pub const LIST: &str = "list_scheduled_tasks";
+pub const CANCEL: &str = "cancel_scheduled_task";
 
 pub enum Action {
     Create(Box<ScheduleDraft>),
@@ -30,7 +30,7 @@ pub fn specs() -> Vec<ToolSpec> {
         parameters_schema: json!({"type":"object","additionalProperties":false,"properties":{"after":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":20}}}),
     }, ToolSpec {
         name: CANCEL.into(),
-        description: "Cancel an AI-created scheduled task in the current conversation without an extra approval dialog. Use the id and revision returned by list_conversation_scheduled_tasks. The server forbids cancellation of manual tasks and tasks from other conversations, devices or owners. Stops future scheduling and requests cancellation of any active occurrence; does not undo completed external effects. Report the returned state accurately, including cancellation_requested for a running occurrence.".into(),
+        description: "Cancel an AI-created scheduled task in the current conversation without an extra approval dialog. Use the id and revision returned by list_scheduled_tasks. The server forbids cancellation of manual tasks and tasks from other conversations, devices or owners. Stops future scheduling and requests cancellation of any active occurrence; does not undo completed external effects. Report the returned state accurately, including cancellation_requested for a running occurrence.".into(),
         parameters_schema: json!({"type":"object","additionalProperties":false,"required":["schedule_id","expected_revision"],"properties":{"schedule_id":{"type":"string","minLength":36,"maxLength":36},"expected_revision":{"type":"integer","minimum":1}}}),
     }]
 }

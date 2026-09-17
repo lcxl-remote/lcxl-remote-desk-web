@@ -136,7 +136,7 @@ async fn execute(
         vec![ToolCallRef {
             id: "c1".into(),
             name: "exec_command".into(),
-            arguments_json: "{}".into(),
+            arguments_json: r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#.into(),
         }],
     ));
     let store = CasStore(RefCell::new(held.clone()));
@@ -161,7 +161,7 @@ async fn execute(
         &ToolCall {
             id: "c1".into(),
             name: "exec_command".into(),
-            arguments_json: "{}".into(),
+            arguments_json: r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#.into(),
         },
         &[],
         &mut || "minted".into(),

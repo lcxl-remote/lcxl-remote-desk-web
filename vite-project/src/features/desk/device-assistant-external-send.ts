@@ -12,7 +12,7 @@ export type ExternalSendReceipt = {
     observed_at_unix_ms: number;
 };
 
-const EXACT_SEND_TOOLS = new Set(['send_gmail_web_exact', 'send_slack_web_exact']);
+const EXACT_SEND_TOOLS = new Set(['send_gmail_message', 'send_slack_message']);
 const SHA256 = /^[0-9a-f]{64}$/;
 
 export function isExactExternalSendTool(toolName: string) {

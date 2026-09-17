@@ -56,7 +56,7 @@ impl OutlookCallPreflight {
     ) -> Result<Self, AgentError> {
         let capability = registry
             .capability_for_tool(&call.name)
-            .filter(|_| call.name == "prepare_outlook_new_draft_handoff")
+            .filter(|_| call.name == "prepare_outlook_draft")
             .ok_or_else(unavailable)?;
         let provider = registry
             .provider_for_capability(&capability.wire.capability_id)

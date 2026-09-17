@@ -88,6 +88,12 @@ export const router = createBrowserRouter([
                 }),
             },
             {
+                path: 'desk/:id/browser-setup',
+                lazy: async () => ({
+                    Component: (await import('@/features/desk/browser-setup-page')).default,
+                }),
+            },
+            {
                 path: 'desk/:id/assistant',
                 lazy: async () => ({
                     Component: (await import('@/features/desk/device-assistant-page')).default,

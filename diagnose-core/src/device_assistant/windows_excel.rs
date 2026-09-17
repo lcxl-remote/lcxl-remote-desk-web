@@ -4,8 +4,8 @@ pub const PROVIDER_ID: &str = "office.xlsx.batch";
 pub const INSPECT_CAPABILITY_ID: &str = "office.xlsx.batch.inspect";
 pub const PATCH_CAPABILITY_ID: &str = "office.xlsx.batch.patch";
 pub const ADAPTER_ID: &str = "windows.office.xlsx.batch";
-pub const INSPECT_TOOL: &str = "inspect_selected_excel_cell";
-pub const PATCH_TOOL: &str = "patch_selected_excel_copy";
+pub const INSPECT_TOOL: &str = "inspect_excel_cell";
+pub const PATCH_TOOL: &str = "patch_excel_copy";
 pub(super) const READINESS_IDENTITIES: [(&str, &str, &str, &str); 1] = [(
     PROVIDER_ID,
     INSPECT_CAPABILITY_ID,
@@ -29,7 +29,7 @@ pub struct InspectArgs {
 pub(super) fn inspect_tool() -> RegisteredTool {
     let mut tool = batch_inspect_tool(
         INSPECT_TOOL,
-        "Read one explicitly named worksheet and canonical A1 cell from exactly one owner-selected XLSX file. Use inspect_selected_spreadsheets first if the worksheet name is unknown. No native path, source token, active document or Live session is accepted. Value is JSON stored evidence (presence, type, literal text/value); formula caches are omitted and formulas are not calculated. Use the returned fresh range for a copy mutation.",
+        "Read one explicitly named worksheet and canonical A1 cell from exactly one owner-selected XLSX file. Use inspect_spreadsheets first if the worksheet name is unknown. No native path, source token, active document or Live session is accepted. Value is JSON stored evidence (presence, type, literal text/value); formula caches are omitted and formulas are not calculated. Use the returned fresh range for a copy mutation.",
         Capability::SpreadsheetLiveInspect,
     );
     tool.spec.parameters_schema = serde_json::json!({
@@ -46,7 +46,7 @@ pub(super) fn inspect_tool() -> RegisteredTool {
 pub(super) fn patch_tool() -> RegisteredTool {
     let mut tool = spreadsheet_batch_patch_tool();
     tool.spec.name = PATCH_TOOL.into();
-    tool.spec.description = "Update exactly one fresh range returned by inspect_selected_excel_cell and create a new XLSX in the owner-approved output directory. set_cell_value writes literal text without numeric, date or formula coercion; set_cell_formula uses the restricted formula policy. Read first, then request exact mutation approval with the entire target/output/action. Never overwrite or operate on the user's active workbook. Formula results require current-run calculation and independent file readback before publication.".into();
+    tool.spec.description = "Update exactly one fresh range returned by inspect_excel_cell and create a new XLSX in the owner-approved output directory. set_cell_value writes literal text without numeric, date or formula coercion; set_cell_formula uses the restricted formula policy. Read first, then request exact mutation approval with the entire target/output/action. Never overwrite or operate on the user's active workbook. Formula results require current-run calculation and independent file readback before publication.".into();
     tool.spec.parameters_schema["properties"]["output"] = batch_output_schema("xlsx");
     let actions = tool.spec.parameters_schema["properties"]["action"]["oneOf"]
         .as_array_mut()

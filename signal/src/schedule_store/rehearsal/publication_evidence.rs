@@ -139,8 +139,7 @@ impl ScheduleStore {
                 && (action.sent_message.is_some()
                     || action.prepared_message.is_some()
                     || (action.created_artifact.is_some()
-                        && action.authority.tool_name
-                            == "create_text_artifact_in_selected_directory"))
+                        && action.authority.tool_name == "create_text_file"))
             {
                 use crate::entity::agent_session;
                 use desk_diagnose_core::{
@@ -184,9 +183,11 @@ impl ScheduleStore {
                     &proposals[0].message_id,
                 )
                 .await?;
-                if let Some(output) = action.created_artifact.as_ref().filter(|_| {
-                    action.authority.tool_name == "create_text_artifact_in_selected_directory"
-                }) {
+                if let Some(output) = action
+                    .created_artifact
+                    .as_ref()
+                    .filter(|_| action.authority.tool_name == "create_text_file")
+                {
                     let originals: Vec<_> = proposals[0]
                         .tool_calls
                         .iter()

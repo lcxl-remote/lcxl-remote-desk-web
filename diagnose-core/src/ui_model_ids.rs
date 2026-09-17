@@ -19,17 +19,15 @@ fn fields(tool: &str) -> &'static [(&'static str, &'static str)] {
     match tool {
         "execute_ui_actions" => &[("application", "application_id"), ("target", "element_id")],
         "inspect_desktop_ui" => &[("root", "root_id")],
-        "execute_background_inputs" => {
-            &[("application", "application_id"), ("target", "window_id")]
-        }
-        "execute_confirmed_raw_input" => &[("target", "application_id")],
+        "send_background_input" => &[("application", "application_id"), ("target", "window_id")],
+        "send_raw_input" => &[("target", "application_id")],
         "read_current_screen" => &[("window", "window_id")],
         _ => &[],
     }
 }
 
 pub fn needs_resolution(tool: &str) -> bool {
-    !fields(tool).is_empty() || tool == "request_capability_grants"
+    !fields(tool).is_empty() || tool == "request_permissions"
 }
 
 fn references(value: &Value, result: &mut Vec<ObjectRef>) {
@@ -191,7 +189,7 @@ pub(crate) fn resolve_single_call(
             r#"Required shape: {"application_id":"<application ID>","element_id":"<control ID>","action":{"kind":"invoke"}}. set_value uses {"kind":"set_value","params":{"value":"text"}}. No action was executed."#,
         ));
     }
-    if call.name == "execute_background_inputs" {
+    if call.name == "send_background_input" {
         if object.contains_key("geometry") {
             return Err(invalid(
                 "The server supplies window geometry; do not provide geometry",
@@ -253,14 +251,14 @@ pub(crate) fn resolve_single_call(
             }
         }
     }
-    if call.name == "request_capability_grants" {
+    if call.name == "request_permissions" {
         if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
             for item in items {
-                if item["tool_name"] == "execute_confirmed_raw_input" {
+                if item["tool_name"] == "send_raw_input" {
                     if let Some(exact) = item.get_mut("exact_input") {
                         let nested = ToolCall {
                             id: call.id.clone(),
-                            name: "execute_confirmed_raw_input".into(),
+                            name: "send_raw_input".into(),
                             arguments_json: exact.to_string(),
                         };
                         *exact = serde_json::from_str(
@@ -272,7 +270,7 @@ pub(crate) fn resolve_single_call(
                 }
                 if !matches!(
                     item["tool_name"].as_str(),
-                    Some("execute_ui_actions" | "execute_background_inputs")
+                    Some("execute_ui_actions" | "send_background_input")
                 ) {
                     continue;
                 }
@@ -334,7 +332,7 @@ fn project_arguments(tool: &str, value: &mut Value) {
             project_arguments(tool, item);
         }
         let mut result = json!({"application_id":all[0]["application_id"],"steps":[]});
-        if tool == "execute_background_inputs" {
+        if tool == "send_background_input" {
             result["window_id"] = all[0]["window_id"].clone();
         }
         for item in &mut all {
@@ -346,7 +344,7 @@ fn project_arguments(tool: &str, value: &mut Value) {
         *value = result;
         return;
     }
-    if tool == "execute_background_inputs" {
+    if tool == "send_background_input" {
         if let Some(object) = value.as_object_mut() {
             object.remove("geometry");
         }
@@ -366,13 +364,13 @@ fn project_arguments(tool: &str, value: &mut Value) {
                 );
             }
         }
-        if tool == "request_capability_grants" {
+        if tool == "request_permissions" {
             if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
                 for item in items {
                     project_scope(item);
-                    if item["tool_name"] == "execute_confirmed_raw_input" {
+                    if item["tool_name"] == "send_raw_input" {
                         if let Some(exact) = item.get_mut("exact_input") {
-                            project_arguments("execute_confirmed_raw_input", exact);
+                            project_arguments("send_raw_input", exact);
                         }
                     }
                 }
@@ -516,9 +514,9 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
                     {
                         for entry in &mut entries {
                             project_scope(entry);
-                            if entry["tool_name"] == "execute_confirmed_raw_input" {
+                            if entry["tool_name"] == "send_raw_input" {
                                 if let Some(exact) = entry.get_mut("approved_exact_input") {
-                                    project_arguments("execute_confirmed_raw_input", exact);
+                                    project_arguments("send_raw_input", exact);
                                 }
                             }
                         }
@@ -560,7 +558,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
             }
         }
     }
-    if tool.name == "request_capability_grants" {
+    if tool.name == "request_permissions" {
         if let Some(scope) =
             schema.pointer_mut("/properties/items/items/properties/application_scope")
         {
@@ -578,7 +576,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
     }
     match tool.name.as_str() {
         "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. Queries are substring OR matches, up to 16 alternatives. First locate the target window and, when available, its dialog/popover/editor; search inside that observed root using task-specific localized/English labels or native_id (e.g. 标题, title-field, 完成, Done). Group needed controls together. If no separate container exists, use the window root. Only after targeted misses add control types such as AXTextField/input. Broad text/date/time queries are fallbacks: text can match every AXStaticText date and weekday. Use element_only=true only for a known result control itself, without queries; it never searches descendants. To find descendants use root_id for the smallest relevant observed region with targeted queries. When truncated=true, narrow the root first when possible; increase depth/node/byte bounds only as needed to complete that search. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in original window screenshot pixels relative to the top-left (0,0) of location.window.id (the same pixel space as background input, not percentages or normalized coordinates). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
-        "execute_confirmed_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
+        "send_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
         "read_current_screen" => tool.description = "Capture the current display, or use window_id to capture a background macOS window. To obtain window_id: inspect_desktop_session -> inspect_desktop_ui(root_id=session ID, queries=[localized app name, English app name]) -> inspect_desktop_ui(root_id=returned application ID, queries=[窗口, window]) -> read_current_screen(window_id=owner_selectable_windows[].object_ref.id). The application catalog does not query windows; never infer capture is unsupported from missing window entries there. Do not pass an application ID as window_id. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture. Returned width/height are original image pixel dimensions. For window screenshots, background position and UI bounds use these pixel coordinates with top-left origin (0,0); do not convert to percentages.".into(),
         _ => {}
     }
@@ -949,16 +947,11 @@ mod tests {
             "resolving the approved window ID must preserve exact-grant input"
         );
         let exact = json!({"application_id":"calendar","action":{"screen":{"display":"1","width":100,"height":100,"dpi_x":96,"dpi_y":96},"step":{"kind":"key","params":{"key":"enter"}}}});
-        let execution = resolve_call(
-            &call("execute_confirmed_raw_input", exact.clone()),
-            &messages,
-            1,
-        )
-        .unwrap();
+        let execution = resolve_call(&call("send_raw_input", exact.clone()), &messages, 1).unwrap();
         let permission = resolve_call(
             &call(
-                "request_capability_grants",
-                json!({"items":[{"tool_name":"execute_confirmed_raw_input","exact_input":exact}]}),
+                "request_permissions",
+                json!({"items":[{"tool_name":"send_raw_input","exact_input":exact}]}),
             ),
             &messages,
             1,
@@ -973,7 +966,7 @@ mod tests {
         messages[0]
             .tool_calls
             .iter_mut()
-            .for_each(|c| c.name = "read_selected_text_file".into());
+            .for_each(|c| c.name = "read_text_file".into());
         assert!(
             resolve_call(
                 &call("read_current_screen", json!({"window_id":"window"})),
@@ -989,7 +982,7 @@ mod tests {
     #[test]
     fn application_permission_resolves_on_server_and_keeps_approval_flow() {
         let original = call(
-            "request_capability_grants",
+            "request_permissions",
             json!({"items":[{"item_id":"calendar","tool_name":"execute_ui_actions","application_scope":{"application_id":"calendar","actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":4,"reason":"Create requested event"}]}),
         );
         let resolved = resolve_call(&original, &history(), 1).unwrap();
@@ -1049,19 +1042,19 @@ mod tests {
             crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER
         ));
         let scroll = call(
-            "execute_background_inputs",
+            "send_background_input",
             json!({"application_id":"calendar","window_id":"window","action":{"kind":"scroll","element_id":"date","horizontal_pixels":0,"vertical_pixels":-400}}),
         );
         let error = resolve_call(&scroll, &messages, 1).unwrap_err();
         assert!(error.message.contains("Scroll requires action"));
         assert!(error.message.contains("No input was dispatched"));
         let scroll = call(
-            "execute_background_inputs",
+            "send_background_input",
             json!({"application_id":"calendar","window_id":"window","action":{"kind":"scroll","position":{"x":400,"y":300},"horizontal_pixels":0,"vertical_pixels":-400}}),
         );
         assert!(resolve_call(&scroll, &messages, 1).is_ok());
         let original = call(
-            "execute_background_inputs",
+            "send_background_input",
             json!({"application_id":"calendar","window_id":"window","action":{"kind":"click","element_id":"date"}}),
         );
         let resolved = resolve_call(&original, &messages, 1).unwrap();
@@ -1076,7 +1069,7 @@ mod tests {
         ));
         let mut bad: Value = serde_json::from_str(&original.arguments_json).unwrap();
         bad["geometry"] = geometry;
-        assert!(resolve_call(&call("execute_background_inputs", bad), &messages, 1).is_err());
+        assert!(resolve_call(&call("send_background_input", bad), &messages, 1).is_err());
         let mut tool = crate::background_input::tool().spec;
         project_tool(&mut tool);
         assert!(

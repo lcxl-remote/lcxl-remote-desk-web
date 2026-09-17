@@ -32,27 +32,27 @@ pub(super) async fn bind(
     step_id: &str,
 ) -> Result<MessageBinding, DbErr> {
     let (send, draft, slack_send, slack_draft) = match tool.name.as_str() {
-        "send_gmail_web_exact" => {
+        "send_gmail_message" => {
             let input: GmailWebExactSendInput =
                 serde_json::from_str(&tool.arguments_json).map_err(|_| invalid())?;
             desk_diagnose_core::communication::verify_gmail_web_exact_send_input(&input)
                 .map_err(|_| invalid())?;
             (Some(input), None, None, None)
         }
-        "prepare_gmail_web_draft_handoff" => {
+        "prepare_gmail_draft" => {
             let input: GmailWebDraftHandoffInput =
                 serde_json::from_str(&tool.arguments_json).map_err(|_| invalid())?;
             input.validate().map_err(|_| invalid())?;
             (None, Some(input), None, None)
         }
-        "send_slack_web_exact" => {
+        "send_slack_message" => {
             let input: SlackWebExactSendInput =
                 serde_json::from_str(&tool.arguments_json).map_err(|_| invalid())?;
             desk_diagnose_core::communication::verify_slack_web_exact_send_input(&input)
                 .map_err(|_| invalid())?;
             (None, None, Some(input), None)
         }
-        "prepare_slack_web_message_handoff" => {
+        "prepare_slack_message" => {
             let input: SlackWebDraftHandoffInput =
                 serde_json::from_str(&tool.arguments_json).map_err(|_| invalid())?;
             input.validate().map_err(|_| invalid())?;

@@ -224,7 +224,7 @@ fn input(id: &str, mut objects: Vec<ContextAttachment>) -> AppendUserFollowupPar
             policy_name: None,
         },
         read_context: Some(ReadContextSelection {
-            tool_names: vec!["read_selected_text_file".into()],
+            tool_names: vec!["read_text_file".into()],
             expires_at: None,
             object_attachments: objects,
             live_targets: Vec::new(),
@@ -496,13 +496,13 @@ async fn shared_object_binding_clamps_all_file_reads_and_rejects_expired_or_chan
     object.bounds.max_bytes = 4096;
     object.bounds.max_objects = 1;
     for name in [
-        "inspect_selected_file_metadata",
-        "read_selected_text_file",
-        "inspect_selected_spreadsheets",
+        "inspect_files",
+        "read_text_file",
+        "inspect_spreadsheets",
         "preview_spreadsheet_merge",
-        "inspect_selected_numbers_with_iwork",
-        "inspect_selected_pages_with_iwork",
-        "inspect_selected_keynote_with_iwork",
+        "inspect_numbers_file",
+        "inspect_pages_file",
+        "inspect_keynote_file",
     ] {
         let selection = ReadContextSelection {
             tool_names: vec![name.into()],
@@ -574,11 +574,10 @@ async fn terminal_read_binds_only_original_terminal_with_original_byte_limit() {
     terminal.bounds.max_bytes = 1024;
     let file = attach(&store, "file", ObjectKind::File).await;
     let mut params = input("message", vec![terminal.clone(), file]);
-    params.read_context.as_mut().unwrap().tool_names =
-        vec!["inspect_selected_terminal_output".into()];
+    params.read_context.as_mut().unwrap().tool_names = vec!["read_terminal_output".into()];
     let call = ToolCall {
         id: "terminal-read".into(),
-        name: "inspect_selected_terminal_output".into(),
+        name: "read_terminal_output".into(),
         arguments_json: "{}".into(),
     };
     let (_, mut operation) = desk_diagnose_core::read_tools::build_read_operation(&call).unwrap();

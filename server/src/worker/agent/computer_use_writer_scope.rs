@@ -8,7 +8,9 @@ pub(crate) fn scope_for_action(
 ) -> WriterLeaseScope {
     match action {
         ComputerActionKind::BackgroundInput { .. } => WriterLeaseScope::BackgroundApplication,
-        ComputerActionKind::File(_) => WriterLeaseScope::FileWorker,
+        ComputerActionKind::File(_) | ComputerActionKind::LaunchApplication(_) => {
+            WriterLeaseScope::FileWorker
+        }
         _ if is_file_batch(action, adapter) => WriterLeaseScope::FileWorker,
         _ => WriterLeaseScope::InteractiveSession,
     }

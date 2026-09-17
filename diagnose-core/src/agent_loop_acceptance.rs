@@ -266,7 +266,12 @@ fn tool_use(id: &str, name: &str) -> ModelTurn {
         tool_calls: vec![ToolCall {
             id: id.into(),
             name: name.into(),
-            arguments_json: "{}".into(),
+            arguments_json: if name == "exec_command" {
+                r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#
+            } else {
+                "{}"
+            }
+            .into(),
         }],
         provider_meta: ProviderResponseMeta {
             stop_reason: StopReason::ToolUse,

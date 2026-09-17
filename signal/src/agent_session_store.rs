@@ -2292,7 +2292,7 @@ mod tests {
             "",
             vec![desk_diagnose_core::chat::ToolCallRef {
                 id: "matrix-unknown-call".into(),
-                name: "execute_confirmed_command".into(),
+                name: "exec_command".into(),
                 arguments_json:
                     r#"{"schema_version":1,"shell":"bash","command":"printf safe","timeout_ms":1000}"#
                         .into(),
@@ -2328,9 +2328,10 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                launch_confirmation: None,
                 item_id: "matrix-read".into(),
                 provider_id: "file.read".into(),
-                tool_name: "read_selected_text_file".into(),
+                tool_name: "read_text_file".into(),
                 expected_effect: CapabilityEffect::ReadFile,
                 resource_scope: Vec::new(),
                 operation_scope: Vec::new(),
@@ -2454,10 +2455,8 @@ mod tests {
         session.focus_epoch.input_revision = 7;
         session.capability_disclosure.focus_input_revision = 7;
         session.capability_disclosure.updated_input_revision = 7;
-        session.capability_disclosure.loaded_tool_names = vec![
-            "inspect_selected_pages_with_iwork".into(),
-            "read_system_info".into(),
-        ];
+        session.capability_disclosure.loaded_tool_names =
+            vec!["inspect_pages_file".into(), "read_system_info".into()];
         session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
         first.save(&mut session).await.unwrap();
         let saved_version = session.version;
@@ -2476,7 +2475,7 @@ mod tests {
         assert_eq!(restored.focus_epoch.input_revision, 7);
         assert_eq!(
             restored.capability_disclosure.loaded_tool_names,
-            ["inspect_selected_pages_with_iwork", "read_system_info"]
+            ["inspect_pages_file", "read_system_info"]
         );
 
         let stale = SignalAgentSessionStore::new(reopened_db.clone()).with_client_metadata(
@@ -2637,6 +2636,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                launch_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
                 tool_name: "inspect_desktop_session".into(),
@@ -2721,6 +2721,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                launch_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
                 tool_name: "inspect_desktop_session".into(),
@@ -2878,6 +2879,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                launch_confirmation: None,
                 item_id: "ui-action".into(),
                 provider_id: desk_diagnose_core::device_assistant::DESKTOP_UI_ACTION_PROVIDER_ID
                     .into(),
@@ -3695,7 +3697,7 @@ mod tests {
             },
             provenance: DataProvenance {
                 source_provider_id: "file.workspace".into(),
-                source_tool_name: "create_word_report_from_merge_preview".into(),
+                source_tool_name: "create_word_report".into(),
                 source_object_id: Some("device-1:docx-call-1".into()),
                 source_envelope_ids: vec!["merge-preview-envelope-1".into()],
             },

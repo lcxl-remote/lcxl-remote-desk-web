@@ -141,9 +141,9 @@ pub fn frame_file_tool_result(message: &ChatMessage) -> String {
     if matches!(
         source,
         Some(
-            "inspect_selected_file_metadata"
-                | "read_selected_text_file"
-                | "create_text_artifact_in_selected_directory"
+            "inspect_files"
+                | "read_text_file"
+                | "create_text_file"
                 | "update_text_file"
                 | "delete_text_file"
         )

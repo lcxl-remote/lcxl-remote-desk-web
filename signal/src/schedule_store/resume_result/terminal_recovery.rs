@@ -696,11 +696,7 @@ async fn interruption_preserves_live_lease_and_records_untracked_read_as_unavail
 
 #[tokio::test]
 async fn untracked_mutations_and_unknown_tools_cannot_be_closed_as_reads() {
-    for tool in [
-        "execute_confirmed_command",
-        "browser_open_page",
-        "unregistered_tool",
-    ] {
+    for tool in ["exec_command", "browser_open_page", "unregistered_tool"] {
         let (store, work, mut session) = interrupted_fixture(false).await;
         let mut proposal = ChatMessage::text("proposal", ChatRole::Assistant, "")
             .with_turn_id(work.turn_id.clone());

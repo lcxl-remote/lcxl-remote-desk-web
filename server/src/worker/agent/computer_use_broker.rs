@@ -94,6 +94,9 @@ fn screen_capture_readiness(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ResolvedObject {
+    LaunchTarget {
+        identity: desk_agent_protocol::application_launch::ResolvedApplicationIdentity,
+    },
     #[cfg(windows)]
     ExcelBatch {
         source_file: ObjectRef,
@@ -223,6 +226,7 @@ struct ScreenCaptureGateState {
 }
 
 pub struct ComputerUseBroker {
+    application_catalog: Mutex<super::application_launch::catalog_store::ApplicationCatalogStore>,
     incarnation_nonce: String,
     worker_generation: AtomicU64,
     snapshot_counter: AtomicU64,
@@ -259,6 +263,7 @@ impl ComputerUseBroker {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            application_catalog: Mutex::new(Default::default()),
             incarnation_nonce: uuid::Uuid::new_v4().to_string(),
             worker_generation: AtomicU64::new(1),
             snapshot_counter: AtomicU64::new(0),
@@ -951,6 +956,67 @@ impl ComputerUseBroker {
         })
     }
 
+    pub(crate) fn list_applications(
+        &self,
+        mut params: desk_agent_protocol::application_launch::ListApplicationsRequest,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<desk_agent_protocol::application_launch::ApplicationCatalogPage, AgentError> {
+        ensure_observation_enabled(ceiling)?;
+        params
+            .normalize()
+            .map_err(|message| error(AgentErrorKind::InvalidInput, message, false))?;
+        #[cfg(windows)]
+        let session = super::application_launch::windows_process::catalog_session_identity()
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::SessionUnavailable,
+                    "application discovery requires an interactive user",
+                    false,
+                )
+            })?;
+        #[cfg(unix)]
+        let host = super::application_launch::unix_catalog_host::current()
+            .map_err(|message| error(AgentErrorKind::SessionUnavailable, message, false))?;
+        #[cfg(unix)]
+        let session = host.session_id.clone();
+        let session = format!("{session}:{}", self.current_incarnation_nonce());
+        let mut store = self.application_catalog.lock().map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "application catalog storage is unavailable",
+                false,
+            )
+        })?;
+        store
+            .list(
+                &self.incarnation_nonce,
+                &session,
+                chrono::Utc::now().timestamp_millis().max(1) as u64,
+                params,
+                || {
+                    #[cfg(windows)]
+                    let mut collection = super::application_launch::catalog::windows::enumerate();
+                    #[cfg(unix)]
+                    let mut collection = host.enumerate();
+                    if !ceiling.allowed_application_paths.is_empty() {
+                        let before = collection.entries.len();
+                        collection.entries.retain(|entry| {
+                            entry
+                                .target
+                                .as_ref()
+                                .is_some_and(|target| ceiling.application_allowed(&target.value))
+                        });
+                        if before != collection.entries.len() {
+                            collection
+                                .warn("The local application policy excludes some catalog entries");
+                        }
+                    }
+                    Ok(collection)
+                },
+            )
+            .map_err(|message| error(AgentErrorKind::InvalidInput, message, false))
+    }
+
     #[must_use]
     pub fn readiness(
         &self,
@@ -1415,6 +1481,34 @@ impl ComputerUseBroker {
                     supported: desktop_provider_supported,
                     ready: session_ready,
                     reason: session_reason,
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::ApplicationLaunchConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::NativeApplication,
+                        version: desk_diagnose_core::application_launch::ADAPTER_VERSION.into(),
+                    },
+                    supported: cfg!(any(windows, target_os = "macos", target_os = "linux")),
+                    ready: ceiling.enabled && application_catalog_host_available(),
+                    reason: if !ceiling.enabled {
+                        Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
+                    } else if !application_catalog_host_available() {
+                        Some(ComputerUseReadinessReason::AdapterUnavailable)
+                    } else { None },
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::ApplicationList,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::NativeApplication,
+                        version: desk_diagnose_core::device_assistant::APPLICATION_CATALOG_ADAPTER_VERSION.into(),
+                    },
+                    supported: cfg!(any(windows, target_os = "macos", target_os = "linux")),
+                    ready: ceiling.observation_enabled() && application_catalog_host_available(),
+                    reason: if !ceiling.observation_enabled() {
+                        Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
+                    } else if !application_catalog_host_available() {
+                        Some(ComputerUseReadinessReason::AdapterUnavailable)
+                    } else { None },
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DesktopUiInspect,
@@ -3104,7 +3198,10 @@ impl ComputerUseBroker {
         if let Ok(mut objects) = self.objects.lock() {
             let before = objects.len();
             objects.retain(|_, object| {
-                if matches!(&object.resolved, ResolvedObject::OfficeDocument { .. }) {
+                if matches!(
+                    &object.resolved,
+                    ResolvedObject::OfficeDocument { .. } | ResolvedObject::LaunchTarget { .. }
+                ) {
                     return true;
                 }
                 // Native semantic targets are process-bound identities, not coordinates.
@@ -3264,6 +3361,76 @@ impl ComputerUseBroker {
         self.ui_identities.lock().map_err(|_| error(AgentErrorKind::Internal, "UI identity store unavailable", false))?
             .get(id).cloned().ok_or_else(|| error(AgentErrorKind::InvalidInput,
                 "element_id is unknown to this worker or was invalidated; search for the element again. No full UI listing was performed.", false))
+    }
+
+    pub(crate) fn preflight_launch(
+        &self,
+        binding: &desk_agent_protocol::application_launch::LaunchApprovalBinding,
+        ceiling: &ComputerUseSettings,
+    ) -> Result<(), AgentError> {
+        if !ceiling.enabled
+            || (!ceiling.allowed_application_paths.is_empty()
+                && (!ceiling.application_allowed(&binding.request().target.value)
+                    || !ceiling.application_allowed(&binding.identity().canonical_target)))
+        {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Application launch is disabled by local policy",
+                false,
+            ));
+        }
+        let target = binding.target().ok_or_else(|| {
+            error(
+                AgentErrorKind::InvalidInput,
+                "Missing native launch reference",
+                false,
+            )
+        })?;
+        self.validate_launch_target(target, binding.identity(), &binding.subject().session_id)
+    }
+
+    pub(crate) fn register_launch_target(
+        &self,
+        identity: desk_agent_protocol::application_launch::ResolvedApplicationIdentity,
+    ) -> Result<desk_agent_protocol::application_launch::LaunchPreflightReceipt, AgentError> {
+        let incarnation = format!("native:{}", self.current_incarnation_nonce());
+        let target = self.issue_ref(
+            &self.next_snapshot_id(),
+            &incarnation,
+            ObjectKind::ApplicationLaunchTarget,
+            ResolvedObject::LaunchTarget {
+                identity: identity.clone(),
+            },
+        )?;
+        Ok(
+            desk_agent_protocol::application_launch::LaunchPreflightReceipt {
+                identity,
+                target,
+                interactive_session_incarnation: incarnation,
+            },
+        )
+    }
+
+    pub(crate) fn validate_launch_target(
+        &self,
+        reference: &ObjectRef,
+        identity: &desk_agent_protocol::application_launch::ResolvedApplicationIdentity,
+        incarnation: &str,
+    ) -> Result<(), AgentError> {
+        self.validate_file_worker_incarnation(incarnation)?;
+        if reference.object_kind != ObjectKind::ApplicationLaunchTarget
+            || self.resolve_ref(reference)?
+                != (ResolvedObject::LaunchTarget {
+                    identity: identity.clone(),
+                })
+        {
+            return Err(error(
+                AgentErrorKind::InvalidInput,
+                "Application launch target changed",
+                false,
+            ));
+        }
+        Ok(())
     }
 
     fn next_snapshot_id(&self) -> String {
@@ -3812,6 +3979,17 @@ fn ensure_observation_enabled(ceiling: &ComputerUseSettings) -> Result<(), Agent
             "Computer Use observation is disabled in device-local settings",
             false,
         ))
+    }
+}
+
+fn application_catalog_host_available() -> bool {
+    #[cfg(windows)]
+    {
+        super::application_launch::windows_process::catalog_session_identity().is_ok()
+    }
+    #[cfg(unix)]
+    {
+        super::application_launch::unix_catalog_host::current().is_ok()
     }
 }
 
@@ -5039,7 +5217,7 @@ mod tests {
         let observed = chrono::DateTime::parse_from_rfc3339(&readiness.observed_at).unwrap();
         let expires = chrono::DateTime::parse_from_rfc3339(&readiness.expires_at).unwrap();
         assert_eq!((expires - observed).num_seconds(), 60);
-        assert_eq!(readiness.capabilities.len(), 38);
+        assert_eq!(readiness.capabilities.len(), 40);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(
                 entry.capability,
@@ -5111,6 +5289,8 @@ mod tests {
                     | Capability::BrowserInputFallbackConfirmed
                     | Capability::BrowserExternalDraftWriteConfirmed
                     | Capability::BrowserExternalSendConfirmed
+                    | Capability::ApplicationList
+                    | Capability::ApplicationLaunchConfirmed
             )
         }));
     }

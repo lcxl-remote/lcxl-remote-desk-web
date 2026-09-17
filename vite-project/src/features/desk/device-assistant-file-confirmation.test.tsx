@@ -15,7 +15,7 @@ describe('exact text file approval', () => {
         expect(fileApprovalBlocked({ toolName: 'update_text_file', textFileConfirmation: review })).toBe(false);
         expect(fileApprovalBlocked({ toolName: 'delete_text_file', textFileConfirmation: review })).toBe(true);
         expect(fileApprovalBlocked({ toolName: 'update_text_file' })).toBe(true);
-        expect(fileApprovalBlocked({ toolName: 'read_selected_text_file' })).toBe(false);
+        expect(fileApprovalBlocked({ toolName: 'read_text_file' })).toBe(false);
         for (const invalid of [null, {}, { ...review, expectedSha256: 'bad' }, { ...review, recoverable: false },
             { ...review, oneShot: false }, { ...review, change: null }, { ...review, change: { kind: 'replace_once', before: '' } }]) {
             expect(validTextFileReview(invalid)).toBe(false);

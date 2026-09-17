@@ -1810,6 +1810,17 @@ impl WorkerSession {
                                         continue;
                                     }
 
+                                    if let Some(completed) = crate::worker::agent::application_launch::admitted::replay(worker_data_dir.as_deref(), &plan) {
+                                        let _ = writer_tx.send(WorkerToService::ComputerActionCompleted(
+                                            ComputerActionCompletedPayload {
+                                                request_id: payload.request_id,
+                                                connection_id: payload.connection_id,
+                                                completed,
+                                            },
+                                        ));
+                                        continue;
+                                    }
+
                                     let action_settings = shared_settings.read().await;
                                     let ceiling = action_settings.computer_use.clone();
                                     let selected_display = action_settings.desk.video_device_name.clone();
@@ -1872,6 +1883,8 @@ impl WorkerSession {
                                                     .map_err(|error| error.to_string())
                                             }
                                         }
+                                        ComputerActionKind::LaunchApplication(binding) => computer_use_broker
+                                            .preflight_launch(binding, &ceiling).map_err(|error| error.message),
                                         ComputerActionKind::Communication(request) => {
                                             if !ceiling.communication_handoff_enabled() {
                                                 Err("communication handoff is disabled by the host-local ceiling".to_string())
@@ -1978,6 +1991,19 @@ impl WorkerSession {
                                     let application_settings = shared_settings.clone();
                                     tokio::spawn(async move {
                                         let generation = plan.execution_generation.clone();
+                                        if matches!(&plan.actions[0].action, ComputerActionKind::LaunchApplication(_)) {
+                                            let completed = crate::worker::agent::application_launch::admitted::run(
+                                                action_broker, application_settings, action_data_root, plan,
+                                            ).await;
+                                            let _ = action_writer.send(WorkerToService::ComputerActionCompleted(
+                                                ComputerActionCompletedPayload {
+                                                    request_id: payload.request_id,
+                                                    connection_id: payload.connection_id,
+                                                    completed,
+                                                },
+                                            ));
+                                            return;
+                                        }
                                         if crate::worker::agent::application_batch::supports(&plan.actions) {
                                             let steps = plan.actions.clone();
                                             let broker = action_broker.clone();

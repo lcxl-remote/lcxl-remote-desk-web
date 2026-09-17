@@ -13,7 +13,7 @@
         "http://127.0.0.1/*",
         "http://localhost/*"
     ],
-    "optional_host_permissions": ["https://*/*"],
+    "optional_host_permissions": ["https://*/*", "http://*/*"],
     "background": {
         "service_worker": "src/service-worker.js",
         "type": "module"

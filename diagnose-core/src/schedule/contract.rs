@@ -307,7 +307,7 @@ pub fn validate_contract(input: &TaskContract) -> Result<ValidatedTaskContract, 
                 max_content_bytes,
             } => {
                 if rule.effect != CapabilityEffect::WriteArtifact
-                    || rule.tool_name != "create_text_artifact_in_selected_directory"
+                    || rule.tool_name != "create_text_file"
                     || *max_content_bytes == 0
                     || *max_content_bytes > 65_536
                 {

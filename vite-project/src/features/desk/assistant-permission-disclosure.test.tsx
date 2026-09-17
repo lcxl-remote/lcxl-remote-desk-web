@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AssistantPermissionDisclosure } from './assistant-permission-disclosure';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-const card = (state: string) => <AssistantPermissionDisclosure state={state} tools={['execute_confirmed_command']}>
+const card = (state: string) => <AssistantPermissionDisclosure state={state} tools={['exec_command']}>
     <div>Full command and scope</div>
 </AssistantPermissionDisclosure>;
 
@@ -16,7 +16,7 @@ describe('permission disclosure', () => {
     it.each(['approved', 'partially_approved', 'denied', 'replaced', 'withdrawn'])('collapses %s requests and allows reviewing them', (state) => {
         render(card(state));
         expect(screen.queryByText('Full command and scope')).toBeNull();
-        expect(screen.getByText('execute_confirmed_command')).toBeTruthy();
+        expect(screen.getByText('exec_command')).toBeTruthy();
         fireEvent.click(screen.getByRole('button'));
         expect(screen.getByText('Full command and scope')).toBeTruthy();
         fireEvent.click(screen.getByRole('button'));

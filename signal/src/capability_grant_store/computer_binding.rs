@@ -189,6 +189,27 @@ pub(super) fn validate_binding(
     {
         return Err(invalid());
     }
+    if payload.tool_name == desk_diagnose_core::application_launch::TOOL_NAME {
+        let [step] = plan.actions.as_slice() else {
+            return Err(invalid());
+        };
+        let desk_agent_protocol::computer_use::ComputerActionKind::LaunchApplication(launch) =
+            &step.action
+        else {
+            return Err(invalid());
+        };
+        let canonical = desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
+            &payload.tool_name,
+            serde_json::to_value(launch.request()).map_err(|_| invalid())?,
+        )
+        .map_err(|_| invalid())?;
+        if canonical != payload.canonical_input_json
+            || launch.subject().device_id != work.target_device_id
+            || launch.subject().input_revision != payload.input_revision
+        {
+            return Err(invalid());
+        }
+    }
     if desk_diagnose_core::application_batch::supports(&payload.tool_name) {
         let call = desk_diagnose_core::chat::ToolCall {
             id: origin.tool_call_id.clone(),

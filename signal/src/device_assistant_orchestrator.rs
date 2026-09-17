@@ -1249,6 +1249,7 @@ async fn compose_turn_inner(
         .cloned()
         .collect::<Vec<_>>();
     let resumed_desktop_reads = [
+        "list_applications",
         "inspect_desktop_session",
         "inspect_desktop_ui",
         "read_current_screen",
@@ -1266,7 +1267,7 @@ async fn compose_turn_inner(
     // for read-back. Device invocation and model egress remain separate checks.
     selected_source_tools.extend(resumed_desktop_reads.iter().map(|name| (*name).to_string()));
     if !selected_file_roots.is_empty() {
-        selected_source_tools.insert("inspect_selected_file_metadata".into());
+        selected_source_tools.insert("inspect_files".into());
         let selected_file_count = selected_file_roots
             .iter()
             .filter(|object_ref| {
@@ -1277,17 +1278,17 @@ async fn compose_turn_inner(
             object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
         });
         if selected_file_count > 0 {
-            selected_source_tools.insert("read_selected_text_file".into());
+            selected_source_tools.insert("read_text_file".into());
         }
         if selected_file_count == 1 {
             selected_source_tools.extend(
                 [
-                    "inspect_selected_numbers_with_iwork",
-                    "inspect_selected_pages_with_iwork",
-                    "inspect_selected_keynote_with_iwork",
-                    "inspect_selected_powerpoint_file",
-                    "inspect_selected_word_file",
-                    "inspect_selected_excel_cell",
+                    "inspect_numbers_file",
+                    "inspect_pages_file",
+                    "inspect_keynote_file",
+                    "inspect_powerpoint_file",
+                    "inspect_word_file",
+                    "inspect_excel_cell",
                 ]
                 .into_iter()
                 .map(str::to_string),
@@ -1295,12 +1296,12 @@ async fn compose_turn_inner(
             if has_output_directory {
                 selected_source_tools.extend(
                     [
-                        "patch_selected_numbers_copy",
-                        "replace_selected_pages_copy_body",
-                        "patch_selected_keynote_copy",
-                        "patch_selected_powerpoint_copy",
-                        "replace_selected_word_copy_body",
-                        "patch_selected_excel_copy",
+                        "patch_numbers_copy",
+                        "replace_pages_copy_body",
+                        "patch_keynote_copy",
+                        "patch_powerpoint_copy",
+                        "replace_word_copy_body",
+                        "patch_excel_copy",
                     ]
                     .into_iter()
                     .map(str::to_string),
@@ -1308,23 +1309,23 @@ async fn compose_turn_inner(
             }
         }
         if has_output_directory {
-            selected_source_tools.insert("create_text_artifact_in_selected_directory".into());
-            selected_source_tools.insert("create_local_communication_draft".into());
+            selected_source_tools.insert("create_text_file".into());
+            selected_source_tools.insert("create_local_message_draft".into());
         }
     }
     if !selected_spreadsheet_roots.is_empty() {
-        selected_source_tools.insert("inspect_selected_spreadsheets".into());
+        selected_source_tools.insert("inspect_spreadsheets".into());
         selected_source_tools.insert("preview_spreadsheet_merge".into());
         if selected_file_roots.iter().any(|object_ref| {
             object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
         }) {
-            selected_source_tools.insert("create_workbook_from_merge_preview".into());
-            selected_source_tools.insert("create_formula_workbook_from_merge_preview".into());
-            selected_source_tools.insert("create_word_report_from_merge_preview".into());
+            selected_source_tools.insert("create_workbook".into());
+            selected_source_tools.insert("create_formula_workbook".into());
+            selected_source_tools.insert("create_word_report".into());
         }
     }
     if !selected_terminal_roots.is_empty() {
-        selected_source_tools.insert("inspect_selected_terminal_output".into());
+        selected_source_tools.insert("read_terminal_output".into());
     }
     if selected_browser_surface.is_some() {
         selected_source_tools.extend(
@@ -1335,7 +1336,7 @@ async fn compose_turn_inner(
         );
     }
     if selected_outlook_surface.is_some() {
-        selected_source_tools.insert("prepare_outlook_new_draft_handoff".into());
+        selected_source_tools.insert("prepare_outlook_draft".into());
     }
     if selected_live_spreadsheet.is_some() {
         selected_source_tools.insert("inspect_live_spreadsheet".into());
@@ -1358,15 +1359,15 @@ async fn compose_turn_inner(
             .into_iter()
             .map(str::to_string),
     );
-    selected_source_tools.insert("execute_confirmed_command".into());
+    selected_source_tools.insert("exec_command".into());
     // Candidates only. Directory consent and every read/write grant remain
     // independently checked against the authoritative conversation.
     selected_source_tools.extend(
         [
-            "create_text_artifact_in_selected_directory",
-            "create_local_communication_draft",
-            "read_selected_text_file",
-            "inspect_selected_file_metadata",
+            "create_text_file",
+            "create_local_message_draft",
+            "read_text_file",
+            "inspect_files",
             "update_text_file",
             "delete_text_file",
         ]
@@ -2444,6 +2445,7 @@ mod tests {
 
         let providers = device_assistant_provider_registry();
         for name in [
+            "list_applications",
             "inspect_desktop_session",
             "inspect_desktop_ui",
             "read_current_screen",

@@ -29,6 +29,7 @@ pub mod agent_loop;
 mod agent_loop_acceptance;
 pub mod agentic_prompt;
 pub mod application_batch;
+pub mod application_launch;
 pub mod application_ui;
 pub mod assistant_policy;
 pub mod background_input;

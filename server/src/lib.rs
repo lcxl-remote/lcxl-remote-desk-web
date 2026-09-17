@@ -28,6 +28,8 @@ pub mod terminal_copilot;
 pub mod transport_guard;
 pub mod version;
 #[cfg(windows)]
+pub mod windows_application_host;
+#[cfg(windows)]
 pub(crate) mod windows_local_user;
 #[cfg(windows)]
 pub mod windows_office_helper;

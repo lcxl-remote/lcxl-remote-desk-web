@@ -1,17 +1,64 @@
 {
-    "extensionName": { "message": "LCXL Browser Assistant" },
-    "extensionDescription": { "message": "Connects the local LCXL AI assistant to explicitly approved browser pages." },
-    "bridgeUrlLabel": { "message": "Local bridge URL" },
-    "pairingCodeLabel": { "message": "Pairing code" },
-    "pairButton": { "message": "Pair this browser" },
-    "allowSiteButton": { "message": "Allow current site" },
-    "connection_connecting": { "message": "Connecting to LCXL…" },
-    "connection_connected": { "message": "Connected to LCXL" },
-    "connection_disconnected": { "message": "Not connected" },
-    "pairingCodeRequired": { "message": "Enter the pairing code shown by LCXL." },
-    "pairingSaved": { "message": "Saved. The extension is connecting to this device." },
-    "noActivePage": { "message": "No active web page is available." },
-    "httpsOnly": { "message": "Only HTTPS sites can be added." },
-    "siteDenied": { "message": "Site access was not granted." },
-    "siteAllowed": { "message": "Allowed $SITE$.", "placeholders": { "site": { "content": "$1" } } }
+    "extensionName": {
+        "message": "LCXL Browser Assistant"
+    },
+    "extensionDescription": {
+        "message": "Connects the local LCXL AI assistant to explicitly approved browser pages."
+    },
+    "bridgeUrlLabel": {
+        "message": "Local bridge URL"
+    },
+    "pairingCodeLabel": {
+        "message": "Pairing code"
+    },
+    "pairButton": {
+        "message": "Pair this browser"
+    },
+    "allowSiteButton": {
+        "message": "Allow current site"
+    },
+    "connection_connecting": {
+        "message": "Connecting to LCXL…"
+    },
+    "connection_connected": {
+        "message": "Connected to LCXL"
+    },
+    "connection_disconnected": {
+        "message": "Not connected"
+    },
+    "pairingCodeRequired": {
+        "message": "Enter the pairing code shown by LCXL."
+    },
+    "pairingSaved": {
+        "message": "Saved. The extension is connecting to this device."
+    },
+    "noActivePage": {
+        "message": "No active web page is available."
+    },
+    "siteDenied": {
+        "message": "Site access was not granted."
+    },
+    "siteAllowed": {
+        "message": "Allowed $SITE$.",
+        "placeholders": {
+            "site": {
+                "content": "$1"
+            }
+        }
+    },
+    "permissionRequestFailed": {
+        "message": "Permission request failed. Try again or check Chrome extension settings."
+    },
+    "allowAllWebButton": {
+        "message": "Allow all HTTP and HTTPS websites"
+    },
+    "allowAllWebHint": {
+        "message": "Optional: allow access to all HTTP and HTTPS websites. AI actions still require authorization. Manage or revoke site access in Chrome extension settings."
+    },
+    "allWebAllowed": {
+        "message": "All HTTP and HTTPS websites allowed. Return to the AI assistant to continue."
+    },
+    "webOnly": {
+        "message": "Only HTTP or HTTPS sites can be added."
+    }
 }

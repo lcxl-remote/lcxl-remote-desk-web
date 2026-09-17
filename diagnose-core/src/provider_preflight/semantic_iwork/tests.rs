@@ -89,7 +89,7 @@ fn attachment(id: &str, kind: ContextAttachmentKind, reference: &ObjectRef) -> C
             },
             provenance: DataProvenance {
                 source_provider_id: "file.workspace".into(),
-                source_tool_name: "inspect_selected_file_metadata".into(),
+                source_tool_name: "inspect_files".into(),
                 source_object_id: Some(id.into()),
                 source_envelope_ids: vec![],
             },
@@ -348,30 +348,30 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
     directory.token = "selected-directory".into();
     let cases = [
         (
-            "patch_selected_numbers_copy",
-            "inspect_selected_numbers_with_iwork",
+            "patch_numbers_copy",
+            "inspect_numbers_file",
             "copy.numbers",
             serde_json::json!({"action":{"kind":"set_cell_value","params":{"value":"42"}}}),
             Capability::SpreadsheetLivePatchConfirmed,
         ),
         (
-            "replace_selected_pages_copy_body",
-            "inspect_selected_pages_with_iwork",
+            "replace_pages_copy_body",
+            "inspect_pages_file",
             "copy.pages",
             serde_json::json!({"text":"replacement"}),
             Capability::DocumentLivePatchConfirmed,
         ),
         (
-            "patch_selected_keynote_copy",
-            "inspect_selected_keynote_with_iwork",
+            "patch_keynote_copy",
+            "inspect_keynote_file",
             "copy.key",
             serde_json::json!({"action":{"kind":"replace_slide_title","params":{"text":"Title"}}}),
             Capability::PresentationLivePatchConfirmed,
         ),
     ];
     let cases = cases.into_iter().chain(std::iter::once((
-        "patch_selected_powerpoint_copy",
-        "inspect_selected_powerpoint_file",
+        "patch_powerpoint_copy",
+        "inspect_powerpoint_file",
         "copy.pptx",
         serde_json::json!({"action":{"kind":"replace_slide_title","params":{"text":"Title"}}}),
         Capability::PresentationLivePatchConfirmed,
@@ -383,10 +383,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             LiveDocumentProjection,
         };
         let slide = derived_reference(ObjectKind::Slide);
-        let binding = if matches!(
-            tool,
-            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy"
-        ) {
+        let binding = if matches!(tool, "patch_keynote_copy" | "patch_powerpoint_copy") {
             let mut presentation = derived_reference(ObjectKind::Presentation);
             presentation.token = "presentation".into();
             Some(
@@ -396,8 +393,8 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
                     &LiveDocumentInspectOutput {
                         snapshot_id: slide.snapshot_id.clone(),
                         adapter: ComputerUseAdapterRef {
-                            kind: if tool == "patch_selected_powerpoint_copy" { ComputerUseAdapterKind::OfficePowerPoint } else { ComputerUseAdapterKind::IworkKeynote },
-                            version: if tool == "patch_selected_powerpoint_copy" { desk_agent_protocol::computer_use::office_batch::PPTX_ADAPTER_VERSION } else { crate::device_assistant::IWORK_ADAPTER_VERSION }.into(),
+                            kind: if tool == "patch_powerpoint_copy" { ComputerUseAdapterKind::OfficePowerPoint } else { ComputerUseAdapterKind::IworkKeynote },
+                            version: if tool == "patch_powerpoint_copy" { desk_agent_protocol::computer_use::office_batch::PPTX_ADAPTER_VERSION } else { crate::device_assistant::IWORK_ADAPTER_VERSION }.into(),
                         },
                         projection: LiveDocumentProjection::Presentation {
                             presentation,

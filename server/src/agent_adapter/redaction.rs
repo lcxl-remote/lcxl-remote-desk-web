@@ -38,6 +38,42 @@ pub fn redact_snapshot(
         let mut entry_kinds: Vec<String> = Vec::new();
         if let AgentOutcome::Ok(OperationOutput::ReadContext(read)) = &mut entry.outcome {
             match read {
+                ReadContextOutput::ApplicationList(out) => {
+                    for application in &mut out.entries {
+                        let mut changed = false;
+                        let fields = std::iter::once(&mut application.display_name)
+                            .chain(application.aliases.iter_mut())
+                            .chain(
+                                application
+                                    .target
+                                    .iter_mut()
+                                    .map(|target| &mut target.value),
+                            )
+                            .chain(application.suggested_args.iter_mut().flatten())
+                            .chain(application.argument_template.iter_mut())
+                            .chain(application.suggested_cwd.iter_mut())
+                            .chain(application.unsupported_reason.iter_mut())
+                            .chain(application.sources.iter_mut());
+                        for field in fields {
+                            let redacted = redactor.redact(field)?;
+                            changed |= !redacted.kinds.is_empty();
+                            *field = redacted.text;
+                            entry_kinds.extend(redacted.kinds);
+                        }
+                        if changed {
+                            application.target = None;
+                            application.suggested_args = None;
+                            application.argument_template = None;
+                            application.suggested_cwd = None;
+                            application.unsupported_reason = Some("Sensitive catalog fields were removed; obtain a clean explicit target before launch".into());
+                        }
+                    }
+                    for warning in &mut out.warnings {
+                        let redacted = redactor.redact(warning)?;
+                        *warning = redacted.text;
+                        entry_kinds.extend(redacted.kinds);
+                    }
+                }
                 ReadContextOutput::LogRecent(out) => {
                     for event in &mut out.events {
                         let redacted = redactor.redact(&event.message)?;
@@ -76,6 +112,46 @@ mod tests {
         AgentError, AgentErrorKind, Capability, ContainerInspectOutput, ContainerLogsOutput,
         LogEvent, LogRecentOutput, LogSeverity, OperationOutput, ReadContextOutput,
     };
+
+    #[test]
+    fn catalog_diagnostics_are_scrubbed_before_model_delivery() {
+        use desk_agent_protocol::application_launch::{
+            ApplicationCatalogEntry, ApplicationCatalogPage,
+        };
+        let page = ApplicationCatalogPage {
+            entries: vec![ApplicationCatalogEntry {
+                display_name: "Example".into(),
+                aliases: vec![],
+                target: None,
+                suggested_args: None,
+                argument_template: None,
+                suggested_cwd: None,
+                sources: vec![],
+                unsupported_reason: Some("invalid token=catalogsecret".into()),
+            }],
+            next_cursor: None,
+            enumeration_complete: false,
+            warnings: vec!["entry failed password=warningsecret".into()],
+        };
+        let mut snapshot = EvidenceSnapshot::record(
+            "live",
+            "catalog",
+            "2026-09-16T00:00:00Z",
+            vec![(
+                Capability::ApplicationList,
+                AgentOutcome::Ok(OperationOutput::ReadContext(
+                    ReadContextOutput::ApplicationList(page),
+                )),
+            )],
+        );
+        assert_eq!(
+            redact_snapshot(&RegexRedactor::new(), &mut snapshot).unwrap(),
+            2
+        );
+        let json = snapshot.to_json_pretty().unwrap();
+        assert!(!json.contains("catalogsecret"));
+        assert!(!json.contains("warningsecret"));
+    }
 
     fn ok_log(message: &str) -> crate::worker::agent::eval::EvidenceSnapshot {
         let out = OperationOutput::ReadContext(ReadContextOutput::LogRecent(LogRecentOutput {

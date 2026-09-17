@@ -1043,6 +1043,7 @@ pub struct GrantRequestItemDto {
     pub reason: String,
     pub external_send_confirmation: Option<ExternalSendConfirmationDto>,
     pub command_confirmation: Option<CommandConfirmationDto>,
+    pub launch_confirmation: Option<LaunchConfirmationDto>,
     pub application_scope: Option<desk_agent_protocol::computer_use::UiApplicationScope>,
     pub text_file_confirmation: Option<TextFileConfirmationDto>,
 }
@@ -1079,6 +1080,20 @@ impl PermissionRequestDto {
     }
 }
 
+/// Owner-visible native launch identity; no opaque approval token is exposed.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchConfirmationDto {
+    pub target: desk_agent_protocol::application_launch::ApplicationTarget,
+    pub resolved_target: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub run_as_admin: bool,
+    pub target_device_id: String,
+    pub target_session_id: String,
+    pub one_shot: bool,
+}
+
 /// Owner-visible projection of the exact persisted command plan.
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1101,7 +1116,7 @@ fn external_send_confirmation(
 ) -> Option<ExternalSendConfirmationDto> {
     let canonical_input_json = canonical_input_json?;
     let (snapshot, body_plain_text) = match tool_name {
-        "send_gmail_web_exact" => {
+        "send_gmail_message" => {
             let input: GmailWebExactSendInput = serde_json::from_str(canonical_input_json).ok()?;
             desk_diagnose_core::communication::verify_gmail_web_exact_send_input(&input).ok()?;
             (
@@ -1109,7 +1124,7 @@ fn external_send_confirmation(
                 input.draft.body_plain_text,
             )
         }
-        "send_slack_web_exact" => {
+        "send_slack_message" => {
             let input: SlackWebExactSendInput = serde_json::from_str(canonical_input_json).ok()?;
             desk_diagnose_core::communication::verify_slack_web_exact_send_input(&input).ok()?;
             (input.handoff.send_payload_snapshot?, input.body_plain_text)
@@ -1218,6 +1233,22 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                         &item.tool_name,
                         item.canonical_input_json.as_deref(),
                     );
+                    let launch_confirmation = item
+                        .launch_confirmation
+                        .as_ref()
+                        .filter(|_| {
+                            item.tool_name == "launch_application" && item.validate().is_ok()
+                        })
+                        .map(|binding| LaunchConfirmationDto {
+                            target: binding.request().target.clone(),
+                            resolved_target: binding.identity().canonical_target.clone(),
+                            args: binding.request().args.clone(),
+                            cwd: binding.identity().resolved_cwd.clone(),
+                            run_as_admin: binding.request().run_as_admin,
+                            target_device_id: binding.subject().device_id.clone(),
+                            target_session_id: binding.subject().session_id.clone(),
+                            one_shot: true,
+                        });
                     let command_confirmation =
                         item.command_confirmation
                             .as_ref()
@@ -1258,6 +1289,7 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                         reason: item.reason,
                         external_send_confirmation,
                         command_confirmation,
+                        launch_confirmation,
                         text_file_confirmation: None,
                     }
                 })
@@ -1477,7 +1509,7 @@ mod tests {
     fn exact_send_confirmation_projects_only_verified_owner_fields() {
         let canonical = slack_exact_send_json();
         let confirmation =
-            external_send_confirmation("send_slack_web_exact", Some(&canonical)).unwrap();
+            external_send_confirmation("send_slack_message", Some(&canonical)).unwrap();
         assert_eq!(confirmation.channel, CommunicationChannel::Chat);
         assert_eq!(confirmation.account_id, "slack-current-profile");
         assert_eq!(confirmation.destination, "Message #review");
@@ -1490,10 +1522,9 @@ mod tests {
         let mut changed = serde_json::from_str::<serde_json::Value>(&canonical).unwrap();
         changed["body_plain_text"] = serde_json::json!("Changed after review");
         assert!(
-            external_send_confirmation("send_slack_web_exact", Some(&changed.to_string()))
-                .is_none()
+            external_send_confirmation("send_slack_message", Some(&changed.to_string())).is_none()
         );
-        assert!(external_send_confirmation("send_slack_web_exact", None).is_none());
+        assert!(external_send_confirmation("send_slack_message", None).is_none());
         assert!(external_send_confirmation("browser_activate_element", Some(&canonical)).is_none());
     }
 

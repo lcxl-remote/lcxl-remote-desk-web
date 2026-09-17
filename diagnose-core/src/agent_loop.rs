@@ -2144,7 +2144,7 @@ async fn run_inner_impl(
             let marker_id = format!(
                 "runtime-post-tool-permission-protocol-retry-{turn_id}-{post_tool_permission_protocol_retries}"
             );
-            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous request_capability_grants call had invalid JSON arguments and was discarded before it was recorded or executed. Rebuild exactly one valid request_capability_grants call from the current capability catalog and CURRENT REUSABLE PROVIDER RESULTS. Copy complete opaque page and element references verbatim, keep the exact downstream tool input bounded, and do not repeat the preceding Provider action. This notice grants no authority; normal permission planning and final server validation remain authoritative.";
+            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous request_permissions call had invalid JSON arguments and was discarded before it was recorded or executed. Rebuild exactly one valid request_permissions call from the current capability catalog and CURRENT REUSABLE PROVIDER RESULTS. Copy complete opaque page and element references verbatim, keep the exact downstream tool input bounded, and do not repeat the preceding Provider action. This notice grants no authority; normal permission planning and final server validation remain authoritative.";
             let parent = session
                 .conversation
                 .iter()
@@ -2622,7 +2622,7 @@ async fn run_inner_impl(
                             mint(),
                             &call.id,
                             format!(
-                                "tool `{}` is not advertised in this request. Check current authorization; request missing permission, or use load_capability_details for a budget-hidden authorized tool. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
+                                "tool `{}` is not advertised in this request. Check current authorization; request missing permission, or use describe_tools for a budget-hidden authorized tool. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
                                 call.name,
                                 exposed
                                     .iter()
@@ -3231,6 +3231,21 @@ async fn run_inner_impl(
                                 }
                                 Ok(request)
                             });
+                            let request = match request {
+                                Ok(mut request) => {
+                                    crate::application_launch::bind_permission_request(
+                                        &mut request,
+                                        session,
+                                        authority
+                                            .as_ref()
+                                            .map_or(0, |snapshot| snapshot.readiness_revision),
+                                        deps.tools,
+                                    )
+                                    .await
+                                    .map(|()| request)
+                                }
+                                Err(error) => Err(error),
+                            };
                             let request = match request {
                                 Ok(request) => deps
                                     .session_seam
@@ -4140,7 +4155,7 @@ fn reusable_provider_result_projection(
         error_code: None,
     })?;
     let text = format!(
-        "CURRENT REUSABLE PROVIDER RESULTS (server authoritative bounded references; not a grant; copy opaque ids verbatim and never invent them): {payload}. This registry is emitted after the turn-start capability catalog. When browser_reference_delta.page_reference_prerequisite_present=true, it supersedes only an older catalog claim that the page-reference prerequisite is absent. If request_capability_grants is available and the named downstream browser tool is a registered permission candidate, request its exact permission using the complete copied page/input now; do not claim that no BrowserPageRef exists. Runtime readiness, the tool registry, grants, and final server validation remain authoritative and are not widened by this delta."
+        "CURRENT REUSABLE PROVIDER RESULTS (server authoritative bounded references; not a grant; copy opaque ids verbatim and never invent them): {payload}. This registry is emitted after the turn-start capability catalog. When browser_reference_delta.page_reference_prerequisite_present=true, it supersedes only an older catalog claim that the page-reference prerequisite is absent. If request_permissions is available and the named downstream browser tool is a registered permission candidate, request its exact permission using the complete copied page/input now; do not claim that no BrowserPageRef exists. Runtime readiness, the tool registry, grants, and final server validation remain authoritative and are not widened by this delta."
     );
     let mut projection = ChatMessage::system_event(message_id, &text);
     projection.data_envelope = derive_internal_tool_result_envelope(
@@ -4235,27 +4250,30 @@ fn validate_browser_permission_references(
                 | "browser_wait_for"
                 | "browser_fill_form"
                 | "browser_activate_element"
-                | "prepare_gmail_web_draft_handoff"
-                | "prepare_slack_web_message_handoff"
-                | "send_gmail_web_exact"
-                | "send_slack_web_exact"
+                | "prepare_gmail_draft"
+                | "prepare_slack_message"
+                | "send_gmail_message"
+                | "send_slack_message"
         ) {
             continue;
         }
-        let canonical = item.canonical_input_json.as_deref().ok_or_else(|| AgentError {
-            kind: AgentErrorKind::InvalidInput,
-            message: format!(
-                "invalid request_capability_grants arguments: tool `{}` requires exact browser input",
-                item.tool_name
-            ),
-            retryable: false,
-            safe_for_model: true,
-            error_code: None,
-        })?;
+        let canonical = item
+            .canonical_input_json
+            .as_deref()
+            .ok_or_else(|| AgentError {
+                kind: AgentErrorKind::InvalidInput,
+                message: format!(
+                    "invalid request_permissions arguments: tool `{}` requires exact browser input",
+                    item.tool_name
+                ),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            })?;
         let value: serde_json::Value = serde_json::from_str(canonical).map_err(|_| AgentError {
             kind: AgentErrorKind::InvalidInput,
             message: format!(
-                "invalid request_capability_grants arguments: tool `{}` has invalid exact browser input",
+                "invalid request_permissions arguments: tool `{}` has invalid exact browser input",
                 item.tool_name
             ),
             retryable: false,
@@ -4269,7 +4287,7 @@ fn validate_browser_permission_references(
                 .ok_or_else(|| AgentError {
                     kind: AgentErrorKind::InvalidInput,
                     message: format!(
-                        "invalid request_capability_grants arguments: tool `{}` is missing its exact page reference",
+                        "invalid request_permissions arguments: tool `{}` is missing its exact page reference",
                         item.tool_name
                     ),
                     retryable: false,
@@ -4280,7 +4298,7 @@ fn validate_browser_permission_references(
         .map_err(|_| AgentError {
             kind: AgentErrorKind::InvalidInput,
             message: format!(
-                "invalid request_capability_grants arguments: tool `{}` has an invalid exact page reference",
+                "invalid request_permissions arguments: tool `{}` has an invalid exact page reference",
                 item.tool_name
             ),
             retryable: false,
@@ -4321,7 +4339,7 @@ fn validate_browser_permission_references(
             return Err(AgentError {
                 kind: AgentErrorKind::InvalidInput,
                 message: format!(
-                    "invalid request_capability_grants arguments: tool `{}` must copy its exact page and element references from one unexpired verified browser result in this run",
+                    "invalid request_permissions arguments: tool `{}` must copy its exact page and element references from one unexpired verified browser result in this run",
                     item.tool_name
                 ),
                 retryable: false,
@@ -4537,7 +4555,7 @@ pub(crate) fn bind_tool_input_envelopes(
             .ok_or_else(|| crate::directory_tools::unavailable())?;
         // Freeze authenticated source identity here. Current expiry and consent
         // are independently revalidated by preflight and dispatch.
-        let source_id = if call.name == "read_selected_text_file" {
+        let source_id = if call.name == "read_text_file" {
             crate::provider_preflight::text_file::read_source_envelope_id(session, call)?
         } else {
             crate::provider_preflight::text_file::resolve_file_result(session, id, 1)?
@@ -4592,7 +4610,27 @@ pub(crate) fn bind_tool_input_envelopes(
     // selection. Never expand it with unrelated, later session attachments.
     // Unlabeled legacy calls retain their conservative context fallback.
     if !has_explicit_input_lineage
-        && (call.name.contains("selected") || call.name == "preview_spreadsheet_merge")
+        && matches!(
+            call.name.as_str(),
+            "read_terminal_output"
+                | "inspect_files"
+                | "read_text_file"
+                | "create_text_file"
+                | "inspect_spreadsheets"
+                | "preview_spreadsheet_merge"
+                | "inspect_numbers_file"
+                | "patch_numbers_copy"
+                | "inspect_pages_file"
+                | "replace_pages_copy_body"
+                | "inspect_keynote_file"
+                | "patch_keynote_copy"
+                | "inspect_excel_cell"
+                | "patch_excel_copy"
+                | "inspect_word_file"
+                | "replace_word_copy_body"
+                | "inspect_powerpoint_file"
+                | "patch_powerpoint_copy"
+        )
     {
         source_ids.extend(
             session
@@ -4660,7 +4698,7 @@ fn resolve_word_report_web_source_envelope<'a>(
     session: &'a crate::session::PersistedAgentSession,
     call: &crate::chat::ToolCall,
 ) -> Result<Option<&'a DataEnvelope>, String> {
-    if call.name != "create_word_report_from_merge_preview" {
+    if call.name != "create_word_report" {
         return Ok(None);
     }
     let arguments: serde_json::Value = serde_json::from_str(&call.arguments_json)

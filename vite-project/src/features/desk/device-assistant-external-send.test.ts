@@ -48,9 +48,9 @@ describe('external send receipts', () => {
     });
 
     it('recognizes only the two reviewed exact-send tools', () => {
-        expect(isExactExternalSendTool('send_gmail_web_exact')).toBe(true);
-        expect(isExactExternalSendTool('send_slack_web_exact')).toBe(true);
-        expect(isExactExternalSendTool('prepare_gmail_web_draft_handoff')).toBe(false);
+        expect(isExactExternalSendTool('send_gmail_message')).toBe(true);
+        expect(isExactExternalSendTool('send_slack_message')).toBe(true);
+        expect(isExactExternalSendTool('prepare_gmail_draft')).toBe(false);
         expect(isExactExternalSendTool('browser_activate_element')).toBe(false);
     });
 });

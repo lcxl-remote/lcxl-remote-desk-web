@@ -133,14 +133,14 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
     let read_name = if live {
         "inspect_live_document"
     } else {
-        "inspect_selected_file_metadata"
+        "inspect_files"
     };
     let capability = registry.capability_for_tool(read_name).unwrap();
     let provider = registry
         .provider_for_capability(&capability.wire.capability_id)
         .unwrap();
     let mut replies = vec![
-        tool_reply("request_capability_grants", serde_json::json!({"items":[{
+        tool_reply("request_permissions", serde_json::json!({"items":[{
             "item_id":"read", "provider_id":provider.wire.provider_id,
             "tool_name":read_name, "expected_effect":capability.wire.effect,
             "suggested_ttl_seconds":120, "suggested_max_uses":1, "reason":"Read the selected file metadata"

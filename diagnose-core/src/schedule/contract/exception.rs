@@ -213,7 +213,7 @@ fn validate_requested_input(
                 provider_device_id,
             };
             let destination = match rule.tool_name.as_str() {
-                "prepare_gmail_web_draft_handoff" => {
+                "prepare_gmail_draft" => {
                     let input: desk_agent_protocol::communication::GmailWebDraftHandoffInput =
                         serde_json::from_str(canonical).map_err(|_| Error::InvalidInput)?;
                     contract.verify_generated_gmail_draft_approval_scope(
@@ -223,7 +223,7 @@ fn validate_requested_input(
                         &input.page,
                     )?
                 }
-                "prepare_slack_web_message_handoff" => {
+                "prepare_slack_message" => {
                     let input: desk_agent_protocol::communication::SlackWebDraftHandoffInput =
                         serde_json::from_str(canonical).map_err(|_| Error::InvalidInput)?;
                     contract.verify_generated_slack_draft(
@@ -233,7 +233,7 @@ fn validate_requested_input(
                         &input.page,
                     )?
                 }
-                "send_gmail_web_exact" => {
+                "send_gmail_message" => {
                     let input: desk_agent_protocol::communication::GmailWebExactSendInput =
                         serde_json::from_str(canonical).map_err(|_| Error::InvalidInput)?;
                     crate::communication::verify_gmail_web_exact_send_input(&input)
@@ -255,7 +255,7 @@ fn validate_requested_input(
                         },
                     )?
                 }
-                "send_slack_web_exact" => {
+                "send_slack_message" => {
                     let input: desk_agent_protocol::communication::SlackWebExactSendInput =
                         serde_json::from_str(canonical).map_err(|_| Error::InvalidInput)?;
                     crate::communication::verify_slack_web_exact_send_input(&input)
@@ -512,7 +512,7 @@ mod candidate_tests {
     fn candidate_requires_unique_unchanged_original_call() {
         let original = ToolCall {
             id: "call-1".into(),
-            name: "send_slack_web_exact".into(),
+            name: "send_slack_message".into(),
             arguments_json: "{\"body_plain_text\":\"Original\"}".into(),
         };
         let mut message = ChatMessage::text("proposal", ChatRole::Assistant, "");

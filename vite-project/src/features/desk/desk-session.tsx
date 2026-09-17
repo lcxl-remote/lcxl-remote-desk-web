@@ -1847,10 +1847,7 @@ export default function DeskSession({
                                     localPairingAvailable={!assistantConnection.device_id}
                                     featureProfile={assistantFeatureProfile}
                                     assistantEnabled={true}
-                                    onBrowserTakeover={() => {
-                                        setAssistantOpen(false);
-                                        videoRef.current?.focus();
-                                    }} />
+                                    />
                             </DeskAssistantPanel>
                         )}
 

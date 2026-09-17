@@ -77,7 +77,15 @@ pub fn canonical_compiled_scope(
     {
         return Some(CanonicalGrantScope {
             resources: vec!["command:exact_input_required".into()],
-            operations: vec!["execute_confirmed_command".into()],
+            operations: vec!["exec_command".into()],
+        });
+    }
+    if authorization_resources == [AuthorizationResourceKind::ExactApplication]
+        && effect == CapabilityEffect::LaunchApplication
+    {
+        return Some(CanonicalGrantScope {
+            resources: vec!["application:exact_input_required".into()],
+            operations: vec!["launch_application".into()],
         });
     }
     None
@@ -422,7 +430,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(command.resources, vec!["command:exact_input_required"]);
-        assert_eq!(command.operations, vec!["execute_confirmed_command"]);
+        assert_eq!(command.operations, vec!["exec_command"]);
         assert_eq!(
             exact_command_resource_scope(&digest('a')),
             vec![format!("command_input:sha256:{}", digest('a'))]

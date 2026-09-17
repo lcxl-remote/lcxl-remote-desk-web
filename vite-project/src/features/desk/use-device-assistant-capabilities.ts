@@ -68,11 +68,13 @@ export function useDeviceAssistantCapabilities({
     deskId,
     subscribe,
     sendMessage,
+    enabled = true,
     timeoutMs = 10_000,
 }: {
     deskId: string | null;
     subscribe: (handler: SignalingSubscriber) => () => void;
     sendMessage: SendMessage;
+    enabled?: boolean;
     timeoutMs?: number;
 }) {
     const [snapshot, setSnapshot] = useState<CapabilityInventorySnapshot | null>(null);
@@ -99,7 +101,7 @@ export function useDeviceAssistantCapabilities({
     }, []);
 
     const refresh = useCallback(() => {
-        if (!deskId) return;
+        if (!deskId || !enabled) return;
         if (timer.current !== null) window.clearTimeout(timer.current);
         setLoading(true);
         setError(null);
@@ -114,7 +116,30 @@ export function useDeviceAssistantCapabilities({
             setLoading(false);
             setError('timeout');
         }, timeoutMs);
-    }, [deskId, sendMessage, timeoutMs]);
+    }, [deskId, enabled, sendMessage, timeoutMs]);
+
+    useEffect(() => {
+        requestId.current = null;
+        if (timer.current !== null) window.clearTimeout(timer.current);
+        timer.current = null;
+        setSnapshot(null);
+        setError(null);
+        setLoading(false);
+        if (!enabled || !deskId) return;
+        refresh();
+        const onReturn = () => {
+            if (document.visibilityState === 'visible' && requestId.current === null) refresh();
+        };
+        window.addEventListener('focus', onReturn);
+        document.addEventListener('visibilitychange', onReturn);
+        return () => {
+            window.removeEventListener('focus', onReturn);
+            document.removeEventListener('visibilitychange', onReturn);
+            requestId.current = null;
+            if (timer.current !== null) window.clearTimeout(timer.current);
+            timer.current = null;
+        };
+    }, [deskId, enabled, refresh]);
 
     return { snapshot, loading, error, refresh };
 }

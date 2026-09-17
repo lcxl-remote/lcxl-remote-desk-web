@@ -33,7 +33,7 @@ fn output(value: ReadContextOutput) -> ToolRunOutput {
 #[test]
 fn read_limits_narrow_typed_bounds_without_dropping_selected_roots() {
     let registry = crate::device_assistant::device_assistant_provider_registry();
-    let call = call("inspect_selected_file_metadata");
+    let call = call("inspect_files");
     let (_, mut input) = build_read_operation(&call).unwrap();
     let OperationInput::ReadContext(ref mut input_value) = input else {
         panic!()
@@ -66,7 +66,7 @@ fn read_output_limits_count_wire_bytes_and_actual_projections() {
         byte_len: 6,
         sha256: "a".repeat(64),
     }));
-    let text_call = call("read_selected_text_file");
+    let text_call = call("read_text_file");
     let bytes = text.content.len() as u64;
     validate_output(&registry, &text_call, &text, &limit(bytes, 1)).unwrap();
     assert!(validate_output(&registry, &text_call, &text, &limit(bytes - 1, 1)).is_err());
@@ -76,7 +76,7 @@ fn read_output_limits_count_wire_bytes_and_actual_projections() {
     assert!(
         validate_output(
             &registry,
-            &call("inspect_selected_terminal_output"),
+            &call("read_terminal_output"),
             &text,
             &limit(1024, 1)
         )
@@ -97,7 +97,7 @@ fn read_output_limits_count_wire_bytes_and_actual_projections() {
             truncated: false,
         },
     ));
-    let meta_call = call("inspect_selected_file_metadata");
+    let meta_call = call("inspect_files");
     assert!(validate_output(&registry, &meta_call, &metadata, &limit(4096, 1)).is_err());
     validate_output(&registry, &meta_call, &metadata, &limit(4096, 2)).unwrap();
     let screen = ToolRunOutput {

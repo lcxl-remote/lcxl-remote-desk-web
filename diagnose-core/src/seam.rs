@@ -615,6 +615,14 @@ pub trait ToolSeam {
     ) -> Result<desk_agent_protocol::computer_use::FileDirectoryResolveOutput, AgentError> {
         Err(crate::directory_tools::unavailable())
     }
+    /// Internal metadata-only preflight for an exact application approval.
+    /// This does not grant launch authority or start an application.
+    async fn resolve_application_candidate(
+        &self,
+        _request: &desk_agent_protocol::application_launch::LaunchApplicationRequest,
+    ) -> Result<desk_agent_protocol::application_launch::LaunchPreflightReceipt, AgentError> {
+        Err(crate::directory_tools::unavailable())
+    }
     /// Run a read-only tool call and return its redacted result. The loop has
     /// already validated that the call names an exposed read tool.
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError>;

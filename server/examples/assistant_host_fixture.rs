@@ -9,6 +9,10 @@ use std::{path::Path, sync::Arc};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
+    if let Some(code) = lcxl_remote_desk_server::windows_application_host::run_if_requested() {
+        std::process::exit(code);
+    }
+    #[cfg(windows)]
     {
         let mut args = std::env::args_os().skip(1);
         if args.next().as_deref()

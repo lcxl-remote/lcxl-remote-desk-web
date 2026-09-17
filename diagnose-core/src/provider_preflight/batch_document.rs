@@ -171,7 +171,7 @@ pub fn resolve_presentation_read(
         if calls.next().is_some()
             || !matches!(
                 call.name.as_str(),
-                "inspect_selected_keynote_with_iwork" | "inspect_selected_powerpoint_file"
+                "inspect_keynote_file" | "inspect_powerpoint_file"
             )
         {
             continue;
@@ -200,7 +200,7 @@ pub fn resolve_presentation_read(
         else {
             continue;
         };
-        let expected_adapter = if call.name == "inspect_selected_keynote_with_iwork" {
+        let expected_adapter = if call.name == "inspect_keynote_file" {
             ComputerUseAdapterKind::IworkKeynote
         } else {
             ComputerUseAdapterKind::OfficePowerPoint
@@ -312,7 +312,7 @@ mod tests {
         ))
         .unwrap();
         let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
-        let tool = "inspect_selected_powerpoint_file";
+        let tool = "inspect_powerpoint_file";
         let mut proposal = ChatMessage::text("proposal", ChatRole::Assistant, "");
         proposal.tool_calls.push(ToolCallRef {
             id: "read".into(),

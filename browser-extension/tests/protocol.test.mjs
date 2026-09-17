@@ -37,6 +37,8 @@ function extensionChrome(overrides = {}) {
             contains: async () => true
         },
         runtime: {
+            id: "fixture-extension",
+            onMessage: event,
             getManifest: () => ({ version: "0.1.0" }),
             onInstalled: event,
             onStartup: event
@@ -231,7 +233,7 @@ test("manifest keeps tab access user-scoped and excludes privileged browser surf
         assert.equal(manifest.permissions.includes(forbidden), false);
     }
     assert.equal(manifest.host_permissions.includes("<all_urls>"), false);
-    assert.deepEqual(manifest.optional_host_permissions, ["https://*/*"]);
+    assert.deepEqual(manifest.optional_host_permissions, ["https://*/*", "http://*/*"]);
 });
 
 test("MV3 reconnect uses an alarm that survives service-worker suspension", async () => {
@@ -667,4 +669,19 @@ test("signed-in account change invalidates a page even when URL and document rev
         assert.equal(samePageObservation(page, { ...page, account_id: "gmail-web:other@example.test" }), false);
         assert.equal(samePageObservation(page, { ...page, account_id: null }), false);
     } finally { delete globalThis.chrome; }
+});
+
+
+test("HTTP targets support LAN hosts while preserving origin boundaries", () => {
+    const command = openCommand();
+    command.action.target = { url: "http://192.168.1.20:8080/app", origin: { kind: "http", host_ascii: "192.168.1.20", port: 8080 } };
+    assert.deepEqual(parseHostCommand(command), command);
+    assert.equal(permissionPatternForUrl(command.action.target.url), "http://192.168.1.20/*");
+    for (const changed of [{ kind: "https" }, { port: 80 }, { host_ascii: "other.test" }]) {
+        const invalid = structuredClone(command);
+        Object.assign(invalid.action.target.origin, changed);
+        assert.throws(() => parseHostCommand(invalid), /origin_mismatch/u);
+    }
+    command.action.target.url = "file:///tmp/file";
+    assert.throws(() => parseHostCommand(command), /invalid_navigation_target/u);
 });

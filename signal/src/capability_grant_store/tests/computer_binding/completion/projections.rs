@@ -257,15 +257,9 @@ async fn outlook_projection_preserves_assistive_manual_only_handoff_and_original
         output: Some(ComputerActionOutput::CommunicationHandoff(handoff.clone())),
         ..failed(&plan)
     };
-    let projected = project(
-        &plan,
-        "prepare_outlook_new_draft_handoff",
-        "run-1",
-        "{}",
-        &native,
-    )
-    .unwrap()
-    .unwrap();
+    let projected = project(&plan, "prepare_outlook_draft", "run-1", "{}", &native)
+        .unwrap()
+        .unwrap();
     assert_eq!(projected.outcome, CapabilityDispatchOutcome::Succeeded);
     assert_eq!(
         serde_json::from_str::<CommunicationDraftHandoff>(&projected.content).unwrap(),
@@ -286,14 +280,7 @@ async fn outlook_projection_preserves_assistive_manual_only_handoff_and_original
             }
         }
         assert!(
-            project(
-                &plan,
-                "prepare_outlook_new_draft_handoff",
-                "run-1",
-                "{}",
-                &bad
-            )
-            .is_err(),
+            project(&plan, "prepare_outlook_draft", "run-1", "{}", &bad).is_err(),
             "{fault}"
         );
     }
@@ -355,9 +342,9 @@ async fn gmail_and_slack_projection_bind_account_and_exact_send_eligibility() {
             .unwrap()
         };
         let name = if gmail {
-            "prepare_gmail_web_draft_handoff"
+            "prepare_gmail_draft"
         } else {
-            "prepare_slack_web_message_handoff"
+            "prepare_slack_message"
         };
         let call = ToolCall {
             id: "model".into(),

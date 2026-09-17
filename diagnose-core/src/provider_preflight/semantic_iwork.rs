@@ -136,12 +136,12 @@ impl IworkCallPreflight {
             "patch_live_spreadsheet_cell"
                 | "replace_live_document_body"
                 | "patch_live_presentation_slide"
-                | "patch_selected_numbers_copy"
-                | "replace_selected_pages_copy_body"
-                | "patch_selected_keynote_copy"
-                | "patch_selected_powerpoint_copy"
-                | "replace_selected_word_copy_body"
-                | "patch_selected_excel_copy"
+                | "patch_numbers_copy"
+                | "replace_pages_copy_body"
+                | "patch_keynote_copy"
+                | "patch_powerpoint_copy"
+                | "replace_word_copy_body"
+                | "patch_excel_copy"
         )
     }
 
@@ -212,7 +212,7 @@ impl IworkCallPreflight {
         }
         if !matches!(
             call.name.as_str(),
-            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy"
+            "patch_keynote_copy" | "patch_powerpoint_copy"
         ) {
             return Err(unavailable());
         }
@@ -249,7 +249,7 @@ impl IworkCallPreflight {
     ) -> Result<Self, AgentError> {
         let binding = if matches!(
             call.name.as_str(),
-            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy"
+            "patch_keynote_copy" | "patch_powerpoint_copy"
         ) {
             original.validate()?;
             let args: PresentationBatchActionArgs =
@@ -508,7 +508,7 @@ impl IworkCallPreflight {
                     expiry,
                 )
             }
-            "patch_selected_numbers_copy" => {
+            "patch_numbers_copy" => {
                 let args: SpreadsheetBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
                 if exact_batch_file()? != args.target {
@@ -527,7 +527,7 @@ impl IworkCallPreflight {
                     u64::MAX,
                 )
             }
-            "replace_selected_pages_copy_body" => {
+            "replace_pages_copy_body" => {
                 let args: DocumentBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
                 if exact_batch_file()? != args.target {
@@ -546,7 +546,7 @@ impl IworkCallPreflight {
                     u64::MAX,
                 )
             }
-            "patch_selected_excel_copy" => {
+            "patch_excel_copy" => {
                 let args: SpreadsheetBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
                 let binding = excel.ok_or_else(unavailable)?;
@@ -575,7 +575,7 @@ impl IworkCallPreflight {
                     binding.valid_until_unix_ms(),
                 )
             }
-            "replace_selected_word_copy_body" => {
+            "replace_word_copy_body" => {
                 let args: DocumentBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
                 let binding = word.ok_or_else(unavailable)?;
@@ -598,11 +598,11 @@ impl IworkCallPreflight {
                     binding.valid_until_unix_ms(),
                 )
             }
-            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy" => {
+            "patch_keynote_copy" | "patch_powerpoint_copy" => {
                 let args: PresentationBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
                 let binding = presentation.ok_or_else(unavailable)?;
-                let adapter = if call.name == "patch_selected_powerpoint_copy" {
+                let adapter = if call.name == "patch_powerpoint_copy" {
                     ComputerUseAdapterKind::OfficePowerPoint
                 } else {
                     ComputerUseAdapterKind::IworkKeynote

@@ -27,12 +27,12 @@ pub struct ObjectReadBinding<'a> {
 pub fn is_batch_document_read(name: &str) -> bool {
     matches!(
         name,
-        "inspect_selected_numbers_with_iwork"
-            | "inspect_selected_pages_with_iwork"
-            | "inspect_selected_keynote_with_iwork"
-            | "inspect_selected_powerpoint_file"
-            | "inspect_selected_word_file"
-            | "inspect_selected_excel_cell"
+        "inspect_numbers_file"
+            | "inspect_pages_file"
+            | "inspect_keynote_file"
+            | "inspect_powerpoint_file"
+            | "inspect_word_file"
+            | "inspect_excel_cell"
     )
 }
 
@@ -40,17 +40,17 @@ pub fn requires_objects(name: &str) -> bool {
     super::live_read::target_kind(name).is_some()
         || matches!(
             name,
-            "inspect_selected_file_metadata"
-                | "read_selected_text_file"
-                | "inspect_selected_spreadsheets"
+            "inspect_files"
+                | "read_text_file"
+                | "inspect_spreadsheets"
                 | "preview_spreadsheet_merge"
-                | "inspect_selected_terminal_output"
-                | "inspect_selected_numbers_with_iwork"
-                | "inspect_selected_pages_with_iwork"
-                | "inspect_selected_keynote_with_iwork"
-                | "inspect_selected_powerpoint_file"
-                | "inspect_selected_word_file"
-                | "inspect_selected_excel_cell"
+                | "read_terminal_output"
+                | "inspect_numbers_file"
+                | "inspect_pages_file"
+                | "inspect_keynote_file"
+                | "inspect_powerpoint_file"
+                | "inspect_word_file"
+                | "inspect_excel_cell"
         )
 }
 
@@ -69,12 +69,12 @@ pub fn uses_selected_objects(name: &str, objects: &[ContextAttachment]) -> bool 
 /// require their separate explicit capability selection.
 pub fn implicit_object_tool(name: &str, objects: &[ContextAttachment]) -> bool {
     match name {
-        "inspect_selected_terminal_output" => objects
+        "read_terminal_output" => objects
             .iter()
             .any(|object| object.kind == ContextAttachmentKind::TerminalSessionRef),
-        "inspect_selected_file_metadata"
-        | "read_selected_text_file"
-        | "inspect_selected_spreadsheets"
+        "inspect_files"
+        | "read_text_file"
+        | "inspect_spreadsheets"
         | "preview_spreadsheet_merge" => objects.iter().any(|object| {
             matches!(
                 object.kind,
@@ -93,7 +93,7 @@ impl ObjectReadBinding<'_> {
         if !self.original.tool_names.contains(&call.name) {
             return Err(denied());
         }
-        let terminal = call.name == "inspect_selected_terminal_output";
+        let terminal = call.name == "read_terminal_output";
         let window = call.name == "read_current_screen";
         let mut selected: Vec<_> = self
             .original
@@ -114,13 +114,13 @@ impl ObjectReadBinding<'_> {
             .collect();
         if matches!(
             call.name.as_str(),
-            "read_selected_text_file"
-                | "inspect_selected_numbers_with_iwork"
-                | "inspect_selected_pages_with_iwork"
-                | "inspect_selected_keynote_with_iwork"
-                | "inspect_selected_powerpoint_file"
-                | "inspect_selected_word_file"
-                | "inspect_selected_excel_cell"
+            "read_text_file"
+                | "inspect_numbers_file"
+                | "inspect_pages_file"
+                | "inspect_keynote_file"
+                | "inspect_powerpoint_file"
+                | "inspect_word_file"
+                | "inspect_excel_cell"
         ) {
             selected.retain(|object| object.kind == ContextAttachmentKind::File);
             if selected.len() != 1 {
@@ -172,24 +172,24 @@ impl ObjectReadBinding<'_> {
             return Err(denied());
         };
         match (call.name.as_str(), kind) {
-            ("inspect_selected_excel_cell", ContextKind::SpreadsheetBatchInspect(params)) => {
+            ("inspect_excel_cell", ContextKind::SpreadsheetBatchInspect(params)) => {
                 if refs[0].object_kind != ObjectKind::File {
                     return Err(denied());
                 }
                 params.file = Some(refs[0].clone());
                 params.max_bytes = params.max_bytes.min(bytes);
             }
-            ("inspect_selected_file_metadata", ContextKind::FileMetadataInspect(params)) => {
+            ("inspect_files", ContextKind::FileMetadataInspect(params)) => {
                 params.roots = refs;
                 params.max_bytes = params.max_bytes.min(bytes);
                 params.max_entries = params.max_entries.min(objects);
                 params.enumerate_directories = true;
             }
-            ("read_selected_text_file", ContextKind::FileContentRead(params)) => {
+            ("read_text_file", ContextKind::FileContentRead(params)) => {
                 params.file = refs[0].clone();
                 params.max_bytes = params.max_bytes.min(bytes);
             }
-            ("inspect_selected_spreadsheets", ContextKind::SpreadsheetFileInspect(params)) => {
+            ("inspect_spreadsheets", ContextKind::SpreadsheetFileInspect(params)) => {
                 params.files = refs;
                 params.max_bytes = params.max_bytes.min(bytes);
                 params.max_workbooks = params.max_workbooks.min(objects);
@@ -198,7 +198,7 @@ impl ObjectReadBinding<'_> {
                 params.files = refs;
                 params.max_bytes = params.max_bytes.min(bytes);
             }
-            ("inspect_selected_terminal_output", ContextKind::TerminalOutputInspect(params)) => {
+            ("read_terminal_output", ContextKind::TerminalOutputInspect(params)) => {
                 params.roots = refs;
                 params.max_bytes = params.max_bytes.min(bytes);
             }
@@ -213,16 +213,13 @@ impl ObjectReadBinding<'_> {
                 }
                 params.window = Some(refs[0].clone());
             }
-            (
-                "inspect_selected_numbers_with_iwork",
-                ContextKind::SpreadsheetLiveInspect(params),
-            )
+            ("inspect_numbers_file", ContextKind::SpreadsheetLiveInspect(params))
             | (
-                "inspect_selected_pages_with_iwork" | "inspect_selected_word_file",
+                "inspect_pages_file" | "inspect_word_file",
                 ContextKind::DocumentLiveInspect(params),
             )
             | (
-                "inspect_selected_keynote_with_iwork" | "inspect_selected_powerpoint_file",
+                "inspect_keynote_file" | "inspect_powerpoint_file",
                 ContextKind::PresentationLiveInspect(params),
             ) => {
                 if refs[0].object_kind != ObjectKind::File {

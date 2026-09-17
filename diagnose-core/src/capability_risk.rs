@@ -49,7 +49,10 @@ pub const fn classify_capability_risk(
                 Risk::R2
             }
         }
-        Effect::SendExternal | Effect::InputFallback | Effect::ExecuteCommand => Risk::R3,
+        Effect::SendExternal
+        | Effect::InputFallback
+        | Effect::ExecuteCommand
+        | Effect::LaunchApplication => Risk::R3,
     }
 }
 

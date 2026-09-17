@@ -22,7 +22,7 @@ describe('useDeviceAssistantCapabilities', () => {
             sendMessage,
         }));
 
-        act(() => { result.current.refresh(); });
+        expect(sendMessage).toHaveBeenCalledTimes(1);
         expect(sendMessage).toHaveBeenCalledWith(
             SIGNALING_TYPE_CODE_GET_DEVICE_ASSISTANT_CAPABILITIES,
             {},
@@ -63,5 +63,29 @@ describe('useDeviceAssistantCapabilities', () => {
             .toBe('office_bridge_not_paired');
         expect(result.current.snapshot?.entries[0].context_selectable).toBe(true);
         expect(result.current.loading).toBe(false);
+        act(() => { window.dispatchEvent(new Event('focus')); });
+        expect(sendMessage).toHaveBeenCalledTimes(2);
+        act(() => { window.dispatchEvent(new Event('focus')); });
+        expect(sendMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('refreshes on reconnect and does not request capabilities while disabled', () => {
+        const subscribe = vi.fn(() => () => {});
+        const sendMessage = vi.fn(() => 'inventory');
+        const { rerender, unmount } = renderHook(({ enabled }) => useDeviceAssistantCapabilities({
+            deskId: 'desk-1', subscribe, sendMessage, enabled,
+        }), { initialProps: { enabled: false } });
+        act(() => { window.dispatchEvent(new Event('focus')); });
+        expect(sendMessage).not.toHaveBeenCalled();
+        rerender({ enabled: true });
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        rerender({ enabled: false });
+        act(() => { window.dispatchEvent(new Event('focus')); });
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        rerender({ enabled: true });
+        expect(sendMessage).toHaveBeenCalledTimes(2);
+        unmount();
+        act(() => { window.dispatchEvent(new Event('focus')); });
+        expect(sendMessage).toHaveBeenCalledTimes(2);
     });
 });

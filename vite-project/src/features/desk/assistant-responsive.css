@@ -1,5 +1,61 @@
 .assistant-composer, .assistant-header { container-type: inline-size; }
 .assistant-action { gap: 0.5rem; }
+
+/* Include nested tool output and code blocks in the transcript. */
+.assistant-scrollbar,
+.assistant-scrollbar * {
+    scrollbar-width: auto;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.45) transparent;
+}
+
+/* WebView2/WebKit styling also covers engines without standard scrollbar CSS. */
+@supports selector(::-webkit-scrollbar) {
+    .assistant-scrollbar,
+    .assistant-scrollbar * {
+        scrollbar-width: auto;
+        scrollbar-color: auto;
+    }
+
+    .assistant-scrollbar::-webkit-scrollbar,
+    .assistant-scrollbar *::-webkit-scrollbar {
+        width: 16px;
+        height: 16px;
+    }
+
+    .assistant-scrollbar::-webkit-scrollbar-thumb,
+    .assistant-scrollbar *::-webkit-scrollbar-thumb {
+        border: 2px solid transparent;
+        border-radius: 999px;
+        background: hsl(var(--muted-foreground) / 0.45);
+        background-clip: padding-box;
+    }
+
+    .assistant-scrollbar::-webkit-scrollbar-thumb:hover,
+    .assistant-scrollbar *::-webkit-scrollbar-thumb:hover {
+        background-color: hsl(var(--muted-foreground) / 0.7);
+    }
+
+    .assistant-scrollbar::-webkit-scrollbar-track,
+    .assistant-scrollbar *::-webkit-scrollbar-track,
+    .assistant-scrollbar::-webkit-scrollbar-corner,
+    .assistant-scrollbar *::-webkit-scrollbar-corner {
+        background: transparent;
+    }
+}
+
+@media (forced-colors: active) {
+    .assistant-scrollbar,
+    .assistant-scrollbar * {
+        scrollbar-color: auto;
+        scrollbar-width: auto;
+    }
+
+    .assistant-scrollbar::-webkit-scrollbar-thumb,
+    .assistant-scrollbar *::-webkit-scrollbar-thumb {
+        background-color: ButtonText;
+    }
+}
+
 @container (max-width: 760px) {
     .assistant-action-label { display: none; }
     .assistant-action { padding-inline: 0.625rem; }

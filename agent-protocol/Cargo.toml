@@ -13,3 +13,4 @@ wincode = { workspace = true }
 utoipa = { workspace = true }
 async-trait = { workspace = true }
 url = { workspace = true }
+sha2 = { workspace = true }

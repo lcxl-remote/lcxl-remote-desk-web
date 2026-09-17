@@ -219,6 +219,19 @@ pub(crate) fn project(
             return Err(invalid());
         }
     }
+    if let ComputerActionKind::LaunchApplication(binding) = &plan.actions[0].action {
+        desk_diagnose_core::application_launch::completion::validate(binding, completed)?;
+        let accepted = matches!(&completed.output, Some(ComputerActionOutput::ApplicationLaunch(result))
+            if result.launch_outcome == desk_agent_protocol::application_launch::LaunchOutcome::LaunchAccepted);
+        return Ok(Some(Projection {
+            outcome: if accepted {
+                CapabilityDispatchOutcome::Succeeded
+            } else {
+                CapabilityDispatchOutcome::Failed
+            },
+            content,
+        }));
+    }
     let verified = completed.result == ComputerActionResultClass::Verified;
     if verified && (completed.facts.len() != 1 || !completed.facts[0].verified) {
         return Err(invalid());
@@ -285,7 +298,7 @@ pub(crate) fn project(
             validate_output(action, &plan.device_id, completed)?;
         }
     }
-    let exact_send_receipt = if matches!(tool_name, "send_gmail_web_exact" | "send_slack_web_exact")
+    let exact_send_receipt = if matches!(tool_name, "send_gmail_message" | "send_slack_message")
         && matches!(
             &completed.output,
             Some(ComputerActionOutput::Browser(BrowserActionResult {

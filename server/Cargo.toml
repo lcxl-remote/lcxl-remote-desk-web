@@ -135,7 +135,7 @@ rand = { workspace = true }
 console-subscriber = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true, features = ["Win32_System_Registry"] }
+windows = { workspace = true, features = ["Win32_System_Registry", "Win32_Storage_Packaging_Appx"] }
 windows-result = { workspace = true }
 windows-core = { workspace = true }
 windows-numerics = { workspace = true }
@@ -154,6 +154,7 @@ arboard = { version = "3.6", features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true, features = ["exception"] }
+block2 = "0.5"
 objc2-foundation = { workspace = true, features = ["NSGeometry"] }
 foreign-types = "0.5"
 core-graphics = { workspace = true }

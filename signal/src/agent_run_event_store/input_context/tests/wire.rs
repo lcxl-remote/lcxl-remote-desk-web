@@ -42,8 +42,7 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
         let object = attach(&store, "first", ObjectKind::File).await;
         let mut params = input("message", vec![object.clone()]);
         params.current_scope.granted = vec![Capability::FileMetadataRead];
-        params.read_context.as_mut().unwrap().tool_names =
-            vec!["inspect_selected_file_metadata".into()];
+        params.read_context.as_mut().unwrap().tool_names = vec!["inspect_files".into()];
         let receipt = store.append_user_followup(params.clone()).await.unwrap();
         let later = attach(&store, "not-selected", ObjectKind::File).await;
         let turn = "original-turn";
@@ -214,7 +213,7 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             .unwrap();
         let call = ToolCall {
             id: "metadata-call".into(),
-            name: "inspect_selected_file_metadata".into(),
+            name: "inspect_files".into(),
             arguments_json: "{}".into(),
         };
         // Seed an owner-approved R1 grant; the transport test must exercise, not

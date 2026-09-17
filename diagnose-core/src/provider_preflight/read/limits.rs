@@ -95,6 +95,10 @@ pub fn bind(
             p.max_bytes = p.max_bytes.min(bytes);
             p.roots.len()
         }
+        ContextKind::ApplicationList(p) => {
+            p.limit = p.limit.min(items);
+            1
+        }
         _ => 1,
     };
     if roots > items as usize {
@@ -126,7 +130,12 @@ pub fn validate_output(
     ) {
         return validate_web_output(registry, call, output, &limits);
     }
-    if !requires_objects(&call.name) && call.name != "inspect_desktop_ui" {
+    if !requires_objects(&call.name)
+        && !matches!(
+            call.name.as_str(),
+            "inspect_desktop_ui" | "list_applications"
+        )
+    {
         return Ok(());
     }
     if output.image_data_url.is_some() {
@@ -141,6 +150,7 @@ pub fn validate_output(
         return Err(unavailable());
     };
     let items = match (expected.kind, typed) {
+        (ContextKind::ApplicationList(_), ReadContextOutput::ApplicationList(p)) => p.entries.len(),
         (ContextKind::DesktopUiInspect(_), ReadContextOutput::DesktopUiInspect(p)) => p.nodes.len(),
         (ContextKind::OfficeDocumentInspect(_), ReadContextOutput::OfficeDocumentInspect(p)) => {
             match p.selection {

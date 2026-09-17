@@ -41,6 +41,7 @@ fn decision_fixture() -> (
         state: PermissionRequestState::Pending,
         items: vec![GrantRequestItem {
             command_confirmation: None,
+            launch_confirmation: None,
             item_id: "inspect".into(),
             provider_id: "desktop.session".into(),
             tool_name: "inspect_desktop_session".into(),
@@ -787,7 +788,7 @@ fn scroll_approval_keeps_semantic_and_background_authority_separate() {
         ProductSurface::OssPersonalOwner,
         ProductSurface::ManagerPersonalOwner,
     ] {
-        for tool in ["execute_ui_actions", "execute_background_inputs"] {
+        for tool in ["execute_ui_actions", "send_background_input"] {
             let planning = crate::chat::ToolCall {id:"request".into(),name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:serde_json::json!({"items":[{"item_id":"scroll","tool_name":tool,"application_scope":{"application":app,"actions":["scroll"]},"suggested_ttl_seconds":60,"suggested_max_uses":2,"reason":"Scroll requested content"}]}).to_string()};
             let request = crate::permission_tools::build_permission_request(
                 &planning,
@@ -880,7 +881,7 @@ fn background_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
     session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
     let registry = crate::device_assistant::device_assistant_provider_registry();
     let app = serde_json::json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
-    let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"execute_background_inputs", "application_scope":{"application":app,"actions":["key_press","type_text"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
+    let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"send_background_input", "application_scope":{"application":app,"actions":["key_press","type_text"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
     let request = crate::permission_tools::build_permission_request(
         &planning,
         &registry,

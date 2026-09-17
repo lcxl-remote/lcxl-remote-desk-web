@@ -3,7 +3,14 @@
         return;
     }
     globalThis.__lcxlBrowserAssistantLoaded = true;
-    const documentIncarnation = crypto.randomUUID();
+    function randomId() {
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        bytes[6] = (bytes[6] & 15) | 64;
+        bytes[8] = (bytes[8] & 63) | 128;
+        const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    }
+    const documentIncarnation = randomId();
     const MAX_ACCESSIBLE_NAME_BYTES = 1024;
     const MAX_FORM_VALUE_BYTES = 64 * 1024;
     const MAX_SNAPSHOT_TOTAL_BYTES = 256 * 1024;
@@ -83,8 +90,21 @@
 
     async function sha256(value) {
         const bytes = new TextEncoder().encode(value);
-        const digest = await crypto.subtle.digest("SHA-256", bytes);
-        return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        return digestBytes(bytes);
+    }
+
+    async function digestBytes(bytes) {
+        if (crypto.subtle) {
+            const digest = await crypto.subtle.digest("SHA-256", bytes);
+            return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+        }
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 32768) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+        }
+        const result = await chrome.runtime.sendMessage({ type: 'lcxl_content_digest', base64: btoa(binary) });
+        if (!/^[a-f0-9]{64}$/.test(result?.sha256 ?? '')) throw new Error('digest_unavailable');
+        return result.sha256;
     }
 
     async function pageDescriptor() {
@@ -95,8 +115,9 @@
             account_id: account,
             page_incarnation: documentIncarnation,
             origin: {
-                kind: url.protocol === "https:" ? "https" : "http_loopback",
-                host_ascii: url.hostname.toLowerCase(),
+                kind: url.protocol === "https:" ? "https"
+                    : ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) ? "http_loopback" : "http",
+                host_ascii: url.hostname.toLowerCase().replace(/^\[|\]$/g, ""),
                 port: Number(url.port || (url.protocol === "https:" ? 443 : 80))
             },
             document_revision: documentRevision,
@@ -201,7 +222,7 @@
     function registerElement(element) {
         const existing = elementIds.get(element);
         if (existing) return existing;
-        const elementId = crypto.randomUUID();
+        const elementId = randomId();
         elementIds.set(element, elementId);
         elements.set(elementId, element);
         return elementId;
@@ -450,9 +471,7 @@
         if (bytes.byteLength !== action.size_bytes) {
             throw new Error("upload_size_mismatch");
         }
-        const actualDigest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
-            .map((byte) => byte.toString(16).padStart(2, "0"))
-            .join("");
+        const actualDigest = await digestBytes(bytes);
         if (actualDigest !== action.digest_sha256) {
             throw new Error("upload_digest_mismatch");
         }
@@ -478,7 +497,7 @@
                 const attachmentFileName = await upload(action, "element");
                 const captured = await snapshot(64);
                 captured.elements.push({
-                    element_id: crypto.randomUUID(),
+                    element_id: randomId(),
                     role: "generic",
                     accessible_name: attachmentFileName,
                     value: null,
@@ -491,7 +510,7 @@
                 const attachmentFileName = await upload(action, "upload_element");
                 const captured = await snapshot(96);
                 captured.elements.push({
-                    element_id: crypto.randomUUID(),
+                    element_id: randomId(),
                     role: "generic",
                     accessible_name: attachmentFileName,
                     value: null,

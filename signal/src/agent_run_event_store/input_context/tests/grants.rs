@@ -27,23 +27,23 @@ async fn all_object_read_grants_ignore_later_objects_display_names_and_ambient_r
         ProductSurface::ManagerPersonalOwner,
     ] {
         for (name, selected) in [
-            ("inspect_selected_file_metadata", &file),
-            ("read_selected_text_file", &file),
-            ("inspect_selected_spreadsheets", &file),
+            ("inspect_files", &file),
+            ("read_text_file", &file),
+            ("inspect_spreadsheets", &file),
             ("preview_spreadsheet_merge", &file),
-            ("inspect_selected_terminal_output", &terminal),
-            ("inspect_selected_numbers_with_iwork", &file),
-            ("inspect_selected_pages_with_iwork", &file),
-            ("inspect_selected_keynote_with_iwork", &file),
-            ("inspect_selected_file_metadata", &directory),
-            ("inspect_selected_spreadsheets", &directory),
+            ("read_terminal_output", &terminal),
+            ("inspect_numbers_file", &file),
+            ("inspect_pages_file", &file),
+            ("inspect_keynote_file", &file),
+            ("inspect_files", &directory),
+            ("inspect_spreadsheets", &directory),
             ("preview_spreadsheet_merge", &directory),
         ] {
             let capability = registry.capability_for_tool(name).unwrap();
             let provider = registry
                 .provider_for_capability(&capability.wire.capability_id)
                 .unwrap();
-            let call = ToolCall { id: "request".into(), name: "request_capability_grants".into(),
+            let call = ToolCall { id: "request".into(), name: "request_permissions".into(),
                 arguments_json: serde_json::json!({"items":[{
                     "item_id":"read", "provider_id":provider.wire.provider_id,
                     "tool_name":name, "expected_effect":capability.wire.effect,

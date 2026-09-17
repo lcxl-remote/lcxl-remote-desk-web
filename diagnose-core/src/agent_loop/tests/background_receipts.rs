@@ -10,7 +10,7 @@ fn original_task_session() -> MemSession {
         vec![ToolCallRef {
             id: "c1".into(),
             name: "exec_command".into(),
-            arguments_json: "{}".into(),
+            arguments_json: r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#.into(),
         }],
     ));
     session
@@ -58,7 +58,7 @@ async fn failed_background_receipt_stops_open_group_then_delivers_original_failu
     first.tool_calls.push(ToolCall {
         id: "c3".into(),
         name: "exec_command".into(),
-        arguments_json: "{}".into(),
+        arguments_json: r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#.into(),
     });
     let model = ScriptModel {
         turns: RefCell::new(

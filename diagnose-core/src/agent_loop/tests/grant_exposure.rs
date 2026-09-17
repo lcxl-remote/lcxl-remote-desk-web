@@ -91,7 +91,7 @@ async fn approval_exposes_without_load_and_last_use_refreshes_next_request() {
         requests[1]
             .tools
             .iter()
-            .any(|t| t.name == "request_capability_grants")
+            .any(|t| t.name == "request_permissions")
     );
     assert!(requests[1].messages[0].text.contains("exhausted"));
     assert!(

@@ -2262,6 +2262,7 @@ mod tests {
             state,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                launch_confirmation: None,
                 item_id: format!("item-{id}"),
                 provider_id: "file.artifact".into(),
                 tool_name: "create_text_artifact".into(),

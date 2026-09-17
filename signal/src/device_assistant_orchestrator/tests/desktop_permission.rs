@@ -64,8 +64,8 @@ async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup
         .provider_for_capability(&capability.wire.capability_id)
         .unwrap();
     let mut replies = vec![
-        tool_reply("load_capability_details", serde_json::json!({"tool_names":[read_name]})),
-        tool_reply("request_capability_grants", serde_json::json!({"items":[{
+        tool_reply("describe_tools", serde_json::json!({"tool_names":[read_name]})),
+        tool_reply("request_permissions", serde_json::json!({"items":[{
             "item_id":"read", "provider_id":provider.wire.provider_id,
             "tool_name":read_name, "expected_effect":capability.wire.effect,
             "suggested_ttl_seconds":120, "suggested_max_uses":1, "reason":"Read the desktop session requested by the owner"

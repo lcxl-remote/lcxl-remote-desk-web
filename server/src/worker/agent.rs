@@ -13,6 +13,7 @@
 //! instead of failing the transport.
 
 pub(crate) mod application_batch;
+pub(crate) mod application_launch;
 pub mod audit_sink;
 pub mod browser_extension_bridge;
 pub mod collectors;
@@ -390,6 +391,60 @@ async fn dispatch_read_context(
             .await??;
             Ok(OperationOutput::ReadContext(
                 ReadContextOutput::DesktopSessionInspect(output),
+            ))
+        }
+        ContextKind::ApplicationList(params) => {
+            let Some(settings) = settings else {
+                return Err(unsupported(
+                    "application discovery requires a session context",
+                ));
+            };
+            let ceiling = settings.read().await.computer_use.clone();
+            let output =
+                run_blocking(move || computer_use_broker.list_applications(params, &ceiling))
+                    .await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::ApplicationList(output),
+            ))
+        }
+        ContextKind::ApplicationLaunchResolve(request) => {
+            let Some(settings) = settings else {
+                return Err(unsupported(
+                    "application preflight requires a session context",
+                ));
+            };
+            let ceiling = settings.read().await.computer_use.clone();
+            if !ceiling.enabled
+                || (!ceiling.allowed_application_paths.is_empty()
+                    && !ceiling.application_allowed(&request.target.value))
+            {
+                return Err(AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
+                    message: "application launch preflight is disabled by local policy".into(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                });
+            }
+            let identity = application_launch::resolve(request)
+                .await
+                .map_err(|reason| AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
+                    message: format!("application launch preflight failed: {reason:?}"),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                })?;
+            if !ceiling.allowed_application_paths.is_empty()
+                && !ceiling.application_allowed(&identity.canonical_target)
+            {
+                return Err(unsupported(
+                    "resolved application is excluded by local policy",
+                ));
+            }
+            let receipt = computer_use_broker.register_launch_target(identity)?;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::ApplicationLaunchResolve(receipt),
             ))
         }
         ContextKind::DesktopUiInspect(params) => {

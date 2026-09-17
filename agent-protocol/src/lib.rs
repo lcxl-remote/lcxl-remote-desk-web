@@ -29,6 +29,7 @@ use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
 pub mod agent_event;
+pub mod application_launch;
 pub mod audit;
 pub mod authz;
 pub mod background_input;
@@ -527,6 +528,10 @@ pub enum Capability {
     BrowserExternalSendConfirmed,
     #[serde(rename = "file.delete.confirmed")]
     FileDeleteConfirmed,
+    #[serde(rename = "application.list")]
+    ApplicationList,
+    #[serde(rename = "application.launch.confirmed")]
+    ApplicationLaunchConfirmed,
 }
 
 // ============================ Operation ============================
@@ -593,6 +598,8 @@ impl OperationInput {
                 ContextKind::SpreadsheetFileInspect(_) => Capability::SpreadsheetFileInspect,
                 ContextKind::SpreadsheetMergePreview(_) => Capability::SpreadsheetMergePreview,
                 ContextKind::TerminalOutputInspect(_) => Capability::TerminalOutputRead,
+                ContextKind::ApplicationList(_) => Capability::ApplicationList,
+                ContextKind::ApplicationLaunchResolve(_) => Capability::ApplicationList,
             }),
             OperationInput::Exec(_) => None,
         }
@@ -656,6 +663,8 @@ pub enum ContextKind {
     TerminalOutputInspect(computer_use::TerminalOutputInspectParams),
     // Append only: preserve all previous wincode discriminants.
     SpreadsheetBatchInspect(computer_use::SpreadsheetBatchInspectParams),
+    ApplicationList(application_launch::ListApplicationsRequest),
+    ApplicationLaunchResolve(application_launch::LaunchApplicationRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
@@ -681,6 +690,8 @@ pub enum ReadContextOutput {
     SpreadsheetFileInspect(computer_use::SpreadsheetFileInspectOutput),
     SpreadsheetMergePreview(computer_use::SpreadsheetMergePreviewOutput),
     TerminalOutputInspect(computer_use::TerminalOutputInspectOutput),
+    ApplicationList(application_launch::ApplicationCatalogPage),
+    ApplicationLaunchResolve(application_launch::LaunchPreflightReceipt),
 }
 
 // -------- read params (fields are additive) --------

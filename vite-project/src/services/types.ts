@@ -194,6 +194,27 @@ export type ApplicationActionKindEnumKey = (typeof applicationActionKindEnum)[ke
 
 export type ApplicationActionKind = ApplicationActionKindEnumKey;
 
+export const applicationTargetKindEnum = {
+    executable: "executable",
+    macos_bundle: "macos_bundle",
+    windows_app_id: "windows_app_id"
+} as const;
+
+export type ApplicationTargetKindEnumKey = (typeof applicationTargetKindEnum)[keyof typeof applicationTargetKindEnum];
+
+export type ApplicationTargetKind = ApplicationTargetKindEnumKey;
+
+export type ApplicationTarget = {
+    /**
+     * @type string
+    */
+    kind: ApplicationTargetKind;
+    /**
+     * @type string
+    */
+    value: string;
+};
+
 export type ApprovalAckParams = {
     /**
      * @type string
@@ -487,7 +508,8 @@ export const capabilityEffectEnum = {
     send_external: "send_external",
     capture_screen: "capture_screen",
     input_fallback: "input_fallback",
-    execute_command: "execute_command"
+    execute_command: "execute_command",
+    launch_application: "launch_application"
 } as const;
 
 export type CapabilityEffectEnumKey = (typeof capabilityEffectEnum)[keyof typeof capabilityEffectEnum];
@@ -573,7 +595,8 @@ export type BrowserExtensionPairing = {
 
 export const browserOriginKindEnum = {
     https: "https",
-    http_loopback: "http_loopback"
+    http_loopback: "http_loopback",
+    http: "http"
 } as const;
 
 export type BrowserOriginKindEnumKey = (typeof browserOriginKindEnum)[keyof typeof browserOriginKindEnum];
@@ -2352,7 +2375,8 @@ export const objectKindEnum = {
     file: "file",
     directory: "directory",
     terminal_output: "terminal_output",
-    browser_surface: "browser_surface"
+    browser_surface: "browser_surface",
+    application_launch_target: "application_launch_target"
 } as const;
 
 export type ObjectKindEnumKey = (typeof objectKindEnum)[keyof typeof objectKindEnum];
@@ -2453,6 +2477,44 @@ export type ExternalSendConfirmationDto = {
     subject?: string | null;
 };
 
+/**
+ * @description Owner-visible native launch identity; no opaque approval token is exposed.
+*/
+export type LaunchConfirmationDto = {
+    /**
+     * @type array
+    */
+    args: string[];
+    /**
+     * @type string,null
+    */
+    cwd?: string | null;
+    /**
+     * @type boolean
+    */
+    oneShot: boolean;
+    /**
+     * @type string
+    */
+    resolvedTarget: string;
+    /**
+     * @type boolean
+    */
+    runAsAdmin: boolean;
+    /**
+     * @type object
+    */
+    target: ApplicationTarget;
+    /**
+     * @type string
+    */
+    targetDeviceId: string;
+    /**
+     * @type string
+    */
+    targetSessionId: string;
+};
+
 export const textFileChangeKindEnum = {
     replace_all: "replace_all"
 } as const;
@@ -2549,6 +2611,7 @@ export type GrantRequestItemDto = {
      * @type string
     */
     itemId: string;
+    launchConfirmation?: (null | LaunchConfirmationDto);
     /**
      * @type array
     */

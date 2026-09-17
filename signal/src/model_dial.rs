@@ -2520,7 +2520,7 @@ mod tests {
         let index =
             capability_name_index_prompt(&registry, &inventory, &[], &all_tools, &advertised)
                 .unwrap();
-        let contract = "You are evaluating a bounded capability protocol. Follow the server-authored index exactly. Never invent a tool. If the requested capability is not an advertised API tool, first call load_capability_details with its exact name. Loading grants no authority.";
+        let contract = "You are evaluating a bounded capability protocol. Follow the server-authored index exactly. Never invent a tool. If the requested capability is not an advertised API tool, first call describe_tools with its exact name. Loading grants no authority.";
         let mut results = Vec::new();
 
         let (no_tool, no_tool_elapsed_ms) = call(
@@ -2556,22 +2556,22 @@ mod tests {
         for (case, target, request) in [
             (
                 "file_read_discovery",
-                "read_selected_text_file",
+                "read_text_file",
                 "The user explicitly selected a text file and asks you to read it. Start the capability protocol now; do not answer in prose.",
             ),
             (
                 "iwork_discovery",
-                "inspect_selected_pages_with_iwork",
+                "inspect_pages_file",
                 "The user explicitly selected a Pages document and asks you to inspect it with Pages. Start the capability protocol now; do not answer in prose.",
             ),
             (
                 "gmail_discovery",
-                "prepare_gmail_web_draft_handoff",
+                "prepare_gmail_draft",
                 "The user asks to prepare a Gmail web draft. Start the capability protocol now; do not answer in prose.",
             ),
             (
                 "slack_discovery",
-                "prepare_slack_web_message_handoff",
+                "prepare_slack_message",
                 "The user asks to prepare a Slack web message. Start the capability protocol now; do not answer in prose.",
             ),
         ] {
@@ -2596,7 +2596,7 @@ mod tests {
             }));
         }
 
-        let target = "replace_selected_pages_copy_body";
+        let target = "replace_pages_copy_body";
         let mut state = CapabilityDisclosureState::default();
         let synthetic_load = ToolCall {
             id: "eval-load".into(),
@@ -2629,7 +2629,7 @@ mod tests {
         let (permission_turn, permission_elapsed_ms) = call(
             seam,
             format!(
-                "{contract}\nThe requested capability is loaded. Ask for permission with request_capability_grants; loading itself did not authorize it.\n\n{}\n\n{}",
+                "{contract}\nThe requested capability is loaded. Ask for permission with request_permissions; loading itself did not authorize it.\n\n{}\n\n{}",
                 projection.index_prompt, projection.detail_prompt
             ),
             "The user wants to replace the selected Pages copy body with the exact text `Quarterly review`. Request the required permission now and do not claim execution.",
@@ -2984,7 +2984,7 @@ mod tests {
             wire_protocol,
             provider,
             format!(
-                "{contract} If the latest requested capability is not advertised, call load_capability_details with its exact name. Loading grants no authority.\n\n{index}"
+                "{contract} If the latest requested capability is not advertised, call describe_tools with its exact name. Loading grants no authority.\n\n{index}"
             ),
             switched,
             &switch_tools,
@@ -2995,11 +2995,7 @@ mod tests {
                 && serde_json::from_str::<Value>(&call.arguments_json)
                     .ok()
                     .and_then(|value| value["tool_names"].as_array().cloned())
-                    .is_some_and(|names| {
-                        names
-                            .iter()
-                            .any(|name| name == "prepare_gmail_web_draft_handoff")
-                    })
+                    .is_some_and(|names| names.iter().any(|name| name == "prepare_gmail_draft"))
         });
         results.push(json!({
             "case": "frequent_topic_switch",
@@ -3012,7 +3008,7 @@ mod tests {
             "permission_attempts": 0,
         }));
 
-        let target = "replace_selected_pages_copy_body";
+        let target = "replace_pages_copy_body";
         let mut disclosure = CapabilityDisclosureState::default();
         apply_load_call(
             &ToolCall {
@@ -3076,7 +3072,7 @@ mod tests {
             wire_protocol,
             provider,
             format!(
-                "{contract} The latest capability is loaded but not authorized. Request exact permission with request_capability_grants.\n\n{}\n\n{}",
+                "{contract} The latest capability is loaded but not authorized. Request exact permission with request_permissions.\n\n{}\n\n{}",
                 disclosure.index_prompt, disclosure.detail_prompt
             ),
             long,

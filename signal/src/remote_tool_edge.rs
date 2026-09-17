@@ -4,6 +4,7 @@
 //! local reads and confirmed mutations. Reads use server-stamped remote-tool
 //! frames; writes use exact durable grants and sealed Computer Action plans.
 
+mod application;
 pub(crate) mod directory;
 mod object_read;
 
@@ -795,6 +796,7 @@ fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind
         ComputerActionKind::UiInApplication { .. } => Some(ObjectKind::UiElement),
         ComputerActionKind::BackgroundInput { .. } => Some(ObjectKind::Window),
         ComputerActionKind::RawInput(_) => Some(ObjectKind::Application),
+        ComputerActionKind::LaunchApplication(_) => Some(ObjectKind::ApplicationLaunchTarget),
         ComputerActionKind::SpreadsheetLive(_) => Some(ObjectKind::Range),
         ComputerActionKind::DocumentLive(_) => Some(ObjectKind::Document),
         ComputerActionKind::PresentationLive(_) | ComputerActionKind::PresentationLiveBatch(_) => {
@@ -954,7 +956,7 @@ impl SignalDeviceAssistantTools {
                 ))
             }
             desk_agent_protocol::Capability::SpreadsheetLiveInspect
-                if call.name != "inspect_selected_numbers_with_iwork"
+                if call.name != "inspect_numbers_file"
                     && self.selected_live_spreadsheet.is_none() =>
             {
                 Err(error(
@@ -965,8 +967,7 @@ impl SignalDeviceAssistantTools {
                 ))
             }
             desk_agent_protocol::Capability::DocumentLiveInspect
-                if call.name != "inspect_selected_pages_with_iwork"
-                    && self.selected_live_document.is_none() =>
+                if call.name != "inspect_pages_file" && self.selected_live_document.is_none() =>
             {
                 Err(error(
                     AgentErrorKind::PermissionDenied,
@@ -976,7 +977,7 @@ impl SignalDeviceAssistantTools {
                 ))
             }
             desk_agent_protocol::Capability::PresentationLiveInspect
-                if call.name != "inspect_selected_keynote_with_iwork"
+                if call.name != "inspect_keynote_file"
                     && self.selected_live_presentation.is_none() =>
             {
                 Err(error(
@@ -1803,7 +1804,7 @@ impl SignalDeviceAssistantTools {
         call: &ToolCall,
         ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
-        if call.name != "execute_confirmed_command" {
+        if call.name != "exec_command" {
             return Err(error(
                 AgentErrorKind::UnsupportedCapability,
                 "command Provider is not registered",
@@ -1851,7 +1852,7 @@ impl SignalDeviceAssistantTools {
             .expect("registered command capability has a Provider");
         self.verify_current_readiness(capability).await?;
         let resource_scope = confirmation.resource_scope()?;
-        let operation_scope = vec!["execute_confirmed_command".into()];
+        let operation_scope = vec!["exec_command".into()];
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
             error(
                 AgentErrorKind::Internal,
@@ -2315,6 +2316,15 @@ impl SignalDeviceAssistantTools {
                 false,
             )
         })?;
+        let shared_launch = if call.name == desk_diagnose_core::application_launch::TOOL_NAME {
+            Some(desk_diagnose_core::application_launch::approved_binding(
+                &self.authoritative_session().await?,
+                call,
+                self.readiness_revision,
+            )?)
+        } else {
+            None
+        };
         let shared_iwork =
             if desk_diagnose_core::provider_preflight::IworkCallPreflight::supports(&call.name) {
                 self.validate_original_objects().await?;
@@ -2388,6 +2398,18 @@ impl SignalDeviceAssistantTools {
             adapter_kind,
             action_name,
         ) = match call.name.as_str() {
+            "launch_application" => {
+                let binding = shared_launch.as_ref().expect("launch preflight");
+                let target = binding.target().expect("approved launch target").clone();
+                (
+                    target.clone(),
+                    vec![target],
+                    ComputerActionKind::LaunchApplication(binding.clone()),
+                    desk_agent_protocol::Capability::ApplicationLaunchConfirmed,
+                    ComputerUseAdapterKind::NativeApplication,
+                    "application launch",
+                )
+            }
             "update_text_file" | "delete_text_file" => {
                 let input = shared_text.as_ref().expect("text mutation preflight");
                 let directory = match input.action() {
@@ -2516,7 +2538,7 @@ impl SignalDeviceAssistantTools {
                     "presentation slide patch",
                 )
             }
-            "patch_selected_numbers_copy" | "patch_selected_excel_copy" => {
+            "patch_numbers_copy" | "patch_excel_copy" => {
                 let args: SpreadsheetBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
                 let authority_refs =
@@ -2529,7 +2551,7 @@ impl SignalDeviceAssistantTools {
                         action: args.action,
                     }),
                     desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
-                    if call.name == "patch_selected_excel_copy" {
+                    if call.name == "patch_excel_copy" {
                         ComputerUseAdapterKind::OfficeExcel
                     } else {
                         ComputerUseAdapterKind::IworkNumbers
@@ -2537,7 +2559,7 @@ impl SignalDeviceAssistantTools {
                     "selected spreadsheet copy patch",
                 )
             }
-            "replace_selected_pages_copy_body" | "replace_selected_word_copy_body" => {
+            "replace_pages_copy_body" | "replace_word_copy_body" => {
                 let args: DocumentBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
                 let authority_refs =
@@ -2550,7 +2572,7 @@ impl SignalDeviceAssistantTools {
                         action: DocumentLivePatchAction::ReplaceBodyText { text: args.text },
                     }),
                     desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
-                    if call.name == "replace_selected_word_copy_body" {
+                    if call.name == "replace_word_copy_body" {
                         ComputerUseAdapterKind::OfficeWord
                     } else {
                         ComputerUseAdapterKind::IworkPages
@@ -2558,7 +2580,7 @@ impl SignalDeviceAssistantTools {
                     "selected document copy body replacement",
                 )
             }
-            "patch_selected_keynote_copy" | "patch_selected_powerpoint_copy" => {
+            "patch_keynote_copy" | "patch_powerpoint_copy" => {
                 let args: PresentationBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(decode)?;
                 let authority_refs =
@@ -2571,7 +2593,7 @@ impl SignalDeviceAssistantTools {
                         action: args.action,
                     }),
                     desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
-                    if call.name == "patch_selected_powerpoint_copy" {
+                    if call.name == "patch_powerpoint_copy" {
                         ComputerUseAdapterKind::OfficePowerPoint
                     } else {
                         ComputerUseAdapterKind::IworkKeynote
@@ -2637,11 +2659,23 @@ impl SignalDeviceAssistantTools {
         let session = self.authoritative_session().await?;
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
-        let resource_scope = shared_iwork.as_ref().map_or_else(
-            || fresh_object_resource_scope(&authority_refs),
-            |preflight| preflight.resource_scope().to_vec(),
+        let resource_scope = shared_launch.as_ref().map_or_else(
+            || {
+                shared_iwork.as_ref().map_or_else(
+                    || fresh_object_resource_scope(&authority_refs),
+                    |preflight| preflight.resource_scope().to_vec(),
+                )
+            },
+            |binding| binding.resource_scope(),
         );
-        let operation_scope = vec!["use_selected_object".to_string()];
+        let operation_scope = vec![
+            if shared_launch.is_some() {
+                "launch_application"
+            } else {
+                "use_selected_object"
+            }
+            .to_string(),
+        ];
         let risk_tier = Self::capability_risk(capability, call)?;
         let server_call_id = format!(
             "capability-call-{:x}",
@@ -2886,6 +2920,12 @@ impl SignalDeviceAssistantTools {
                 },
             }],
         };
+        if let Some(binding) = shared_launch.as_ref() {
+            plan.interactive_session_incarnation = binding.subject().session_id.clone();
+            plan.actions[0].before_summary = "exact application identity resolved before owner approval".into();
+            plan.actions[0].after_intent = "launch the application independently of this task".into();
+            plan.actions[0].verification = "report native submission only; observe application readiness separately".into();
+        }
         if let Some(input) = shared_ui.as_ref() { plan.actions = input.steps().to_vec(); }
         if let Some(input) = shared_background.as_ref() { plan.actions = input.steps().to_vec(); }
         if desk_diagnose_core::application_batch::supports(&call.name) {
@@ -3105,7 +3145,7 @@ impl SignalDeviceAssistantTools {
         let canonical_call = call;
         let call = &action_call;
         let (args, required_capability, _operation, orchestrator_grant) = match call.name.as_str() {
-            "create_text_artifact_in_selected_directory" => (
+            "create_text_file" => (
                 ArtifactRequest::Text(serde_json::from_str(&call.arguments_json).map_err(
                     |decode_error| {
                         error(
@@ -3120,7 +3160,7 @@ impl SignalDeviceAssistantTools {
                 "create_new_artifact",
                 desk_diagnose_core::device_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID,
             ),
-            "create_local_communication_draft" => {
+            "create_local_message_draft" => {
                 let args: LocalDraftArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
                         error(
@@ -3145,7 +3185,7 @@ impl SignalDeviceAssistantTools {
                 desk_diagnose_core::device_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID,
             )
             }
-            "create_workbook_from_merge_preview" => (
+            "create_workbook" => (
                 ArtifactRequest::Spreadsheet(serde_json::from_str(&call.arguments_json).map_err(
                     |decode_error| {
                         error(
@@ -3160,7 +3200,7 @@ impl SignalDeviceAssistantTools {
                 "create_new_artifact",
                 desk_diagnose_core::device_assistant::SPREADSHEET_WORKBOOK_CREATE_CAPABILITY_ID,
             ),
-            "create_formula_workbook_from_merge_preview" => {
+            "create_formula_workbook" => {
                 let args: SpreadsheetFormulaArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
                     error(
@@ -3208,7 +3248,7 @@ impl SignalDeviceAssistantTools {
                 desk_diagnose_core::device_assistant::SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID,
             )
             }
-            "create_word_report_from_merge_preview" => {
+            "create_word_report" => {
                 let args: WordArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
                         error(
@@ -3797,7 +3837,7 @@ impl SignalDeviceAssistantTools {
             .provider_registry
             .provider_for_capability(&capability.wire.capability_id)
             .expect("registered browser capability has a Provider");
-        let slack_input = if call.name == "prepare_slack_web_message_handoff" {
+        let slack_input = if call.name == "prepare_slack_message" {
             let input: SlackWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
                 .map_err(|decode_error| {
                     error(
@@ -3819,7 +3859,7 @@ impl SignalDeviceAssistantTools {
         } else {
             None
         };
-        let gmail_input = if call.name == "prepare_gmail_web_draft_handoff" {
+        let gmail_input = if call.name == "prepare_gmail_draft" {
             let input: GmailWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
                 .map_err(|decode_error| {
                     error(
@@ -4905,9 +4945,7 @@ impl SignalDeviceAssistantTools {
         }
         let is_iwork_batch_inspect = matches!(
             call.name.as_str(),
-            "inspect_selected_numbers_with_iwork"
-                | "inspect_selected_pages_with_iwork"
-                | "inspect_selected_keynote_with_iwork"
+            "inspect_numbers_file" | "inspect_pages_file" | "inspect_keynote_file"
         );
         if is_iwork_batch_inspect {
             let file = exact_selected_batch_file(&self.selected_file_roots)?;
@@ -4935,13 +4973,9 @@ impl SignalDeviceAssistantTools {
             };
             input = OperationInput::ReadContext(ReadContextInput {
                 kind: match call.name.as_str() {
-                    "inspect_selected_numbers_with_iwork" => {
-                        ContextKind::SpreadsheetLiveInspect(params)
-                    }
-                    "inspect_selected_pages_with_iwork" => ContextKind::DocumentLiveInspect(params),
-                    "inspect_selected_keynote_with_iwork" => {
-                        ContextKind::PresentationLiveInspect(params)
-                    }
+                    "inspect_numbers_file" => ContextKind::SpreadsheetLiveInspect(params),
+                    "inspect_pages_file" => ContextKind::DocumentLiveInspect(params),
+                    "inspect_keynote_file" => ContextKind::PresentationLiveInspect(params),
                     _ => unreachable!(),
                 },
             });
@@ -5484,6 +5518,19 @@ impl ToolSeam for SignalDeviceAssistantTools {
             },
         ))
     }
+    async fn resolve_application_candidate(
+        &self,
+        request: &desk_agent_protocol::application_launch::LaunchApplicationRequest,
+    ) -> Result<desk_agent_protocol::application_launch::LaunchPreflightReceipt, AgentError> {
+        application::resolve_candidate(
+            self.connections.as_ref(),
+            &self.target_connection_id,
+            &self.actor_id,
+            &self.target_device_id,
+            request,
+        )
+        .await
+    }
     async fn resolve_directory_candidate(
         &self,
         path: &str,
@@ -5622,7 +5669,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
         call: &ToolCall,
         ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
-        if call.name == "execute_confirmed_command" {
+        if call.name == "exec_command" {
             return self.authorize_and_execute_command(call, ctx).await;
         }
         if matches!(
@@ -5633,14 +5680,15 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 | "patch_live_spreadsheet_cell"
                 | "replace_live_document_body"
                 | "patch_live_presentation_slide"
-                | "patch_selected_numbers_copy"
-                | "replace_selected_pages_copy_body"
-                | "patch_selected_keynote_copy"
-                | "patch_selected_powerpoint_copy"
-                | "replace_selected_word_copy_body"
-                | "patch_selected_excel_copy"
+                | "patch_numbers_copy"
+                | "replace_pages_copy_body"
+                | "patch_keynote_copy"
+                | "patch_powerpoint_copy"
+                | "replace_word_copy_body"
+                | "patch_excel_copy"
                 | "update_text_file"
                 | "delete_text_file"
+                | "launch_application"
         ) {
             return self.authorize_and_execute_semantic_action(call).await;
         }
@@ -5652,23 +5700,23 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 | "browser_wait_for"
                 | "browser_fill_form"
                 | "browser_activate_element"
-                | "prepare_gmail_web_draft_handoff"
-                | "prepare_slack_web_message_handoff"
-                | "send_gmail_web_exact"
-                | "send_slack_web_exact"
+                | "prepare_gmail_draft"
+                | "prepare_slack_message"
+                | "send_gmail_message"
+                | "send_slack_message"
         ) {
             return self.authorize_and_execute_browser(call).await;
         }
-        if call.name == "prepare_outlook_new_draft_handoff" {
+        if call.name == "prepare_outlook_draft" {
             return self.authorize_and_execute_outlook_handoff(call).await;
         }
         if !matches!(
             call.name.as_str(),
-            "create_text_artifact_in_selected_directory"
-                | "create_workbook_from_merge_preview"
-                | "create_formula_workbook_from_merge_preview"
-                | "create_word_report_from_merge_preview"
-                | "create_local_communication_draft"
+            "create_text_file"
+                | "create_workbook"
+                | "create_formula_workbook"
+                | "create_word_report"
+                | "create_local_message_draft"
         ) {
             return Ok(ExecOutcome::Rejected {
                 reason: Some("this Device Assistant mutation is not enabled".into()),
@@ -6082,20 +6130,14 @@ mod tests {
         };
         for (name, arguments) in [
             (
-                "inspect_selected_excel_cell",
+                "inspect_excel_cell",
                 r#"{"sheet_name":"Sheet1","address":"B2","max_bytes":4096}"#,
             ),
-            ("inspect_selected_word_file", r#"{"max_bytes":4096}"#),
-            ("inspect_selected_powerpoint_file", r#"{"max_bytes":4096}"#),
-            (
-                "inspect_selected_numbers_with_iwork",
-                r#"{"max_bytes":4096}"#,
-            ),
-            ("inspect_selected_pages_with_iwork", r#"{"max_bytes":4096}"#),
-            (
-                "inspect_selected_keynote_with_iwork",
-                r#"{"max_bytes":4096}"#,
-            ),
+            ("inspect_word_file", r#"{"max_bytes":4096}"#),
+            ("inspect_powerpoint_file", r#"{"max_bytes":4096}"#),
+            ("inspect_numbers_file", r#"{"max_bytes":4096}"#),
+            ("inspect_pages_file", r#"{"max_bytes":4096}"#),
+            ("inspect_keynote_file", r#"{"max_bytes":4096}"#),
         ] {
             let call = ToolCall {
                 id: "read".into(),
@@ -6348,11 +6390,8 @@ mod tests {
             CapabilityRiskTier::R1
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(
-                file,
-                &call("inspect_selected_file_metadata", "{}")
-            )
-            .unwrap(),
+            SignalDeviceAssistantTools::capability_risk(file, &call("inspect_files", "{}"))
+                .unwrap(),
             CapabilityRiskTier::R1
         );
         assert_eq!(
@@ -6515,7 +6554,7 @@ mod tests {
         };
         let call = ToolCall {
             id: "model-call".into(),
-            name: "prepare_slack_web_message_handoff".into(),
+            name: "prepare_slack_message".into(),
             arguments_json: serde_json::json!({
                 "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
                 "page": page,
@@ -6581,7 +6620,7 @@ mod tests {
         to_field.role = BrowserElementRole::Combobox;
         let call = ToolCall {
             id: "model-call".into(),
-            name: "prepare_gmail_web_draft_handoff".into(),
+            name: "prepare_gmail_draft".into(),
             arguments_json: serde_json::json!({
                 "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
                 "page": page,
@@ -6641,7 +6680,7 @@ mod tests {
         attachment_arguments["draft"]["attachment_labels"] = serde_json::json!(["report.docx"]);
         let attachment_call = ToolCall {
             id: "model-call-with-attachment".into(),
-            name: "prepare_gmail_web_draft_handoff".into(),
+            name: "prepare_gmail_draft".into(),
             arguments_json: attachment_arguments.to_string(),
         };
         let attachment_request = SignalDeviceAssistantTools::browser_action_from_call(

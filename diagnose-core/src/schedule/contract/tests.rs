@@ -615,11 +615,9 @@ fn generated_send_binds_actual_payload_current_surface_and_run() {
         };
         // Draft construction must preserve the sealed recipient while allowing new text.
         let registry = crate::device_assistant::device_assistant_provider_registry();
-        let descriptor = registry
-            .capability_for_tool("send_gmail_web_exact")
-            .unwrap();
+        let descriptor = registry.capability_for_tool("send_gmail_message").unwrap();
         let mut observed_send = authority.clone();
-        observed_send.tool_name = "send_gmail_web_exact".into();
+        observed_send.tool_name = "send_gmail_message".into();
         observed_send.provider_id = registry
             .provider_for_capability(&descriptor.wire.capability_id)
             .unwrap()
@@ -675,12 +673,10 @@ fn generated_send_binds_actual_payload_current_surface_and_run() {
             subject: sent.subject.clone(),
             body_plain_text: sent.body_plain_text.clone(),
         };
-        let preparation = registry
-            .capability_for_tool("prepare_gmail_web_draft_handoff")
-            .unwrap();
+        let preparation = registry.capability_for_tool("prepare_gmail_draft").unwrap();
         let mut observed_preparation = observed_send.clone();
         observed_preparation.effect = CapabilityEffect::WriteExternalDraft;
-        observed_preparation.tool_name = "prepare_gmail_web_draft_handoff".into();
+        observed_preparation.tool_name = "prepare_gmail_draft".into();
         observed_preparation.provider_id = registry
             .provider_for_capability(&preparation.wire.capability_id)
             .unwrap()
@@ -1927,7 +1923,7 @@ fn slack_generated_draft_binds_verified_account_page_and_destination() {
     input.validate().unwrap();
     let mut definition = message_contract();
     definition.permissions[0].effect = CapabilityEffect::WriteExternalDraft;
-    definition.permissions[0].tool_name = "prepare_slack_web_message_handoff".into();
+    definition.permissions[0].tool_name = "prepare_slack_message".into();
     let TaskStepBinding::SendMessage { destination, .. } = &mut definition.steps[0].binding else {
         unreachable!()
     };
@@ -2163,7 +2159,7 @@ fn generated_text_artifact_contract_requires_safe_name_local_effect_and_sources(
     definition.permissions[0].automatic.resources = resources.clone();
     definition.permissions[0].approval_ceiling.resources = resources;
     definition.permissions[0].effect = CapabilityEffect::WriteArtifact;
-    definition.permissions[0].tool_name = "create_text_artifact_in_selected_directory".into();
+    definition.permissions[0].tool_name = "create_text_file".into();
     definition.permissions[0].input = TaskInputConstraint::GeneratedTextArtifact {
         file_name: "report.txt".into(),
         max_content_bytes: 65_536,

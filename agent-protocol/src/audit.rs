@@ -770,6 +770,14 @@ pub fn summarize_output(output: &OperationOutput) -> String {
                 o.entries.len(),
                 if o.truncated { " (truncated)" } else { "" }
             ),
+            R::ApplicationLaunchResolve(_) => {
+                "application.launch.resolve: one target, no execution".into()
+            }
+            R::ApplicationList(o) => format!(
+                "application.list: {} entries, complete={}",
+                o.entries.len(),
+                o.enumeration_complete
+            ),
         },
         OperationOutput::Exec(o) => format!("exec: exit {}", o.exit_code),
     }
@@ -859,6 +867,8 @@ impl Capability {
             }
             Capability::BrowserExternalSendConfirmed => "browser.external.send.confirmed",
             Capability::FileDeleteConfirmed => "file.delete.confirmed",
+            Capability::ApplicationList => "application.list",
+            Capability::ApplicationLaunchConfirmed => "application.launch.confirmed",
         }
     }
 }
@@ -1286,6 +1296,19 @@ mod tests {
         let bytes = wincode::config::serialize(&event, config).expect("encode");
         let back: AuditEvent = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn application_capability_audit_names_match_wire_names() {
+        for capability in [
+            Capability::ApplicationList,
+            Capability::ApplicationLaunchConfirmed,
+        ] {
+            assert_eq!(
+                serde_json::to_value(capability).unwrap(),
+                capability.as_str()
+            );
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::{
 };
 
 pub const CAPABILITY_DISCLOSURE_SCHEMA_VERSION: u16 = 1;
-pub const LOAD_CAPABILITY_DETAILS_TOOL_NAME: &str = "load_capability_details";
+pub const LOAD_CAPABILITY_DETAILS_TOOL_NAME: &str = "describe_tools";
 /// The current 47-name inventory serializes below 2 KiB. Leave bounded growth
 /// room while making registry growth fail loudly rather than silently hiding a
 /// capability.
@@ -103,17 +103,17 @@ fn invalid(error: CapabilityDisclosureError) -> AgentError {
             format!("advertised Provider tools are too large ({actual} > {maximum} bytes)")
         }
         CapabilityDisclosureError::InvalidLoad(reason) => format!(
-            "Invalid load_capability_details input: {reason}. Required: tool_names, a non-empty array of exact Provider names. Complete example: {{\"tool_names\":[\"inspect_desktop_ui\"]}}. No permission or focus was changed."
+            "Invalid describe_tools input: {reason}. Required: tool_names, a non-empty array of exact Provider names. Complete example: {{\"tool_names\":[\"inspect_desktop_ui\"]}}. No permission or focus was changed."
         ),
         CapabilityDisclosureError::UnknownOrOutOfSurface(name) => {
             if matches!(
                 name.as_str(),
-                "request_capability_grants"
-                    | "load_capability_details"
+                "request_permissions"
+                    | "describe_tools"
                     | "update_task_status"
                     | "load_conversation_history"
                     | "read_conversation_image"
-                    | "request_conversation_directory"
+                    | "request_directory"
             ) {
                 format!(
                     "`{name}` is a built-in conversation tool, not a Provider capability. It does not need capability loading. Use it directly when present in the current tool list. Remove ALL built-in tools from tool_names and retry with Provider names from the capability index only. No working set or permission was changed; no approval card was created."

@@ -317,7 +317,7 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
             let mut to_field = field("to");
             to_field.role = BrowserElementRole::Combobox;
             (
-                "prepare_gmail_web_draft_handoff",
+                "prepare_gmail_draft",
                 json!({"schema_version":COMMUNICATION_SCHEMA_VERSION,"page":page,"to_field":to_field,
                     "subject_field":field("subject"),"body_field":field("body"),"attachment":null,
                     "draft":{"schema_version":COMMUNICATION_SCHEMA_VERSION,"recipients":[{"role":"to","address":"alice@example.com","display_name":null}],
@@ -328,7 +328,7 @@ fn communication_handoffs_pin_destinations_and_cannot_become_send_actions() {
             )
         } else {
             (
-                "prepare_slack_web_message_handoff",
+                "prepare_slack_message",
                 json!({"schema_version":COMMUNICATION_SCHEMA_VERSION,"page":page,"composer":field("composer"),"body_plain_text":"Draft only"}),
                 DestinationIdentity::ChatAccount {
                     account_id: "slack-web:T123:U456".into(),
@@ -383,14 +383,14 @@ fn exact_external_send_preflight_is_sealed_r3_authority() {
 
     for (tool, input, destination) in [
         (
-            "send_gmail_web_exact",
+            "send_gmail_message",
             serde_json::to_value(gmail_exact_send_input()).unwrap(),
             DestinationIdentity::EmailAccount {
                 account_id: "gmail-web:owner@example.test".into(),
             },
         ),
         (
-            "send_slack_web_exact",
+            "send_slack_message",
             serde_json::to_value(slack_exact_send_input()).unwrap(),
             DestinationIdentity::ChatAccount {
                 account_id: "slack-web:T123:U456".into(),
@@ -418,7 +418,7 @@ fn exact_external_send_preflight_is_sealed_r3_authority() {
         ));
 
         let mut changed = input.clone();
-        if tool == "send_gmail_web_exact" {
+        if tool == "send_gmail_message" {
             changed["draft"]["body_plain_text"] = json!("Changed after review");
         } else {
             changed["body_plain_text"] = json!("Changed after review");
@@ -455,7 +455,7 @@ fn outlook_handoff_pins_application_destination_and_manual_compose_request() {
     };
     let call = ToolCall {
         id: "call".into(),
-        name: "prepare_outlook_new_draft_handoff".into(),
+        name: "prepare_outlook_draft".into(),
         arguments_json: json!({"draft": {
             "schema_version": COMMUNICATION_SCHEMA_VERSION,
             "recipients": [{"role":"to","address":"alice@example.com","display_name":null}],

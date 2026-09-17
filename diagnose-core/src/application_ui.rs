@@ -46,13 +46,13 @@ pub fn from_canonical(tool: &str, canonical: Option<&str>) -> Option<UiApplicati
 }
 
 pub fn supports(tool: &str) -> bool {
-    matches!(tool, "execute_ui_actions" | "execute_background_inputs")
+    matches!(tool, "execute_ui_actions" | "send_background_input")
 }
 pub fn validate_for_tool(tool: &str, scope: &UiApplicationScope) -> Result<(), AgentError> {
     validate(scope)?;
     if !supports(tool)
         || scope.actions.iter().any(|a| {
-            if tool == "execute_background_inputs" {
+            if tool == "send_background_input" {
                 !a.is_background()
             } else {
                 a.is_background() && *a != ApplicationActionKind::Scroll
@@ -191,7 +191,7 @@ mod tests {
         assert!(validate(&duplicated).is_err());
         duplicated.actions = vec![ApplicationActionKind::Scroll];
         assert!(validate_for_tool("execute_ui_actions", &duplicated).is_ok());
-        assert!(validate_for_tool("execute_background_inputs", &duplicated).is_ok());
+        assert!(validate_for_tool("send_background_input", &duplicated).is_ok());
     }
 
     #[test]

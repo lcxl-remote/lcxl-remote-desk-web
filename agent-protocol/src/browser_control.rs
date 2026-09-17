@@ -69,8 +69,10 @@ pub enum BrowserEngineKind {
 #[serde(rename_all = "snake_case")]
 pub enum BrowserOriginKind {
     Https,
-    /// Plain HTTP is accepted only for a loopback development origin.
+    /// Distinct identity retained for loopback HTTP origins.
     HttpLoopback,
+    /// Plain HTTP on a user-authorized website.
+    Http,
 }
 
 /// Canonical origin identity. Paths, query strings, fragments, and credentials
@@ -455,7 +457,10 @@ impl BrowserNavigationTarget {
         }
         let parsed_kind = match parsed.scheme() {
             "https" => BrowserOriginKind::Https,
-            "http" => BrowserOriginKind::HttpLoopback,
+            "http" if matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) => {
+                BrowserOriginKind::HttpLoopback
+            }
+            "http" => BrowserOriginKind::Http,
             _ => return Err(BrowserControlContractError::InvalidNavigationTarget),
         };
         let parsed_origin = BrowserOrigin {
@@ -463,6 +468,8 @@ impl BrowserNavigationTarget {
             host_ascii: parsed
                 .host_str()
                 .ok_or(BrowserControlContractError::InvalidNavigationTarget)?
+                .trim_start_matches('[')
+                .trim_end_matches(']')
                 .to_ascii_lowercase(),
             port: parsed
                 .port_or_known_default()
@@ -1285,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_http_is_loopback_only() {
+    fn loopback_kind_rejects_non_loopback_hosts() {
         BrowserOrigin {
             kind: BrowserOriginKind::HttpLoopback,
             host_ascii: "127.0.0.1".into(),
@@ -1302,6 +1309,56 @@ mod tests {
             .validate(),
             Err(BrowserControlContractError::InvalidOrigin)
         );
+    }
+
+    #[test]
+    fn http_navigation_preserves_scheme_host_and_port() {
+        let target = BrowserNavigationTarget {
+            url: "http://192.168.1.20:8080/app".into(),
+            origin: BrowserOrigin {
+                kind: BrowserOriginKind::Http,
+                host_ascii: "192.168.1.20".into(),
+                port: 8080,
+            },
+        };
+        target.validate().unwrap();
+        for origin in [
+            BrowserOrigin {
+                kind: BrowserOriginKind::Https,
+                ..target.origin.clone()
+            },
+            BrowserOrigin {
+                port: 80,
+                ..target.origin.clone()
+            },
+            BrowserOrigin {
+                host_ascii: "other.test".into(),
+                ..target.origin.clone()
+            },
+        ] {
+            assert!(
+                BrowserNavigationTarget {
+                    origin,
+                    ..target.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        for url in [
+            "file:///tmp/file",
+            "javascript:alert(1)",
+            "http://user:pass@192.168.1.20:8080/app",
+        ] {
+            assert!(
+                BrowserNavigationTarget {
+                    url: url.into(),
+                    ..target.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
     }
 
     #[test]

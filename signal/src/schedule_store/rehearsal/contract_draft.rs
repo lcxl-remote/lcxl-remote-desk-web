@@ -74,7 +74,7 @@ impl ScheduleStore {
                 .flat_map(|message| &message.tool_calls)
                 .filter(|call| &call.id == id)
                 .collect();
-            if calls.len() != 1 || calls[0].name != "request_capability_grants" {
+            if calls.len() != 1 || calls[0].name != "request_permissions" {
                 return Err(ScheduleStoreError::Conflict);
             }
         }
@@ -136,7 +136,7 @@ impl ScheduleStore {
             let text_artifact = action
                 .created_artifact
                 .as_ref()
-                .filter(|_| call.name == "create_text_artifact_in_selected_directory");
+                .filter(|_| call.name == "create_text_file");
             if let Some(output) = text_artifact {
                 let original = desk_diagnose_core::chat::ToolCall {
                     id: call.id.clone(),

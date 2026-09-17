@@ -20,7 +20,7 @@ fn saved_directory_requires_current_approval_and_exact_device_object() {
         rule.automatic.resources = resource.clone();
         rule.approval_ceiling.resources = resource;
         rule.effect = CapabilityEffect::WriteArtifact;
-        rule.tool_name = "create_text_artifact_in_selected_directory".into();
+        rule.tool_name = "create_text_file".into();
         rule.input = TaskInputConstraint::GeneratedTextArtifact {
             file_name: "report.txt".into(),
             max_content_bytes: 4096,
@@ -60,7 +60,7 @@ fn saved_directory_requires_current_approval_and_exact_device_object() {
             object_kind: ObjectKind::Directory,
             expires_at: "2030-01-01T00:00:00Z".into(),
         };
-        let tool = ToolCall { id: "create".into(), name: "create_text_artifact_in_selected_directory".into(), arguments_json: serde_json::json!({"file_name":"report.txt", "content_utf8":"report", "directory_request_id":"selection"}).to_string() };
+        let tool = ToolCall { id: "create".into(), name: "create_text_file".into(), arguments_json: serde_json::json!({"file_name":"report.txt", "content_utf8":"report", "directory_request_id":"selection"}).to_string() };
         let resources = crate::capability_grant::fresh_object_resource_scope(&[directory.clone()]);
         let proposal = DirectoryProposal {
             request_id: "task-selection".into(),

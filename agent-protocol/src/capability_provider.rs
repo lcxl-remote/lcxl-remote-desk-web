@@ -45,6 +45,7 @@ pub enum CapabilityEffect {
     CaptureScreen,
     InputFallback,
     ExecuteCommand,
+    LaunchApplication,
 }
 
 impl CapabilityEffect {
@@ -57,6 +58,7 @@ impl CapabilityEffect {
                 | Self::SendExternal
                 | Self::InputFallback
                 | Self::ExecuteCommand
+                | Self::LaunchApplication
         )
     }
 }
@@ -294,6 +296,8 @@ pub enum AuthorizationResourceKind {
     /// Browser Provider. Stale page and element references fail closed.
     BrowserPage,
     ExternalAccount,
+    /// One independently resolved application identity and exact launch input.
+    ExactApplication,
     ExactRecipientsAndArtifacts,
 }
 

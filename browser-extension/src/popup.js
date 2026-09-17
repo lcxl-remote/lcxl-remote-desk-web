@@ -48,8 +48,8 @@ document.querySelector("#allow-site").addEventListener("click", async () => {
         return;
     }
     const url = new URL(tab.url);
-    if (url.protocol !== "https:") {
-        status.textContent = message("httpsOnly");
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+        status.textContent = message("webOnly");
         return;
     }
     const originPattern = permissionPatternForUrl(tab.url);
@@ -60,4 +60,14 @@ document.querySelector("#allow-site").addEventListener("click", async () => {
     }
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/content-script.js"] });
     status.textContent = message("siteAllowed", [url.origin]);
+});
+
+document.querySelector("#allow-all-web").addEventListener("click", async () => {
+    try {
+        // Request directly from the click to preserve Chrome's user gesture.
+        const granted = await chrome.permissions.request({ origins: ["https://*/*", "http://*/*"] });
+        status.textContent = message(granted ? "allWebAllowed" : "siteDenied");
+    } catch {
+        status.textContent = message("permissionRequestFailed");
+    }
 });

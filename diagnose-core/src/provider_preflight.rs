@@ -135,7 +135,7 @@ impl BrowserCallPreflight {
         .ok_or_else(unavailable)?
         .operations;
         let export_destinations = match call.name.as_str() {
-            "prepare_gmail_web_draft_handoff" | "send_gmail_web_exact" => {
+            "prepare_gmail_draft" | "send_gmail_message" => {
                 vec![DestinationIdentity::EmailAccount {
                     account_id: crate::communication::gmail_web_account_id(
                         &serde_json::from_value(input["page"].clone())
@@ -144,7 +144,7 @@ impl BrowserCallPreflight {
                     .map_err(|_| unavailable())?,
                 }]
             }
-            "prepare_slack_web_message_handoff" | "send_slack_web_exact" => {
+            "prepare_slack_message" | "send_slack_message" => {
                 vec![DestinationIdentity::ChatAccount {
                     account_id: crate::communication::slack_web_account_id(
                         &serde_json::from_value(input["page"].clone())

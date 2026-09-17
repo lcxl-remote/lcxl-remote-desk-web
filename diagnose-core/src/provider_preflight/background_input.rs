@@ -231,7 +231,7 @@ mod tests {
         let registry = crate::device_assistant::device_assistant_provider_registry();
         let app = json!({"token":"app","snapshot_id":"native","object_kind":"application","expires_at":"2000-01-01T00:00:00Z"});
         let window = json!({"token":"window","snapshot_id":"native","object_kind":"window","expires_at":"2000-01-01T00:00:00Z"});
-        let call=ToolCall{id:"input".into(),name:"execute_background_inputs".into(),arguments_json:json!({"application":app,"target":window,"action":{"kind":"type_text","text":"中文🙂"},"geometry":null}).to_string()};
+        let call=ToolCall{id:"input".into(),name:"send_background_input".into(),arguments_json:json!({"application":app,"target":window,"action":{"kind":"type_text","text":"中文🙂"},"geometry":null}).to_string()};
         for surface in [
             ProductSurface::OssPersonalOwner,
             ProductSurface::ManagerPersonalOwner,

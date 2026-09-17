@@ -57,14 +57,14 @@ async fn set_directory(db: &DatabaseConnection, directory: &ObjectRef, revoke: b
 async fn office_directory_revocation_blocks_both_dispatch_boundaries_and_restart_keeps_one_claim() {
     for (tool, provider, capability, extension, kind) in [
         (
-            "replace_selected_word_copy_body",
+            "replace_word_copy_body",
             "office.docx.batch",
             "office.docx.batch.patch",
             "docx",
             ObjectKind::Document,
         ),
         (
-            "patch_selected_powerpoint_copy",
+            "patch_powerpoint_copy",
             "office.pptx.batch",
             "office.pptx.batch.patch",
             "pptx",

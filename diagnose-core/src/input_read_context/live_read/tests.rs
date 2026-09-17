@@ -70,7 +70,7 @@ fn captured() -> ReadContextSelection {
 
 #[test]
 fn captures_only_exposed_live_reads_and_never_batch_file_targets() {
-    let mut input = selection(&["inspect_live_document", "inspect_selected_pages_with_iwork"]);
+    let mut input = selection(&["inspect_live_document", "inspect_pages_file"]);
     input.live_targets = capture(&input, Some(&readiness()), now()).unwrap();
     assert_eq!(input.live_targets.len(), 1);
     assert_eq!(input.live_targets[0].tool_name, "inspect_live_document");
@@ -551,7 +551,7 @@ fn all_live_read_grants_survive_readiness_ref_rotation_on_both_servers() {
             .provider_for_capability(&capability.wire.capability_id)
             .unwrap();
         let request = crate::permission_tools::build_permission_request(&ToolCall {
-            id:"request".into(),name:"request_capability_grants".into(),arguments_json:serde_json::json!({"items":[{
+            id:"request".into(),name:"request_permissions".into(),arguments_json:serde_json::json!({"items":[{
                 "item_id":"read","provider_id":provider.wire.provider_id,"tool_name":name,"expected_effect":capability.wire.effect,
                 "suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Read original document"}]}).to_string(),
         },&registry,"request".into(),1,"2026-08-31T00:00:01Z".into()).unwrap();

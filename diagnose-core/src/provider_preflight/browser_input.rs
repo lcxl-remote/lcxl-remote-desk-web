@@ -105,7 +105,7 @@ pub fn browser_action_from_call(
                 mutation_class: BrowserMutationClass::InputFallback,
             }
         }
-        "prepare_slack_web_message_handoff" => {
+        "prepare_slack_message" => {
             let args: SlackWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
                 .map_err(|error| decode(&error.to_string()))?;
             args.validate()
@@ -119,7 +119,7 @@ pub fn browser_action_from_call(
                 mutation_class: BrowserMutationClass::WriteExternalDraft,
             }
         }
-        "prepare_gmail_web_draft_handoff" => {
+        "prepare_gmail_draft" => {
             let args: GmailWebDraftHandoffInput = serde_json::from_str(&call.arguments_json)
                 .map_err(|error| decode(&error.to_string()))?;
             args.validate()
@@ -158,7 +158,7 @@ pub fn browser_action_from_call(
                 },
             }
         }
-        "send_gmail_web_exact" => {
+        "send_gmail_message" => {
             let args: GmailWebExactSendInput = serde_json::from_str(&call.arguments_json)
                 .map_err(|error| decode(&error.to_string()))?;
             crate::communication::verify_gmail_web_exact_send_input(&args)
@@ -195,7 +195,7 @@ pub fn browser_action_from_call(
                 },
             }
         }
-        "send_slack_web_exact" => {
+        "send_slack_message" => {
             let args: SlackWebExactSendInput = serde_json::from_str(&call.arguments_json)
                 .map_err(|error| decode(&error.to_string()))?;
             crate::communication::verify_slack_web_exact_send_input(&args)

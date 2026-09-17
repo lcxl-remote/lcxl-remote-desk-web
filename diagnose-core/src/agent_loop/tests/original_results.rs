@@ -220,7 +220,7 @@ async fn original_failure_preserves_receipt_reports_failure_and_stops_the_group(
     first.tool_calls.push(ToolCall {
         id: "c2".into(),
         name: "exec_command".into(),
-        arguments_json: "{}".into(),
+        arguments_json: r#"{"shell":"bash","command":"pwd","timeout_ms":10000}"#.into(),
     });
     let model = ScriptModel {
         turns: RefCell::new([first, answer("failed")].into()),

@@ -598,6 +598,9 @@ pub struct GrantRequestItem {
     /// Server-authored plan reviewed with an exact command permission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_confirmation: Option<crate::command_confirmation::CommandConfirmation>,
+    /// Host-resolved identity and exact arguments frozen before owner approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_confirmation: Option<crate::application_launch::LaunchApprovalBinding>,
     pub suggested_ttl_seconds: u32,
     pub suggested_max_uses: u32,
     pub reason: String,
@@ -645,6 +648,26 @@ impl GrantRequestItem {
                     .as_deref()
                     .is_none_or(|canonical| confirmation.validate(canonical).is_err())
                 || confirmation.resource_scope().ok().as_ref() != Some(&self.resource_scope)
+            {
+                return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
+            }
+        }
+        if let Some(binding) = &self.launch_confirmation {
+            let canonical = self
+                .canonical_input_json
+                .as_deref()
+                .ok_or(DynamicRunContractError::InvalidCanonicalPermissionInput)?;
+            let request: desk_agent_protocol::application_launch::LaunchApplicationRequest =
+                serde_json::from_str(canonical)
+                    .map_err(|_| DynamicRunContractError::InvalidCanonicalPermissionInput)?;
+            if self.tool_name != "launch_application"
+                || self.expected_effect != CapabilityEffect::LaunchApplication
+                || self.command_confirmation.is_some()
+                || self.suggested_max_uses != 1
+                || binding.resource_scope() != self.resource_scope
+                || binding
+                    .revalidate(binding.subject(), &request, binding.identity())
+                    .is_err()
             {
                 return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
             }
@@ -1072,6 +1095,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                launch_confirmation: None,
                 item_id: "write-report".into(),
                 provider_id: "file.workspace".into(),
                 tool_name: "create_report".into(),

@@ -1,7 +1,6 @@
 function parsedHttpUrl(value) {
     const parsed = new URL(value);
-    const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
-    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
         throw new Error("invalid_navigation_target");
     }
     return parsed;
@@ -28,7 +27,8 @@ export function permissionPatternForUrl(value) {
 
 export function browserOriginMatchesUrl(origin, value) {
     const parsed = parsedHttpUrl(value);
-    const expectedKind = parsed.protocol === "https:" ? "https" : "http_loopback";
+    const expectedKind = parsed.protocol === "https:" ? "https"
+        : ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname) ? "http_loopback" : "http";
     return origin?.kind === expectedKind
         && origin.host_ascii === browserHostAscii(parsed)
         && origin.port === effectivePort(parsed);

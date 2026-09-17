@@ -1,1 +1,1 @@
-{"type":"string","enum":["https","http_loopback"],"x-readme-ref-name":"BrowserOriginKind"}
+{"type":"string","enum":["https","http_loopback","http"],"x-readme-ref-name":"BrowserOriginKind"}

@@ -153,10 +153,7 @@ pub fn project_web_draft_handoff(
     canonical_input_digest_sha256: &str,
     completion: &ComputerActionCompleted,
 ) -> Result<Option<CommunicationDraftHandoff>, AgentError> {
-    if !matches!(
-        tool_name,
-        "prepare_gmail_web_draft_handoff" | "prepare_slack_web_message_handoff"
-    ) {
+    if !matches!(tool_name, "prepare_gmail_draft" | "prepare_slack_message") {
         return Ok(None);
     }
     if run_id.trim().is_empty()
@@ -178,7 +175,7 @@ pub fn project_web_draft_handoff(
     if result.call_id != completion.action_request_id {
         return Err(invalid());
     }
-    if tool_name == "prepare_gmail_web_draft_handoff" {
+    if tool_name == "prepare_gmail_draft" {
         let gmail: GmailWebDraftHandoffInput =
             serde_json::from_str(canonical_input).map_err(|_| invalid())?;
         gmail.validate().map_err(|_| invalid())?;
@@ -368,10 +365,10 @@ pub fn project_web_send_receipt(
     canonical_input: &str,
     completion: &ComputerActionCompleted,
 ) -> Result<Option<SendReceipt>, AgentError> {
-    if !matches!(tool_name, "send_gmail_web_exact" | "send_slack_web_exact") {
+    if !matches!(tool_name, "send_gmail_message" | "send_slack_message") {
         return Ok(None);
     }
-    let snapshot = if tool_name == "send_gmail_web_exact" {
+    let snapshot = if tool_name == "send_gmail_message" {
         let input: GmailWebExactSendInput =
             serde_json::from_str(canonical_input).map_err(|_| invalid())?;
         crate::communication::verify_gmail_web_exact_send_input(&input).map_err(|_| invalid())?;
@@ -470,12 +467,12 @@ pub fn project_prepared_web_message(
         return Err(invalid());
     }
     let (subject, body_plain_text) = match tool_name {
-        "prepare_gmail_web_draft_handoff" => {
+        "prepare_gmail_draft" => {
             let input: GmailWebDraftHandoffInput =
                 serde_json::from_str(canonical_input).map_err(|_| invalid())?;
             (input.draft.subject, input.draft.body_plain_text)
         }
-        "prepare_slack_web_message_handoff" => {
+        "prepare_slack_message" => {
             let input: SlackWebDraftHandoffInput =
                 serde_json::from_str(canonical_input).map_err(|_| invalid())?;
             (String::new(), input.body_plain_text)
@@ -510,7 +507,7 @@ pub fn project_sent_web_message(
         return Ok(None);
     }
     let (snapshot, subject, body_plain_text) = match tool_name {
-        "send_gmail_web_exact" => {
+        "send_gmail_message" => {
             let input: GmailWebExactSendInput =
                 serde_json::from_str(canonical_input).map_err(|_| invalid())?;
             (
@@ -519,7 +516,7 @@ pub fn project_sent_web_message(
                 input.draft.body_plain_text,
             )
         }
-        "send_slack_web_exact" => {
+        "send_slack_message" => {
             let input: SlackWebExactSendInput =
                 serde_json::from_str(canonical_input).map_err(|_| invalid())?;
             (
@@ -653,7 +650,7 @@ mod tests {
         let canonical = serde_json::to_string(&input).unwrap();
         let project = |completed: &ComputerActionCompleted| {
             project_web_draft_handoff(
-                "prepare_gmail_web_draft_handoff",
+                "prepare_gmail_draft",
                 "run",
                 &canonical,
                 &"b".repeat(64),
@@ -682,7 +679,7 @@ mod tests {
     fn slack_extension_projection_requires_exact_verified_readback() {
         let (input, completed) = fixture();
         let handoff = project_web_draft_handoff(
-            "prepare_slack_web_message_handoff",
+            "prepare_slack_message",
             "run",
             &input,
             &"b".repeat(64),
@@ -716,7 +713,7 @@ mod tests {
             }
             assert!(
                 project_web_draft_handoff(
-                    "prepare_slack_web_message_handoff",
+                    "prepare_slack_message",
                     "run",
                     &input,
                     &"b".repeat(64),
@@ -753,7 +750,7 @@ mod tests {
         }
 
         let handoff = project_web_draft_handoff(
-            "prepare_slack_web_message_handoff",
+            "prepare_slack_message",
             "run",
             &input,
             &"b".repeat(64),
@@ -782,25 +779,16 @@ mod tests {
             provider_device_id: "device",
             received_at_unix_ms: 45,
         };
-        let prepared = project_prepared_web_message(
-            &context,
-            "prepare_slack_web_message_handoff",
-            &input,
-            &completed,
-        )
-        .unwrap()
-        .unwrap();
+        let prepared =
+            project_prepared_web_message(&context, "prepare_slack_message", &input, &completed)
+                .unwrap()
+                .unwrap();
         assert_eq!(prepared.snapshot, snapshot);
         assert_eq!(prepared.body_plain_text, "Draft only");
         assert!(
-            project_sent_web_message(
-                &context,
-                "prepare_slack_web_message_handoff",
-                &input,
-                &completed
-            )
-            .unwrap()
-            .is_none()
+            project_sent_web_message(&context, "prepare_slack_message", &input, &completed)
+                .unwrap()
+                .is_none()
         );
         for (device, received) in [("other-device", 45), ("device", 43)] {
             assert!(
@@ -810,7 +798,7 @@ mod tests {
                         provider_device_id: device,
                         received_at_unix_ms: received
                     },
-                    "prepare_slack_web_message_handoff",
+                    "prepare_slack_message",
                     &input,
                     &completed
                 )
@@ -822,7 +810,7 @@ mod tests {
         assert!(
             project_prepared_web_message(
                 &context,
-                "prepare_slack_web_message_handoff",
+                "prepare_slack_message",
                 &changed.to_string(),
                 &completed
             )
@@ -838,7 +826,7 @@ mod tests {
         let gmail = crate::communication::test_support::gmail_exact_send_input();
         for (tool, canonical_input, page, snapshot, subject, body) in [
             (
-                "send_slack_web_exact",
+                "send_slack_message",
                 serde_json::to_string(&slack).unwrap(),
                 slack.page,
                 slack.handoff.send_payload_snapshot.unwrap(),
@@ -846,7 +834,7 @@ mod tests {
                 slack.body_plain_text,
             ),
             (
-                "send_gmail_web_exact",
+                "send_gmail_message",
                 serde_json::to_string(&gmail).unwrap(),
                 gmail.page,
                 gmail.handoff.send_payload_snapshot.unwrap(),
