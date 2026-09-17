@@ -115,6 +115,7 @@ impl ReadCallPreflight {
             return Err(unavailable());
         }
         let (cap, mut operation) = build_read_operation(call)?;
+        crate::observation_policy::require_device_observation(cap)?;
         if cap != capability.required_capability {
             return Err(unavailable());
         }

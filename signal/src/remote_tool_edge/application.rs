@@ -4,6 +4,9 @@ use super::*;
 use desk_agent_protocol::application_launch::{LaunchApplicationRequest, LaunchPreflightReceipt};
 use desk_agent_protocol::{Capability, OperationOutput, ReadContextOutput};
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) async fn resolve_candidate(
     connections: &SharedConnectionMap,
     target_connection_id: &str,

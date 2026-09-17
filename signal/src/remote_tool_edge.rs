@@ -5168,35 +5168,7 @@ impl SignalDeviceAssistantTools {
                 }),
             });
         }
-        if !matches!(
-            capability,
-            desk_agent_protocol::Capability::DesktopSessionInspect
-                | desk_agent_protocol::Capability::DesktopUiInspect
-                | desk_agent_protocol::Capability::OfficeDocumentInspect
-                | desk_agent_protocol::Capability::FileMetadataRead
-                | desk_agent_protocol::Capability::FileContentRead
-                | desk_agent_protocol::Capability::SpreadsheetFileInspect
-                | desk_agent_protocol::Capability::SpreadsheetMergePreview
-                | desk_agent_protocol::Capability::TerminalOutputRead
-                | desk_agent_protocol::Capability::ScreenCaptureCurrent
-                | desk_agent_protocol::Capability::SystemInfo
-                | desk_agent_protocol::Capability::ProcessList
-                | desk_agent_protocol::Capability::NetworkPorts
-                | desk_agent_protocol::Capability::ServiceStatus
-                | desk_agent_protocol::Capability::LogRecent
-                | desk_agent_protocol::Capability::ContainerList
-                | desk_agent_protocol::Capability::SpreadsheetLiveInspect
-                | desk_agent_protocol::Capability::DocumentLiveInspect
-                | desk_agent_protocol::Capability::PresentationLiveInspect
-        ) {
-            return Err(error(
-                AgentErrorKind::UnsupportedCapability,
-                "Device Assistant may only invoke selected read-only observations",
-                false,
-                true,
-            )
-            .into());
-        }
+        desk_diagnose_core::observation_policy::require_device_observation(capability)?;
         let uses_selected_objects = self.uses_selected_objects(call)?;
         let object_expiry =
             if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
