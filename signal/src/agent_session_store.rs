@@ -1053,6 +1053,69 @@ async fn find_recovery_task(
 
 #[async_trait(?Send)]
 impl SessionSeam for SignalAgentSessionStore {
+    async fn delete_attachments(
+        &self,
+        session: &PersistedAgentSession,
+        ids: &[String],
+    ) -> Result<(), AgentError> {
+        crate::agent_attachment_store::delete(
+            &self.db,
+            &session.conversation_id,
+            &session.actor_id,
+            ids,
+        )
+        .await
+        .map_err(|e| internal(format!("Attachment deletion failed: {e}")))
+    }
+    async fn attachment_usage(&self, session: &PersistedAgentSession) -> Result<u64, AgentError> {
+        crate::agent_attachment_store::usage(&self.db, &session.conversation_id, &session.actor_id)
+            .await
+            .map_err(|e| internal(format!("Attachment usage failed: {e}")))
+    }
+
+    async fn store_attachment_batch(
+        &self,
+        session: &PersistedAgentSession,
+        attachments: &[desk_diagnose_core::conversation_attachment::batch::PreparedAttachment],
+    ) -> Result<Vec<desk_diagnose_core::conversation_attachment::AttachmentMetadata>, AgentError>
+    {
+        crate::agent_attachment_store::store_batch(&self.db, session, attachments)
+            .await
+            .map_err(|e| internal(format!("Attachment storage failed: {e}")))
+    }
+    async fn list_attachments(
+        &self,
+        session: &PersistedAgentSession,
+        before: Option<&str>,
+    ) -> Result<Vec<desk_diagnose_core::conversation_attachment::AttachmentMetadata>, AgentError>
+    {
+        crate::agent_attachment_store::list(
+            &self.db,
+            &session.conversation_id,
+            &session.actor_id,
+            before,
+        )
+        .await
+        .map_err(|e| internal(format!("Attachment listing failed: {e}")))
+    }
+    async fn read_attachment(
+        &self,
+        session: &PersistedAgentSession,
+        attachment_id: &str,
+        consume: bool,
+    ) -> Result<desk_diagnose_core::conversation_attachment::batch::PreparedAttachment, AgentError>
+    {
+        crate::agent_attachment_store::read(
+            &self.db,
+            &session.conversation_id,
+            &session.actor_id,
+            attachment_id,
+            consume,
+        )
+        .await
+        .map_err(|e| internal(format!("Attachment reading failed: {e}")))
+    }
+
     async fn store_image(
         &self,
         session: &PersistedAgentSession,

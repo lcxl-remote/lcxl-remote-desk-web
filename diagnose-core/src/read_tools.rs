@@ -275,7 +275,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_files",
             Capability::FileMetadataRead,
-            "Read bounded metadata for owner-selected objects, or supply directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_text_file using this result call id and exact entry_name; content reading still requires a separate grant.",
+            "Read bounded metadata for owner-selected objects, or supply directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_text_file using this result call id and exact entry_name; content reading still requires a separate grant. Reduce max_entries or use the supported file filters to narrow large results; max_bytes is at most 32768 and does not expand your permission.",
             json!({
                 "type": "object",
                 "properties": {
@@ -287,6 +287,8 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                         "default": []
                     },
                     "directory_request_id": {"type":"string", "minLength":1, "maxLength":256},
+                    "max_entries": {"type":"integer", "minimum":1, "maximum":256, "default":256},
+                    "max_bytes": {"type":"integer", "minimum":1024, "maximum":32768, "default":32768},
                     "min_file_bytes": {"type": ["integer", "null"], "minimum": 0},
                     "max_file_bytes": {"type": ["integer", "null"], "minimum": 0},
                     "modified_after": {"type": ["string", "null"], "format": "date-time"},
@@ -308,21 +310,29 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_spreadsheets",
             Capability::SpreadsheetFileInspect,
-            "Read bounded cell, formula, and value projections from explicitly owner-selected inert .xlsx, .csv, or .tsv files, or from supported direct children of an explicitly selected directory. Directory expansion is non-recursive and bounded; macros, external links, data connections, and model-provided paths are rejected.",
+            "Read bounded cell, formula, and value projections from explicitly owner-selected inert .xlsx, .csv, or .tsv files, or from supported direct children of an explicitly selected directory. Directory expansion is non-recursive and bounded; macros, external links, data connections, and model-provided paths are rejected. Reduce max_workbooks, max_sheets, max_rows, max_columns or max_bytes to narrow an oversized result. Returned truncated projections do not contain the omitted cells.",
             json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "max_workbooks": {"type":"integer", "minimum":1, "maximum":8, "default":8},
+                    "max_sheets": {"type":"integer", "minimum":1, "maximum":16, "default":16},
+                    "max_rows": {"type":"integer", "minimum":1, "maximum":200, "default":200},
+                    "max_columns": {"type":"integer", "minimum":1, "maximum":64, "default":64},
+                    "max_bytes": {"type":"integer", "minimum":1024, "maximum":32768, "default":32768}
+                },
                 "additionalProperties": false
             }),
         ),
         read(
             "preview_spreadsheet_merge",
             Capability::SpreadsheetMergePreview,
-            "Preview a bounded multi-workbook merge, dedupe, and statistics operation over explicitly selected inert spreadsheets. Rules are typed data only; no script or formula is executed and no file is written.",
+            "Preview a bounded multi-workbook merge, dedupe, and statistics operation over explicitly selected inert spreadsheets. Rules are typed data only; no script or formula is executed and no file is written. Narrow source_sheet, columns, statistics or max_rows to reduce output; max_bytes is at most 32768. A truncated merge preview cannot be materialized as a complete workbook or report.",
             json!({
                 "type": "object",
                 "properties": {
                     "source_sheet": {"type": ["string", "null"], "maxLength": 128},
+                    "max_rows": {"type":"integer", "minimum":1, "maximum":1000, "default":1000},
+                    "max_bytes": {"type":"integer", "minimum":1024, "maximum":32768, "default":32768},
                     "header_row": {"type": "integer", "minimum": 1, "maximum": 32, "default": 1},
                     "columns": {
                         "type": "array", "minItems": 1, "maxItems": 64,
@@ -478,6 +488,10 @@ struct NoToolArgs {}
 #[serde(deny_unknown_fields)]
 struct SelectedFileMetadataToolArgs {
     #[serde(default)]
+    max_entries: Option<u32>,
+    #[serde(default)]
+    max_bytes: Option<u32>,
+    #[serde(default)]
     directory_request_id: Option<String>,
     #[serde(default)]
     file_extensions: Vec<String>,
@@ -489,6 +503,37 @@ struct SelectedFileMetadataToolArgs {
     modified_after: Option<String>,
     #[serde(default)]
     modified_before: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectedSpreadsheetToolArgs {
+    max_workbooks: Option<u32>,
+    max_sheets: Option<u32>,
+    max_rows: Option<u32>,
+    max_columns: Option<u32>,
+    max_bytes: Option<u32>,
+}
+
+fn result_bound(
+    value: Option<u32>,
+    default: u32,
+    min: u32,
+    max: u32,
+    name: &str,
+) -> Result<u32, AgentError> {
+    let value = value.unwrap_or(default);
+    if !(min..=max).contains(&value) {
+        return Err(bad_arguments(format!(
+            "{name} must be between {min} and {max}"
+        )));
+    }
+    Ok(value)
+}
+
+fn json_result_budget(value: Option<u32>) -> Result<u32, AgentError> {
+    let maximum = crate::conversation_attachment::MAX_JSON_BYTES as u32;
+    result_bound(value, maximum, 1024, maximum, "max_bytes")
 }
 
 impl Default for OfficeSelectionToolArgs {
@@ -717,8 +762,8 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 // the exact edge-issued refs selected by the owner. The model
                 // schema has no field that can nominate a path or token.
                 roots: Vec::new(),
-                max_entries: 256,
-                max_bytes: 64 * 1024,
+                max_entries: result_bound(args.max_entries, 256, 1, 256, "max_entries")?,
+                max_bytes: json_result_budget(args.max_bytes)?,
                 enumerate_directories: false,
                 file_extensions: args.file_extensions,
                 min_file_bytes: args.min_file_bytes,
@@ -741,20 +786,22 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             })
         }
         "inspect_spreadsheets" => {
-            let _ = parse_params::<NoToolArgs>(&call.arguments_json)?;
+            let args = parse_params::<SelectedSpreadsheetToolArgs>(&call.arguments_json)?;
             ContextKind::SpreadsheetFileInspect(SpreadsheetFileInspectParams {
                 files: Vec::new(),
-                max_workbooks: 8,
-                max_sheets: 16,
-                max_rows: 200,
-                max_columns: 64,
-                max_bytes: 256 * 1024,
+                max_workbooks: result_bound(args.max_workbooks, 8, 1, 8, "max_workbooks")?,
+                max_sheets: result_bound(args.max_sheets, 16, 1, 16, "max_sheets")?,
+                max_rows: result_bound(args.max_rows, 200, 1, 200, "max_rows")?,
+                max_columns: result_bound(args.max_columns, 64, 1, 64, "max_columns")?,
+                max_bytes: json_result_budget(args.max_bytes)?,
             })
         }
         "preview_spreadsheet_merge" => {
             #[derive(Default, serde::Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Args {
+                max_rows: Option<u32>,
+                max_bytes: Option<u32>,
                 #[serde(default)]
                 source_sheet: Option<String>,
                 #[serde(default = "default_header_row")]
@@ -776,8 +823,8 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 columns: args.columns,
                 dedupe_keys: args.dedupe_keys,
                 statistics: args.statistics,
-                max_rows: 1000,
-                max_bytes: 512 * 1024,
+                max_rows: result_bound(args.max_rows, 1000, 1, 1000, "max_rows")?,
+                max_bytes: json_result_budget(args.max_bytes)?,
             })
         }
         "read_terminal_output" => {
@@ -813,6 +860,71 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_result_limits_are_model_adjustable_and_validated() {
+        let make = |name: &str, arguments: &str| ToolCall {
+            id: "bounded-read".into(),
+            name: name.into(),
+            arguments_json: arguments.into(),
+        };
+        let (_, input) = build_read_operation(&make(
+            "inspect_spreadsheets",
+            r#"{"max_workbooks":1,"max_sheets":2,"max_rows":3,"max_columns":4,"max_bytes":8192}"#,
+        ))
+        .unwrap();
+        let OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::SpreadsheetFileInspect(params),
+        }) = input
+        else {
+            panic!("wrong read operation");
+        };
+        assert_eq!(
+            (
+                params.max_workbooks,
+                params.max_sheets,
+                params.max_rows,
+                params.max_columns,
+                params.max_bytes
+            ),
+            (1, 2, 3, 4, 8192)
+        );
+        let (_, input) = build_read_operation(&make(
+            "inspect_files",
+            r#"{"max_entries":2,"max_bytes":4096}"#,
+        ))
+        .unwrap();
+        let OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::FileMetadataInspect(params),
+        }) = input
+        else {
+            panic!("wrong read operation");
+        };
+        assert_eq!((params.max_entries, params.max_bytes), (2, 4096));
+        let (_, input) = build_read_operation(&make("preview_spreadsheet_merge",
+            r#"{"columns":[{"output_header":"name","source_headers":["name"]}],"max_rows":3,"max_bytes":8192}"#)).unwrap();
+        let OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::SpreadsheetMergePreview(params),
+        }) = input
+        else {
+            panic!("wrong read operation");
+        };
+        assert_eq!((params.max_rows, params.max_bytes), (3, 8192));
+        for tool in ["inspect_files", "inspect_spreadsheets"] {
+            for invalid in [
+                r#"{"max_bytes":0}"#,
+                r#"{"max_bytes":32769}"#,
+                r#"{"path":"C:/private"}"#,
+            ] {
+                assert!(
+                    build_read_operation(&make(tool, invalid)).is_err(),
+                    "{tool}: {invalid}"
+                );
+            }
+        }
+        assert!(build_read_operation(&make("inspect_spreadsheets", r#"{"max_rows":0}"#)).is_err());
+        assert!(build_read_operation(&make("inspect_files", r#"{"max_entries":257}"#)).is_err());
+    }
 
     /// `build_read_operation` maps each known tool name to the right capability
     /// and accepts both empty and populated arguments.

@@ -32,3 +32,5 @@ pub mod agent_image_attachment;
 
 pub mod agent_file_recovery_cleanup;
 pub mod agent_file_recovery_scope;
+
+pub mod agent_attachment;

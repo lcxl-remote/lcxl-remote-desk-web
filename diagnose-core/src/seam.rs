@@ -795,6 +795,57 @@ pub enum ClaimError {
 /// in DB with optimistic-concurrency CAS and is the authority across instances.
 #[async_trait(?Send)]
 pub trait SessionSeam {
+    /// Publish a whole validated batch under the current session version/lease.
+    /// A transient runtime must fail explicitly rather than inline large bodies.
+    async fn store_attachment_batch(
+        &self,
+        _session: &PersistedAgentSession,
+        _attachments: &[crate::conversation_attachment::batch::PreparedAttachment],
+    ) -> Result<Vec<crate::conversation_attachment::AttachmentMetadata>, AgentError> {
+        Err(crate::conversation_attachment::invalid(
+            "Durable attachment storage is unavailable",
+        ))
+    }
+
+    async fn list_attachments(
+        &self,
+        _session: &PersistedAgentSession,
+        _before: Option<&str>,
+    ) -> Result<Vec<crate::conversation_attachment::AttachmentMetadata>, AgentError> {
+        Err(crate::conversation_attachment::invalid(
+            "Attachment listing is unavailable",
+        ))
+    }
+
+    /// `consume` is true only for an authorized successful content consumption;
+    /// replay, reference resolution and validation must leave LRU unchanged.
+    async fn read_attachment(
+        &self,
+        _session: &PersistedAgentSession,
+        _attachment_id: &str,
+        _consume: bool,
+    ) -> Result<crate::conversation_attachment::batch::PreparedAttachment, AgentError> {
+        Err(crate::conversation_attachment::invalid(
+            "Attachment reading is unavailable",
+        ))
+    }
+
+    async fn delete_attachments(
+        &self,
+        _session: &PersistedAgentSession,
+        _attachment_ids: &[String],
+    ) -> Result<(), AgentError> {
+        Err(crate::conversation_attachment::invalid(
+            "Attachment deletion is unavailable",
+        ))
+    }
+
+    async fn attachment_usage(&self, _session: &PersistedAgentSession) -> Result<u64, AgentError> {
+        Err(crate::conversation_attachment::invalid(
+            "Attachment usage is unavailable",
+        ))
+    }
+
     /// Store verified pixels before publishing screenshot success. None is an
     /// explicitly transient runtime; durable runtimes must override this hook.
     async fn store_image(

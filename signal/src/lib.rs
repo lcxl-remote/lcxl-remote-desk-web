@@ -45,6 +45,7 @@ pub mod web_search_config;
 
 pub mod schedule_management;
 
+pub(crate) mod agent_attachment_store;
 pub(crate) mod agent_image_store;
 
 pub mod file_recovery_cleanup_store;

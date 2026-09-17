@@ -207,7 +207,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 15;
+const SIGNAL_SCHEMA_VERSION: i32 = 16;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -266,6 +266,7 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, host_remote_access_state::Entity).await?;
     create_entity(db, &schema, agent_session::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_image_attachment::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_attachment::Entity).await?;
     create_entity(
         db,
         &schema,
@@ -468,6 +469,7 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     check_entity!(host_remote_access_state);
     check_entity!(agent_session);
     check_entity!(agent_image_attachment);
+    check_entity!(agent_attachment);
     check_entity!(agent_file_recovery_cleanup);
     check_entity!(agent_file_recovery_scope);
     check_entity!(agent_exec_task);
@@ -668,6 +670,7 @@ mod tests {
             "host_remote_access_state",
             "agent_session",
             "agent_image_attachment",
+            "agent_attachment",
             "agent_file_recovery_cleanup",
             "agent_file_recovery_scope",
             "agent_exec_task",

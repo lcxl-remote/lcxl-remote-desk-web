@@ -47,6 +47,7 @@ pub mod communication_handoff;
 pub mod content_safety;
 pub mod context_attachment;
 pub mod context_usage;
+pub mod conversation_attachment;
 pub mod conversation_history;
 pub mod conversation_key;
 pub mod data_policy;
