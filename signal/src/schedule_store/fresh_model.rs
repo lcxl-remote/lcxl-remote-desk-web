@@ -23,7 +23,7 @@ impl ScheduleStore {
             || held.lease_token == 0
             || held.lease_token > i64::MAX as u64
             || held.version <= 0
-            || held.surface != AgentSessionSurface::DeviceAssistant
+            || held.surface != AgentSessionSurface::AiAssistant
             || held.trigger_origin != TriggerOrigin::ScheduledTask
             || held.turn_state != desk_diagnose_core::session::TurnState::Running
             || held.current_request_id.as_deref() != Some(request.run_id)

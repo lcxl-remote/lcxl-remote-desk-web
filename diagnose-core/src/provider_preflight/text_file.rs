@@ -251,7 +251,7 @@ pub fn resolve_file_result(
     use desk_agent_protocol::computer_use::{
         ComputerActionCompleted, ComputerActionOutput, ComputerActionResultClass,
     };
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let mut source_calls = session
         .conversation
         .iter()
@@ -631,7 +631,7 @@ fn read_evidence(
             || crate::model_egress::envelope_expires_by(envelope, now)
             || envelope.provenance.source_tool_name != source_call.name
             || envelope.provenance.source_provider_id
-                != crate::device_assistant::FILE_WORKSPACE_PROVIDER_ID
+                != crate::ai_assistant::FILE_WORKSPACE_PROVIDER_ID
             || envelope.digest_sha256
                 != format!(
                     "{:x}",
@@ -1121,7 +1121,7 @@ impl TextMutationPreflight {
         evidence: &VerifiedTextFile,
         now_unix_ms: u64,
     ) -> Result<Self, AgentError> {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let capability = registry
             .capability_for_tool(&call.name)
             .ok_or_else(unavailable)?;
@@ -1236,7 +1236,7 @@ mod tests {
             },
             "2026-09-05T00:00:00Z",
         );
-        session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+        session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
         session.input_revision = 1;
         let subject = session
             .file_scope_subject("owner", "device", "conversation")
@@ -1454,7 +1454,7 @@ mod tests {
         ))
         .unwrap();
         let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let cap = registry.capability_for_tool("read_text_file").unwrap();
         let provider = registry
             .provider_for_capability(&cap.wire.capability_id)
@@ -1619,7 +1619,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .provenance
-            .source_provider_id = crate::device_assistant::FILE_WORKSPACE_PROVIDER_ID.into();
+            .source_provider_id = crate::ai_assistant::FILE_WORKSPACE_PROVIDER_ID.into();
         session.conversation = vec![owner, proposal, receipt];
         let framed = crate::chat::frame_file_tool_result(&session.conversation[2]);
         assert!(framed.starts_with("file_result_call_id: \"metadata\"\n"));
@@ -1777,7 +1777,7 @@ mod tests {
             ] {
                 assert!(
                     super::super::read::ReadCallPreflight::build_file_result(
-                        &crate::device_assistant::device_assistant_provider_registry(),
+                        &crate::ai_assistant::ai_assistant_provider_registry(),
                         surface,
                         &call,
                         &binding,
@@ -1864,7 +1864,7 @@ mod tests {
             tool,
         )
         .unwrap();
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let descriptor = registry.capability_for_tool(tool).unwrap();
         receipt
             .data_envelope
@@ -1972,7 +1972,7 @@ mod tests {
         proposal.turn_id = Some("mutation-turn".into());
         session.conversation.push(proposal);
         let origin = crate::action_result::ActionResultOrigin::capture(
-            &crate::device_assistant::device_assistant_provider_registry(),
+            &crate::ai_assistant::ai_assistant_provider_registry(),
             &session,
             &call,
         )
@@ -2025,7 +2025,7 @@ mod tests {
         use crate::capability_availability::CapabilityAvailability;
         use crate::dynamic_run::{PermissionDecisionItem, PermissionItemDecision};
         use crate::permission_grant::{PermissionGrantIssuanceContext, build_permission_grants};
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         for tool in [UPDATE_TEXT_TOOL, DELETE_TEXT_TOOL] {
             let mut call = fixture().2;
             call.name = tool.into();
@@ -2039,7 +2039,7 @@ mod tests {
             validate_mutation_permission_input(session, tool, Some(&call.arguments_json), 1000)
                 .unwrap();
             let request_call = ToolCall { id: "permission".into(), name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json: serde_json::json!({"items":[{
-                "item_id":"mutation", "provider_id":crate::device_assistant::TEXT_FILE_PROVIDER_ID,
+                "item_id":"mutation", "provider_id":crate::ai_assistant::TEXT_FILE_PROVIDER_ID,
                 "tool_name":tool,"expected_effect":"write_artifact", "exact_input":serde_json::from_str::<serde_json::Value>(&call.arguments_json).unwrap(),
                 "suggested_ttl_seconds":60,"suggested_max_uses":50,"reason":"Perform the requested exact text change"
             }]}).to_string() };
@@ -2063,7 +2063,7 @@ mod tests {
                 },
             }];
             let inventory = vec![CapabilityAvailability {
-                provider_id: crate::device_assistant::TEXT_FILE_PROVIDER_ID.into(),
+                provider_id: crate::ai_assistant::TEXT_FILE_PROVIDER_ID.into(),
                 capability_id: capability.wire.capability_id.clone(),
                 tool_name: tool.into(),
                 compiled: true,

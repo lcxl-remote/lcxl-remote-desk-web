@@ -15,7 +15,7 @@ impl SessionSeam for ReviewStore<'_> {
         params: ClaimTurnParams,
     ) -> Result<PersistedAgentSession, ClaimError> {
         let mut session = self.mem.claim_turn(params).await?;
-        session.surface = AgentSessionSurface::DeviceAssistant;
+        session.surface = AgentSessionSurface::AiAssistant;
         Ok(session)
     }
     async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError> {

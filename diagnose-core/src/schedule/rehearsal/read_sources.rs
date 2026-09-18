@@ -287,7 +287,7 @@ mod tests {
             content: "original result".into(),
             image_data_url: None,
         };
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let mut envelope = read_result_envelope(
             &registry,
             &call,

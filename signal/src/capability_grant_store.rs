@@ -382,7 +382,7 @@ impl SignalCapabilityGrantStore {
         &self,
         request: PrepareCapabilityCall<'_>,
     ) -> Result<PreparedCapabilityCall, DbErr> {
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         match self.prepare_outcome(request, &registry).await? {
             CapabilityPreparation::Ready(work) => Ok(work),
             CapabilityPreparation::PermissionRequired(_) => {

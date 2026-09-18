@@ -59,7 +59,7 @@ pub(super) fn validate_destination(
 ) -> Result<bool, DbErr> {
     let action = &original.receipt.action;
     let call = &original.original_call_id;
-    if session.surface != AgentSessionSurface::DeviceAssistant
+    if session.surface != AgentSessionSurface::AiAssistant
         || session
             .execution_state
             .tasks()
@@ -267,7 +267,7 @@ impl SignalCapabilityGrantStore {
         session: &mut PersistedAgentSession,
         now: &str,
     ) -> Result<bool, DbErr> {
-        if session.surface != AgentSessionSurface::DeviceAssistant {
+        if session.surface != AgentSessionSurface::AiAssistant {
             return Ok(false);
         }
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;

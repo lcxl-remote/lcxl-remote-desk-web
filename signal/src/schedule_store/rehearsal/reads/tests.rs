@@ -66,7 +66,7 @@ async fn fixture_with_text(
         scope.clone(),
         now.to_rfc3339(),
     );
-    session.surface = AgentSessionSurface::DeviceAssistant;
+    session.surface = AgentSessionSurface::AiAssistant;
     session.client_conversation_id = Some(started.client_conversation_id.clone());
     session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
     session.input_revision = 1;
@@ -130,7 +130,7 @@ async fn fixture_with_text(
         destination: &destination,
         now_unix_ms: now.timestamp_millis() as u64,
     };
-    let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+    let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
     let preflight =
         ReadCallPreflight::build(&registry, ProductSurface::OssPersonalOwner, &call, &binding)
             .unwrap();

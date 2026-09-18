@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn every_registered_tool_has_a_consistent_candidate_and_scope_projection() {
-        let providers = crate::device_assistant::device_assistant_provider_registry();
+        let providers = crate::ai_assistant::ai_assistant_provider_registry();
         for tool in providers.registered_tools() {
             let descriptor = providers.capability_for_tool(tool.name()).unwrap();
             for selected in [false, true] {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::device_assistant::*;
+use crate::ai_assistant::*;
 use serde_json::json;
 
 fn now() -> u64 {
@@ -14,7 +14,7 @@ fn call(action: UiSemanticAction) -> ToolCall {
 
 #[test]
 fn both_orchestrators_derive_application_ui_authority_for_the_same_bounded_actions() {
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     for action in [
         UiSemanticAction::Invoke,
         UiSemanticAction::Select,
@@ -119,7 +119,7 @@ fn semantic_scroll_accepts_only_nonempty_discrete_axis_amounts() {
 
 #[test]
 fn original_ui_reference_deadline_and_policy_are_checked_without_renewal() {
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     let call = call(UiSemanticAction::Invoke);
     let input = UiCallPreflight::build(
         &registry,

@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
-import type { DeviceAssistantToolActivity } from '@/features/desk/use-device-assistant-chat';
+import type { AiAssistantToolActivity } from '@/features/desk/use-ai-assistant-chat';
 import { useDeskSignaling } from '@/features/desk/use-desk-signaling';
 import { ScheduleClient } from './client';
 import { ProposalReview } from './proposal-review';
 
-export function ScheduleProposalCards({ tools, running = false, deviceId, connectionId }: { tools: DeviceAssistantToolActivity[]; running?: boolean; deviceId: string; connectionId: string }) {
+export function ScheduleProposalCards({ tools, running = false, deviceId, connectionId }: { tools: AiAssistantToolActivity[]; running?: boolean; deviceId: string; connectionId: string }) {
     const { t } = useTranslation();
     const { isConnected, subscribe, sendTracked, cancelQueued } = useDeskSignaling();
     const client = useMemo(() => new ScheduleClient(sendTracked, cancelQueued), [sendTracked, cancelQueued]);

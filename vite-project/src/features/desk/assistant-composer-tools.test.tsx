@@ -11,8 +11,8 @@ describe('assistant composer tools', () => {
         const onSubmit = vi.fn();
         render(<form onSubmit={onSubmit}><AssistantComposerTools meter={<span data-testid="meter" />} onDetails={onDetails} onPermissionHistory={onPermissionHistory} /></form>);
         const tools = screen.getByTestId('assistant-composer-tools');
-        const details = screen.getByRole('button', { name: 'pages.deviceAssistant.workspace.details' });
-        const history = screen.getByRole('button', { name: 'pages.deviceAssistant.permissionHistory' });
+        const details = screen.getByRole('button', { name: 'pages.aiAssistant.workspace.details' });
+        const history = screen.getByRole('button', { name: 'pages.aiAssistant.permissionHistory' });
         expect(Array.from(tools.children)).toEqual([screen.getByTestId('meter'), details, history]);
         for (const button of [details, history]) {
             expect(button.title).toBe(button.getAttribute('aria-label'));
@@ -32,8 +32,8 @@ it('places scheduled tasks immediately after directories and opens them without 
     const onSubmit = vi.fn();
     render(<form onSubmit={onSubmit}><AssistantComposerTools meter={null} onDetails={() => {}}
         onPermissionHistory={() => {}} onDirectories={() => {}} onSchedules={onSchedules} /></form>);
-    const directories = screen.getByRole('button', { name: 'pages.deviceAssistant.directories.title' });
-    const schedules = screen.getByRole('button', { name: 'pages.deviceAssistant.schedules.title' });
+    const directories = screen.getByRole('button', { name: 'pages.aiAssistant.directories.title' });
+    const schedules = screen.getByRole('button', { name: 'pages.aiAssistant.schedules.title' });
     expect(directories.nextElementSibling).toBe(schedules);
     fireEvent.click(schedules);
     expect(onSchedules).toHaveBeenCalledOnce();

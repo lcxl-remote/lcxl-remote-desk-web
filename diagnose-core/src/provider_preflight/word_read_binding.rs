@@ -90,7 +90,7 @@ pub fn resolve_word_read(
     target: &ObjectRef,
     now: u64,
 ) -> Result<WordReadBinding, AgentError> {
-    use crate::{chat::ChatRole, device_assistant::windows_word};
+    use crate::{ai_assistant::windows_word, chat::ChatRole};
     let mut selected = None;
     for message in &session.conversation {
         if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {

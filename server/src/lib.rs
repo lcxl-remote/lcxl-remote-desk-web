@@ -23,8 +23,8 @@ pub mod model;
 pub mod openapi;
 pub mod service;
 pub mod telemetry;
+pub mod terminal_ai_assistant;
 pub mod terminal_complete;
-pub mod terminal_copilot;
 pub mod transport_guard;
 pub mod version;
 #[cfg(windows)]
@@ -57,12 +57,12 @@ use crate::{
         redeem::redeem_code,
         service_mgmt::{install_service, uninstall_service},
         settings::{
-            ack_security_approval, query_ai_policy_settings, query_collection_policy_settings,
-            query_device_assistant_settings, query_log_settings, query_security_settings,
+            ack_security_approval, query_ai_assistant_settings, query_ai_policy_settings,
+            query_collection_policy_settings, query_log_settings, query_security_settings,
             query_settings, query_telemetry_status, query_turn_client_settings,
             query_turn_settings, regenerate_turn_secret, submit_security_approval,
-            update_ai_policy_settings, update_collection_policy_settings,
-            update_device_assistant_settings, update_log_settings, update_security_settings,
+            update_ai_assistant_settings, update_ai_policy_settings,
+            update_collection_policy_settings, update_log_settings, update_security_settings,
             update_settings, update_telemetry_consent, update_turn_client_settings,
             update_turn_settings,
         },
@@ -95,14 +95,14 @@ use actix_web::{
 use clap::Parser as _;
 use desk_signal::{
     controller::{
+        ai_assistant_session::{
+            cancel_ai_assistant_background_task, decide_ai_assistant_permission,
+            delete_ai_assistant_session, delete_assistant_image, get_ai_assistant_session,
+            get_assistant_image, list_ai_assistant_sessions, list_assistant_images,
+            revoke_ai_assistant_capability_grant,
+        },
         ai_usage::get_model_usage,
         connection::list_connections,
-        device_assistant_session::{
-            cancel_device_assistant_background_task, decide_device_assistant_permission,
-            delete_assistant_image, delete_device_assistant_session, get_assistant_image,
-            get_device_assistant_session, list_assistant_images, list_device_assistant_sessions,
-            revoke_device_assistant_capability_grant,
-        },
         device_code::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
             update_device_code,
@@ -263,23 +263,23 @@ pub fn configure_api_surface(
                 // no embedded signaling route, so it never offers this endpoint.
                 if opts.include_signaling {
                     cfg.service(create_token)
-                        .service(get_device_assistant_session)
+                        .service(get_ai_assistant_session)
                         .service(list_assistant_images)
-                        .service(desk_signal::controller::device_assistant_session::list_assistant_attachments)
-                        .service(desk_signal::controller::device_assistant_session::get_assistant_attachment)
-                        .service(desk_signal::controller::device_assistant_session::read_assistant_attachment)
-                        .service(desk_signal::controller::device_assistant_session::delete_assistant_attachments)
+                        .service(desk_signal::controller::ai_assistant_session::list_assistant_attachments)
+                        .service(desk_signal::controller::ai_assistant_session::get_assistant_attachment)
+                        .service(desk_signal::controller::ai_assistant_session::read_assistant_attachment)
+                        .service(desk_signal::controller::ai_assistant_session::delete_assistant_attachments)
                         .service(get_assistant_image)
                         .service(delete_assistant_image)
                         .service(desk_signal::controller::file_recovery::manage_device_file_recovery)
                         .service(desk_signal::controller::file_recovery::list_file_recovery_cleanup)
                         .service(desk_signal::controller::file_recovery::retry_file_recovery_cleanup)
                         .service(desk_signal::controller::file_recovery::export_device_file_recovery)
-                        .service(decide_device_assistant_permission)
-                        .service(revoke_device_assistant_capability_grant)
-                        .service(cancel_device_assistant_background_task)
-                        .service(list_device_assistant_sessions)
-                        .service(delete_device_assistant_session);
+                        .service(decide_ai_assistant_permission)
+                        .service(revoke_ai_assistant_capability_grant)
+                        .service(cancel_ai_assistant_background_task)
+                        .service(list_ai_assistant_sessions)
+                        .service(delete_ai_assistant_session);
                 }
             })
             .service(
@@ -291,8 +291,8 @@ pub fn configure_api_surface(
                     .service(update_ai_policy_settings)
                     .service(query_collection_policy_settings)
                     .service(update_collection_policy_settings)
-                    .service(query_device_assistant_settings)
-                    .service(update_device_assistant_settings)
+                    .service(query_ai_assistant_settings)
+                    .service(update_ai_assistant_settings)
                     .service(controller::computer_use_policy::query_computer_use_application_policy)
                     .service(controller::file_recovery::query_local_file_recovery)
                     .service(controller::file_recovery::update_local_file_recovery_policy)
@@ -577,8 +577,7 @@ pub async fn run_with_hub(
     // The durable host setting is authoritative. Publish it before starting
     // signaling maintenance tasks so the default-disabled gate cannot briefly
     // admit work during startup.
-    desk_signal::device_assistant_gate::global_device_assistant_gate()
-        .replace(settings.device_assistant);
+    desk_signal::ai_assistant_gate::global_ai_assistant_gate().replace(settings.ai_assistant);
 
     // The host's authoritative security policy, and the only path that commits
     // it or the locale durably. Every mode builds one; the modes with no worker
@@ -691,7 +690,7 @@ pub async fn run_with_hub(
             desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
                 desk_signal::db::get_db().clone(),
                 connection_map.clone(),
-                desk_signal::device_assistant_gate::global_device_assistant_gate(),
+                desk_signal::ai_assistant_gate::global_ai_assistant_gate(),
             )
             .run(),
         );
@@ -699,7 +698,7 @@ pub async fn run_with_hub(
             desk_signal::schedule_executor::SignalScheduleExecutor::new(
                 desk_signal::db::get_db().clone(),
                 connection_map.clone(),
-                desk_signal::device_assistant_gate::global_device_assistant_gate(),
+                desk_signal::ai_assistant_gate::global_ai_assistant_gate(),
             )
             .run(),
         );
@@ -1441,11 +1440,11 @@ mod tests {
             "/api/desk/settings",
             "/api/desk/device_codes",
             "/api/desk/signaling",
-            "/api/my/device-assistant-session",
-            "/api/my/device-assistant-session/permission-decision",
-            "/api/my/device-assistant-session/background-task/cancel",
-            "/api/my/device-assistant-sessions",
-            "/api/my/device-assistant-session/delete",
+            "/api/my/ai-assistant-session",
+            "/api/my/ai-assistant-session/permission-decision",
+            "/api/my/ai-assistant-session/background-task/cancel",
+            "/api/my/ai-assistant-sessions",
+            "/api/my/ai-assistant-session/delete",
             "/api/turn/info",
         ] {
             assert!(
@@ -1595,8 +1594,8 @@ mod tests {
             max_ai_command_runtime_ms: None,
             exec_pty: false,
             exec_pty_elevation: false,
-            device_assistant_revision: None,
-            device_assistant_enabled: None,
+            ai_assistant_revision: None,
+            ai_assistant_enabled: None,
         };
         let query = serde_urlencoded::to_string(&version).unwrap();
         let uri = format!("/api/desk/signaling?{query}");

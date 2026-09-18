@@ -9,12 +9,12 @@ import { useListConnections } from "@/services/hooks/connectionController/useLis
 import { Skeleton } from "@/components/ui/skeleton"
 import { Badge } from "@/components/ui/badge"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
-import { isDeviceAssistantEnabled } from "@/features/desk/device-assistant-switch"
+import { isAiAssistantEnabled } from "@/features/desk/ai-assistant-switch"
 
-const OSS_DEVICE_ASSISTANT_ENABLED = import.meta.env.BASE_URL !== '/console/';
+const OSS_AI_ASSISTANT_ENABLED = import.meta.env.BASE_URL !== '/console/';
 
 export default function DeskDashboard({
-    showAssistant = OSS_DEVICE_ASSISTANT_ENABLED,
+    showAssistant = OSS_AI_ASSISTANT_ENABLED,
 }: { showAssistant?: boolean }) {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
@@ -175,20 +175,20 @@ export default function DeskDashboard({
                     )}
 
                     {showAssistant && restricted.ownerPlaneVisible
-                        && isDeviceAssistantEnabled(connection.version_info) && (
+                        && isAiAssistantEnabled(connection.version_info) && (
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/assistant`)}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
                                 <AiAssistantIcon className="h-5 w-5 text-violet-500" />
-                                {t('pages.deskDashboard.deviceAssistant')}
+                                {t('pages.deskDashboard.aiAssistant')}
                             </CardTitle>
-                            <CardDescription>{t('pages.deskDashboard.deviceAssistantDesc')}</CardDescription>
+                            <CardDescription>{t('pages.deskDashboard.aiAssistantDesc')}</CardDescription>
                         </CardHeader>
                         <CardContent className="flex-1">
                             <ul className="text-sm text-muted-foreground space-y-2">
-                                <li>• {t('pages.deskDashboard.deviceAssistantFeature1')}</li>
-                                <li>• {t('pages.deskDashboard.deviceAssistantFeature2')}</li>
-                                <li>• {t('pages.deskDashboard.deviceAssistantFeature3')}</li>
+                                <li>• {t('pages.deskDashboard.aiAssistantFeature1')}</li>
+                                <li>• {t('pages.deskDashboard.aiAssistantFeature2')}</li>
+                                <li>• {t('pages.deskDashboard.aiAssistantFeature3')}</li>
                             </ul>
                         </CardContent>
                         <CardFooter>

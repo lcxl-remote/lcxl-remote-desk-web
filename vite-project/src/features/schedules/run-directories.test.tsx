@@ -6,8 +6,8 @@ import { AssistantFileScope } from '../desk/assistant-file-scope';
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 type Props = Parameters<typeof RunDirectories>[0];
 const baseTime = Date.parse('2026-09-14T12:00:00Z');
-const approve = () => screen.getByRole('button', { name: 'pages.deviceAssistant.directories.approve' });
-const reject = () => screen.getByRole('button', { name: 'pages.deviceAssistant.directories.reject' });
+const approve = () => screen.getByRole('button', { name: 'pages.aiAssistant.directories.approve' });
+const reject = () => screen.getByRole('button', { name: 'pages.aiAssistant.directories.reject' });
 function props(path: string): Props {
     return { scheduleId: 'task-1', runId: 'run-1', connected: true, loading: false,
         snapshot: { sessionId: 'session-1', requestId: 'run-1', fileScope: { revision: 7, directories: [{
@@ -30,7 +30,7 @@ describe.each(['C:\\用户资料\\季度 报告', '/Users/owner/季度 报告'])
         expect(approve()).toBeEnabled();
         await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
         expect(approve()).toBeEnabled();
-        expect(screen.queryByText('pages.deviceAssistant.directories.expired')).toBeNull();
+        expect(screen.queryByText('pages.aiAssistant.directories.expired')).toBeNull();
         await act(async () => { fireEvent.click(approve()); });
         if (surface === 'scheduled') expect(input.client.request).toHaveBeenCalledWith(expect.objectContaining({ approve: true, expected_scope_revision: 7 }));
         else expect(update).toHaveBeenCalledWith(expect.objectContaining({ approve: true, expected_revision: 7 }), expect.any(String));
@@ -69,7 +69,7 @@ describe.each(['C:\\用户资料\\季度 报告', '/Users/owner/季度 报告'])
         render(<RunDirectories {...input} />);
         await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
         expect(screen.getByText('schedules.directoryState.approved')).toBeInTheDocument();
-        const remove = screen.getByRole('button', { name: 'pages.deviceAssistant.directories.remove' });
+        const remove = screen.getByRole('button', { name: 'pages.aiAssistant.directories.remove' });
         expect(remove).toBeEnabled();
         await act(async () => { fireEvent.click(remove); });
         expect(input.client.request).toHaveBeenCalledWith(expect.objectContaining({ operation: 'revoke_run_directory', expected_scope_revision: 7 }));

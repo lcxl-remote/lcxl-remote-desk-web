@@ -18,7 +18,7 @@ describe('assistant detail navigation', () => {
         expect(screen.queryByText('complete-inventory')).toBeNull();
         fireEvent.click(screen.getByText('open'));
         expect(screen.getByText('activity-only')).toBeTruthy();
-        fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.workspace.capabilities' }));
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.workspace.capabilities' }));
         expect(screen.getByText('complete-inventory')).toBeTruthy();
         expect(screen.queryByText('selection-only')).toBeNull();
         expect(screen.queryByText('manual-observation')).toBeNull();

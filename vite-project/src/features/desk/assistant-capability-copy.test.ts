@@ -7,13 +7,13 @@ import { capabilityDescriptionKey } from './assistant-capability-copy';
 
 describe('capability inventory copy', () => {
     it('uses an explicit fallback for unknown key namespaces', () => {
-        expect(capabilityDescriptionKey('future.capability')).toBe('pages.deviceAssistant.workspace.descriptionUnavailable');
+        expect(capabilityDescriptionKey('future.capability')).toBe('pages.aiAssistant.workspace.descriptionUnavailable');
         expect(capabilityDescriptionKey('assistant.capability.systemCommandExecute'))
             .toBe('assistant.capabilityDescription.systemCommandExecute');
     });
     it('provides a name and description in both languages for every registered capability', () => {
-        const moduleRoot = '../diagnose-core/src/device_assistant';
-        const source = [readFileSync('../diagnose-core/src/device_assistant.rs', 'utf8'),
+        const moduleRoot = '../diagnose-core/src/ai_assistant';
+        const source = [readFileSync('../diagnose-core/src/ai_assistant.rs', 'utf8'),
             ...readdirSync(moduleRoot, { recursive: true }).filter(name => name.endsWith('.rs'))
                 .map(name => readFileSync(join(moduleRoot, name), 'utf8'))].join('\n');
         const keys = [...new Set([...source.matchAll(/"(assistant\.capability\.[A-Za-z]+)"/g)].map((match) => match[1]))];

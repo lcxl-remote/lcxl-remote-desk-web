@@ -2,8 +2,8 @@ use super::*;
 use crate::agent_session_store::{SignalAgentSessionStore, UpdateObjectContext};
 use desk_agent_protocol::{
     Capability, ExecutionMode,
+    ai_assistant::{AiAssistantObjectContextOperation, AiAssistantObjectContextUpdate},
     computer_use::{ObjectKind, ObjectRef},
-    device_assistant::{DeviceAssistantObjectContextOperation, DeviceAssistantObjectContextUpdate},
 };
 use desk_diagnose_core::{
     chat::ToolCall,
@@ -42,10 +42,8 @@ async fn setup(url: &str) -> SignalAgentRunEventStore {
 }
 
 fn sessions(store: &SignalAgentRunEventStore) -> SignalAgentSessionStore {
-    SignalAgentSessionStore::new(store.db.clone()).with_client_metadata(
-        Some("client-run".into()),
-        AgentSessionSurface::DeviceAssistant,
-    )
+    SignalAgentSessionStore::new(store.db.clone())
+        .with_client_metadata(Some("client-run".into()), AgentSessionSurface::AiAssistant)
 }
 
 async fn session_row(store: &SignalAgentRunEventStore) -> agent_session::Model {
@@ -71,7 +69,7 @@ async fn select_live_document(store: &SignalAgentRunEventStore) {
     };
 
     let now = Utc::now();
-    let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+    let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
     let capability = registry
         .capability_for_tool("inspect_live_document")
         .unwrap();
@@ -101,7 +99,7 @@ async fn select_live_document(store: &SignalAgentRunEventStore) {
             capability: Capability::DocumentLiveInspect,
             adapter: ComputerUseAdapterRef {
                 kind: ComputerUseAdapterKind::IworkPages,
-                version: desk_diagnose_core::device_assistant::IWORK_ADAPTER_VERSION.into(),
+                version: desk_diagnose_core::ai_assistant::IWORK_ADAPTER_VERSION.into(),
             },
             supported: true,
             ready: true,
@@ -154,12 +152,12 @@ async fn attach(store: &SignalAgentRunEventStore, id: &str, kind: ObjectKind) ->
         expires_at: (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
     };
     let operation = if kind == ObjectKind::TerminalOutput {
-        DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+        AiAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref: reference,
             display_summary: "selected output".into(),
         }
     } else {
-        DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+        AiAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref: reference,
             display_summary: "arbitrary metadata, not a file type".into(),
         }
@@ -169,7 +167,7 @@ async fn attach(store: &SignalAgentRunEventStore, id: &str, kind: ObjectKind) ->
             run_id: "run".into(),
             actor_id: "7".into(),
             device_id: "device".into(),
-            update: DeviceAssistantObjectContextUpdate {
+            update: AiAssistantObjectContextUpdate {
                 conversation_id: "client-run".into(),
                 client_request_id: id.into(),
                 operation,
@@ -193,10 +191,10 @@ async fn detach(store: &SignalAgentRunEventStore, object: &ContextAttachment) {
             run_id: "run".into(),
             actor_id: "7".into(),
             device_id: "device".into(),
-            update: DeviceAssistantObjectContextUpdate {
+            update: AiAssistantObjectContextUpdate {
                 conversation_id: "client-run".into(),
                 client_request_id: format!("detach-{}", object.attachment_id),
-                operation: DeviceAssistantObjectContextOperation::Detach {
+                operation: AiAssistantObjectContextOperation::Detach {
                     attachment_id: object.attachment_id.clone(),
                 },
             },
@@ -215,7 +213,7 @@ fn input(id: &str, mut objects: Vec<ContextAttachment>) -> AppendUserFollowupPar
         actor_id: "7".into(),
         device_id: "device".into(),
         client_conversation_id: Some("client-run".into()),
-        surface: AgentSessionSurface::DeviceAssistant,
+        surface: AgentSessionSurface::AiAssistant,
         policy_revision: desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
         current_scope: AgentScope {
             granted: vec![Capability::FileContentRead],

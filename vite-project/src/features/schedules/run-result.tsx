@@ -8,12 +8,12 @@ import type { ScheduleClient } from './client';
 import { Button } from '@/components/ui/button';
 import { agentErrorMessage } from '@/lib/agent-error-i18n';
 import { AssistantCommandResult } from '@/features/desk/assistant-command-result';
-import { deskErrorCodeEnum, type DeviceAssistantSessionSnapshotDto, type SnapshotMessageDto } from '@/services/types';
+import { deskErrorCodeEnum, type AiAssistantSessionSnapshotDto, type SnapshotMessageDto } from '@/services/types';
 
 export function RunResult({ scheduleId, runId, connected, onBack, client, connectionIds }: { client?: Pick<ScheduleClient, 'request'>; connectionIds?: Record<string, string>; scheduleId: string; runId: string; connected: boolean; onBack: () => void }) {
     const { t } = useTranslation();
     const [messages, setMessages] = useState<SnapshotMessageDto[]>([]);
-    const [snapshot, setSnapshot] = useState<DeviceAssistantSessionSnapshotDto | null>(null);
+    const [snapshot, setSnapshot] = useState<AiAssistantSessionSnapshotDto | null>(null);
     const [cursor, setCursor] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const [failed, setFailed] = useState(false);
@@ -28,11 +28,11 @@ export function RunResult({ scheduleId, runId, connected, onBack, client, connec
         try {
             const params = new URLSearchParams({ scheduled_task: scheduleId, scheduled_run: runId, message_limit: '100' });
             if (before) params.set('message_before', before);
-            const response = await fetch(`/api/my/device-assistant-session?${params}`, { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal });
+            const response = await fetch(`/api/my/ai-assistant-session?${params}`, { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal });
             if (!response.ok) throw new Error('snapshot unavailable');
             const body = await response.json();
             if (current !== epoch.current) return;
-            const snapshot = body?.data as DeviceAssistantSessionSnapshotDto | undefined;
+            const snapshot = body?.data as AiAssistantSessionSnapshotDto | undefined;
             if (body?.code !== deskErrorCodeEnum.SUCCESS || !snapshot || !Array.isArray(snapshot.messages)
                 || (before && (watermark.current?.session !== snapshot.sessionId || watermark.current?.seq !== snapshot.seq))) throw new Error('snapshot unavailable');
             setSnapshot(snapshot);

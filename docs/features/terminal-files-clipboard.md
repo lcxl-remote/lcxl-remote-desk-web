@@ -16,12 +16,12 @@ page triggers the browser's leave confirmation because disconnecting ends that
 remote shell and any processes running inside it. The shell-selection page and a
 terminal that has already closed do not trigger this prompt.
 
-The Terminal Copilot side panel can be widened or narrowed by dragging its left
+The Terminal AI Assistant side panel can be widened or narrowed by dragging its left
 edge. Its conversation follows new streaming text only while the reader remains
 at the bottom; after the reader scrolls up, a down-arrow button returns to the
 latest content instead of forcibly moving the current view.
 
-Copilot renders both streaming and completed assistant prose as GitHub-flavored
+Assistant renders both streaming and completed assistant prose as GitHub-flavored
 Markdown, including headings, lists, code, and tables. Raw HTML is ignored and
 model-supplied image URLs are not loaded.
 

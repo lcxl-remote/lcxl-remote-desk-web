@@ -41,7 +41,7 @@ impl SignalAgentSessionStore {
             .check_subject(actor, device)
             .map_err(|_| internal("Conversation not accessible"))?;
         session
-            .check_surface(AgentSessionSurface::DeviceAssistant)
+            .check_surface(AgentSessionSurface::AiAssistant)
             .map_err(|_| internal("Conversation not accessible"))?;
         agent_schedule::Entity::update_many()
             .col_expr(agent_schedule::Column::Status, Expr::value("deleted"))

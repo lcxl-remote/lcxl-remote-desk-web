@@ -27,7 +27,7 @@ pub fn background_input_from_call(
         #[serde(rename = "geometry")]
         _geometry: Option<desk_agent_protocol::background_input::WindowInputGeometry>,
     }
-    if call.name != crate::device_assistant::EXECUTE_BACKGROUND_INPUT_TOOL
+    if call.name != crate::ai_assistant::EXECUTE_BACKGROUND_INPUT_TOOL
         || call.arguments_json.len() > 64 * 1024
     {
         return Err(unavailable());
@@ -228,7 +228,7 @@ mod tests {
     use serde_json::json;
     #[test]
     fn both_surfaces_bind_application_and_background_action_without_reference_deadline() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let app = json!({"token":"app","snapshot_id":"native","object_kind":"application","expires_at":"2000-01-01T00:00:00Z"});
         let window = json!({"token":"window","snapshot_id":"native","object_kind":"window","expires_at":"2000-01-01T00:00:00Z"});
         let call=ToolCall{id:"input".into(),name:"send_background_input".into(),arguments_json:json!({"application":app,"target":window,"action":{"kind":"type_text","text":"中文🙂"},"geometry":null}).to_string()};

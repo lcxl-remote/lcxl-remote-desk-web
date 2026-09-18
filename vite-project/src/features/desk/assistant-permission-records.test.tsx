@@ -21,8 +21,8 @@ describe('permission request history', () => {
         const requests = Array.from({ length: 100 }, (_, i) => request(`resolved-${i}`, 'approved'));
         render(<Records requests={requests} />);
         expect(screen.queryByText('resolved-0')).toBeNull();
-        expect(screen.queryByTestId('device-assistant-permission-requests')).toBeNull();
-        fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.permissionHistory' }));
+        expect(screen.queryByTestId('ai-assistant-permission-requests')).toBeNull();
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.permissionHistory' }));
         expect(screen.getByText('resolved-99')).toBeTruthy();
     });
 
@@ -37,7 +37,7 @@ describe('permission request history', () => {
 
     it('closes records when remounted for a different conversation', () => {
         const { rerender } = render(<Records key="a" requests={[request('old', 'denied')]} />);
-        fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.permissionHistory' }));
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.permissionHistory' }));
         rerender(<Records key="b" requests={[]} />);
         expect(screen.queryByRole('dialog')).toBeNull();
         expect(screen.queryByText('old')).toBeNull();

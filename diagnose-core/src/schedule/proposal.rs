@@ -15,7 +15,7 @@ pub const REQUEST_SCHEDULE: &str = "request_scheduled_task";
 
 /// Trusted clock context only. Locale and device location are never timezones.
 pub fn clock_prompt(session: &PersistedAgentSession, now_unix_ms: u64) -> String {
-    if session.surface != AgentSessionSurface::DeviceAssistant
+    if session.surface != AgentSessionSurface::AiAssistant
         || session.trigger_origin != TriggerOrigin::User
     {
         return String::new();
@@ -93,7 +93,7 @@ pub fn draft(
     if call.name != REQUEST_SCHEDULE
         || call.id.is_empty()
         || call.id.len() > 256
-        || session.surface != AgentSessionSurface::DeviceAssistant
+        || session.surface != AgentSessionSurface::AiAssistant
         || session.trigger_origin != TriggerOrigin::User
         || !session.turn_state.is_active()
         || session.input_revision == 0

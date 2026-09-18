@@ -1124,12 +1124,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // AI host → control-end responses are plain relayed types (no
             // authorization injection on the reply path).
             | SignalingType::AgentCapabilityCompleted
-            | SignalingType::DeviceAssistantUpdated
-            | SignalingType::DeviceAssistantCapabilitiesUpdated
-            | SignalingType::DeviceAssistantContextUpdated
-            | SignalingType::DeviceAssistantObjectContextUpdated
-            | SignalingType::DeviceAssistantSessionSelected
-            | SignalingType::TerminalCopilotUpdated
+            | SignalingType::AiAssistantUpdated
+            | SignalingType::AiAssistantCapabilitiesUpdated
+            | SignalingType::AiAssistantContextUpdated
+            | SignalingType::AiAssistantObjectContextUpdated
+            | SignalingType::AiAssistantSessionSelected
+            | SignalingType::TerminalAiAssistantUpdated
             | SignalingType::TerminalCompletionsGenerated
             | SignalingType::ExecutionPreviewGenerated
             | SignalingType::ExecutionCompleted
@@ -1235,8 +1235,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // ResolveExec is relayed unwrapped by the authorizer (`Forward`); with no
             // authorizer (signal server) it relays plainly, exactly like before.
             SignalingType::InvokeAgentCapability
-            | SignalingType::AskTerminalCopilot
-            | SignalingType::CancelTerminalCopilot
+            | SignalingType::AskTerminalAiAssistant
+            | SignalingType::CancelTerminalAiAssistant
             | SignalingType::GenerateTerminalCompletions
             | SignalingType::PreviewExecution
             // `ExecControl` acts on a command that is already running, so it goes
@@ -1247,12 +1247,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::DispatchComputerAction
             | SignalingType::CancelComputerAction
             | SignalingType::QueryComputerActionState
-            | SignalingType::AskDeviceAssistant
-            | SignalingType::CancelDeviceAssistant
-            | SignalingType::GetDeviceAssistantCapabilities
-            | SignalingType::UpdateDeviceAssistantContext
-            | SignalingType::UpdateDeviceAssistantObjectContext
-            | SignalingType::SelectDeviceAssistantSession
+            | SignalingType::AskAiAssistant
+            | SignalingType::CancelAiAssistant
+            | SignalingType::GetAiAssistantCapabilities
+            | SignalingType::UpdateAiAssistantContext
+            | SignalingType::UpdateAiAssistantObjectContext
+            | SignalingType::SelectAiAssistantSession
             | SignalingType::ManageScheduledTasks
             | SignalingType::ManageFileRecovery => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
@@ -1428,9 +1428,9 @@ impl<U: SignalingUser> SignalingHandler<U> {
                      not be sent inbound — dropping"
                 );
             }
-            SignalingType::UpdateDeviceAssistantSettings => {
+            SignalingType::UpdateAiAssistantSettings => {
                 log::warn!(
-                    "Received UpdateDeviceAssistantSettings from a client; it is server-originated \
+                    "Received UpdateAiAssistantSettings from a client; it is server-originated \
                      and must not be sent inbound — dropping"
                 );
             }

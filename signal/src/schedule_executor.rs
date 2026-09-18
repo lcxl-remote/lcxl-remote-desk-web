@@ -2,8 +2,8 @@
 mod fresh;
 use crate::owned_task;
 use crate::{
-    device_assistant_gate::DeviceAssistantGate,
-    device_assistant_orchestrator::{claim_scheduled_permission, resume_scheduled_turn},
+    ai_assistant_gate::AiAssistantGate,
+    ai_assistant_orchestrator::{claim_scheduled_permission, resume_scheduled_turn},
     entity::{agent_schedule_run as run, agent_session},
     schedule_store::{
         ClaimedContinuation, ContinuationClaim, ContinuationLease, ScheduleStore,
@@ -38,7 +38,7 @@ pub struct ContinuationScanReport {
 pub struct SignalScheduleExecutor {
     db: DatabaseConnection,
     connections: web::Data<SharedConnectionMap>,
-    gate: Arc<DeviceAssistantGate>,
+    gate: Arc<AiAssistantGate>,
 }
 
 enum DispatchResult {
@@ -52,7 +52,7 @@ impl SignalScheduleExecutor {
     pub fn new(
         db: DatabaseConnection,
         connections: web::Data<SharedConnectionMap>,
-        gate: Arc<DeviceAssistantGate>,
+        gate: Arc<AiAssistantGate>,
     ) -> Self {
         Self {
             db,

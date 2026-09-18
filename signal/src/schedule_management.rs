@@ -21,7 +21,7 @@ pub async fn handle(
     actor: &ConnectionState,
     model: &SignalingModel,
     connections: actix_web::web::Data<desk_signal_facade::model::connection::SharedConnectionMap>,
-    gate: std::sync::Arc<crate::device_assistant_gate::DeviceAssistantGate>,
+    gate: std::sync::Arc<crate::ai_assistant_gate::AiAssistantGate>,
 ) -> ControlFrameOutcome {
     let result = async {
         let owner = cookie_owner(&actor.auth_context).ok_or(ScheduleStoreError::NotFound)?;
@@ -810,7 +810,7 @@ async fn resolve_source(
             .check_subject(&actor, &draft.target_device_id)
             .is_err()
         || session
-            .check_surface(AgentSessionSurface::DeviceAssistant)
+            .check_surface(AgentSessionSurface::AiAssistant)
             .is_err()
     {
         return Err(ScheduleStoreError::NotFound);
@@ -960,7 +960,7 @@ mod tests {
             },
             "2026-09-06T00:00:00Z",
         );
-        session.surface = AgentSessionSurface::DeviceAssistant;
+        session.surface = AgentSessionSurface::AiAssistant;
         session.client_conversation_id = Some("chat-1".into());
         session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
         session.input_revision = 1;
@@ -1148,7 +1148,7 @@ mod tests {
             Err(ScheduleStoreError::NotFound)
         ));
         session.actor_id = "1".into();
-        session.surface = AgentSessionSurface::TerminalCopilot;
+        session.surface = AgentSessionSurface::TerminalAiAssistant;
         let mut changed: session_row::ActiveModel = row.into();
         changed.state_json = Set(session.encode_json_for_storage().unwrap());
         changed.update(&db).await.unwrap();

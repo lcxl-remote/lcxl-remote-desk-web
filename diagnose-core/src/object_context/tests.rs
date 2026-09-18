@@ -10,7 +10,7 @@ fn destination() -> DestinationIdentity {
     }
 }
 
-fn update(kind: ObjectKind) -> DeviceAssistantObjectContextUpdate {
+fn update(kind: ObjectKind) -> AiAssistantObjectContextUpdate {
     let object_ref = ObjectRef {
         token: "opaque-ref".into(),
         snapshot_id: "generation-1".into(),
@@ -18,20 +18,20 @@ fn update(kind: ObjectKind) -> DeviceAssistantObjectContextUpdate {
         expires_at: "2030-01-01T00:00:00Z".into(),
     };
     let operation = match kind {
-        ObjectKind::TerminalOutput => DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+        ObjectKind::TerminalOutput => AiAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref,
             display_summary: "Selected output".into(),
         },
-        ObjectKind::Window => DeviceAssistantObjectContextOperation::AttachWindow {
+        ObjectKind::Window => AiAssistantObjectContextOperation::AttachWindow {
             object_ref,
             display_summary: "Selected window".into(),
         },
-        _ => DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+        _ => AiAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref,
             display_summary: "Selected file".into(),
         },
     };
-    DeviceAssistantObjectContextUpdate {
+    AiAssistantObjectContextUpdate {
         conversation_id: "client-conversation".into(),
         client_request_id: "client-request".into(),
         operation,
@@ -39,7 +39,7 @@ fn update(kind: ObjectKind) -> DeviceAssistantObjectContextUpdate {
 }
 
 fn build(
-    update: &DeviceAssistantObjectContextUpdate,
+    update: &AiAssistantObjectContextUpdate,
     id: &str,
     now: u64,
 ) -> Result<ObjectContextMutation, AgentError> {
@@ -81,7 +81,7 @@ fn session() -> PersistedAgentSession {
     );
     session.adopt_client_metadata(
         Some("client-conversation"),
-        AgentSessionSurface::DeviceAssistant,
+        AgentSessionSurface::AiAssistant,
     );
     session
 }
@@ -146,7 +146,7 @@ fn invalid_selection_never_builds_authority() {
     assert!(build(&update(ObjectKind::TerminalOutput), "id", 0).is_err());
     assert!(build(&update(ObjectKind::TerminalOutput), "", 1).is_err());
     let mut request = update(ObjectKind::TerminalOutput);
-    let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+    let AiAssistantObjectContextOperation::AttachTerminalOutput {
         display_summary, ..
     } = &mut request.operation
     else {
@@ -154,7 +154,7 @@ fn invalid_selection_never_builds_authority() {
     };
     *display_summary = "x".repeat(513);
     assert!(build(&request, "id", 1).is_err());
-    let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+    let AiAssistantObjectContextOperation::AttachTerminalOutput {
         object_ref,
         display_summary,
     } = &mut request.operation
@@ -249,8 +249,7 @@ fn selecting_another_window_atomically_replaces_the_previous_focus() {
 
     let mut request = update(ObjectKind::Window);
     request.client_request_id = "select-second-window".into();
-    let DeviceAssistantObjectContextOperation::AttachWindow { object_ref, .. } =
-        &mut request.operation
+    let AiAssistantObjectContextOperation::AttachWindow { object_ref, .. } = &mut request.operation
     else {
         unreachable!()
     };

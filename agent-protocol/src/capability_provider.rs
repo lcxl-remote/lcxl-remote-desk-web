@@ -549,7 +549,7 @@ pub struct CapabilityInventoryEntry {
     pub provider_version: u16,
     pub capability: CapabilityWireDescriptor,
     /// Whether a control end may place this capability id in
-    /// `DeviceAssistantAsk.selected_capability_ids`. This server-authored bit
+    /// `AiAssistantAsk.selected_capability_ids`. This server-authored bit
     /// is metadata, not a grant or readiness claim.
     #[serde(default)]
     pub context_selectable: bool,

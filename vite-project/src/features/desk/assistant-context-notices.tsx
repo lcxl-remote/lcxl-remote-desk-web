@@ -1,9 +1,9 @@
 import { Disclosure } from '@/components/ui/disclosure';
 import { useTranslation } from 'react-i18next';
 import type { ContextNoticeDto } from '@/services/types';
-import type { DeviceAssistantMessage } from './use-device-assistant-chat';
+import type { AiAssistantMessage } from './use-ai-assistant-chat';
 
-export function noticeMessageId(notice: ContextNoticeDto, messages: DeviceAssistantMessage[]): string | undefined {
+export function noticeMessageId(notice: ContextNoticeDto, messages: AiAssistantMessage[]): string | undefined {
     if (!notice.afterMessageId) return undefined;
     return messages.find(message => message.id === notice.afterMessageId
         || message.contextBoundaryIds?.includes(notice.afterMessageId!))?.id;
@@ -17,12 +17,12 @@ export function AssistantContextNotices({ notices, historical = false }: { notic
         return <p key={notice.id} data-testid="assistant-context-notice" className="text-center text-xs text-muted-foreground">
             {Number.isFinite(timestamp)
                 ? <time dateTime={notice.createdAt!}>{new Date(timestamp).toLocaleString(i18n.language)}</time>
-                : t('pages.deviceAssistant.contextNotice.unknownTime')}
+                : t('pages.aiAssistant.contextNotice.unknownTime')}
             {' · '}
-            {t(`pages.deviceAssistant.contextNotice.${notice.kind}`)}
+            {t(`pages.aiAssistant.contextNotice.${notice.kind}`)}
         </p>;
     });
-    if (historical) return <Disclosure className="text-xs text-muted-foreground" title={<>{t('pages.deviceAssistant.contextNotice.earlier')}</>} summaryClassName="cursor-pointer">
+    if (historical) return <Disclosure className="text-xs text-muted-foreground" title={<>{t('pages.aiAssistant.contextNotice.earlier')}</>} summaryClassName="cursor-pointer">
 
         <div className="max-h-32 space-y-2 overflow-auto pt-2">{rows}</div>
     </Disclosure>;

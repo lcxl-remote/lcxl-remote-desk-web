@@ -49,7 +49,7 @@ type RestResponse<T> = {
 
 type SaveState = "idle" | "saving" | "error"
 
-/** The AI role slot a selector targets. Diagnose and the terminal copilot both use
+/** The AI role slot a selector targets. Diagnose and the Terminal AI Assistant both use
  *  the `agent` model; terminal completion is a separate slot. */
 export type ModelRole = "agent" | "completion"
 

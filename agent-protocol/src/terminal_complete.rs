@@ -1,6 +1,6 @@
 //! Wire types for the in-terminal AI command completion (ghost-text).
 //!
-//! Completion is a sibling of [`crate::terminal_copilot`] but a **non-streaming**
+//! Completion is a sibling of [`crate::terminal_ai_assistant`] but a **non-streaming**
 //! request/response: the control end sends a [`TerminalCompleteAsk`] carrying the
 //! command prefix the operator is typing, and the orchestrator answers with a
 //! single [`TerminalCompleteResult`] (best-first candidates, or an error). The
@@ -10,7 +10,7 @@
 //! Trust boundary (the server is the source of truth):
 //! - The target device is **not** in this payload — it rides the outer
 //!   `SignalingModel.to_connection_id`, resolved and authorized server-side
-//!   exactly like a `Diagnose` / `TerminalCopilotAsk` frame.
+//!   exactly like a `Diagnose` / `TerminalAiAssistantAsk` frame.
 //! - [`TerminalCompletionContext`] is a **non-authoritative** prompt hint only; it
 //!   never participates in target resolution or authorization.
 //! - Each [`CommandCompletion`] carries a server-computed `risk` / [`ExecDecision`]
@@ -30,7 +30,7 @@ use crate::{AgentError, RiskLevel};
 /// Non-authoritative terminal context for a completion ask, supplied by the
 /// control end purely as a prompt hint. Redacted and length-capped server-side
 /// before any model dial. Deliberately leaner than
-/// [`crate::terminal_copilot::TerminalContext`]: completion is latency-sensitive,
+/// [`crate::terminal_ai_assistant::TerminalContext`]: completion is latency-sensitive,
 /// so only the environment plus a short scrollback is carried.
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,

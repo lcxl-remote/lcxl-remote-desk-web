@@ -5,7 +5,7 @@ import { deskErrorMessage, type ErrorCodeKeyMap } from '@/lib/desk-error-i18n';
 /**
  * Localize an agent error by its machine-readable `error_code`.
  *
- * Agent errors (copilot / diagnose / terminal-complete / exec) ride the
+ * Agent errors (assistant / diagnose / terminal-complete / exec) ride the
  * `AgentError` wire shape, which carries an optional `error_code`. The backend
  * sends only the numeric code plus a raw English `message`; the control end maps
  * the code to a localized string here so the UI is never English-only. An error
@@ -16,13 +16,13 @@ import { deskErrorMessage, type ErrorCodeKeyMap } from '@/lib/desk-error-i18n';
 const CODE_TO_KEY: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.SCHEDULE_MODEL_BUDGET_EXCEEDED]:
         'pages.agentError.scheduleModelBudgetExceeded',
-    [deskErrorCodeEnum.TERMINAL_COPILOT_DISABLED]: 'pages.agentError.terminalCopilotDisabled',
+    [deskErrorCodeEnum.TERMINAL_AI_ASSISTANT_DISABLED]: 'pages.agentError.terminalAiAssistantDisabled',
     [deskErrorCodeEnum.AI_MODEL_NOT_CONFIGURED]: 'pages.agentError.aiModelNotConfigured',
-    [deskErrorCodeEnum.COPILOT_STEP_LIMIT_EXCEEDED]: 'pages.agentError.copilotStepLimit',
-    [deskErrorCodeEnum.COPILOT_RESPONSE_TRUNCATED]: 'pages.agentError.copilotTruncated',
-    [deskErrorCodeEnum.COPILOT_PROTOCOL_VIOLATION]: 'pages.agentError.copilotProtocolViolation',
-    [deskErrorCodeEnum.COPILOT_TURN_BUSY]: 'pages.agentError.copilotTurnBusy',
-    [deskErrorCodeEnum.COPILOT_SUBJECT_MISMATCH]: 'pages.agentError.copilotSubjectMismatch',
+    [deskErrorCodeEnum.AI_ASSISTANT_STEP_LIMIT_EXCEEDED]: 'pages.agentError.assistantStepLimit',
+    [deskErrorCodeEnum.AI_ASSISTANT_RESPONSE_TRUNCATED]: 'pages.agentError.assistantTruncated',
+    [deskErrorCodeEnum.AI_ASSISTANT_PROTOCOL_VIOLATION]: 'pages.agentError.assistantProtocolViolation',
+    [deskErrorCodeEnum.AI_ASSISTANT_TURN_BUSY]: 'pages.agentError.assistantTurnBusy',
+    [deskErrorCodeEnum.AI_ASSISTANT_SUBJECT_MISMATCH]: 'pages.agentError.assistantSubjectMismatch',
     [deskErrorCodeEnum.AGENT_SAME_TOOL_REPEAT_LIMIT]: 'pages.agentError.sameToolRepeatLimit',
     [deskErrorCodeEnum.RATE_LIMITED]: 'pages.agentError.aiRateDisabled',
     [deskErrorCodeEnum.AI_CONTEXT_LIMIT_EXCEEDED]: 'pages.agentError.aiContextLimitExceeded',

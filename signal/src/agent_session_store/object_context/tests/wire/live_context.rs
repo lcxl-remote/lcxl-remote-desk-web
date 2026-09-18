@@ -1,8 +1,6 @@
 //! Real OSS 638/639 loopback; authentication and desktop readiness are synthetic.
 use super::*;
-use desk_agent_protocol::device_assistant::{
-    DeviceAssistantContextUpdate, DeviceAssistantContextUpdated,
-};
+use desk_agent_protocol::ai_assistant::{AiAssistantContextUpdate, AiAssistantContextUpdated};
 #[actix_web::test]
 async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     let store = memory().await;
@@ -30,8 +28,8 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     let authorizer = Arc::new(SignalControlAuthorizer::new(
         store.db.clone(),
         map.clone(),
-        Arc::new(crate::device_assistant_gate::DeviceAssistantGate::new(
-            desk_agent_protocol::device_assistant::DeviceAssistantSettings {
+        Arc::new(crate::ai_assistant_gate::AiAssistantGate::new(
+            desk_agent_protocol::ai_assistant::AiAssistantSettings {
                 revision: 1,
                 enabled: true,
             },
@@ -100,7 +98,7 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
                                             serde_json::from_str(&text).unwrap();
                                         assert_eq!(
                                             frame.signaling_type,
-                                            SignalingType::UpdateDeviceAssistantContext
+                                            SignalingType::UpdateAiAssistantContext
                                         );
                                         assert!(matches!(
                                             authorizer.authorize(&actor, &map, &frame).await,
@@ -168,7 +166,7 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
             now,
         )
         .unwrap();
-    let original = DeviceAssistantContextUpdate {
+    let original = AiAssistantContextUpdate {
         conversation_id: "client-conversation".into(),
         client_request_id: "live-selection".into(),
         selected_capability_ids: vec!["desktop.ui.inspect".into()],
@@ -176,10 +174,10 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
 
     macro_rules! exchange {
         ($request:expr, $transport_id:expr) => {{
-            let update: &DeviceAssistantContextUpdate = $request;
+            let update: &AiAssistantContextUpdate = $request;
             let frame = SignalingModel::new(
                 $transport_id,
-                SignalingType::UpdateDeviceAssistantContext,
+                SignalingType::UpdateAiAssistantContext,
                 Some("untrusted-sender-is-ignored".into()),
                 Some("live-context-host".into()),
                 Some(serde_json::to_value(update).unwrap()),
@@ -203,10 +201,10 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
             assert_eq!(reply.request_id, $transport_id);
             assert_eq!(
                 reply.signaling_type,
-                SignalingType::DeviceAssistantContextUpdated
+                SignalingType::AiAssistantContextUpdated
             );
             assert_eq!(reply.to_connection_id.as_deref(), Some("controller"));
-            let ack: DeviceAssistantContextUpdated = reply.get_data().unwrap();
+            let ack: AiAssistantContextUpdated = reply.get_data().unwrap();
             assert_eq!(ack.conversation_id, update.conversation_id);
             assert_eq!(ack.client_request_id, update.client_request_id);
             ack
@@ -244,7 +242,7 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     assert!(!rejected.changed && rejected.error.is_some());
     assert_eq!(row(&store).await, saved);
 
-    let detach = DeviceAssistantContextUpdate {
+    let detach = AiAssistantContextUpdate {
         client_request_id: "detach".into(),
         selected_capability_ids: vec![],
         ..original.clone()
@@ -272,7 +270,7 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     anonymous.auth_context = AuthContext::anonymous(RemoteDeskTypeEnum::Browser);
     let frame = SignalingModel::new(
         "anonymous-retry",
-        SignalingType::UpdateDeviceAssistantContext,
+        SignalingType::UpdateAiAssistantContext,
         None,
         Some("live-context-host".into()),
         Some(serde_json::to_value(&original).unwrap()),
@@ -294,18 +292,18 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     assert_eq!(frame.request_id, "anonymous-retry");
     assert_eq!(
         frame.signaling_type,
-        SignalingType::DeviceAssistantContextUpdated
+        SignalingType::AiAssistantContextUpdated
     );
     assert!(
         frame
-            .get_data::<DeviceAssistantContextUpdated>()
+            .get_data::<AiAssistantContextUpdated>()
             .unwrap()
             .error
             .is_some()
     );
     let malformed = SignalingModel::new(
         "malformed",
-        SignalingType::UpdateDeviceAssistantContext,
+        SignalingType::UpdateAiAssistantContext,
         None,
         Some("live-context-host".into()),
         Some(
@@ -331,9 +329,9 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     assert_eq!(frame.request_id, "malformed");
     assert_eq!(
         frame.signaling_type,
-        SignalingType::DeviceAssistantContextUpdated
+        SignalingType::AiAssistantContextUpdated
     );
-    let ack = frame.get_data::<DeviceAssistantContextUpdated>().unwrap();
+    let ack = frame.get_data::<AiAssistantContextUpdated>().unwrap();
     assert_eq!(ack.client_request_id, "malformed-client");
     assert!(ack.error.is_some());
     assert_eq!(row(&store).await, saved);

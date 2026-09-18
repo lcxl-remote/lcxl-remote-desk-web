@@ -591,9 +591,8 @@ mod tests {
             );
             assert_eq!(value["configuration_revision"], 1);
             assert_eq!(value["result_count"], 1);
-            let registry =
-                desk_diagnose_core::device_assistant::device_assistant_provider_registry()
-                    .with_web_search_binding(config.binding());
+            let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry()
+                .with_web_search_binding(config.binding());
             desk_diagnose_core::provider_preflight::read::limits::validate_output(
                 &registry,
                 &call,

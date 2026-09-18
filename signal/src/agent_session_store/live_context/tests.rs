@@ -15,7 +15,7 @@ fn params() -> UpdateLiveContext {
         run_id: "conversation-1".into(),
         actor_id: "1".into(),
         device_id: "device-1".into(),
-        update: DeviceAssistantContextUpdate {
+        update: AiAssistantContextUpdate {
             conversation_id: "client-conversation".into(),
             client_request_id: "request-1".into(),
             selected_capability_ids: selection.selected_capability_ids.clone(),
@@ -30,7 +30,7 @@ async fn store(url: &str) -> SignalAgentSessionStore {
     crate::db::initialize_schema(&db).await.unwrap();
     SignalAgentSessionStore::new(db).with_client_metadata(
         Some("client-conversation".into()),
-        AgentSessionSurface::DeviceAssistant,
+        AgentSessionSurface::AiAssistant,
     )
 }
 
@@ -48,7 +48,7 @@ async fn rows(
 
 fn clear(original: &UpdateLiveContext) -> UpdateLiveContext {
     UpdateLiveContext {
-        update: DeviceAssistantContextUpdate {
+        update: AiAssistantContextUpdate {
             selected_capability_ids: vec![],
             client_request_id: "clear-1".into(),
             ..original.update.clone()

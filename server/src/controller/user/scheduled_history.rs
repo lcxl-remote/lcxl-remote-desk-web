@@ -8,7 +8,7 @@ use desk_diagnose_core::{
     session::{AgentSessionSurface, PersistedAgentSession},
 };
 use desk_signal::{
-    controller::device_assistant_session::get_device_assistant_session,
+    controller::ai_assistant_session::get_ai_assistant_session,
     entity::{agent_schedule_run as run, agent_session},
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -79,7 +79,7 @@ async fn scheduled_result_rest_owner_guard_and_original_subject() {
         },
         &now.to_rfc3339(),
     );
-    session.surface = AgentSessionSurface::DeviceAssistant;
+    session.surface = AgentSessionSurface::AiAssistant;
     session.conversation.push(ChatMessage::text(
         "question",
         ChatRole::User,
@@ -154,12 +154,12 @@ async fn scheduled_result_rest_owner_guard_and_original_subject() {
             .service(
                 web::scope("/api")
                     .wrap(from_fn(enforce_device_scope))
-                    .service(get_device_assistant_session),
+                    .service(get_ai_assistant_session),
             ),
     )
     .await;
     let url = format!(
-        "/api/my/device-assistant-session?scheduled_task={}&scheduled_run={run_id}&message_limit=1",
+        "/api/my/ai-assistant-session?scheduled_task={}&scheduled_run={run_id}&message_limit=1",
         task.schedule_id
     );
     let anonymous =
@@ -211,8 +211,20 @@ async fn scheduled_result_rest_owner_guard_and_original_subject() {
     .await;
     let body: serde_json::Value = test::read_body_json(older).await;
     assert_eq!(body["data"]["messages"][0]["text"], "Original question");
-    for uri in [format!("{url}&session=original-session"), format!("{url}&connection=host"), "/api/my/device-assistant-session?scheduled_task=other&scheduled_run=schedule-run-rest-test".into()] {
-        let response = test::call_service(&app, test::TestRequest::get().uri(&uri).cookie(cookie.clone()).to_request()).await;
+    for uri in [
+        format!("{url}&session=original-session"),
+        format!("{url}&connection=host"),
+        "/api/my/ai-assistant-session?scheduled_task=other&scheduled_run=schedule-run-rest-test"
+            .into(),
+    ] {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&uri)
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
         let body: serde_json::Value = test::read_body_json(response).await;
         assert_eq!(body["code"], DeskErrorCode::PERMISSION_ERROR.code());
     }

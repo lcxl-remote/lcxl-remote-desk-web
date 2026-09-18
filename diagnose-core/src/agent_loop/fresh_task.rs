@@ -84,7 +84,7 @@ pub async fn resume_claimed_fresh_task_permission_turn(
         || session.version <= 1
         || session.lease_token <= 1
         || session.trigger_origin != TriggerOrigin::ScheduledTask
-        || session.surface != AgentSessionSurface::DeviceAssistant
+        || session.surface != AgentSessionSurface::AiAssistant
         || session.turn_state != TurnState::Running
         || session.execution_state != ExecutionState::None
         || session.conversation_id != run_id

@@ -29,7 +29,7 @@ describe('scheduled run permission submission', () => {
         fireEvent.click(submit());
         await waitFor(() => expect(input.onReload).toHaveBeenCalledTimes(1));
         const [url, options] = fetch.mock.calls[0];
-        expect(url).toBe('/api/my/device-assistant-session/permission-decision');
+        expect(url).toBe('/api/my/ai-assistant-session/permission-decision');
         expect(options.credentials).toBe('include');
         expect(JSON.parse(options.body)).toEqual({ connection: 'current-connection', session: 'original-session', requestId: 'permission-1',
             expectedRunRequestId: 'run-1', items: [{ itemId: 'read', decision: 'approve', resource_scope: ['target:device-1'],

@@ -1,7 +1,5 @@
 use super::*;
-use desk_agent_protocol::{
-    device_assistant::DeviceAssistantAsk, schedule::management::RehearsalStatus,
-};
+use desk_agent_protocol::{ai_assistant::AiAssistantAsk, schedule::management::RehearsalStatus};
 
 #[tokio::test]
 async fn rehearsal_management_reserves_public_intent_without_starting_or_granting() {
@@ -130,7 +128,7 @@ async fn rehearsal_management_reserves_public_intent_without_starting_or_grantin
             .authorization_revision
             .is_none()
     );
-    let ask = DeviceAssistantAsk {
+    let ask = AiAssistantAsk {
         question: rehearsal.prompt.clone(),
         conversation_id: Some(rehearsal.client_conversation_id.clone()),
         client_message_id: rehearsal.initial_message_id.clone(),

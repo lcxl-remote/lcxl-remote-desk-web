@@ -14,10 +14,10 @@ fn destination() -> DestinationIdentity {
 }
 
 fn params() -> UpdateObjectContext {
-    let update = DeviceAssistantObjectContextUpdate {
+    let update = AiAssistantObjectContextUpdate {
         conversation_id: "client-conversation".into(),
         client_request_id: "attach".into(),
-        operation: DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+        operation: AiAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref: ObjectRef {
                 token: "opaque-file".into(),
                 snapshot_id: "snapshot".into(),
@@ -45,7 +45,7 @@ fn params() -> UpdateObjectContext {
 fn scoped(db: DatabaseConnection) -> SignalAgentSessionStore {
     SignalAgentSessionStore::new(db).with_client_metadata(
         Some("client-conversation".into()),
-        AgentSessionSurface::DeviceAssistant,
+        AgentSessionSurface::AiAssistant,
     )
 }
 
@@ -95,10 +95,10 @@ async fn first_object_receipts_survive_detach_expiry_and_missing_model_without_r
         run_id: original.run_id.clone(),
         actor_id: "7".into(),
         device_id: "device".into(),
-        update: DeviceAssistantObjectContextUpdate {
+        update: AiAssistantObjectContextUpdate {
             conversation_id: original.update.conversation_id.clone(),
             client_request_id: "detach".into(),
-            operation: DeviceAssistantObjectContextOperation::Detach {
+            operation: AiAssistantObjectContextOperation::Detach {
                 attachment_id: attachment.attachment_id.clone(),
             },
         },
@@ -118,7 +118,7 @@ async fn first_object_receipts_survive_detach_expiry_and_missing_model_without_r
     // No model tables exist: this proves the actual orchestrator probe does not
     // resolve current configuration for a historical operation or for detach.
     assert!(
-        crate::device_assistant_orchestrator::apply_object_context_update(
+        crate::ai_assistant_orchestrator::apply_object_context_update(
             store.db.clone(),
             7,
             "device".into(),
@@ -128,7 +128,7 @@ async fn first_object_receipts_survive_detach_expiry_and_missing_model_without_r
         .unwrap()
     );
     assert!(
-        crate::device_assistant_orchestrator::apply_object_context_update(
+        crate::ai_assistant_orchestrator::apply_object_context_update(
             store.db.clone(),
             7,
             "device".into(),
@@ -208,7 +208,7 @@ async fn conflicting_object_request_identity_or_subject_cannot_replay_or_mutate(
             1 => changed.device_id = "other-device".into(),
             2 => changed.update.conversation_id = "other-client".into(),
             3 => {
-                if let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+                if let AiAssistantObjectContextOperation::AttachTerminalOutput {
                     display_summary,
                     ..
                 } = &mut changed.update.operation
@@ -217,16 +217,15 @@ async fn conflicting_object_request_identity_or_subject_cannot_replay_or_mutate(
                 }
             }
             4 => {
-                if let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
-                    object_ref,
-                    ..
+                if let AiAssistantObjectContextOperation::AttachTerminalOutput {
+                    object_ref, ..
                 } = &mut changed.update.operation
                 {
                     object_ref.token = "different-file".into();
                 }
             }
             _ => {
-                changed.update.operation = DeviceAssistantObjectContextOperation::Detach {
+                changed.update.operation = AiAssistantObjectContextOperation::Detach {
                     attachment_id: "different".into(),
                 }
             }

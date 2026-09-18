@@ -67,7 +67,7 @@ describe('native file receipts', () => {
         expect(receipt.verified).toBe(false);
         const { container } = render(<AssistantFileResult receipt={receipt} text={text} />);
         expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
-        expect(screen.getByText('pages.deviceAssistant.fileReceipt.unknownHint')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.fileReceipt.unknownHint')).toBeTruthy();
         expect(container.querySelector('a')).toBeNull();
     });
     it('keeps empty creation byte counts and rejects malformed or contradictory facts', () => {

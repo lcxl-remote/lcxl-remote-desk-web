@@ -12,7 +12,7 @@ pub(super) struct OriginalInput {
     client_conversation_id: Option<String>,
 }
 
-impl SignalDeviceAssistantTools {
+impl SignalAiAssistantTools {
     pub(crate) fn bind_original_input(
         &self,
         revision: u64,

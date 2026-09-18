@@ -1,6 +1,6 @@
 //! Resolve a reserved client intent before entering the normal owner-authorized turn.
 use super::*;
-use desk_agent_protocol::device_assistant::DeviceAssistantAsk;
+use desk_agent_protocol::ai_assistant::AiAssistantAsk;
 
 impl ScheduleStore {
     /// Latest includes cancelled attempts; an older successful run must not hide a newer one.
@@ -23,7 +23,7 @@ impl ScheduleStore {
         &self,
         owner: i32,
         device: &str,
-        ask: &DeviceAssistantAsk,
+        ask: &AiAssistantAsk,
     ) -> Result<Option<rehearsal::Model>, ScheduleStoreError> {
         let Some(client) = ask
             .conversation_id

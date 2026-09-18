@@ -33,37 +33,37 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
 }) {
     const { t } = useTranslation();
     const [browsing, setBrowsing] = useState(false);
-    const submit = (operation: AssistantDirectoryOperation) => onUpdate(operation, t('pages.deviceAssistant.directories.timeout'));
+    const submit = (operation: AssistantDirectoryOperation) => onUpdate(operation, t('pages.aiAssistant.directories.timeout'));
     return <Sheet open={open} onOpenChange={onOpenChange}>
         <SheetContent className="flex w-full flex-col gap-4 overflow-y-auto sm:max-w-lg">
             <SheetHeader>
-                <SheetTitle>{t('pages.deviceAssistant.directories.title')}</SheetTitle>
-                <SheetDescription>{t('pages.deviceAssistant.directories.hint')}</SheetDescription>
+                <SheetTitle>{t('pages.aiAssistant.directories.title')}</SheetTitle>
+                <SheetDescription>{t('pages.aiAssistant.directories.hint')}</SheetDescription>
             </SheetHeader>
             <div className="space-y-2 px-4">
                 <Button type="button" disabled={disabled || !deskId || sessionTargetId === undefined} onClick={() => setBrowsing(value => !value)}>
-                    {t('pages.deviceAssistant.directories.add')}
+                    {t('pages.aiAssistant.directories.add')}
                 </Button>
                 {open && browsing && deskId && sessionTargetId !== undefined && <RemoteDirectoryPicker
                     key={`${deskId}:${sessionTargetId}`} deskId={deskId} sessionTargetId={sessionTargetId}
                     disabled={disabled} onSelect={path => submit({ kind: 'select_directory', path,
-                        purpose: t('pages.deviceAssistant.directories.manualPurpose'), expected_revision: scope.revision })}
+                        purpose: t('pages.aiAssistant.directories.manualPurpose'), expected_revision: scope.revision })}
                     onCancel={() => setBrowsing(false)} />}
             </div>
             <div className="space-y-3 px-4 pb-4">
-                {!scope.directories.length && <p className="text-sm text-muted-foreground">{t('pages.deviceAssistant.directories.empty')}</p>}
+                {!scope.directories.length && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.directories.empty')}</p>}
                 {scope.directories.map(directory => <div key={directory.requestId} className="space-y-2 rounded-md border p-3">
                     <p className="break-all font-mono text-sm">{directory.canonicalPath}</p>
                     <p className="break-words text-xs text-muted-foreground">{directory.purpose}</p>
-                    <p className="text-xs">{directory.state === 'pending' ? t('pages.deviceAssistant.directories.pending')
-                        : directory.state === 'approved' ? t('pages.deviceAssistant.directories.approved') : directory.state}</p>
+                    <p className="text-xs">{directory.state === 'pending' ? t('pages.aiAssistant.directories.pending')
+                        : directory.state === 'approved' ? t('pages.aiAssistant.directories.approved') : directory.state}</p>
                     <div className="flex gap-2">
                         {directory.state === 'pending' ? <>
                             <Button type="button" size="sm" disabled={disabled} onClick={() => {
                                 submit({ kind: 'decide_directory', directory_request_id: directory.requestId, approve: true, expected_revision: scope.revision });
-                            }}>{t('pages.deviceAssistant.directories.approve')}</Button>
-                            <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => submit({ kind: 'decide_directory', directory_request_id: directory.requestId, approve: false, expected_revision: scope.revision })}>{t('pages.deviceAssistant.directories.reject')}</Button>
-                        </> : directory.state === 'approved' && <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => submit({ kind: 'revoke_directory', directory_request_id: directory.requestId, expected_revision: scope.revision })}>{t('pages.deviceAssistant.directories.remove')}</Button>}
+                            }}>{t('pages.aiAssistant.directories.approve')}</Button>
+                            <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => submit({ kind: 'decide_directory', directory_request_id: directory.requestId, approve: false, expected_revision: scope.revision })}>{t('pages.aiAssistant.directories.reject')}</Button>
+                        </> : directory.state === 'approved' && <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => submit({ kind: 'revoke_directory', directory_request_id: directory.requestId, expected_revision: scope.revision })}>{t('pages.aiAssistant.directories.remove')}</Button>}
                     </div>
                 </div>)}
             </div>

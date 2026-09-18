@@ -52,7 +52,7 @@ fn is_public_system_prompt(input: &DataEnvelope) -> bool {
         input.digest_sha256
     );
     input.envelope_id == expected_id
-        && input.provenance.source_provider_id == "device-assistant-runtime"
+        && input.provenance.source_provider_id == "ai-assistant-runtime"
         && input.provenance.source_tool_name == "system-prompt-projector"
         && input.provenance.source_envelope_ids.is_empty()
         && input.sensitivity == Sensitivity::Public
@@ -74,7 +74,7 @@ pub fn is_audited_public_system_prompt(input: &ModelInputLineage) -> bool {
             .digest_sha256
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
-        && input.source_provider_id == "device-assistant-runtime"
+        && input.source_provider_id == "ai-assistant-runtime"
         && input.source_tool_name == "system-prompt-projector"
         && input.source_envelope_ids.is_empty()
         && input

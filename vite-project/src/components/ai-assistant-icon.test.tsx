@@ -17,12 +17,12 @@ describe('AI Assistant branding', () => {
     });
 
     it('uses the same product name on the dashboard and assistant page in both locales', () => {
-        expect(zh['pages.deskDashboard.deviceAssistant']).toBe('AI助手');
-        expect(zh['pages.deviceAssistant.title']).toBe('AI助手');
-        expect(en['pages.deskDashboard.deviceAssistant']).toBe('AI Assistant');
-        expect(en['pages.deviceAssistant.title']).toBe('AI Assistant');
+        expect(zh['pages.deskDashboard.aiAssistant']).toBe('AI助手');
+        expect(zh['pages.aiAssistant.title']).toBe('AI助手');
+        expect(en['pages.deskDashboard.aiAssistant']).toBe('AI Assistant');
+        expect(en['pages.aiAssistant.title']).toBe('AI Assistant');
         for (const locale of [zh, en]) {
-            expect(Object.values(locale).join('\n')).not.toMatch(/设备助手|Device Assistant/);
+            for (const [key, value] of Object.entries(locale)) expect(value, key).not.toMatch(new RegExp('设备\\s*(?:AI\\s*)?助手|Device\\s+Assistant|co' + 'pilot', 'i'));
         }
     });
 });

@@ -32,7 +32,7 @@ pub fn model_bound_user_message(
             media_type: "text/plain;charset=utf-8".into(),
         },
         provenance: DataProvenance {
-            source_provider_id: "device-assistant-user".into(),
+            source_provider_id: "ai-assistant-user".into(),
             source_tool_name: "send-message".into(),
             source_object_id: Some(message_id.clone()),
             source_envelope_ids: Vec::new(),
@@ -50,7 +50,7 @@ pub fn model_bound_user_message(
     };
     envelope.validate().map_err(|error| AgentError {
         kind: AgentErrorKind::Internal,
-        message: format!("failed to label Device Assistant input: {error}"),
+        message: format!("failed to label AI Assistant input: {error}"),
         retryable: false,
         safe_for_model: false,
         error_code: None,
@@ -105,13 +105,13 @@ pub fn read_result_envelope(
         },
         digest_sha256,
         sensitivity: match capability.wire.capability_id.as_str() {
-            crate::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
-            | crate::device_assistant::WEB_RESEARCH_SEARCH_CAPABILITY_ID => Sensitivity::Public,
-            crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID
-            | crate::device_assistant::SYSTEM_INFO_CAPABILITY_ID
-            | crate::device_assistant::SYSTEM_NETWORK_CAPABILITY_ID
-            | crate::device_assistant::SYSTEM_SERVICE_CAPABILITY_ID
-            | crate::device_assistant::SYSTEM_CONTAINER_CAPABILITY_ID => Sensitivity::UserContent,
+            crate::ai_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
+            | crate::ai_assistant::WEB_RESEARCH_SEARCH_CAPABILITY_ID => Sensitivity::Public,
+            crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID
+            | crate::ai_assistant::SYSTEM_INFO_CAPABILITY_ID
+            | crate::ai_assistant::SYSTEM_NETWORK_CAPABILITY_ID
+            | crate::ai_assistant::SYSTEM_SERVICE_CAPABILITY_ID
+            | crate::ai_assistant::SYSTEM_CONTAINER_CAPABILITY_ID => Sensitivity::UserContent,
             _ => Sensitivity::Sensitive,
         },
         // Reading never implicitly grants export to any model or other sink.
@@ -355,7 +355,7 @@ mod tests {
             image_data_url: None,
         };
         let envelope = read_result_envelope(
-            &crate::device_assistant::device_assistant_provider_registry(),
+            &crate::ai_assistant::ai_assistant_provider_registry(),
             &call("inspect_desktop_session"),
             &output,
             label(),
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn unknown_tool_and_empty_result_do_not_get_labels() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         assert!(
             read_result_envelope(
                 &registry,

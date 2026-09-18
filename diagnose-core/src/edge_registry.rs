@@ -182,7 +182,7 @@ mod tests {
     use desk_agent_protocol::capability_provider::CapabilityLimits;
 
     use super::*;
-    use crate::device_assistant::{DESKTOP_UI_CAPABILITY_ID, device_assistant_provider_registry};
+    use crate::ai_assistant::{DESKTOP_UI_CAPABILITY_ID, ai_assistant_provider_registry};
 
     fn descriptor(adapter_id: &str) -> EdgeAdapterDescriptor {
         EdgeAdapterDescriptor {
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn inventory_is_stable_and_bound_to_provider_capabilities() {
-        let providers = device_assistant_provider_registry();
+        let providers = ai_assistant_provider_registry();
         let registry = EdgeAdapterRegistryBuilder::new()
             .register(descriptor("windows.uia"))
             .build(&providers)
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn undeclared_adapter_fails_closed() {
-        let providers = device_assistant_provider_registry();
+        let providers = ai_assistant_provider_registry();
         let error = EdgeAdapterRegistryBuilder::new()
             .register(descriptor("wrong.adapter"))
             .build(&providers)

@@ -52,7 +52,7 @@ impl SignalScheduleExecutor {
             .await
             .map_err(|_| ScheduleStoreError::Conflict)?;
         let (providers, inventory, _, readiness) =
-            crate::device_assistant_orchestrator::current_capability_projection(
+            crate::ai_assistant_orchestrator::current_capability_projection(
                 &self.db,
                 self.connections.get_ref(),
                 &target,
@@ -76,7 +76,7 @@ impl SignalScheduleExecutor {
         let mut tools =
             callable_tools(&providers, &inventory).map_err(|_| ScheduleStoreError::Invalid)?;
         tools.retain(|tool| {
-            crate::device_assistant_orchestrator::fresh::contains_tool(
+            crate::ai_assistant_orchestrator::fresh::contains_tool(
                 &contract,
                 &providers,
                 tool.name(),
@@ -94,7 +94,7 @@ impl SignalScheduleExecutor {
                 .execution_mode
                 .restrict_to(ExecutionMode::ConfirmEachAction),
             expires_at: None,
-            policy_name: Some("oss-device-assistant-provider".into()),
+            policy_name: Some("oss-ai-assistant-provider".into()),
         };
         let claimed = store
             .claim_fresh_task(
@@ -116,7 +116,7 @@ impl SignalScheduleExecutor {
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
         let token = claimed.session.lease_token;
-        let result = owned_task::run(crate::device_assistant_orchestrator::resume_fresh_task(
+        let result = owned_task::run(crate::ai_assistant_orchestrator::resume_fresh_task(
             self.connections.clone(),
             self.db.clone(),
             self.gate.clone(),

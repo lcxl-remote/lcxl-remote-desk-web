@@ -443,7 +443,7 @@ pub fn validate_summary_derivations(
         // Every retained checkpoint parent must have its own earlier derivation.
         // Removing the oldest record must not silently turn a summary into a root.
         for source in &step.compression_sources {
-            if source.provenance.source_provider_id == "device-assistant-context"
+            if source.provenance.source_provider_id == "ai-assistant-context"
                 && source.provenance.source_tool_name == "checkpoint-summary"
                 && !lineage
                     .derivations
@@ -590,7 +590,7 @@ fn derive_projection_metadata(
             output_envelope_id: &format!("context-lineage:{binding}"),
             content,
             digest_sha256: digest,
-            source_provider_id: "device-assistant-context",
+            source_provider_id: "ai-assistant-context",
             source_tool_name: tool,
             source_object_id: Some(&binding),
         },

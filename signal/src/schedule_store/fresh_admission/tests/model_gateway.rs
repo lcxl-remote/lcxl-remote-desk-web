@@ -63,11 +63,11 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
             "target".into(),
             peer("target", &task.target_device_id).await,
         );
-        let settings = DeviceAssistantSettings {
+        let settings = AiAssistantSettings {
             revision: 1,
             enabled: true,
         };
-        let gate = Arc::new(DeviceAssistantGate::new(settings));
+        let gate = Arc::new(AiAssistantGate::new(settings));
         let claimed = store
             .claim_fresh_task(
                 &connections,
@@ -171,7 +171,7 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
                 .is_err()
         );
         model.fresh_task.as_mut().unwrap().session_token = held.lease_token;
-        gate.replace(DeviceAssistantSettings {
+        gate.replace(AiAssistantSettings {
             revision: 2,
             enabled: false,
         });

@@ -209,7 +209,7 @@ mod tests {
         };
         let mut session =
             PersistedAgentSession::new("conversation", "owner", "device", 1, scope.clone(), "now");
-        session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+        session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
         session.input_revision = 1;
         session.latest_input_seq = 1;
         session.begin_focus_epoch(1, vec![]).unwrap();

@@ -87,7 +87,7 @@ pub fn collect(session: &PersistedAgentSession) -> Result<PermissionControls, Ta
         if explicit {
             let rebuilt = crate::permission_tools::build_permission_request(
                 &tool,
-                &crate::device_assistant::device_assistant_provider_registry(),
+                &crate::ai_assistant::ai_assistant_provider_registry(),
                 request.request_id.clone(),
                 request.input_revision,
                 request.created_at.clone(),

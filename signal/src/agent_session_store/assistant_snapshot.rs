@@ -32,7 +32,7 @@ impl SignalAgentSessionStore {
         let Some(row) = row else { return Ok(None) };
         let session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|_| internal("invalid recovery session"))?;
-        if session.surface != AgentSessionSurface::DeviceAssistant
+        if session.surface != AgentSessionSurface::AiAssistant
             || session.actor_id != actor
             || session.device_id != row.device_id
             || session.conversation_id != run
@@ -78,7 +78,7 @@ impl SignalAgentSessionStore {
                 .ok_or_else(|| sea_orm::DbErr::Custom("snapshot subject disappeared".into()))?;
             let session = PersistedAgentSession::decode_json(&row.state_json)
                 .map_err(|_| sea_orm::DbErr::Custom("invalid Assistant snapshot".into()))?;
-            if session.surface != AgentSessionSurface::DeviceAssistant
+            if session.surface != AgentSessionSurface::AiAssistant
                 || session.actor_id != actor
                 || session.device_id != device
                 || session.conversation_id != run

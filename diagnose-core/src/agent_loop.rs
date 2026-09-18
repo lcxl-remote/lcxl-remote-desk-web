@@ -74,7 +74,7 @@ fn reasoning_output_budget_error() -> AgentError {
         retryable: false,
         safe_for_model: true,
         error_code: Some(
-            desk_utils::error::DeskErrorCode::COPILOT_RESPONSE_TRUNCATED.code(),
+            desk_utils::error::DeskErrorCode::AI_ASSISTANT_RESPONSE_TRUNCATED.code(),
         ),
     }
 }
@@ -86,7 +86,7 @@ fn empty_end_turn_recovery_error() -> AgentError {
         retryable: false,
         safe_for_model: true,
         error_code: Some(
-            desk_utils::error::DeskErrorCode::COPILOT_PROTOCOL_VIOLATION.code(),
+            desk_utils::error::DeskErrorCode::AI_ASSISTANT_PROTOCOL_VIOLATION.code(),
         ),
     }
 }
@@ -98,7 +98,7 @@ fn permission_continuation_recovery_error() -> AgentError {
         retryable: false,
         safe_for_model: true,
         error_code: Some(
-            desk_utils::error::DeskErrorCode::COPILOT_PROTOCOL_VIOLATION.code(),
+            desk_utils::error::DeskErrorCode::AI_ASSISTANT_PROTOCOL_VIOLATION.code(),
         ),
     }
 }
@@ -311,7 +311,7 @@ pub struct LoopDeps<'a> {
     /// are not necessarily callable under the current grant scope.
     pub capability_permission_candidates: &'a [RegisteredTool],
     /// Content-free measurements captured when the caller built the current
-    /// capability catalog. Non-Device-Assistant callers leave this unset.
+    /// capability catalog. Non-AI-Assistant callers leave this unset.
     pub capability_catalog_metrics: Option<crate::permission_tools::CapabilityCatalogMetrics>,
     /// Active exact-input Provider tools recovered from the durable permission
     /// decision. On a permission-resumed turn the loop initially exposes only
@@ -328,7 +328,7 @@ pub struct LoopDeps<'a> {
     /// Explicit control-end preference. Missing values preserve the saved locale.
     pub response_locale: Option<String>,
     /// Per-turn model→tool step budget (circuit breaker). Diagnose passes
-    /// [`crate::MAX_STEPS_PER_TURN`]; the latency-sensitive terminal copilot
+    /// [`crate::MAX_STEPS_PER_TURN`]; the latency-sensitive Terminal AI Assistant
     /// passes a tighter bound.
     pub max_steps_per_turn: u32,
     /// Per-turn cap for calls to the same tool. Kept independent of the total
@@ -416,7 +416,7 @@ async fn resume_claimed_scheduled(
     if scheduled_run_id.is_empty()
         || scheduled_run_id.len() > 256
         || session.trigger_origin != crate::session::TriggerOrigin::ScheduledContinuation
-        || session.surface != AgentSessionSurface::DeviceAssistant
+        || session.surface != AgentSessionSurface::AiAssistant
         || session.turn_state != TurnState::Running
         || session.input_revision == 0
         || session.lease_token == 0
@@ -843,7 +843,7 @@ async fn append_reviewed_tool_result_inner(
         // session image already satisfies the one-image invariant.
         let mut message = ChatMessage::tool_result(message_id, call_id, content);
         message.data_envelope = data_envelope;
-        if session.surface == AgentSessionSurface::DeviceAssistant {
+        if session.surface == AgentSessionSurface::AiAssistant {
             message = match crate::conversation_attachment::delivery::externalize(
                 deps.session_seam,
                 session,
@@ -874,7 +874,7 @@ async fn append_reviewed_tool_result_inner(
             message.data_envelope = data_envelope;
             session.conversation.push(message);
             retain_latest_session_image(session)?;
-            if session.surface == AgentSessionSurface::DeviceAssistant {
+            if session.surface == AgentSessionSurface::AiAssistant {
                 let image_data_url = session
                     .conversation
                     .last()
@@ -1081,7 +1081,7 @@ async fn deliver_pending_results(
     deps: &LoopDeps<'_>,
     session: &mut PersistedAgentSession,
 ) -> Result<(), AgentError> {
-    if session.surface != AgentSessionSurface::DeviceAssistant {
+    if session.surface != AgentSessionSurface::AiAssistant {
         return Ok(());
     }
     let policy = deps.model.model_egress_policy()?;
@@ -1710,7 +1710,7 @@ async fn run_inner_impl(
         if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
             return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
         }
-        if session.surface == AgentSessionSurface::DeviceAssistant
+        if session.surface == AgentSessionSurface::AiAssistant
             && session.focus_epoch.step_budget_exhausted()
         {
             return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
@@ -1722,7 +1722,7 @@ async fn run_inner_impl(
             });
         }
 
-        let disclosure_enabled = session.surface == AgentSessionSurface::DeviceAssistant
+        let disclosure_enabled = session.surface == AgentSessionSurface::AiAssistant
             && deps.provider_registry.is_some()
             && deps.capability_inventory.is_some();
         if disclosure_enabled
@@ -1890,7 +1890,7 @@ async fn run_inner_impl(
                     .unwrap_or(&session.conversation),
             ));
         let mut pinned_context = deps.model.context_policy(request_requirements).await?;
-        pinned_context.preserve_history = session.surface == AgentSessionSurface::DeviceAssistant;
+        pinned_context.preserve_history = session.surface == AgentSessionSurface::AiAssistant;
         if disclosure_enabled {
             let selected = crate::capability_disclosure::select_advertised_tools(
                 &raw_provider_exposed,
@@ -1979,12 +1979,12 @@ async fn run_inner_impl(
         if !policy_read_names.is_empty() {
             system_prompt.text.push_str(&format!("\nPOLICY-ELIGIBLE READS: {}. These existing read policies can issue authority at invocation. Load missing parameter details to use them; do not request approval solely because no grant is listed yet. Sensitive arguments can still require approval; the server checks the complete input. Other capabilities need current grants.", policy_read_names.join(", ")));
         }
-        if session.surface == crate::session::AgentSessionSurface::DeviceAssistant {
+        if session.surface == crate::session::AgentSessionSurface::AiAssistant {
             system_prompt
                 .text
-                .push_str(&crate::device_assistant::current_time_prompt(
-                    current_unix_ms(deps.clock)?,
-                ));
+                .push_str(&crate::ai_assistant::current_time_prompt(current_unix_ms(
+                    deps.clock,
+                )?));
             system_prompt
                 .text
                 .push_str(&crate::directory_tools::scope_prompt(
@@ -2021,14 +2021,14 @@ async fn run_inner_impl(
         if disclosure_enabled {
             let providers = deps.provider_registry.ok_or_else(|| AgentError {
                 kind: AgentErrorKind::Internal,
-                message: "Device Assistant capability disclosure has no Provider registry".into(),
+                message: "AI Assistant capability disclosure has no Provider registry".into(),
                 retryable: false,
                 safe_for_model: false,
                 error_code: None,
             })?;
             let inventory = step_inventory.as_deref().ok_or_else(|| AgentError {
                 kind: AgentErrorKind::Internal,
-                message: "Device Assistant capability disclosure has no live inventory".into(),
+                message: "AI Assistant capability disclosure has no live inventory".into(),
                 retryable: false,
                 safe_for_model: false,
                 error_code: None,
@@ -2134,7 +2134,7 @@ async fn run_inner_impl(
         let mut messages = Vec::with_capacity(session.conversation.len() + 3);
         messages.push(system_prompt);
         messages.extend(context_view.messages);
-        if session.surface == AgentSessionSurface::DeviceAssistant
+        if session.surface == AgentSessionSurface::AiAssistant
             && deps.model.command_completion_event_id().is_none()
         {
             // Put the server-owned input watermark at the recency edge of the
@@ -2590,7 +2590,7 @@ async fn run_inner_impl(
                 ) && turn.tool_calls.iter().any(|call| {
                     call.name == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME
                 });
-                if session.surface == crate::session::AgentSessionSurface::DeviceAssistant
+                if session.surface == crate::session::AgentSessionSurface::AiAssistant
                     && follows_tool_result
                     && malformed_permission_plan
                     && post_tool_permission_protocol_retries < 1
@@ -4104,7 +4104,7 @@ fn requested_artifact_registry_projection(
                 }
                 && latest_user.text.contains(&output.original_file_name)
                 && source.provenance.source_provider_id
-                    == crate::device_assistant::TEXT_FILE_PROVIDER_ID
+                    == crate::ai_assistant::TEXT_FILE_PROVIDER_ID
                 && source.provenance.source_tool_name == tool
                 && source.digest_sha256
                     == format!("{:x}", sha2::Sha256::digest(message.text.as_bytes()))
@@ -4208,7 +4208,7 @@ fn requested_artifact_registry_projection(
 }
 
 /// Re-project only the bounded opaque references needed to continue a tool
-/// chain on every Device Assistant model request. This must also run for an
+/// chain on every AI Assistant model request. This must also run for an
 /// ordinary user follow-up: context compression or a new turn can otherwise
 /// retain the requirement while dropping the worker-issued BrowserPageRef.
 /// Historical raw Provider results deliberately are not replayed across the

@@ -30,7 +30,7 @@ async fn base_fixture() -> (
         },
         "2026-09-06T00:00:00Z",
     );
-    session.surface = AgentSessionSurface::DeviceAssistant;
+    session.surface = AgentSessionSurface::AiAssistant;
     session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
     session.input_revision = 1;
     let row = session_row::ActiveModel {

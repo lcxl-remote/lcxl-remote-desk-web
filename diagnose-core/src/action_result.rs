@@ -386,7 +386,7 @@ mod tests {
             },
             "now",
         );
-        session.surface = crate::session::AgentSessionSurface::DeviceAssistant;
+        session.surface = crate::session::AgentSessionSurface::AiAssistant;
         session.input_revision = 1;
         session.latest_input_seq = 1;
         session
@@ -467,7 +467,7 @@ mod tests {
             arguments_json: call.arguments_json.clone(),
         }];
         let old_envelope = proposal.data_envelope.clone();
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         assert!(
             ActionResultOrigin::capture_confirmed_command(&registry, &session, &call, 1000)
                 .is_err()
@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn origin_freezes_registered_provider_and_original_input_retention_without_authority() {
         let (mut session, call) = prepared();
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let origin = ActionResultOrigin::capture(&registry, &session, &call).unwrap();
         let reformatted = ToolCall {
             arguments_json: " {\n } ".into(),
@@ -582,7 +582,7 @@ mod tests {
     fn receipt_is_exact_generation_and_bytes_bound_and_replay_cannot_extend_expiry() {
         let (session, call) = prepared();
         let origin = ActionResultOrigin::capture(
-            &crate::device_assistant::device_assistant_provider_registry(),
+            &crate::ai_assistant::ai_assistant_provider_registry(),
             &session,
             &call,
         )
@@ -641,7 +641,7 @@ mod tests {
     fn expired_origin_is_not_renewed_and_unknown_contract_fields_fail_closed() {
         let (session, call) = prepared();
         let origin = ActionResultOrigin::capture(
-            &crate::device_assistant::device_assistant_provider_registry(),
+            &crate::ai_assistant::ai_assistant_provider_registry(),
             &session,
             &call,
         )

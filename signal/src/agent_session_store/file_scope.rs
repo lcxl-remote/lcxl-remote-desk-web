@@ -23,7 +23,7 @@ impl SignalAgentSessionStore {
         client_conversation_id: &str,
         client_request_id: &str,
     ) -> Result<Option<FileScopeReceipt>, AgentError> {
-        if self.surface != AgentSessionSurface::DeviceAssistant
+        if self.surface != AgentSessionSurface::AiAssistant
             || self.client_conversation_id.as_deref() != Some(client_conversation_id)
         {
             return Err(failure());
@@ -154,7 +154,7 @@ impl SignalAgentSessionStore {
             return Err(failure());
         }
 
-        if self.surface != AgentSessionSurface::DeviceAssistant
+        if self.surface != AgentSessionSurface::AiAssistant
             || self.client_conversation_id.as_deref()
                 != Some(update.client_conversation_id.as_str())
         {
@@ -207,7 +207,7 @@ impl SignalAgentSessionStore {
                 );
                 session.adopt_client_metadata(
                     Some(&update.client_conversation_id),
-                    AgentSessionSurface::DeviceAssistant,
+                    AgentSessionSurface::AiAssistant,
                 );
                 session.version = -1;
                 session

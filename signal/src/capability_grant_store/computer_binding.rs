@@ -252,8 +252,7 @@ impl SignalCapabilityGrantStore {
             {
                 return Err(invalid());
             }
-            let registry =
-                desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+            let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
             let capability = registry
                 .capability_for_tool(&call.name)
                 .ok_or_else(invalid)?;

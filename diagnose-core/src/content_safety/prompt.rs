@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn model_turn_prompt_contains_only_intent_output_and_normalized_actions() {
         let prompt = build_model_turn_prompt(&SafetyModelTurn {
-            surface: ContentSafetySurface::TerminalCopilot,
+            surface: ContentSafetySurface::TerminalAiAssistant,
             text: "check the service".into(),
             tool_calls: vec![super::super::seam::SafetyToolCall {
                 name: "exec_command".into(),

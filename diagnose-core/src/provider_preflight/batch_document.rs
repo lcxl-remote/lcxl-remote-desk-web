@@ -53,7 +53,7 @@ impl PresentationReadBinding {
         }
         let supported = office_batch::is_pptx(&output.adapter)
             || (output.adapter.kind == ComputerUseAdapterKind::IworkKeynote
-                && output.adapter.version == crate::device_assistant::IWORK_ADAPTER_VERSION);
+                && output.adapter.version == crate::ai_assistant::IWORK_ADAPTER_VERSION);
         if !supported
             || (office_batch::is_pptx(&output.adapter) && source.byte_len > 16 * 1024 * 1024)
         {
@@ -152,7 +152,7 @@ pub fn resolve_presentation_read(
 ) -> Result<PresentationReadBinding, AgentError> {
     use crate::chat::ChatRole;
     use sha2::{Digest, Sha256};
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let mut selected = None;
     for message in &session.conversation {
         if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
@@ -334,7 +334,7 @@ mod tests {
                 media_type: "application/json".into(),
             },
             provenance: DataProvenance {
-                source_provider_id: crate::device_assistant::windows_office::PROVIDER_ID.into(),
+                source_provider_id: crate::ai_assistant::windows_office::PROVIDER_ID.into(),
                 source_tool_name: tool.into(),
                 source_object_id: Some("device:read".into()),
                 source_envelope_ids: vec![],
@@ -428,7 +428,7 @@ mod tests {
             output().adapter,
             ComputerUseAdapterRef {
                 kind: ComputerUseAdapterKind::IworkKeynote,
-                version: crate::device_assistant::IWORK_ADAPTER_VERSION.into(),
+                version: crate::ai_assistant::IWORK_ADAPTER_VERSION.into(),
             },
         ] {
             let mut output = output();

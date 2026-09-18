@@ -1,7 +1,7 @@
 //! Single-account runtime checks around atomic fresh occurrence admission.
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::{
-    control_authorizer::SINGLE_ACCOUNT_USER_ID, device_assistant_gate::DeviceAssistantGate,
+    ai_assistant_gate::AiAssistantGate, control_authorizer::SINGLE_ACCOUNT_USER_ID,
     entity::agent_schedule_run,
 };
 use desk_agent_protocol::AgentScope;
@@ -49,7 +49,7 @@ impl ScheduleStore {
     pub async fn claim_fresh_task(
         &self,
         connections: &SharedConnectionMap,
-        gate: &DeviceAssistantGate,
+        gate: &AiAssistantGate,
         input: FreshTaskClaim<'_>,
     ) -> Result<ClaimedFreshTask, ScheduleStoreError> {
         let settings = gate.snapshot();
@@ -124,7 +124,7 @@ mod tests {
     use super::super::publication::tests::{Verifier, fixture_on};
     use super::*;
     use crate::entity::{agent_session, agent_task_budget_reservation};
-    use desk_agent_protocol::{ExecutionMode, device_assistant::DeviceAssistantSettings};
+    use desk_agent_protocol::{ExecutionMode, ai_assistant::AiAssistantSettings};
     use desk_signal_facade::model::{
         auth_context::AuthContext,
         connection::{ConnectionModel, ConnectionState},
@@ -194,7 +194,7 @@ mod tests {
             .unwrap();
         let before = store.read(1, &task.schedule_id).await.unwrap();
         let connections = SharedConnectionMap::new();
-        let gate = DeviceAssistantGate::default();
+        let gate = AiAssistantGate::default();
         for failure in [
             "disabled",
             "offline",
@@ -205,7 +205,7 @@ mod tests {
             "none",
         ] {
             connections.write().await.clear();
-            gate.replace(DeviceAssistantSettings {
+            gate.replace(AiAssistantSettings {
                 revision: 1,
                 enabled: failure != "disabled",
             });

@@ -26,7 +26,7 @@ fn failed() -> PersistedAgentSession {
         },
         "now",
     );
-    session.surface = AgentSessionSurface::DeviceAssistant;
+    session.surface = AgentSessionSurface::AiAssistant;
     session.client_conversation_id = Some("rehearsal_reserved".into());
     session.current_turn_id = Some("turn".into());
     session.turn_state = TurnState::Failed;

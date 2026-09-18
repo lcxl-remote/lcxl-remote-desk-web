@@ -13,12 +13,12 @@ export function AssistantAttachments({ sessionId, attachmentIds }: { sessionId?:
     // Remount the panel for every subject change, including a cleared session.
     return <Dialog open={open} onOpenChange={setOpen}>
         <Button variant="ghost" size="sm" className="assistant-action" disabled={!sessionId}
-            aria-label={t('pages.deviceAssistant.attachments.title')} onClick={() => setOpen(true)}>
+            aria-label={t('pages.aiAssistant.attachments.title')} onClick={() => setOpen(true)}>
             <Paperclip className="h-4 w-4 shrink-0" aria-hidden="true" />
-            <span className="assistant-action-label">{t('pages.deviceAssistant.attachments.title')}</span>
+            <span className="assistant-action-label">{t('pages.aiAssistant.attachments.title')}</span>
         </Button>
         <DialogContent className="flex max-h-[85vh] max-w-4xl flex-col overflow-hidden">
-            <DialogTitle>{t('pages.deviceAssistant.attachments.title')}</DialogTitle>
+            <DialogTitle>{t('pages.aiAssistant.attachments.title')}</DialogTitle>
             {open && sessionId && <AttachmentPanel key={sessionId} sessionId={sessionId} attachmentIds={attachmentIds} />}
         </DialogContent>
     </Dialog>;
@@ -26,7 +26,7 @@ export function AssistantAttachments({ sessionId, attachmentIds }: { sessionId?:
 
 function AttachmentPanel({ sessionId, attachmentIds }: { sessionId: string; attachmentIds?: string[] }) {
     const { t } = useTranslation();
-    const label = (key: string) => t(`pages.deviceAssistant.attachments.${key}`);
+    const label = (key: string) => t(`pages.aiAssistant.attachments.${key}`);
     const [list, setList] = useState<AttachmentListDto | null>(null);
     const [kind, setKind] = useState('all');
     const [status, setStatus] = useState('all');
@@ -147,7 +147,7 @@ function AttachmentPanel({ sessionId, attachmentIds }: { sessionId: string; atta
     }
     const visible = list?.attachments.filter(item => (!attachmentIds || attachmentIds.includes(item.attachment_id)) && (kind === 'all' || item.kind === kind) && (status === 'all' || item.status === status)) ?? [];
     return <div className="flex min-h-0 flex-col gap-3 overflow-y-auto assistant-scrollbar">
-        {list && <p className="text-sm text-muted-foreground">{t('pages.deviceAssistant.attachments.usage', { used: (list.used_bytes / 1048576).toFixed(2), capacity: list.capacity_bytes / 1048576 })}</p>}
+        {list && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.attachments.usage', { used: (list.used_bytes / 1048576).toFixed(2), capacity: list.capacity_bytes / 1048576 })}</p>}
         <div className="flex flex-wrap items-center gap-2">
             <select aria-label={label('type')} className="rounded border bg-background p-2 text-sm" value={kind} onChange={event => setKind(event.target.value)}>
                 {['all', 'image', 'text', 'json'].map(value => <option key={value} value={value}>{label(value)}</option>)}
@@ -170,7 +170,7 @@ function AttachmentPanel({ sessionId, attachmentIds }: { sessionId: string; atta
                     <p>{label(item.kind)} · {item.part} · {label(item.status)} · {item.stored_bytes.toLocaleString()} B</p>
                     <p className="text-xs text-muted-foreground">{new Date(item.created_at_unix_ms).toLocaleString()} · {item.tool_call_id}</p>
                     {item.source_truncated && <p>{label('sourceTruncated')}</p>}
-                    {item.storage_truncated && <p>{t('pages.deviceAssistant.attachments.truncated', { original: item.original_bytes, stored: item.stored_bytes })}</p>}
+                    {item.storage_truncated && <p>{t('pages.aiAssistant.attachments.truncated', { original: item.original_bytes, stored: item.stored_bytes })}</p>}
                 </div>
                 <Button size="sm" variant="ghost" disabled={busy || item.status !== 'available'} onClick={() => { setQueries(''); void view(item); }}>{label('view')}</Button>
                 <Button size="sm" variant="ghost" disabled={busy || item.status !== 'available'} onClick={() => void download(item)}>{label('download')}</Button>

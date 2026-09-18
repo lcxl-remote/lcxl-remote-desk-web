@@ -1,6 +1,6 @@
 use super::*;
 use crate::remote_tool_edge::{
-    SignalDeviceAssistantTools, SignalRemoteToolPendingStore, global_computer_action_pending,
+    SignalAiAssistantTools, SignalRemoteToolPendingStore, global_computer_action_pending,
 };
 use desk_agent_protocol::{
     AgentErrorKind, Capability,
@@ -136,9 +136,9 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
             now,
         )
         .unwrap();
-    let tools = SignalDeviceAssistantTools::new(
+    let tools = SignalAiAssistantTools::new(
         fixture.store.db.clone(),
-        desk_diagnose_core::device_assistant::device_assistant_provider_registry(),
+        desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
         connections.clone(),
         Arc::new(SignalRemoteToolPendingStore::default()),
         connection_id.clone(),

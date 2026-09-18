@@ -624,7 +624,7 @@ mod tests {
     fn screenshot_tools_explain_application_to_window_discovery() {
         let tools = crate::read_tools::read_tool_registry()
             .into_iter()
-            .chain(crate::read_tools::device_assistant_read_tool_registry());
+            .chain(crate::read_tools::ai_assistant_read_tool_registry());
         let mut checked = std::collections::HashSet::new();
         for registered in tools {
             let mut tool = registered.spec;
@@ -714,7 +714,7 @@ mod tests {
             &original.arguments_json,
             &wrong.to_string()
         ));
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         crate::provider_preflight::UiCallPreflight::build(
             &registry,
             desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
@@ -735,7 +735,7 @@ mod tests {
             json!({"application_id":"calendar","element_id":"date","action":{"kind":"invoke"}}),
         );
         let resolved = resolve_call(&action, &messages, 2_000_000_000_000).unwrap();
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         crate::provider_preflight::UiCallPreflight::build(
             &registry,
             desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
@@ -819,7 +819,7 @@ mod tests {
         let original = serde_json::to_string(&messages).unwrap();
         let mut request =
             crate::seam::ModelRequest::text_only(messages, crate::prompt::ResponseFormatSpec::None);
-        request.tools = crate::device_assistant::device_assistant_tool_registry()
+        request.tools = crate::ai_assistant::ai_assistant_tool_registry()
             .into_iter()
             .map(|t| t.spec)
             .collect();
@@ -1026,7 +1026,7 @@ mod tests {
             json!({"items":[{"item_id":"calendar","tool_name":"execute_ui_actions","application_scope":{"application_id":"calendar","actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":4,"reason":"Create requested event"}]}),
         );
         let resolved = resolve_call(&original, &history(), 1).unwrap();
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let mut request = crate::permission_tools::build_permission_request(
             &resolved,
             &registry,
@@ -1135,7 +1135,7 @@ mod tests {
             &original.arguments_json,
             &resolved.arguments_json
         ));
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         for surface in [
             desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
             desk_agent_protocol::capability_provider::ProductSurface::ManagerPersonalOwner,

@@ -56,7 +56,7 @@ pub(super) async fn list(
             || derive_conversation_key(&actor, &device, Some(client), "") != row.conversation_id
             || session.check_subject(&actor, &device).is_err()
             || session
-                .check_surface(AgentSessionSurface::DeviceAssistant)
+                .check_surface(AgentSessionSurface::AiAssistant)
                 .is_err()
             || session.input_revision == 0
             || session.input_revision > i64::MAX as u64

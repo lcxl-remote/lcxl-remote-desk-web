@@ -59,7 +59,7 @@ export function DeskAssistantPanel({ open, onClose, onFocus, children }: {
     }
     const stop = () => { gesture.current = null; };
     return (
-        <section ref={ref} role="region" aria-label={t('pages.deviceAssistant.title')}
+        <section ref={ref} role="region" aria-label={t('pages.aiAssistant.title')}
             hidden={!open} inert={!open ? true : undefined}
             className="absolute z-30 flex flex-col overflow-hidden rounded-lg border bg-background text-foreground shadow-xl"
             style={{ display: open ? 'flex' : 'none', left: geometry.x, top: geometry.y,
@@ -76,11 +76,11 @@ export function DeskAssistantPanel({ open, onClose, onFocus, children }: {
                     onPointerDown={event => start(event, false)} onPointerMove={move}
                     onPointerUp={stop} onPointerCancel={stop} onLostPointerCapture={stop}>
                     <AiAssistantIcon className="h-5 w-5 shrink-0" />
-                    <span className="truncate font-medium">{t('pages.deviceAssistant.title')}</span>
+                    <span className="truncate font-medium">{t('pages.aiAssistant.title')}</span>
                     <GripHorizontal className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />
                 </div>
                 <Button ref={closeRef} type="button" variant="ghost" size="icon" onClick={onClose}
-                    aria-label={t('pages.deviceAssistant.hidePanel')}><X className="h-4 w-4" /></Button>
+                    aria-label={t('pages.aiAssistant.hidePanel')}><X className="h-4 w-4" /></Button>
             </header>
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 [overflow-wrap:anywhere]">
                 {children}

@@ -180,7 +180,7 @@ async fn subject(
         .await?
         .ok_or_else(invalid)?;
     let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
-    if session.surface != desk_diagnose_core::session::AgentSessionSurface::DeviceAssistant
+    if session.surface != desk_diagnose_core::session::AgentSessionSurface::AiAssistant
         || session.conversation_id != run
         || session.actor_id != actor
         || session.device_id != row.device_id

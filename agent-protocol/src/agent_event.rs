@@ -1,4 +1,4 @@
-//! Neutral streaming event contract for Device Assistant agent turns.
+//! Neutral streaming event contract for AI Assistant agent turns.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -57,10 +57,10 @@ pub enum AgentEventKind {
     Answer,
 }
 
-/// One streamed frame of a Device Assistant turn (server → control end).
+/// One streamed frame of a AI Assistant turn (server → control end).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
 pub struct AgentEvent {
-    /// Correlates back to the originating Device Assistant request.
+    /// Correlates back to the originating AI Assistant request.
     pub request_id: String,
     /// Monotonic per-stream sequence number.
     pub seq: u32,

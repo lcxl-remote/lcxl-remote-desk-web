@@ -1,7 +1,7 @@
-//! The signal central brain's terminal copilot / completion orchestration.
+//! The signal central brain's Terminal AI Assistant / completion orchestration.
 //!
 //! In the thin-edge model signal — not the edge — runs the AI behind the terminal
-//! copilot ("how-to" / "explain error" suggestions) and inline command completion.
+//! assistant ("how-to" / "explain error" suggestions) and inline command completion.
 //! Both are driven entirely from the control-end ask: the browser sends the
 //! terminal context inline (recent scrollback / prefix / error passage), so the
 //! central brain needs no round-trip to the edge. signal redacts that context
@@ -10,27 +10,29 @@
 //! the shared baseline classifier, and streams the result back to the browser.
 //!
 //! This is signal's own implementation (single-account, single-turn), distinct
-//! from the edge's agentic copilot: signal makes one direct model call rather than
+//! from the edge's agentic assistant: signal makes one direct model call rather than
 //! running the read-tool loop, because the OSS single-account central brain serves
 //! one operator and the inline context is sufficient. The model dial is `!Send`
 //! (`awc`), so callers spawn these on actix's single-threaded runtime.
 
 use actix_web::web;
 use desk_agent_protocol::provenance::AiProvenance;
+use desk_agent_protocol::terminal_ai_assistant::{
+    TerminalAiAssistantAsk, TerminalAiAssistantEvent,
+};
 use desk_agent_protocol::terminal_complete::{TerminalCompleteAsk, TerminalCompleteResult};
-use desk_agent_protocol::terminal_copilot::{TerminalCopilotAsk, TerminalCopilotEvent};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::chat::{ChatMessage, ModelTurn};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::redaction::{Redactor, RegexRedactor};
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink, TurnSink};
+use desk_diagnose_core::terminal_ai_assistant::{
+    AssistantFrameSink, AssistantStreamSink, build_assistant_history_messages,
+    build_assistant_system_message, build_assistant_user_message, parse_assistant_answer,
+};
 use desk_diagnose_core::terminal_complete::{
     CompletionRedaction, build_completion_model_request, parse_completions, redact_completion_ask,
     validate_completion_raw_input,
-};
-use desk_diagnose_core::terminal_copilot::{
-    CopilotFrameSink, CopilotStreamSink, build_copilot_history_messages,
-    build_copilot_system_message, build_copilot_user_message, parse_copilot_answer,
 };
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
@@ -126,13 +128,13 @@ async fn dial_request(
     Ok((turn, config.model))
 }
 
-/// Redact every browser-supplied free-text field of a copilot ask fail-closed. Any
+/// Redact every browser-supplied free-text field of a assistant ask fail-closed. Any
 /// redactor error aborts the whole turn (the content-free reason is returned for
 /// logging). Mirrors the edge policy so a secret in the scrollback never reaches
 /// the model.
-fn redact_copilot_context(
+fn redact_assistant_context(
     redactor: &dyn Redactor,
-    ask: &mut TerminalCopilotAsk,
+    ask: &mut TerminalAiAssistantAsk,
 ) -> Result<(), String> {
     // The control-end-supplied conversation history is replayed into the prompt on
     // the stateless path, so it is redacted fail-closed exactly like the live
@@ -213,20 +215,20 @@ fn mark_completions(
     ))
 }
 
-/// Run one copilot turn: redact fail-closed, make a single tool-free model call,
+/// Run one assistant turn: redact fail-closed, make a single tool-free model call,
 /// and parse the structured answer (each proposed command stamped with the
 /// server-authoritative risk / decision). Streams the explanation prose as
 /// `Partial` frames through `sink` as the model writes it, then emits the terminal
 /// `Final` answer (or an `Error`). The trailing ```json suggestions block is
 /// withheld from the prose stream; the `Final` frame carries the parsed answer.
-async fn run_copilot_turn(
+async fn run_assistant_turn(
     db: &DatabaseConnection,
-    mut ask: TerminalCopilotAsk,
-    sink: &mut CopilotStreamSink<impl CopilotFrameSink>,
+    mut ask: TerminalAiAssistantAsk,
+    sink: &mut AssistantStreamSink<impl AssistantFrameSink>,
 ) {
     let redactor = RegexRedactor::new();
-    if let Err(reason) = redact_copilot_context(&redactor, &mut ask) {
-        log::warn!("[copilot] redaction failed, aborting before model dial: {reason}");
+    if let Err(reason) = redact_assistant_context(&redactor, &mut ask) {
+        log::warn!("[assistant] redaction failed, aborting before model dial: {reason}");
         sink.emit_error(redaction_failed_error());
         return;
     }
@@ -235,15 +237,15 @@ async fn run_copilot_turn(
     // Stateless multi-turn: the control end replays the conversation, so the prompt
     // is [system, ...prior turns (capped + redacted), current user]. The signal
     // central brain keeps no session of its own.
-    let mut messages = vec![build_copilot_system_message(
+    let mut messages = vec![build_assistant_system_message(
         ask.mode,
         ask.locale.as_deref(),
     )];
-    messages.extend(build_copilot_history_messages(&ask.history));
-    messages.push(build_copilot_user_message(&ask));
+    messages.extend(build_assistant_history_messages(&ask.history));
+    messages.push(build_assistant_user_message(&ask));
     match dial(db, messages, sink).await {
         Ok((turn, model)) => {
-            let (answer, _outcome) = parse_copilot_answer(&turn.text, &default_shell);
+            let (answer, _outcome) = parse_assistant_answer(&turn.text, &default_shell);
             // Mark the AI-generated answer with machine-readable provenance (Art.50(2)).
             sink.set_provenance(AiProvenance::stamp(
                 model,
@@ -275,21 +277,21 @@ pub async fn run_completion(
     .await;
 }
 
-/// Drive a terminal copilot turn centrally and stream its events to the browser.
+/// Drive a Terminal AI Assistant turn centrally and stream its events to the browser.
 /// Spawned by the control-frame authorizer (the model dial is `!Send`).
 ///
-/// An ordered async forwarder (mirroring the manager copilot entry) decouples the
+/// An ordered async forwarder (mirroring the manager assistant entry) decouples the
 /// synchronous stream sink from the async WebSocket send: the sink enqueues each
 /// frame and this drains them in order, so partial explanation frames stream to the
 /// browser as the model writes them without blocking the dial.
-pub async fn run_copilot(
+pub async fn run_assistant(
     connection_map: web::Data<SharedConnectionMap>,
     db: DatabaseConnection,
     request_id: String,
     browser_connection_id: String,
-    ask: TerminalCopilotAsk,
+    ask: TerminalAiAssistantAsk,
 ) {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TerminalCopilotEvent>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TerminalAiAssistantEvent>();
     let forward_map = connection_map.clone();
     let forward_browser = browser_connection_id.clone();
     let forwarder = actix_web::rt::spawn(async move {
@@ -298,20 +300,20 @@ pub async fn run_copilot(
                 forward_map.as_ref(),
                 &forward_browser,
                 &event.request_id,
-                SignalingType::TerminalCopilotUpdated,
+                SignalingType::TerminalAiAssistantUpdated,
                 &event,
             )
             .await;
         }
     });
-    let frame_sink = move |event: TerminalCopilotEvent| {
+    let frame_sink = move |event: TerminalAiAssistantEvent| {
         // The forwarder owns delivery; a closed channel only means the browser is
         // gone, which the turn need not react to.
         let _ = tx.send(event);
     };
-    let mut sink = CopilotStreamSink::new(frame_sink, request_id).streaming_text();
+    let mut sink = AssistantStreamSink::new(frame_sink, request_id).streaming_text();
 
-    run_copilot_turn(&db, ask, &mut sink).await;
+    run_assistant_turn(&db, ask, &mut sink).await;
 
     // Dropping the sink drops `tx`, ending the forwarder once it has flushed every
     // queued frame.
@@ -322,10 +324,10 @@ pub async fn run_copilot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use desk_agent_protocol::terminal_complete::TerminalCompletionContext;
-    use desk_agent_protocol::terminal_copilot::{
-        TerminalContext, TerminalCopilotEventKind, TerminalCopilotMode,
+    use desk_agent_protocol::terminal_ai_assistant::{
+        TerminalAiAssistantEventKind, TerminalAiAssistantMode, TerminalContext,
     };
+    use desk_agent_protocol::terminal_complete::TerminalCompletionContext;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -344,8 +346,8 @@ mod tests {
     /// A recording frame sink: a closure pushing each emitted frame into a shared
     /// buffer.
     fn recorder() -> (
-        Rc<RefCell<Vec<TerminalCopilotEvent>>>,
-        impl Fn(TerminalCopilotEvent),
+        Rc<RefCell<Vec<TerminalAiAssistantEvent>>>,
+        impl Fn(TerminalAiAssistantEvent),
     ) {
         let store = Rc::new(RefCell::new(Vec::new()));
         let s = store.clone();
@@ -366,10 +368,10 @@ mod tests {
         }
     }
 
-    fn copilot_ask(recent: &str, err: Option<&str>) -> TerminalCopilotAsk {
-        TerminalCopilotAsk {
+    fn assistant_ask(recent: &str, err: Option<&str>) -> TerminalAiAssistantAsk {
+        TerminalAiAssistantAsk {
             conversation_id: None,
-            mode: TerminalCopilotMode::HowTo,
+            mode: TerminalAiAssistantMode::HowTo,
             question: Some("how do I check the service?".into()),
             locale: None,
             history: Vec::new(),
@@ -448,16 +450,16 @@ mod tests {
         );
     }
 
-    /// Copilot context redaction scrubs a secret out of the recent scrollback and
+    /// Assistant context redaction scrubs a secret out of the recent scrollback and
     /// the error passage before any model dial (fail-closed input).
     #[test]
-    fn copilot_context_is_redacted_before_dial() {
+    fn assistant_context_is_redacted_before_dial() {
         let redactor = RegexRedactor::new();
-        let mut ask = copilot_ask(
+        let mut ask = assistant_ask(
             "export AWS_KEY=AKIAIOSFODNN7EXAMPLE",
             Some("token=ghp_secretsecretsecretsecretsecret1234 failed"),
         );
-        redact_copilot_context(&redactor, &mut ask).expect("redaction succeeds");
+        redact_assistant_context(&redactor, &mut ask).expect("redaction succeeds");
         assert!(!ask.context.recent_output.contains("AKIAIOSFODNN7EXAMPLE"));
         assert!(
             !ask.context
@@ -471,29 +473,29 @@ mod tests {
     /// The replayed conversation history is redacted fail-closed too, so a secret
     /// echoed into an earlier turn never reaches the model on a follow-up.
     #[test]
-    fn copilot_history_is_redacted_before_dial() {
-        use desk_agent_protocol::terminal_copilot::CopilotHistoryTurn;
+    fn assistant_history_is_redacted_before_dial() {
+        use desk_agent_protocol::terminal_ai_assistant::AssistantHistoryTurn;
         let redactor = RegexRedactor::new();
-        let mut ask = copilot_ask("clean", None);
-        ask.history = vec![CopilotHistoryTurn {
+        let mut ask = assistant_ask("clean", None);
+        ask.history = vec![AssistantHistoryTurn {
             user: "export AWS_KEY=AKIAIOSFODNN7EXAMPLE".into(),
             assistant: "token=ghp_secretsecretsecretsecretsecret1234 leaked".into(),
         }];
-        redact_copilot_context(&redactor, &mut ask).expect("redaction succeeds");
+        redact_assistant_context(&redactor, &mut ask).expect("redaction succeeds");
         assert!(!ask.history[0].user.contains("AKIAIOSFODNN7EXAMPLE"));
         assert!(!ask.history[0].assistant.contains("ghp_secret"));
     }
 
     /// With no provider configured the seam build fails closed, so the streaming
-    /// copilot turn emits exactly one terminal `Error` frame (no half-stream).
+    /// assistant turn emits exactly one terminal `Error` frame (no half-stream).
     #[actix_web::test]
-    async fn copilot_turn_without_provider_emits_single_error_frame() {
+    async fn assistant_turn_without_provider_emits_single_error_frame() {
         let db = provider_db().await;
         let (store, frame_sink) = recorder();
-        let mut sink = CopilotStreamSink::new(frame_sink, "req-1").streaming_text();
-        run_copilot_turn(
+        let mut sink = AssistantStreamSink::new(frame_sink, "req-1").streaming_text();
+        run_assistant_turn(
             &db,
-            copilot_ask("bind: address already in use", None),
+            assistant_ask("bind: address already in use", None),
             &mut sink,
         )
         .await;
@@ -501,7 +503,7 @@ mod tests {
 
         let ev = store.borrow();
         assert_eq!(ev.len(), 1);
-        assert_eq!(ev[0].kind, TerminalCopilotEventKind::Error);
+        assert_eq!(ev[0].kind, TerminalAiAssistantEventKind::Error);
         assert_eq!(ev[0].request_id, "req-1");
     }
 
@@ -509,15 +511,15 @@ mod tests {
     /// drains the (no-op) sends and joins, exercising the channel + forwarder wiring
     /// without hanging.
     #[actix_web::test]
-    async fn run_copilot_completes_without_a_live_browser() {
+    async fn run_assistant_completes_without_a_live_browser() {
         let db = provider_db().await;
         let connection_map = web::Data::new(SharedConnectionMap::new());
-        run_copilot(
+        run_assistant(
             connection_map,
             db,
             "req-2".into(),
             "browser-gone".into(),
-            copilot_ask("recent", None),
+            assistant_ask("recent", None),
         )
         .await;
     }

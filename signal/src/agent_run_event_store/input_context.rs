@@ -43,7 +43,7 @@ pub(super) fn decode_session(
         || session.actor_id != subject.actor_id
         || session.device_id != subject.device_id
         || session.client_conversation_id.as_deref() != subject.client_conversation_id
-        || session.surface != AgentSessionSurface::DeviceAssistant
+        || session.surface != AgentSessionSurface::AiAssistant
         || row.version < 0
         || session.handled_input_seq > session.latest_input_seq
     {
@@ -199,7 +199,7 @@ pub(super) fn validate_selection(
     if !selection.live_targets.is_empty() {
         let now_unix_ms =
             u64::try_from(now.timestamp_millis()).map_err(|_| internal("invalid input time"))?;
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         desk_diagnose_core::input_read_context::live_read::validate_durable_selection(
             selection,
             session,
@@ -364,7 +364,7 @@ async fn original_with_time_on(
         client_conversation_id: subject.client_conversation_id.map(str::to_string),
         actor_id: subject.actor_id.into(),
         device_id: subject.device_id.into(),
-        surface: AgentSessionSurface::DeviceAssistant,
+        surface: AgentSessionSurface::AiAssistant,
         policy_revision: session.policy_revision,
         current_scope: session.scope_snapshot.clone(),
         read_context: selection.clone(),
@@ -422,8 +422,7 @@ impl SignalAgentRunEventStore {
                 destination,
                 now,
             )?;
-            let registry =
-                desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+            let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
             desk_diagnose_core::input_read_context::live_read::validate_durable_selection(
                 original,
                 &session,

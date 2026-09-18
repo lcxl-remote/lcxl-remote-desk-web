@@ -2,9 +2,7 @@
 use super::{
     ScheduleStore, ScheduleStoreError, TaskPublicationVerifier, TaskRehearsalEvidence, entity,
 };
-use crate::{
-    control_authorizer::SINGLE_ACCOUNT_USER_ID, device_assistant_gate::DeviceAssistantGate,
-};
+use crate::{ai_assistant_gate::AiAssistantGate, control_authorizer::SINGLE_ACCOUNT_USER_ID};
 use desk_agent_protocol::{capability_provider::ProductSurface, schedule::contract::TaskBudget};
 use desk_diagnose_core::{
     capability_availability::callable_tools, model_capability::ModelCapabilities,
@@ -17,7 +15,7 @@ use sea_orm::DatabaseTransaction;
 
 pub struct SignalTaskPublicationVerifier<'a> {
     pub connections: &'a SharedConnectionMap,
-    pub gate: &'a DeviceAssistantGate,
+    pub gate: &'a AiAssistantGate,
     pub maximum_budget: &'a TaskBudget,
 }
 
@@ -85,7 +83,7 @@ impl TaskPublicationVerifier for SignalTaskPublicationVerifier<'_> {
             .destination_identity()
             .map_err(|_| ScheduleStoreError::Conflict)?;
         let (registry, inventory, _, readiness) =
-            crate::device_assistant_orchestrator::current_capability_projection(
+            crate::ai_assistant_orchestrator::current_capability_projection(
                 txn,
                 self.connections,
                 &target,
@@ -145,7 +143,7 @@ impl TaskPublicationVerifier for SignalTaskPublicationVerifier<'_> {
 mod tests {
     use super::*;
     use crate::schedule_store::publication_test_fixture;
-    use desk_agent_protocol::device_assistant::DeviceAssistantSettings;
+    use desk_agent_protocol::ai_assistant::AiAssistantSettings;
     use sea_orm::Database;
 
     #[tokio::test]
@@ -153,9 +151,9 @@ mod tests {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         let (store, task, _, input) = publication_test_fixture(db).await;
         let connections = SharedConnectionMap::new();
-        let gate = DeviceAssistantGate::default();
+        let gate = AiAssistantGate::default();
         for enabled in [false, true] {
-            gate.replace(DeviceAssistantSettings {
+            gate.replace(AiAssistantSettings {
                 enabled,
                 revision: 1,
             });

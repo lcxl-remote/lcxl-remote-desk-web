@@ -19,6 +19,19 @@ function createApi() {
 }
 
 describe('shared Web Search settings', () => {
+    it('preserves the themed inline label and arrow layout for both selectors', async () => {
+        render(<WebSearchForm api={createApi()} />);
+        const provider = await screen.findByRole('combobox', { name: 'Search provider' });
+        await selectOption(provider, 'Brave');
+        const selectors = screen.getAllByRole('combobox');
+        expect(selectors).toHaveLength(2);
+        for (const selector of selectors) {
+            expect(selector).toHaveClass('flex', 'items-center', 'justify-between', 'border-input');
+            expect(selector).not.toHaveClass('block');
+            expect(selector.querySelector('svg')).not.toBeNull();
+        }
+    });
+
     it('loads a keyless default without making a search request', async () => {
         const api = createApi();
         render(<WebSearchForm api={api} />);

@@ -20,15 +20,15 @@ it('loads all current conversation timer pages including completed tasks only wh
 it('shows read failures instead of an empty success list', async () => {
     request.mockRejectedValue(new Error('offline'));
     render(<AssistantSchedules open onOpenChange={() => {}} deviceId="device" sessionId="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" />);
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('pages.deviceAssistant.schedules.loadError'));
-    expect(screen.queryByText('pages.deviceAssistant.schedules.empty')).toBeNull();
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('pages.aiAssistant.schedules.loadError'));
+    expect(screen.queryByText('pages.aiAssistant.schedules.empty')).toBeNull();
 });
 
 it('never falls back to device-wide listing for a new conversation', () => {
     request.mockClear();
     render(<AssistantSchedules open onOpenChange={() => {}} deviceId="device" sessionId={null} />);
     expect(request).not.toHaveBeenCalled();
-    expect(screen.getByText('pages.deviceAssistant.schedules.empty')).toBeTruthy();
+    expect(screen.getByText('pages.aiAssistant.schedules.empty')).toBeTruthy();
 });
 
 it('discards a previous conversation response after switching conversations', async () => {
@@ -45,7 +45,7 @@ it('discards a previous conversation response after switching conversations', as
 
 
 it('binds schedule filtering to the canonical snapshot session instead of the client UUID', () => {
-    const page = readFileSync('src/features/desk/device-assistant-page.tsx', 'utf8');
+    const page = readFileSync('src/features/desk/ai-assistant-page.tsx', 'utf8');
     expect(page).toContain('<AssistantSchedules key={permissionHistoryKey} sessionId={chat.sessionId ?? null}');
     expect(page).not.toContain('<AssistantSchedules key={permissionHistoryKey} conversationId={chat.conversationId}');
 });

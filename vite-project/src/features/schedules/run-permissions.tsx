@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AssistantPermissionRequest } from '@/features/desk/assistant-permission-request';
-import { deskErrorCodeEnum, type DeviceAssistantSessionSnapshotDto, type PermissionDecisionBody, type PermissionRequestDto, type ScheduleView } from '@/services/types';
+import { deskErrorCodeEnum, type AiAssistantSessionSnapshotDto, type PermissionDecisionBody, type PermissionRequestDto, type ScheduleView } from '@/services/types';
 import type { ScheduleClient } from './client';
 
-type ApprovalSnapshot = Pick<DeviceAssistantSessionSnapshotDto, 'sessionId' | 'seq' | 'requestId' | 'inputRevision' | 'permissionRequests' | 'active'>;
+type ApprovalSnapshot = Pick<AiAssistantSessionSnapshotDto, 'sessionId' | 'seq' | 'requestId' | 'inputRevision' | 'permissionRequests' | 'active'>;
 
 export function RunPermissions({ client, scheduleId, runId, snapshot, connectionIds = {}, connected, loading, onReload }: {
     client: Pick<ScheduleClient, 'request'>; scheduleId: string; runId: string; snapshot: ApprovalSnapshot;
@@ -52,7 +52,7 @@ export function RunPermissions({ client, scheduleId, runId, snapshot, connection
         };
         let recorded = false;
         try {
-            const response = await fetch('/api/my/device-assistant-session/permission-decision', {
+            const response = await fetch('/api/my/ai-assistant-session/permission-decision', {
                 method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
                 body: JSON.stringify(body), signal: controller.signal,
             });

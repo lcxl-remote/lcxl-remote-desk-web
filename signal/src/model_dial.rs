@@ -6,7 +6,7 @@
 //! The manager has its own seam (its model dialect); signal's is separate.
 //!
 //! The dial **streams** the provider response over Server-Sent Events: each text
-//! delta is forwarded to the [`TurnSink`] as it arrives (so the terminal copilot
+//! delta is forwarded to the [`TurnSink`] as it arrives (so the Terminal AI Assistant
 //! can render the explanation live), while the call still assembles and returns the
 //! complete, normalized [`ModelTurn`] (the structured answer parse runs on the full
 //! text). A caller that does not want streaming passes a no-op sink.
@@ -1455,7 +1455,7 @@ mod tests {
             "os":"macos","interactive_session_incarnation":"worker",
             "active_application":{"token":"calendar-id","snapshot_id":"private-snapshot","object_kind":"application","expires_at":"2030-01-01T00:00:00Z"},"active_application_name":"Calendar"
         }}}).to_string())], ResponseFormatSpec::None);
-        request.tools = desk_diagnose_core::device_assistant::device_assistant_tool_registry()
+        request.tools = desk_diagnose_core::ai_assistant::ai_assistant_tool_registry()
             .into_iter()
             .filter(|tool| {
                 matches!(
@@ -2462,13 +2462,13 @@ mod tests {
     }
 
     async fn run_progressive_disclosure_fixed_eval(seam: &SignalModelSeam, provider: &str) {
+        use desk_diagnose_core::ai_assistant::ai_assistant_provider_registry;
         use desk_diagnose_core::capability_availability::CapabilityAvailability;
         use desk_diagnose_core::capability_disclosure::{
             CapabilityDisclosureState, CapabilityLoadContext, apply_load_call,
             capability_discovery_tool_registry, capability_name_index_prompt,
             project_capability_disclosure,
         };
-        use desk_diagnose_core::device_assistant::device_assistant_provider_registry;
 
         async fn call(
             seam: &SignalModelSeam,
@@ -2505,7 +2505,7 @@ mod tests {
             })
         }
 
-        let registry = device_assistant_provider_registry();
+        let registry = ai_assistant_provider_registry();
         let inventory = registry
             .providers()
             .flat_map(|provider| {
@@ -2873,13 +2873,13 @@ mod tests {
         provider: &str,
         wire_protocol: WireProtocol,
     ) {
+        use desk_diagnose_core::ai_assistant::ai_assistant_provider_registry;
         use desk_diagnose_core::capability_availability::CapabilityAvailability;
         use desk_diagnose_core::capability_disclosure::{
             CapabilityDisclosureState, CapabilityLoadContext, apply_load_call,
             capability_discovery_tool_registry, capability_name_index_prompt,
             project_capability_disclosure,
         };
-        use desk_diagnose_core::device_assistant::device_assistant_provider_registry;
 
         async fn invoke(
             seam: &SignalModelSeam,
@@ -2900,7 +2900,7 @@ mod tests {
             seam.call(request, &mut sink).await.unwrap()
         }
 
-        let registry = device_assistant_provider_registry();
+        let registry = ai_assistant_provider_registry();
         let inventory = registry
             .providers()
             .flat_map(|provider| {

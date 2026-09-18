@@ -1,4 +1,5 @@
 pub mod access_grant;
+pub mod ai_assistant;
 pub mod audio_capture;
 pub mod auth;
 pub mod auth_context;
@@ -6,7 +7,6 @@ pub mod code_session;
 pub mod connection;
 pub mod credential_heartbeat;
 pub mod desk_settings;
-pub mod device_assistant;
 pub mod files;
 pub mod image_capture;
 pub mod media_capability;

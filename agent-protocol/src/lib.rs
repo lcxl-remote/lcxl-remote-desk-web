@@ -29,6 +29,7 @@ use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
 pub mod agent_event;
+pub mod ai_assistant;
 pub mod application_launch;
 pub mod audit;
 pub mod authz;
@@ -42,7 +43,6 @@ pub mod communication;
 pub mod computer_use;
 pub mod content_safety;
 pub mod data_lineage;
-pub mod device_assistant;
 pub mod diagnose;
 pub mod edge_exec;
 pub mod evidence;
@@ -56,8 +56,8 @@ pub mod model_proxy;
 pub mod provenance;
 pub mod remote_tool;
 pub mod schedule;
+pub mod terminal_ai_assistant;
 pub mod terminal_complete;
-pub mod terminal_copilot;
 pub mod visual_evidence;
 
 use crate::exec::{CommandClassification, ExecDecision, ExecEffect, ExecIoMode};

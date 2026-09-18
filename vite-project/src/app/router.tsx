@@ -96,7 +96,7 @@ export const router = createBrowserRouter([
             {
                 path: 'desk/:id/assistant',
                 lazy: async () => ({
-                    Component: (await import('@/features/desk/device-assistant-page')).default,
+                    Component: (await import('@/features/desk/ai-assistant-page')).default,
                 }),
             },
             {

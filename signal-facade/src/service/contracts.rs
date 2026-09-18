@@ -44,17 +44,17 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::ResolveExecution
         | SignalingType::ExecuteEdgePlan
         | SignalingType::InvokeRemoteTool
-        | SignalingType::AskTerminalCopilot
+        | SignalingType::AskTerminalAiAssistant
         | SignalingType::GenerateTerminalCompletions
         | SignalingType::ControlExecution
         | SignalingType::DispatchComputerAction
         | SignalingType::CancelComputerAction
         | SignalingType::QueryComputerActionState
-        | SignalingType::AskDeviceAssistant
-        | SignalingType::GetDeviceAssistantCapabilities
-        | SignalingType::UpdateDeviceAssistantContext
-        | SignalingType::UpdateDeviceAssistantObjectContext
-        | SignalingType::SelectDeviceAssistantSession
+        | SignalingType::AskAiAssistant
+        | SignalingType::GetAiAssistantCapabilities
+        | SignalingType::UpdateAiAssistantContext
+        | SignalingType::UpdateAiAssistantObjectContext
+        | SignalingType::SelectAiAssistantSession
         | SignalingType::ManageScheduledTasks
         | SignalingType::ManageFileRecovery => Request,
 
@@ -82,17 +82,17 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::ExecutionCompleted
         | SignalingType::EdgeExecutionCompleted
         | SignalingType::RemoteToolOutputUpdated
-        | SignalingType::TerminalCopilotUpdated
+        | SignalingType::TerminalAiAssistantUpdated
         | SignalingType::TerminalCompletionsGenerated
         | SignalingType::ExecutionStateReported
         | SignalingType::ComputerActionStarted
         | SignalingType::ComputerActionCompleted
         | SignalingType::ComputerActionStateReported
-        | SignalingType::DeviceAssistantUpdated
-        | SignalingType::DeviceAssistantCapabilitiesUpdated
-        | SignalingType::DeviceAssistantContextUpdated
-        | SignalingType::DeviceAssistantObjectContextUpdated
-        | SignalingType::DeviceAssistantSessionSelected
+        | SignalingType::AiAssistantUpdated
+        | SignalingType::AiAssistantCapabilitiesUpdated
+        | SignalingType::AiAssistantContextUpdated
+        | SignalingType::AiAssistantObjectContextUpdated
+        | SignalingType::AiAssistantSessionSelected
         | SignalingType::ScheduledTasksManaged
         | SignalingType::FileRecoveryManaged => Response,
 
@@ -105,10 +105,10 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::CloseTerminal
         | SignalingType::ReportAiAuditEvent
         | SignalingType::SyncCommandTemplates
-        | SignalingType::CancelTerminalCopilot
+        | SignalingType::CancelTerminalAiAssistant
         | SignalingType::SyncCommandBlocklist
-        | SignalingType::CancelDeviceAssistant
-        | SignalingType::UpdateDeviceAssistantSettings => Command,
+        | SignalingType::CancelAiAssistant
+        | SignalingType::UpdateAiAssistantSettings => Command,
 
         SignalingType::ConnectionRemoved
         | SignalingType::PrivateScreenStateChanged
@@ -158,24 +158,20 @@ pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
         SignalingType::ResolveExecution => SignalingType::ExecutionCompleted,
         SignalingType::ExecuteEdgePlan => SignalingType::EdgeExecutionCompleted,
         SignalingType::InvokeRemoteTool => SignalingType::RemoteToolOutputUpdated,
-        SignalingType::AskTerminalCopilot => SignalingType::TerminalCopilotUpdated,
+        SignalingType::AskTerminalAiAssistant => SignalingType::TerminalAiAssistantUpdated,
         SignalingType::GenerateTerminalCompletions => SignalingType::TerminalCompletionsGenerated,
         SignalingType::ControlExecution => SignalingType::ExecutionStateReported,
         SignalingType::DispatchComputerAction => SignalingType::ComputerActionCompleted,
         SignalingType::CancelComputerAction | SignalingType::QueryComputerActionState => {
             SignalingType::ComputerActionStateReported
         }
-        SignalingType::AskDeviceAssistant => SignalingType::DeviceAssistantUpdated,
-        SignalingType::GetDeviceAssistantCapabilities => {
-            SignalingType::DeviceAssistantCapabilitiesUpdated
+        SignalingType::AskAiAssistant => SignalingType::AiAssistantUpdated,
+        SignalingType::GetAiAssistantCapabilities => SignalingType::AiAssistantCapabilitiesUpdated,
+        SignalingType::UpdateAiAssistantContext => SignalingType::AiAssistantContextUpdated,
+        SignalingType::UpdateAiAssistantObjectContext => {
+            SignalingType::AiAssistantObjectContextUpdated
         }
-        SignalingType::UpdateDeviceAssistantContext => SignalingType::DeviceAssistantContextUpdated,
-        SignalingType::UpdateDeviceAssistantObjectContext => {
-            SignalingType::DeviceAssistantObjectContextUpdated
-        }
-        SignalingType::SelectDeviceAssistantSession => {
-            SignalingType::DeviceAssistantSessionSelected
-        }
+        SignalingType::SelectAiAssistantSession => SignalingType::AiAssistantSessionSelected,
         _ => return None,
     })
 }
@@ -211,16 +207,16 @@ pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] 
         ResolveExecution => &[ExecutionCompleted],
         ExecuteEdgePlan => &[EdgeExecutionCompleted],
         InvokeRemoteTool => &[RemoteToolOutputUpdated],
-        AskTerminalCopilot => &[TerminalCopilotUpdated],
+        AskTerminalAiAssistant => &[TerminalAiAssistantUpdated],
         GenerateTerminalCompletions => &[TerminalCompletionsGenerated],
         ControlExecution => &[ExecutionStateReported],
         DispatchComputerAction => &[ComputerActionStarted, ComputerActionCompleted],
         CancelComputerAction | QueryComputerActionState => &[ComputerActionStateReported],
-        AskDeviceAssistant => &[DeviceAssistantUpdated],
-        GetDeviceAssistantCapabilities => &[DeviceAssistantCapabilitiesUpdated],
-        UpdateDeviceAssistantContext => &[DeviceAssistantContextUpdated],
-        UpdateDeviceAssistantObjectContext => &[DeviceAssistantObjectContextUpdated],
-        SelectDeviceAssistantSession => &[DeviceAssistantSessionSelected],
+        AskAiAssistant => &[AiAssistantUpdated],
+        GetAiAssistantCapabilities => &[AiAssistantCapabilitiesUpdated],
+        UpdateAiAssistantContext => &[AiAssistantContextUpdated],
+        UpdateAiAssistantObjectContext => &[AiAssistantObjectContextUpdated],
+        SelectAiAssistantSession => &[AiAssistantSessionSelected],
         _ => &[],
     }
 }

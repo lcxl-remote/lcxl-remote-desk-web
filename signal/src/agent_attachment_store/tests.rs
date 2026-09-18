@@ -28,7 +28,7 @@ async fn local_attachments_are_durable_scoped_atomic_and_do_not_resurrect() {
     };
     let mut session =
         PersistedAgentSession::new("conversation", "owner", "device", 1, scope, "now");
-    session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
     agent_session::ActiveModel {
         conversation_id: Set(session.conversation_id.clone()),
         actor_id: Set(session.actor_id.clone()),

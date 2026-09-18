@@ -1,4 +1,4 @@
-//! Frozen turn identity for a Device Assistant action. This is concurrency
+//! Frozen turn identity for a AI Assistant action. This is concurrency
 //! evidence, never a capability grant or permission to execute an operation.
 
 use desk_agent_protocol::{AgentError, AgentErrorKind};
@@ -22,7 +22,7 @@ impl AssistantTurnFence {
     /// Freeze the loop's held snapshot, not a newly loaded session that might
     /// already belong to a different input or leaseholder.
     pub fn from_session(session: &PersistedAgentSession) -> Result<Option<Self>, AgentError> {
-        if session.surface != AgentSessionSurface::DeviceAssistant {
+        if session.surface != AgentSessionSurface::AiAssistant {
             return Ok(None);
         }
         if !session.turn_state.is_active() {
@@ -65,7 +65,7 @@ impl AssistantTurnFence {
 fn invalid() -> AgentError {
     AgentError {
         kind: AgentErrorKind::SessionUnavailable,
-        message: "invalid Device Assistant action turn fence".into(),
+        message: "invalid AI Assistant action turn fence".into(),
         retryable: false,
         safe_for_model: false,
         error_code: None,
@@ -146,7 +146,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        session.surface = AgentSessionSurface::DeviceAssistant;
+        session.surface = AgentSessionSurface::AiAssistant;
         assert!(AssistantTurnFence::from_session(&session).is_err());
         session.input_revision = 1;
         session.latest_input_seq = 1;

@@ -1,5 +1,5 @@
 //! Machine-readable provenance for AI-generated content, shared across the AI
-//! output surfaces (diagnosis, Terminal Copilot, command completion).
+//! output surfaces (diagnosis, Terminal AI Assistant, command completion).
 //!
 //! This is attached to the browser-facing content frames, not to the internal
 //! model-adapter result: that result is flattened to a plain string before it

@@ -12,7 +12,7 @@ use desk_agent_protocol::communication::{
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use sha2::{Digest, Sha256};
 
-pub use desk_diagnose_core::device_assistant::OUTLOOK_NEW_APPLICATION_ID;
+pub use desk_diagnose_core::ai_assistant::OUTLOOK_NEW_APPLICATION_ID;
 const MAX_MAILTO_URI_BYTES: usize = 24 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

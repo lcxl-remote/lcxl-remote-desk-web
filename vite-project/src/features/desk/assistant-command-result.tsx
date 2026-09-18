@@ -50,33 +50,33 @@ export function AssistantCommandResult({ text, onExportBackup }: { text: string;
     const output = (label: string, content: string, truncated: boolean) => (
         <div className="min-w-0 space-y-1">
             <p className="font-medium">{label}</p>
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-xs">{content || t('pages.deviceAssistant.commandReceipt.empty')}</pre>
-            {truncated && <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.commandReceipt.truncated')}</p>}
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-xs">{content || t('pages.aiAssistant.commandReceipt.empty')}</pre>
+            {truncated && <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.commandReceipt.truncated')}</p>}
         </div>
     );
     return (
         <Disclosure className="min-w-0" title={<>
-                {t('pages.deviceAssistant.commandResultTitle')}
-                {outcomeUnknown && <> · {t('pages.deviceAssistant.toolCall.inspectBeforeRetry')}</>}
+                {t('pages.aiAssistant.commandResultTitle')}
+                {outcomeUnknown && <> · {t('pages.aiAssistant.toolCall.inspectBeforeRetry')}</>}
             </>} summaryClassName="cursor-pointer rounded font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
 
             <div className="mt-3 space-y-3">
                 {receipt ? <>
                     <dl className="flex flex-wrap gap-x-6 gap-y-2">
-                        <div><dt className="text-muted-foreground">{t('pages.deviceAssistant.commandReceipt.exitCode')}</dt><dd>{receipt.exit_code}</dd></div>
-                        <div><dt className="text-muted-foreground">{t('pages.deviceAssistant.commandReceipt.duration')}</dt><dd>{t('pages.deviceAssistant.commandReceipt.milliseconds', { value: receipt.duration_ms.toLocaleString(i18n.language) })}</dd></div>
+                        <div><dt className="text-muted-foreground">{t('pages.aiAssistant.commandReceipt.exitCode')}</dt><dd>{receipt.exit_code}</dd></div>
+                        <div><dt className="text-muted-foreground">{t('pages.aiAssistant.commandReceipt.duration')}</dt><dd>{t('pages.aiAssistant.commandReceipt.milliseconds', { value: receipt.duration_ms.toLocaleString(i18n.language) })}</dd></div>
                     </dl>
                     {receipt.streams.type === 'split' ? <>
-                        {output(t('pages.deviceAssistant.commandReceipt.stdout'), receipt.streams.stdout, receipt.streams.stdout_truncated)}
-                        {output(t('pages.deviceAssistant.commandReceipt.stderr'), receipt.streams.stderr, receipt.streams.stderr_truncated)}
-                    </> : output(t('pages.deviceAssistant.commandReceipt.terminal'), receipt.streams.terminal, receipt.streams.truncated)}
-                    {!!receipt.redactions?.length && output(t('pages.deviceAssistant.commandReceipt.redactions'), receipt.redactions.join('\n'), false)}
-                    <Disclosure title={<>{t('pages.deviceAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs text-muted-foreground">
+                        {output(t('pages.aiAssistant.commandReceipt.stdout'), receipt.streams.stdout, receipt.streams.stdout_truncated)}
+                        {output(t('pages.aiAssistant.commandReceipt.stderr'), receipt.streams.stderr, receipt.streams.stderr_truncated)}
+                    </> : output(t('pages.aiAssistant.commandReceipt.terminal'), receipt.streams.terminal, receipt.streams.truncated)}
+                    {!!receipt.redactions?.length && output(t('pages.aiAssistant.commandReceipt.redactions'), receipt.redactions.join('\n'), false)}
+                    <Disclosure title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs text-muted-foreground">
 
                         <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{text}</pre>
                     </Disclosure>
                 </> : <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{text}</pre>}
-                <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.commandResultHint')}</p>
+                <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.commandResultHint')}</p>
             </div>
         </Disclosure>
     );

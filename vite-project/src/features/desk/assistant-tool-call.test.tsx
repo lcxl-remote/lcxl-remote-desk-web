@@ -1,10 +1,10 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { AssistantToolCall } from './assistant-tool-call';
-import type { DeviceAssistantToolActivity } from './use-device-assistant-chat';
+import type { AiAssistantToolActivity } from './use-ai-assistant-chat';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-const tool: DeviceAssistantToolActivity = {
+const tool: AiAssistantToolActivity = {
     callId: 'call-1', name: 'inspect_desktop_ui', status: 'running',
     argumentsJson: '{"queries":["Calendar"]}', output: null,
 };
@@ -15,30 +15,30 @@ describe('tool call transcript', () => {
             result: 'outcome_unknown', facts: [{ index: 0, changed: true, verified: false }], output: null };
         const { container, rerender } = render(<AssistantToolCall running={false} tool={{ ...tool,
             name: 'create_text_file', status: 'failed', output: JSON.stringify(output) }} />);
-        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.outcomeUnknown' })).toBeTruthy();
-        expect(screen.getByText(/pages.deviceAssistant.toolCall.inspectBeforeRetry/)).toBeTruthy();
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.outcomeUnknown' })).toBeTruthy();
+        expect(screen.getByText(/pages.aiAssistant.toolCall.inspectBeforeRetry/)).toBeTruthy();
         expect(container.querySelector('pre')).toBeNull();
-        expect(screen.queryByRole('img', { name: 'pages.deviceAssistant.toolCall.failure' })).toBeNull();
+        expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.failure' })).toBeNull();
         rerender(<AssistantToolCall running={false} tool={{ ...tool, status: 'failed',
             output: JSON.stringify({ ...output, action_request_id: 'another-call' }) }} />);
-        expect(screen.queryByRole('img', { name: 'pages.deviceAssistant.toolCall.outcomeUnknown' })).toBeNull();
-        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.failure' })).toBeTruthy();
+        expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.outcomeUnknown' })).toBeNull();
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.failure' })).toBeTruthy();
     });
 
     it('shows accessible status icons while folded and updates from running to success or failure', () => {
         const { container, rerender } = render(<AssistantToolCall tool={tool} running />);
-        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.waiting' }).querySelector('.animate-spin')).toBeTruthy();
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.waiting' }).querySelector('.animate-spin')).toBeTruthy();
         rerender(<AssistantToolCall tool={{ ...tool, status: 'ok', output: '' }} running />);
-        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.success' })).toBeTruthy();
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.success' })).toBeTruthy();
         expect(container.querySelector('.animate-spin')).toBeNull();
         rerender(<AssistantToolCall tool={{ ...tool, status: 'failed', output: 'access denied' }} running />);
-        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.failure' })).toBeTruthy();
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.failure' })).toBeTruthy();
         expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
         expect(container.querySelector('pre')).toBeNull();
         rerender(<AssistantToolCall tool={tool} running={false} />);
-        expect(screen.getByRole('img', { name: 'pages.deviceAssistant.toolCall.missing' })).toBeTruthy();
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.missing' })).toBeTruthy();
         expect(container.querySelector('.animate-spin')).toBeNull();
-        expect(screen.queryByRole('img', { name: 'pages.deviceAssistant.toolCall.success' })).toBeNull();
+        expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.success' })).toBeNull();
     });
 
     it('starts folded, lazily renders payloads, and keeps expansion when output arrives', async () => {
@@ -48,7 +48,7 @@ describe('tool call transcript', () => {
         fireEvent.click(screen.getByText(/inspect_desktop_ui/));
         await waitFor(() => expect(container.querySelectorAll('pre')).toHaveLength(2));
         expect(container.querySelector('pre')?.textContent).toBe(JSON.stringify(JSON.parse(tool.argumentsJson), null, 2));
-        expect(screen.getByText('pages.deviceAssistant.toolCall.waiting')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.toolCall.waiting')).toBeTruthy();
         rerender(<AssistantToolCall tool={{ ...tool, status: 'failed', output: 'tool error: access denied <script>alert(1)</script>' }} running={false} />);
         expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(true);
         expect(screen.getByText(/tool error: access denied/)).toBeTruthy();
@@ -58,13 +58,13 @@ describe('tool call transcript', () => {
     it('distinguishes missing results from empty output after the conversation stops', async () => {
         const { rerender } = render(<AssistantToolCall tool={tool} running={false} />);
         fireEvent.click(screen.getByText(/inspect_desktop_ui/));
-        await screen.findByText('pages.deviceAssistant.toolCall.missing');
+        await screen.findByText('pages.aiAssistant.toolCall.missing');
         rerender(<AssistantToolCall tool={{ ...tool, status: 'ok', output: '' }} running={false} />);
-        expect(screen.getByText('pages.deviceAssistant.toolCall.empty')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.toolCall.empty')).toBeTruthy();
     });
     it('shows the first failed batch step while keeping full inputs folded', () => {
         const { container } = render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', argumentsJson: '{"steps":[{"action":{"kind":"invoke"}}]}', output: '{"status":"stopped_on_error","failed_step_number":2,"error":{"message":"window closed"}}' }} running={false} />);
-        expect(screen.getByText(/pages.deviceAssistant.toolCall.batchFailed/)).toBeTruthy();
+        expect(screen.getByText(/pages.aiAssistant.toolCall.batchFailed/)).toBeTruthy();
         expect(container.querySelector('pre')).toBeNull();
     });
 
@@ -76,16 +76,16 @@ describe('tool call transcript', () => {
     ])('shows the native execution stage for %s completed dispatches with %s', (count, effect, key) => {
         const output = JSON.stringify({ status: 'stopped_on_error', failed_step_number: Number(count) + 1, completed_steps: count, effect });
         const { container, rerender } = render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', output }} running={false} />);
-        expect(screen.getByText(new RegExp(`pages.deviceAssistant.toolCall.${key}`))).toBeTruthy();
+        expect(screen.getByText(new RegExp(`pages.aiAssistant.toolCall.${key}`))).toBeTruthy();
         expect(container.querySelector('pre')).toBeNull();
         rerender(<AssistantToolCall tool={{ ...tool, name: 'send_background_input', status: 'failed', output: JSON.stringify({ message: output }) }} running={false} />);
-        expect(screen.getByText(new RegExp(`pages.deviceAssistant.toolCall.${key}`))).toBeTruthy();
+        expect(screen.getByText(new RegExp(`pages.aiAssistant.toolCall.${key}`))).toBeTruthy();
     });
 
     it('does not infer non-execution from an inconsistent receipt', () => {
         render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', output: JSON.stringify({ status: 'stopped_on_error', failed_step_number: 2, completed_steps: 0, effect: 'no_effect' }) }} running={false} />);
-        expect(screen.getByText(/pages.deviceAssistant.toolCall.batchFailed/)).toBeTruthy();
-        expect(screen.queryByText(/pages.deviceAssistant.toolCall.batchNotStarted/)).toBeNull();
+        expect(screen.getByText(/pages.aiAssistant.toolCall.batchFailed/)).toBeTruthy();
+        expect(screen.queryByText(/pages.aiAssistant.toolCall.batchNotStarted/)).toBeNull();
     });
 
     it.each([
@@ -93,8 +93,8 @@ describe('tool call transcript', () => {
         ['outcome_unknown', 'batchOutcomeUnknown'],
     ])('uses the typed %s result for an executor error without a step receipt', (result, key) => {
         render(<AssistantToolCall tool={{ ...tool, name: 'execute_ui_actions', status: 'failed', output: JSON.stringify({ result, message: 'native UI request stopped' }) }} running={false} />);
-        expect(screen.getByText(new RegExp(`pages.deviceAssistant.toolCall.${key}`))).toBeTruthy();
-        expect(screen.queryByText(/pages.deviceAssistant.toolCall.batchFailed/)).toBeNull();
+        expect(screen.getByText(new RegExp(`pages.aiAssistant.toolCall.${key}`))).toBeTruthy();
+        expect(screen.queryByText(/pages.aiAssistant.toolCall.batchFailed/)).toBeNull();
     });
 
 });

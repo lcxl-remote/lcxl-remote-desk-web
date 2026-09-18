@@ -15,7 +15,7 @@ async fn fixture(db: DatabaseConnection) -> (ScheduleStore, String, String) {
     let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
     session.actor_id = "1".into();
     session.version = row.version;
-    session.surface = AgentSessionSurface::DeviceAssistant;
+    session.surface = AgentSessionSurface::AiAssistant;
     session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
     session
         .begin_turn(
@@ -90,7 +90,7 @@ async fn fixture(db: DatabaseConnection) -> (ScheduleStore, String, String) {
     .await
     .unwrap();
     exec.mark_unsent("old-generation").await.unwrap();
-    let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+    let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
     let mut origin = ActionResultOrigin::capture(&registry, &session, &call).unwrap();
     let now = Utc::now().timestamp_millis() as u64;
     let context = desk_diagnose_core::command_completion::CommandCompletionContext::capture(

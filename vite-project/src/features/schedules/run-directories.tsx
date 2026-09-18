@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { v4 } from 'uuid';
 import { Button } from '@/components/ui/button';
-import type { DeviceAssistantSessionSnapshotDto } from '@/services/types';
+import type { AiAssistantSessionSnapshotDto } from '@/services/types';
 import type { ScheduleClient } from './client';
 
 export function RunDirectories({ client, scheduleId, runId, snapshot, connected, loading, onReload }: {
     client: Pick<ScheduleClient, 'request'>; scheduleId: string; runId: string;
-    snapshot: DeviceAssistantSessionSnapshotDto; connected: boolean; loading: boolean;
+    snapshot: AiAssistantSessionSnapshotDto; connected: boolean; loading: boolean;
     onReload: () => Promise<void>;
 }) {
     const { t } = useTranslation();
@@ -42,18 +42,18 @@ export function RunDirectories({ client, scheduleId, runId, snapshot, connected,
         catch { if (current === epoch.current) setNotice('rejected'); }
         finally { if (current === epoch.current) { inFlight.current = false; setBusy(false); } }
     };
-    return <section className="space-y-3" aria-busy={busy} aria-label={t('pages.deviceAssistant.directories.title')}>
-        <h3 className="font-semibold">{t('pages.deviceAssistant.directories.title')}</h3>
-        <p className="text-sm text-muted-foreground">{t('pages.deviceAssistant.directories.hint')}</p>
+    return <section className="space-y-3" aria-busy={busy} aria-label={t('pages.aiAssistant.directories.title')}>
+        <h3 className="font-semibold">{t('pages.aiAssistant.directories.title')}</h3>
+        <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.directories.hint')}</p>
         {notice && <p role={notice === 'rejected' ? 'alert' : 'status'}>{t(`schedules.approval.${notice}`)}</p>}
         {scope.directories.map(directory => <article key={directory.requestId} className="space-y-2 rounded-md border p-3">
             <p className="break-all font-mono text-sm">{directory.canonicalPath}</p>
             <p className="break-words text-sm">{directory.purpose}</p>
             <p className="text-sm">{t(`schedules.directoryState.${directory.state}`)}</p>
-            {directory.state === 'approved' && <Button variant="outline" disabled={!canDecide} onClick={() => void decide(directory.requestId, null)}>{t('pages.deviceAssistant.directories.remove')}</Button>}
+            {directory.state === 'approved' && <Button variant="outline" disabled={!canDecide} onClick={() => void decide(directory.requestId, null)}>{t('pages.aiAssistant.directories.remove')}</Button>}
             {directory.state === 'pending' && <div className="flex gap-2">
-                <Button disabled={!canDecide} onClick={() => void decide(directory.requestId, true)}>{t('pages.deviceAssistant.directories.approve')}</Button>
-                <Button variant="outline" disabled={!canDecide} onClick={() => void decide(directory.requestId, false)}>{t('pages.deviceAssistant.directories.reject')}</Button>
+                <Button disabled={!canDecide} onClick={() => void decide(directory.requestId, true)}>{t('pages.aiAssistant.directories.approve')}</Button>
+                <Button variant="outline" disabled={!canDecide} onClick={() => void decide(directory.requestId, false)}>{t('pages.aiAssistant.directories.reject')}</Button>
             </div>}
         </article>)}
     </section>;

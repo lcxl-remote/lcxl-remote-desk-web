@@ -58,7 +58,7 @@ pub fn note_successful_observation(
     call_id: &str,
     tool_name: &str,
 ) -> Result<(), &'static str> {
-    if session.surface != crate::session::AgentSessionSurface::DeviceAssistant
+    if session.surface != crate::session::AgentSessionSurface::AiAssistant
         || !matches!(tool_name, "read_current_screen" | "inspect_desktop_ui")
     {
         return Ok(());
@@ -286,7 +286,7 @@ mod tests {
             scope.clone(),
             "now",
         );
-        session.adopt_client_metadata(Some("client-1"), AgentSessionSurface::DeviceAssistant);
+        session.adopt_client_metadata(Some("client-1"), AgentSessionSurface::AiAssistant);
         session.input_revision = 1;
         session.latest_input_seq = 1;
         session.begin_focus_epoch(1, Vec::new()).unwrap();

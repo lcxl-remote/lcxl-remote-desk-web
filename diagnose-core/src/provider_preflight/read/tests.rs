@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    device_assistant::device_assistant_provider_registry,
+    ai_assistant::ai_assistant_provider_registry,
     input_read_context::{ReadContextSelection, live_read::LiveReadTarget},
 };
 
@@ -15,7 +15,7 @@ fn destination() -> DestinationIdentity {
 
 #[test]
 fn live_read_authority_uses_original_targets_on_both_surfaces() {
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     let now = 1_788_134_401_000;
     let destination = destination();
     for name in [
@@ -104,7 +104,7 @@ fn live_read_authority_uses_original_targets_on_both_surfaces() {
 
 #[test]
 fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused() {
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     let destination = destination();
     let mut original = ReadContextSelection {
         tool_names: vec!["read_system_info".into()],
@@ -186,7 +186,7 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
 
 #[test]
 fn central_web_authority_is_exact_and_fixes_the_search_destination() {
-    let registry = device_assistant_provider_registry().with_web_search_binding(Some(
+    let registry = ai_assistant_provider_registry().with_web_search_binding(Some(
         crate::web_research::SearchBinding {
             connector_id: "brave_web_v1".into(),
             revision: 3,
@@ -264,10 +264,10 @@ fn terminal_authority_uses_only_original_attachment_refs() {
     use crate::object_context::{
         ObjectContextBuild, ObjectContextMutation, build_object_context_mutation,
     };
-    use desk_agent_protocol::device_assistant::{
-        DeviceAssistantObjectContextOperation as Op, DeviceAssistantObjectContextUpdate,
+    use desk_agent_protocol::ai_assistant::{
+        AiAssistantObjectContextOperation as Op, AiAssistantObjectContextUpdate,
     };
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     let destination = destination();
     for name in ["read_terminal_output"] {
         let reference = ObjectRef {
@@ -292,7 +292,7 @@ fn terminal_authority_uses_only_original_attachment_refs() {
             }
         };
         let ObjectContextMutation::Attach(attachment) = build_object_context_mutation(
-            &DeviceAssistantObjectContextUpdate {
+            &AiAssistantObjectContextUpdate {
                 conversation_id: "client".into(),
                 client_request_id: "selection".into(),
                 operation,
@@ -374,7 +374,7 @@ fn terminal_authority_uses_only_original_attachment_refs() {
 
 #[test]
 fn unselected_desktop_preflight_requires_explicit_r1_authority_on_both_surfaces() {
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     let destination = destination();
     let original = ReadContextSelection {
         tool_names: vec![],

@@ -1,0 +1,91 @@
+use desk_agent_protocol::{
+    agent_event::{AgentEvent, AgentEventKind},
+    ai_assistant::{
+        AiAssistantAsk, AiAssistantContextUpdate, AiAssistantContextUpdated,
+        AiAssistantObjectContextUpdate,
+    },
+    capability_provider::CapabilityInventorySnapshot,
+};
+use serde_json::Value;
+
+fn contract() -> Value {
+    serde_json::from_str(include_str!(
+        "fixtures/mobile_ai_assistant/contract-v1.json"
+    ))
+    .expect("mobile AI Assistant fixture must be valid JSON")
+}
+
+#[test]
+fn canonical_mobile_contract_decodes_with_the_shared_protocol() {
+    let root = contract();
+
+    let minimal: AiAssistantAsk =
+        serde_json::from_value(root["asks"]["minimal"].clone()).expect("minimal ask");
+    let full: AiAssistantAsk =
+        serde_json::from_value(root["asks"]["full"].clone()).expect("full ask");
+    minimal.validate().expect("minimal ask is valid");
+    full.validate().expect("full ask is valid");
+
+    let events: Vec<AgentEvent> =
+        serde_json::from_value(root["events"].clone()).expect("agent events");
+    assert_eq!(events.len(), 10);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == AgentEventKind::Answer)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == AgentEventKind::PermissionRequired)
+    );
+
+    let inventory: CapabilityInventorySnapshot =
+        serde_json::from_value(root["inventory"].clone()).expect("inventory");
+    inventory
+        .validate()
+        .expect("inventory is internally consistent");
+    assert!(inventory.entries[0].context_selectable);
+
+    let update: AiAssistantContextUpdate =
+        serde_json::from_value(root["context_update"].clone()).expect("context update");
+    update.validate().expect("context update is valid");
+    let ack: AiAssistantContextUpdated =
+        serde_json::from_value(root["context_updated"].clone()).expect("context ack");
+    assert_eq!(ack.client_request_id, update.client_request_id);
+
+    let object_update: AiAssistantObjectContextUpdate =
+        serde_json::from_value(root["object_context_update"].clone()).expect("object update");
+    object_update.validate().expect("object update is valid");
+}
+
+#[test]
+fn canonical_feature_profile_and_mutations_keep_fail_closed_fields_explicit() {
+    let root = contract();
+    assert_eq!(root["snapshot"]["sessionId"], "session-1");
+    assert_eq!(root["snapshot"]["capabilityGrants"][0]["inputRevision"], 3);
+    assert_eq!(
+        root["snapshot"]["permissionRequests"][0]["items"][0].get("externalSendConfirmation"),
+        Some(&Value::Null),
+    );
+    let profiles = &root["feature_profiles"];
+    assert_eq!(profiles["oss"]["ai_assistant"]["schema_version"], 1);
+    assert_eq!(profiles["oss"]["ai_assistant"]["turn_stream"], true);
+    assert_eq!(
+        profiles["manager_inventory_only"]["ai_assistant"]["turn_stream"],
+        false
+    );
+    assert!(profiles["legacy"].get("ai_assistant").is_none());
+
+    let mutations = &root["mutations"];
+    assert_eq!(mutations["permission_deny"]["items"][0]["decision"], "deny");
+    assert!(
+        mutations["permission_deny"]["items"][0]
+            .get("resourceScope")
+            .is_none()
+    );
+    assert_eq!(
+        mutations["background_cancel"]["requestId"],
+        "cancel-request-1"
+    );
+}

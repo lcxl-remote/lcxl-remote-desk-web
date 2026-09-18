@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { AssistantContextNotices, noticeMessageId } from './assistant-context-notices';
-import type { DeviceAssistantMessage } from './use-device-assistant-chat';
+import type { AiAssistantMessage } from './use-ai-assistant-chat';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => key }) }));
 
@@ -14,7 +14,7 @@ describe('assistant context timeline notices', () => {
     });
     it('keeps its original message boundary when later turns arrive', () => {
         const notice = { id: 'a', turnId: 'turn-a', kind: 'compacted' as const, afterMessageId: 'hidden-tool' };
-        const messages: DeviceAssistantMessage[] = [{ id: 'user', role: 'user', text: 'question', contextBoundaryIds: ['user', 'hidden-tool'] }];
+        const messages: AiAssistantMessage[] = [{ id: 'user', role: 'user', text: 'question', contextBoundaryIds: ['user', 'hidden-tool'] }];
         expect(noticeMessageId(notice, messages)).toBe('user');
         messages.push({ id: 'later', role: 'assistant', text: 'later answer' });
         expect(noticeMessageId(notice, messages)).toBe('user');

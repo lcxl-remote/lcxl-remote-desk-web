@@ -1,0 +1,1774 @@
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import {
+    SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
+    SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT,
+    SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
+    SIGNALING_TYPE_CODE_AI_ASSISTANT_CONTEXT_UPDATED,
+    SIGNALING_TYPE_CODE_AI_ASSISTANT_OBJECT_CONTEXT_UPDATED,
+    SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED,
+    SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+    SIGNALING_TYPE_CODE_SELECT_AI_ASSISTANT_SESSION,
+    SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_CONTEXT,
+    SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
+} from './constants';
+import type { SignalingSubscriber } from './use-desk-signaling';
+import { useAiAssistantChat } from './use-ai-assistant-chat';
+import { deskErrorCodeEnum } from '@/services/types';
+
+vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
+
+describe('useAiAssistantChat', () => {
+    it('does not send live desktop metadata as an explicit object attachment', async () => {
+        localStorage.setItem('ai-assistant-conversation:delivery-kinds', 'conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'session', seq: 1, active: false, messages: [],
+            contextAttachments: [{ id: 'desktop-context', kind: 'interactive_session', capabilityId: 'desktop.ui.inspect',
+                providerId: 'desktop.ui', state: 'active', expiresAtUnixMs: 1, createdAtUnixMs: 0, displaySummary: 'desktop' }],
+        } }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'delivery-kinds', subscribe: () => () => undefined, sendMessage }));
+        await waitFor(() => expect(result.current.attachments).toHaveLength(1));
+        act(() => { expect(result.current.start('Continue', 'zh', ['desktop.ui.inspect'])).toBe(true); });
+        const payload = sendMessage.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+        expect(payload.selected_attachment_ids).toEqual([]);
+        expect(payload.selected_capability_ids).toEqual(['desktop.ui.inspect']);
+        unmount();
+    });
+    it('preserves intake rejection across an old successful snapshot and permits a new send', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'session', seq: 10, active: false, messages: [{ id: 'old-answer', role: 'assistant', text: 'Previous success' }],
+        } }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'delivery-reject',
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        act(() => { result.current.start('New requirement'); });
+        const original = sendMessage.mock.calls.at(-1)!;
+        await act(async () => subscriber?.({ request_id: original[3], signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { seq: 1, kind: 'error', error: { message: 'selected attachment is unavailable' } } }));
+        expect(result.current.error).toBe('selected attachment is unavailable');
+        expect(result.current.deliveryState).toBeNull();
+        expect(result.current.acceptedInput).toBeNull();
+        await act(async () => { await result.current.retryDelivery(); });
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        act(() => { expect(result.current.start('Corrected requirement')).toBe(true); });
+        expect(sendMessage.mock.calls.at(-1)?.[3]).not.toBe(original[3]);
+        unmount();
+    });
+    it('bounds the snapshot lookup before retrying an unconfirmed message', async () => {
+        vi.useFakeTimers();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string): string => { throw new Error('offline'); });
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'delivery-query-timeout', subscribe: () => () => undefined, sendMessage }));
+        try {
+            act(() => { result.current.start('Retry after query timeout'); });
+            vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+                init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+            })));
+            await act(async () => {
+                const retry = result.current.retryDelivery();
+                await vi.advanceTimersByTimeAsync(10_000);
+                await retry;
+            });
+            expect(sendMessage).toHaveBeenCalledTimes(2);
+            expect(sendMessage.mock.calls[1]).toEqual(sendMessage.mock.calls[0]);
+        } finally { unmount(); vi.useRealTimers(); }
+    });
+    it('shows a retry state when no server receipt arrives and ignores unrelated receipts', async () => {
+        vi.useFakeTimers();
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'delivery-timeout',
+            subscribe: handler => { subscriber = handler; return () => undefined; },
+            sendMessage: (_type, _data, _to, id) => id!,
+        }));
+        try {
+            act(() => { result.current.start('Retain on timeout'); });
+            act(() => subscriber?.({ request_id: 'another-request', signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+            expect(result.current.deliveryState).toBe('sending');
+            await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+            expect(result.current.deliveryState).toBe('unconfirmed');
+            expect(result.current.acceptedInput).toBeNull();
+            expect(result.current.messages.at(-1)?.text).toBe('Retain on timeout');
+        } finally { unmount(); vi.useRealTimers(); }
+    });
+    it('retains unconfirmed input and retries the exact payload and message ID', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string): string => {
+            if (sendMessage.mock.calls.length === 1) throw new Error('Disconnected');
+            return id!;
+        });
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'delivery-test',
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        act(() => { expect(result.current.start('Keep this message')).toBe(true); });
+        expect(result.current.deliveryState).toBe('unconfirmed');
+        expect(result.current.messages.at(-1)?.text).toBe('Keep this message');
+        expect(result.current.acceptedInput).toBeNull();
+        const original = sendMessage.mock.calls[0];
+        await act(async () => { await result.current.retryDelivery(); });
+        expect(sendMessage.mock.calls[1]).toEqual(original);
+        expect(result.current.messages.filter(m => m.role === 'user')).toHaveLength(1);
+        act(() => subscriber?.({ request_id: original[3], signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+        expect(result.current.deliveryState).toBeNull();
+        expect(result.current.acceptedInput?.question).toBe('Keep this message');
+        unmount();
+    });
+    it('queries the stored message before retrying and does not resend an accepted input', async () => {
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, _id?: string): string => { throw new Error('Receipt lost'); });
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'delivery-stored',
+            subscribe: () => () => undefined, sendMessage }));
+        act(() => { result.current.start('Already stored'); });
+        const payload = sendMessage.mock.calls[0][1] as { client_message_id: string };
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'stored-session', seq: 1, active: false,
+            messages: [{ id: payload.client_message_id, role: 'user', text: 'Already stored' }],
+        } }) }));
+        await act(async () => { await result.current.retryDelivery(); });
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        expect(result.current.deliveryState).toBeNull();
+        expect(result.current.acceptedInput?.id).toBe(payload.client_message_id);
+        unmount();
+    });
+    it('accepts directory acknowledgements only for the exact response type and conversation request', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _data?: unknown, _to?: string) => 'directory-wire');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'directory-ack', connected: true,
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        act(() => { expect(result.current.updateDirectory({ kind: 'select_directory', path: '/private/tmp/test', purpose: 'test', expected_revision: 0 }, 'timeout')).toBe(true); });
+        const request = sendMessage.mock.calls.at(-1)?.[1] as { conversation_id: string; client_request_id: string };
+        const ack = { request_id: 'directory-wire', signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_OBJECT_CONTEXT_UPDATED,
+            signaling_data: { conversation_id: request.conversation_id, client_request_id: request.client_request_id, changed: true } };
+        act(() => subscriber?.({ ...ack, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_CONTEXT_UPDATED }));
+        expect(result.current.contextUpdating).toBe(true);
+        act(() => subscriber?.({ ...ack, signaling_data: { ...ack.signaling_data, conversation_id: 'another-conversation' } }));
+        expect(result.current.contextUpdating).toBe(true);
+        act(() => subscriber?.({ ...ack, signaling_data: { ...ack.signaling_data, client_request_id: 'another-request' } }));
+        expect(result.current.contextUpdating).toBe(true);
+        await act(async () => subscriber?.(ack));
+        expect(result.current.contextUpdating).toBe(false);
+        unmount();
+    });
+    it('restores a pending directory proposal as permission required, not a missing-answer error', async () => {
+        localStorage.setItem('ai-assistant-conversation:pending-directory', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 10, active: false,
+            fileScope: { revision: 1, directories: [{ requestId: 'directory-request', canonicalPath: '/private/tmp/test',
+                purpose: 'report', state: 'pending', source: 'model_proposal', referenceExpiresAt: '2030-01-01T00:00:00Z' }] },
+            messages: [{ id: 'user-1', role: 'user', text: 'create a report' }],
+        } }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'pending-directory', connected: true,
+            subscribe: () => () => undefined, sendMessage: () => 'select' }));
+        await waitFor(() => expect(result.current.status).toBe('permission_required'));
+        expect(result.current.error).toBeNull();
+        expect(result.current.fileScope.revision).toBe(1);
+        unmount();
+    });
+    it.each([
+        [undefined, 'model context compression failed: stale_context'],
+        [deskErrorCodeEnum.SCHEDULE_MODEL_BUDGET_EXCEEDED,
+            'The scheduled task has insufficient model-token budget remaining. This model request was not sent. Review the task budget before running it again.'],
+    ])('restores and localizes durable terminal error code %s in a newly opened page', async (errorCode, expected) => {
+        localStorage.setItem('ai-assistant-conversation:restore-error', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 10, active: false,
+            terminalError: { message: 'model context compression failed: stale_context', error_code: errorCode },
+            messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
+        } }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'restore-error', connected: true,
+            subscribe: () => () => undefined, sendMessage: () => 'select' }));
+        await waitFor(() => expect(result.current.error).toBe(expected));
+        expect(result.current.status).toBe('error');
+        unmount();
+    });
+    it.each([
+        [undefined, 'Context authorization expired.'],
+        [deskErrorCodeEnum.SCHEDULE_MODEL_BUDGET_EXCEEDED,
+            'The scheduled task has insufficient model-token budget remaining. This model request was not sent. Review the task budget before running it again.'],
+    ])('keeps localized turn error code %s after refresh and clears it on a new turn', async (errorCode, expected) => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'failed-session', seq: 10, active: false,
+            messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
+        } }) }));
+        const sendMessage = vi.fn((type: number) => type === SIGNALING_TYPE_CODE_SELECT_AI_ASSISTANT_SESSION
+            ? 'session-request' : 'turn-request');
+        const { result } = renderHook(() => useAiAssistantChat({ deskId: 'failed-desk', connected: true,
+            subscribe: (handler) => { subscriber = handler; return () => undefined; }, sendMessage }));
+        act(() => subscriber?.({ request_id: 'session-request',
+            signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED,
+            signaling_data: { revision: 1, target: { target_id: 'desktop', display_name: 'Desktop',
+                foreground: true, remote_desktop_ready: true, terminal_ready: true, file_ready: true, assistant_ready: true } },
+            response_state: { error_code: 0, message: '' },
+        }));
+        act(() => { expect(result.current.start('continue')).toBe(true); });
+        await act(async () => subscriber?.({ request_id: 'turn-request',
+            signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { seq: 1, kind: 'error', error: { message: 'Context authorization expired.', error_code: errorCode } },
+        }));
+        await waitFor(() => expect(result.current.messages.at(-1)?.text).toBe('continue'));
+        expect(result.current.deliveryState).toBeNull();
+        expect(result.current.error).toBe(expected);
+        expect(result.current.status).toBe('error');
+        act(() => { expect(result.current.start('another question')).toBe(true); });
+        expect(result.current.error).toBeNull();
+        act(() => result.current.reset());
+        expect(result.current.error).toBeNull();
+    });
+
+    it('restores server context usage and clears it for a new conversation', async () => {
+        localStorage.setItem('ai-assistant-conversation:budget-desk', 'budget-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'budget-session', seq: 1, active: false, messages: [],
+            contextUsage: { usedBytes: 200, limitBytes: 1000, strategy: 'checkpoint_summary' },
+            contextNotices: [
+                { id: 'notice-1', turnId: 'turn-1', kind: 'compacted' },
+                { id: 'notice-1', turnId: 'turn-1', kind: 'compacted' },
+            ],
+        } }) }));
+        const { result } = renderHook(() => useAiAssistantChat({ deskId: 'budget-desk',
+            subscribe: () => () => undefined, sendMessage: vi.fn() }));
+        await waitFor(() => expect(result.current.contextUsage?.usedBytes).toBe(200));
+        expect(result.current.contextNotices).toEqual([{ id: 'notice-1', turnId: 'turn-1', kind: 'compacted' }]);
+        act(() => result.current.reset());
+        expect(result.current.contextUsage).toBeNull();
+        expect(result.current.contextNotices).toEqual([]);
+    });
+
+    it('opens history through its continuation id without sending a cancel or a question', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'old-session', seq: 1, active: false, messages: [],
+        } }) }));
+        const sendMessage = vi.fn();
+        const { result } = renderHook(() => useAiAssistantChat({ deskId: 'desk-history',
+            subscribe: () => () => undefined, sendMessage }));
+        act(() => { expect(result.current.selectConversation('old-conversation')).toBe(true); });
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(fetch).toHaveBeenCalledWith(expect.stringContaining('conversation=old-conversation'), expect.anything());
+        expect(localStorage.getItem('ai-assistant-conversation:desk-history')).toBe('old-conversation');
+        expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('switches and creates conversations while a previous turn keeps running', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'other', requestId: 'remote-turn', seq: 1, active: true, messages: [],
+        } }) }));
+        const sendMessage = vi.fn().mockReturnValue('original-turn');
+        const { result } = renderHook(() => useAiAssistantChat({ deskId: 'parallel', subscribe: () => () => undefined, sendMessage }));
+        act(() => { result.current.start('original question'); });
+        act(() => { expect(result.current.selectConversation('other')).toBe(true); });
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(result.current.turnRunning).toBe(true);
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        act(() => { result.current.reset(); });
+        expect(result.current.turnRunning).toBe(false);
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        act(() => { result.current.start('new question'); });
+        expect(sendMessage).toHaveBeenCalledTimes(2);
+        act(() => { result.current.forgetConversation('other'); });
+        expect(result.current.messages[0].text).toBe('new question');
+    });
+
+    beforeEach(() => localStorage.clear());
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+    });
+
+    it('selects the only AI Assistant desktop session before enabling turns', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const sendMessage = vi.fn((type: number) => type ===
+            SIGNALING_TYPE_CODE_SELECT_AI_ASSISTANT_SESSION
+            ? 'session-request-1'
+            : 'assistant-request-1');
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            connected: true,
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage,
+        }));
+
+        await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_SELECT_AI_ASSISTANT_SESSION,
+            {},
+            'desk-1',
+        ));
+        expect(result.current.sessionTargetReady).toBe(false);
+        expect(result.current.start('too early')).toBe(false);
+
+        act(() => {
+            subscriber?.({
+                request_id: 'session-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED,
+                signaling_data: {
+                    revision: 3,
+                    target: {
+                        target_id: 'target-a',
+                        display_name: 'Desktop A',
+                        session_type: 'wayland',
+                        seat: 'seat0',
+                        foreground: true,
+                        remote_desktop_ready: true,
+                        terminal_ready: true,
+                        file_ready: true,
+                        assistant_ready: true,
+                    },
+                },
+                response_state: { error_code: 0, message: '' },
+            });
+        });
+
+        expect(result.current.sessionTargetReady).toBe(true);
+        expect(result.current.sessionTarget?.target_id).toBe('target-a');
+        expect(result.current.start('continue')).toBe(true);
+    });
+
+    it('requires an explicit AI Assistant target when the host returns many', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const sendMessage = vi.fn((type: number) => type ===
+            SIGNALING_TYPE_CODE_SELECT_AI_ASSISTANT_SESSION
+            ? 'session-request-1'
+            : 'assistant-request-1');
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            connected: true,
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage,
+        }));
+        await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+
+        act(() => {
+            subscriber?.({
+                request_id: 'session-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED,
+                signaling_data: {
+                    revision: 2,
+                    targets: [{
+                        target_id: 'target-a',
+                        display_name: 'Desktop A',
+                        foreground: true,
+                        remote_desktop_ready: true,
+                        terminal_ready: true,
+                        file_ready: true,
+                        assistant_ready: true,
+                    }, {
+                        target_id: 'target-b',
+                        display_name: 'Desktop B',
+                        foreground: false,
+                        remote_desktop_ready: true,
+                        terminal_ready: true,
+                        file_ready: true,
+                        assistant_ready: true,
+                    }],
+                },
+                response_state: { error_code: 109, message: 'selection required' },
+            });
+        });
+
+        expect(result.current.sessionTargetReady).toBe(false);
+        expect(result.current.sessionTargets.map((target) => target.target_id)).toEqual([
+            'target-a',
+            'target-b',
+        ]);
+        act(() => {
+            expect(result.current.selectSessionTarget('target-b')).toBe(true);
+        });
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_SELECT_AI_ASSISTANT_SESSION,
+            { session_target_id: 'target-b' },
+            'desk-1',
+        );
+    });
+
+    it('restores browser-safe attachment metadata with the durable conversation', async () => {
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: true,
+            json: async () => ({
+                data: {
+                    sessionId: 'session-1',
+                    seq: 1,
+                    messages: [],
+                    contextAttachments: [{
+                        id: 'attachment-1',
+                        kind: 'interactive_session',
+                        providerId: 'desktop.ui',
+                        capabilityId: 'desktop.ui.inspect',
+                        displaySummary: 'current interactive session',
+                        createdAtUnixMs: 100,
+                        expiresAtUnixMs: 200,
+                        state: 'stale',
+                        staleReason: 'worker_respawned',
+                    }],
+                },
+            }),
+        })));
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(result.current.attachments).toEqual([
+            expect.objectContaining({
+                capabilityId: 'desktop.ui.inspect',
+                state: 'stale',
+                staleReason: 'worker_respawned',
+            }),
+        ]);
+    });
+
+    it.each(['execution failed: command timed out after 240000 ms', 'exit_code=0\n12G /example'])('shows a durable command receipt without waiting for an AI answer: %s', async (output) => {
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: true,
+            json: async () => ({ data: {
+                sessionId: 'session-1', seq: 34, active: false,
+                messages: [
+                    { id: 'call', role: 'assistant', text: '', toolCalls: [{ id: 'command-1', name: 'exec_command', argumentsJson: '{}' }] },
+                    { id: 'running', role: 'tool', toolCallId: 'command-1', text: '{"status":"background_running"}' },
+                    { id: 'waiting', role: 'assistant', text: 'Waiting for the background command.' },
+                    { id: 'finished', role: 'untrusted_output', toolCallId: 'command-1', backgroundTaskId: 'exec-1', text: output },
+                ],
+            } }),
+        })));
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
+        }));
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(result.current.messages).toEqual([
+            expect.objectContaining({ id: 'tool-call-command-1', role: 'tool_call', toolCallId: 'command-1' }),
+            { id: 'waiting', role: 'assistant', text: 'Waiting for the background command.' },
+            { id: 'finished', role: 'tool_result', text: output },
+        ]);
+        expect(result.current.tools[0].status).toBe(output.startsWith('execution failed:') ? 'failed' : 'ok');
+        expect(result.current.status).toBe('done');
+    });
+
+    it.each(['update_text_file', 'delete_text_file'])('renders a successful %s recovery receipt outside the folded tool payload', async (name) => {
+        const output = JSON.stringify({ result: 'verified', output: { kind: 'text_file_mutation', value: {
+            operation: name === 'update_text_file' ? 'update' : 'delete', verified: true,
+            original_file_name: 'notes.txt', original_size_bytes: 3, original_sha256: 'a'.repeat(64), updated_file: null,
+            recovery: { recovery_id: 'b'.repeat(64), created_at_unix_ms: 1000, expires_at_unix_ms: 2000, cleanup_pending: false },
+        } } });
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+            sessionId: 'session-1', seq: 34, active: false, messages: [
+                { id: 'call', role: 'assistant', text: '', toolCalls: [{ id: 'file-1', name, argumentsJson: '{}' }] },
+                { id: 'finished', role: 'tool', toolCallId: 'file-1', text: output },
+            ],
+        } }) })));
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
+        }));
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(result.current.messages).toEqual([
+            expect.objectContaining({ role: 'tool_call', toolCallId: 'file-1' }),
+            { id: 'finished', role: 'tool_result', text: output },
+        ]);
+        expect(result.current.tools[0].status).toBe('ok');
+    });
+
+    it('attaches only the opaque owner-selected window reference', () => {
+        const sendMessage = vi.fn(() => 'window-request-1');
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage,
+        }));
+        const objectRef = {
+            token: 'opaque-window',
+            snapshot_id: 'worker-1:7',
+            object_kind: 'window' as const,
+            expires_at: '2030-01-01T00:00:00Z',
+        };
+
+        act(() => {
+            expect(result.current.attachWindow(objectRef, 'Calculator')).toBe(true);
+        });
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
+            expect.objectContaining({
+                operation: {
+                    kind: 'attach_window',
+                    object_ref: objectRef,
+                    display_summary: 'Calculator',
+                },
+            }),
+            'desk-1',
+        );
+        const payload = sendMessage.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+        expect(JSON.stringify(payload)).not.toMatch(/handle|process_id|coordinate/);
+    });
+
+    it('prepends an older page only for the same durable snapshot', async () => {
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({ data: {
+                    sessionId: 'session-1',
+                    seq: 7,
+                    active: false,
+                    messages: [
+                        { id: 'm2', role: 'user', text: 'newer question' },
+                        { id: 'm3', role: 'assistant', text: 'newer answer' },
+                    ],
+                    messagePage: { hasMore: true, nextBeforeMessageId: 'm2', limit: 100 },
+                    contextAttachments: [],
+                } }),
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({ data: {
+                    sessionId: 'session-1',
+                    seq: 7,
+                    active: false,
+                    messages: [
+                        { id: 'm1', role: 'assistant', text: 'older answer' },
+                        { id: 'm2', role: 'user', text: 'newer question' },
+                    ],
+                    messagePage: { hasMore: false, limit: 100 },
+                    contextAttachments: [],
+                } }),
+            });
+        vi.stubGlobal('fetch', fetchMock);
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(result.current.hasMoreMessages).toBe(true);
+        await act(async () => { await result.current.loadOlderMessages(); });
+
+        expect(fetchMock.mock.calls[1]?.[0]).toContain('message_before=m2');
+        expect(result.current.messages.map((message) => message.id)).toEqual(['m1', 'm2', 'm3']);
+        expect(result.current.hasMoreMessages).toBe(false);
+    });
+
+    it('keeps expanded history and its cursor across live snapshot refreshes', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        const response = (seq: number, ids: string[], hasMore: boolean, cursor?: string) => ({
+            ok: true,
+            json: async () => ({ data: {
+                sessionId: 'session-1', seq, active: false,
+                messages: ids.map(id => ({ id, role: 'assistant', text: `${id} at ${seq}` })),
+                messagePage: { hasMore, nextBeforeMessageId: cursor },
+            } }),
+        });
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response(7, ['m3', 'm4'], true, 'm3'))
+            .mockResolvedValueOnce(response(7, ['m2', 'm3'], true, 'm2'))
+            .mockResolvedValueOnce(response(8, ['m4', 'm5'], true, 'm4'))
+            .mockResolvedValueOnce(response(8, ['m1', 'm2'], false))
+            .mockResolvedValue(response(9, ['m4', 'm5'], true, 'm4'));
+        vi.stubGlobal('fetch', fetchMock);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
+        }));
+        await act(async () => { await Promise.resolve(); });
+        await act(async () => { await result.current.loadOlderMessages(); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        expect(result.current.messages.map(message => message.id)).toEqual(['m2', 'm3', 'm4', 'm5']);
+        expect(result.current.messages.find(message => message.id === 'm4')?.text).toBe('m4 at 8');
+        await act(async () => { await result.current.loadOlderMessages(); });
+        expect(fetchMock.mock.calls[3]?.[0]).toContain('message_before=m2');
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        expect(result.current.messages.map(message => message.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5']);
+        expect(result.current.hasMoreMessages).toBe(false);
+        unmount();
+    });
+
+    it.each([false, true])('handles a pending history page when conversation changes: %s', async (switchConversation) => {
+        vi.useFakeTimers();
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        const response = (sessionId: string, seq: number, ids: string[]) => ({
+            ok: true,
+            json: async () => ({ data: {
+                sessionId, seq, active: false,
+                messages: ids.map(id => ({ id, role: 'assistant', text: `${id} at ${seq}` })),
+                messagePage: { hasMore: true, nextBeforeMessageId: ids[0] },
+            } }),
+        });
+        let resolveOlder!: (value: ReturnType<typeof response>) => void;
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response('session-1', 7, ['m2']))
+            .mockImplementationOnce(() => new Promise(resolve => { resolveOlder = resolve; }))
+            .mockResolvedValue(response(switchConversation ? 'session-2' : 'session-1', 8, ['m2', 'm3']));
+        vi.stubGlobal('fetch', fetchMock);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
+        }));
+        await act(async () => { await Promise.resolve(); });
+        let loading!: Promise<void>;
+        act(() => { loading = result.current.loadOlderMessages(); });
+        if (switchConversation) {
+            await act(async () => { expect(result.current.selectConversation('conversation-2')).toBe(true); });
+        } else {
+            await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        }
+        await act(async () => {
+            resolveOlder(response('session-1', 7, ['m1', 'm2']));
+            await loading;
+        });
+        expect(result.current.messages.map(message => message.id)).toEqual(
+            switchConversation ? ['m2', 'm3'] : ['m1', 'm2', 'm3'],
+        );
+        expect(result.current.messages.find(message => message.id === 'm2')?.text).toBe('m2 at 8');
+        expect(result.current.loadingOlderMessages).toBe(false);
+        unmount();
+    });
+
+    it('ignores an older durable snapshot that resolves after a newer one', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        const pending: Array<(response: {
+            ok: boolean;
+            json: () => Promise<unknown>;
+        }) => void> = [];
+        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(pending).toHaveLength(1);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(pending).toHaveLength(2);
+
+        await act(async () => {
+            pending[1]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-1',
+                        seq: 12,
+                        active: false,
+                        messages: [{ id: 'answer-12', role: 'assistant', text: 'newest answer' }],
+                        contextNotices: [{ id: 'new-notice', turnId: 'new-turn', kind: 'compacted' }],
+                        contextAttachments: [],
+                        backgroundTasks: [{
+                            taskId: 'task-1',
+                            callId: 'call-1',
+                            providerId: 'browser.control',
+                            capabilityId: 'browser.control.semantic',
+                            toolName: 'browser_take_snapshot',
+                            effect: 'read_device',
+                            state: 'succeeded',
+                            progressSequence: 12,
+                            supportsCancel: false,
+                            updatedAt: '2026-08-31T00:00:12Z',
+                        }],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('newest answer');
+        expect(result.current.backgroundTasks[0]?.state).toBe('succeeded');
+
+        await act(async () => {
+            pending[0]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-1',
+                        seq: 11,
+                        active: true,
+                        messages: [{ id: 'answer-11', role: 'assistant', text: 'older answer' }],
+                        contextNotices: [{ id: 'old-notice', turnId: 'old-turn', kind: 'trimmed' }],
+                        contextAttachments: [],
+                        backgroundTasks: [{
+                            taskId: 'task-1',
+                            callId: 'call-1',
+                            providerId: 'browser.control',
+                            capabilityId: 'browser.control.semantic',
+                            toolName: 'browser_take_snapshot',
+                            effect: 'read_device',
+                            state: 'running',
+                            progressSequence: 11,
+                            supportsCancel: false,
+                            updatedAt: '2026-08-31T00:00:11Z',
+                        }],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(result.current.messages.at(-1)?.text).toBe('newest answer');
+        expect(result.current.backgroundTasks[0]?.state).toBe('succeeded');
+        expect(result.current.running).toBe(false);
+        expect(result.current.contextNotices.map(notice => notice.id)).toEqual(['new-notice']);
+    });
+
+    it('isolates an old request after the selected conversation changes', async () => {
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        const pending: Array<(response: {
+            ok: boolean;
+            json: () => Promise<unknown>;
+        }) => void> = [];
+        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(pending).toHaveLength(1);
+
+        await act(async () => {
+            window.dispatchEvent(new StorageEvent('storage', {
+                key: 'ai-assistant-conversation:desk-1',
+                newValue: 'conversation-2',
+            }));
+            await Promise.resolve();
+        });
+        expect(pending).toHaveLength(2);
+
+        await act(async () => {
+            pending[1]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-2',
+                        seq: 1,
+                        active: false,
+                        messages: [{ id: 'new', role: 'assistant', text: 'new conversation' }],
+                        contextAttachments: [],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('new conversation');
+
+        await act(async () => {
+            pending[0]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-1',
+                        seq: 99,
+                        active: false,
+                        messages: [{ id: 'old', role: 'assistant', text: 'old conversation' }],
+                        contextAttachments: [],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('new conversation');
+    });
+
+    it('lets a later request move the watermark to a replacement server session', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        const pending: Array<(response: {
+            ok: boolean;
+            json: () => Promise<unknown>;
+        }) => void> = [];
+        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await act(async () => {
+            await Promise.resolve();
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(pending).toHaveLength(2);
+
+        await act(async () => {
+            pending[0]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'expired-session',
+                        seq: 40,
+                        active: false,
+                        messages: [{ id: 'old', role: 'assistant', text: 'expired session' }],
+                        contextAttachments: [],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('expired session');
+
+        await act(async () => {
+            pending[1]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'replacement-session',
+                        seq: 1,
+                        active: false,
+                        messages: [{ id: 'new', role: 'assistant', text: 'replacement session' }],
+                        contextAttachments: [],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('replacement session');
+    });
+
+    it('discovers another tab conversation and polls its durable completion', async () => {
+        vi.useFakeTimers();
+        let snapshot = {
+            sessionId: 'session-1',
+            seq: 1,
+            active: true,
+            messages: [{ id: 'user-1', role: 'user', text: 'shared request' }],
+            contextAttachments: [],
+            backgroundTasks: [{
+                taskId: 'task-1',
+                callId: 'call-1',
+                providerId: 'office.document',
+                capabilityId: 'office.document.inspect',
+                toolName: 'inspect_excel_selection',
+                effect: 'read_device',
+                state: 'running',
+                progressSequence: 2,
+                supportsCancel: true,
+                updatedAt: '2026-08-26T00:00:00Z',
+            }],
+        };
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: true,
+            json: async () => ({ data: snapshot }),
+        })));
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await act(async () => {
+            window.dispatchEvent(new StorageEvent('storage', {
+                key: 'ai-assistant-conversation:desk-1',
+                newValue: 'shared-conversation',
+            }));
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.running).toBe(true);
+        expect(result.current.messages.at(-1)?.text).toBe('shared request');
+        expect(result.current.backgroundTasks).toEqual([
+            expect.objectContaining({ taskId: 'task-1', state: 'running', progressSequence: 2 }),
+        ]);
+
+        snapshot = {
+            active: false,
+            sessionId: 'session-1',
+            seq: 2,
+            messages: [
+                { id: 'user-1', role: 'user', text: 'shared request' },
+                { id: 'assistant-1', role: 'assistant', text: 'shared answer' },
+            ],
+            contextAttachments: [],
+            backgroundTasks: [{
+                taskId: 'task-1',
+                callId: 'call-1',
+                providerId: 'office.document',
+                capabilityId: 'office.document.inspect',
+                toolName: 'inspect_excel_selection',
+                effect: 'read_device',
+                state: 'succeeded',
+                progressSequence: 3,
+                supportsCancel: true,
+                updatedAt: '2026-08-26T00:00:02Z',
+                terminalAt: '2026-08-26T00:00:02Z',
+            }],
+        };
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(result.current.running).toBe(false);
+        expect(result.current.status).toBe('done');
+        expect(result.current.messages.at(-1)?.text).toBe('shared answer');
+        expect(result.current.backgroundTasks).toEqual([
+            expect.objectContaining({ taskId: 'task-1', state: 'succeeded', progressSequence: 3 }),
+        ]);
+    });
+
+    it('keeps two mounted pages on one durable snapshot and closing one does not cancel the run', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('ai-assistant-conversation:device-1', 'shared-conversation');
+        let snapshot = {
+            sessionId: 'session-1',
+            seq: 1,
+            active: true,
+            latestInputSeq: 3,
+            handledInputSeq: 2,
+            messages: [{ id: 'user-1', role: 'user', text: 'shared request' }],
+            contextAttachments: [],
+            permissionRequests: [],
+            backgroundTasks: [{
+                taskId: 'task-1',
+                callId: 'call-1',
+                providerId: 'browser.control',
+                capabilityId: 'browser.control.semantic',
+                toolName: 'prepare_gmail_draft',
+                effect: 'write_external_draft',
+                state: 'running',
+                progressSequence: 4,
+                supportsCancel: true,
+                updatedAt: '2026-08-29T00:00:00Z',
+            }],
+            capabilityGrants: [{
+                grantId: 'grant-1',
+                providerId: 'browser.control',
+                capabilityId: 'browser.control.semantic',
+                toolName: 'prepare_gmail_draft',
+                riskTier: 'r2',
+                resourceScope: ['browser-extension-surface'],
+                operationScope: ['write_external_draft'],
+                remainingUses: 1,
+                expiresAtUnixMs: 999,
+                revokedAtUnixMs: null,
+            }],
+            unresolvedOutcome: null,
+        };
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: true,
+            json: async () => ({ data: snapshot }),
+        })));
+        const firstSend = vi.fn(() => 'first-request');
+        const secondSend = vi.fn(() => 'second-request');
+        const first = renderHook(() => useAiAssistantChat({
+            deskId: 'connection-1',
+            conversationStorageScope: 'device-1',
+            subscribe: () => () => undefined,
+            sendMessage: firstSend,
+        }));
+        const second = renderHook(() => useAiAssistantChat({
+            deskId: 'connection-1',
+            conversationStorageScope: 'device-1',
+            subscribe: () => () => undefined,
+            sendMessage: secondSend,
+        }));
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(first.result.current.messages).toEqual(second.result.current.messages);
+        expect(first.result.current.backgroundTasks).toEqual(second.result.current.backgroundTasks);
+        expect(first.result.current.capabilityGrants).toEqual(second.result.current.capabilityGrants);
+        expect(first.result.current.pendingInputCount).toBe(1);
+        expect(second.result.current.pendingInputCount).toBe(1);
+
+        first.unmount();
+        snapshot = {
+            ...snapshot,
+            seq: 2,
+            active: false,
+            handledInputSeq: 3,
+            messages: [
+                snapshot.messages[0],
+                { id: 'assistant-1', role: 'assistant', text: 'shared answer' },
+            ],
+            backgroundTasks: [{
+                ...snapshot.backgroundTasks[0],
+                state: 'succeeded',
+                progressSequence: 5,
+                terminalAt: '2026-08-29T00:00:02Z',
+            }],
+        };
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+
+        expect(firstSend).not.toHaveBeenCalled();
+        expect(secondSend).not.toHaveBeenCalled();
+        expect(second.result.current.running).toBe(false);
+        expect(second.result.current.status).toBe('done');
+        expect(second.result.current.messages.at(-1)?.text).toBe('shared answer');
+        expect(second.result.current.pendingInputCount).toBe(0);
+        expect(second.result.current.backgroundTasks[0]).toEqual(
+            expect.objectContaining({ state: 'succeeded', progressSequence: 5 }),
+        );
+    });
+
+    it('persists context independently and blocks a turn until the ack arrives', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: true,
+            json: async () => ({
+                data: {
+                    sessionId: 'session-1',
+                    seq: 1,
+                    active: false,
+                    messages: [],
+                    contextAttachments: [{
+                        id: 'attachment-1',
+                        kind: 'interactive_session',
+                        providerId: 'desktop.session',
+                        capabilityId: 'desktop.session.inspect',
+                        displaySummary: 'current interactive session',
+                        createdAtUnixMs: 100,
+                        expiresAtUnixMs: 200,
+                        state: 'active',
+                    }],
+                },
+            }),
+        })));
+        const sendMessage = vi.fn((type: number) => type ===
+            SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_CONTEXT
+            ? 'context-request-1'
+            : 'assistant-request-1');
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage,
+        }));
+
+        act(() => {
+            expect(result.current.updateContext(['desktop.session.inspect'])).toBe(true);
+        });
+        expect(result.current.contextUpdating).toBe(true);
+        expect(result.current.start('must wait')).toBe(false);
+        expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_CONTEXT,
+            expect.objectContaining({
+                client_request_id: expect.any(String),
+                selected_capability_ids: ['desktop.session.inspect'],
+            }),
+            'desk-1',
+        );
+
+        act(() => {
+            subscriber?.({
+                request_id: 'context-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_CONTEXT_UPDATED,
+                signaling_data: { changed: true },
+            });
+        });
+        await waitFor(() => expect(result.current.contextUpdating).toBe(false));
+        await waitFor(() => expect(result.current.attachments).toEqual([
+            expect.objectContaining({ capabilityId: 'desktop.session.inspect', state: 'active' }),
+        ]));
+        act(() => {
+            expect(result.current.start('now continue')).toBe(true);
+        });
+    });
+
+    it('detaches object context explicitly and sends only persisted attachment ids', async () => {
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: true,
+            json: async () => ({
+                data: {
+                    sessionId: 'session-1',
+                    seq: 1,
+                    active: false,
+                    messages: [],
+                    contextAttachments: [{
+                        id: 'file-attachment-1',
+                        kind: 'file',
+                        providerId: 'file.workspace',
+                        capabilityId: 'file.metadata.read',
+                        displaySummary: 'selected.txt',
+                        createdAtUnixMs: 100,
+                        expiresAtUnixMs: Date.now() + 60_000,
+                        state: 'active',
+                    }],
+                },
+            }),
+        })));
+        const sendMessage = vi.fn((type: number) => type ===
+            SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT
+            ? 'object-context-request-1'
+            : 'assistant-request-1');
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage,
+        }));
+
+        await waitFor(() => expect(result.current.attachments).toHaveLength(1));
+        act(() => {
+            expect(result.current.detachAttachment('file-attachment-1')).toBe(true);
+        });
+        expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
+            expect.objectContaining({
+                conversation_id: 'conversation-1',
+                operation: { kind: 'detach', attachment_id: 'file-attachment-1' },
+            }),
+            'desk-1',
+        );
+        act(() => {
+            subscriber?.({
+                request_id: 'object-context-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_OBJECT_CONTEXT_UPDATED,
+                signaling_data: { changed: true },
+            });
+        });
+        await waitFor(() => expect(result.current.contextUpdating).toBe(false));
+
+        act(() => {
+            expect(result.current.start('Read the selected metadata.')).toBe(true);
+        });
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
+            expect.objectContaining({ selected_attachment_ids: ['file-attachment-1'] }),
+            'desk-1',
+            expect.any(String),
+        );
+    });
+
+    it('streams a read-only answer and exposes a validated typed preview event', () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const subscribe = (handler: SignalingSubscriber) => {
+            subscriber = handler;
+            return () => { subscriber = null; };
+        };
+        const sendMessage = vi.fn(() => 'assistant-request-1');
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe,
+            sendMessage,
+        }));
+
+        act(() => {
+            expect(result.current.start(
+                'Inspect Word and prepare a focus preview.',
+                'en-US',
+                ['desktop.ui.inspect'],
+            )).toBe(true);
+        });
+        expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
+            expect.objectContaining({
+                question: 'Inspect Word and prepare a focus preview.',
+                locale: 'en-US',
+                selected_capability_ids: ['desktop.ui.inspect'],
+            }),
+            'desk-1',
+            expect.any(String),
+        );
+
+        const draft = {
+            schema_version: 1,
+            adapter: { kind: 'windows_uia', version: 'a4-windows-uia-read/v1' },
+            risk: 'low',
+            reversible: true,
+            data_egress: false,
+            actions: [{
+                target: {
+                    token: 'opaque',
+                    snapshot_id: 'snapshot-1',
+                    object_kind: 'ui_element',
+                    expires_at: '2026-08-24T00:00:00Z',
+                },
+                action: { adapter: 'ui', action: { kind: 'focus' } },
+                before_summary: 'Document surface is not focused.',
+                after_intent: 'Focus the document surface.',
+                verification: 'Inspect focus state again.',
+            }],
+        };
+        act(() => {
+            subscriber?.({
+                request_id: 'assistant-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'assistant-request-1',
+                    seq: 0,
+                    kind: 'status',
+                    status: 'modeling',
+                },
+            });
+            subscriber?.({
+                request_id: 'assistant-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'assistant-request-1',
+                    seq: 1,
+                    kind: 'tool_started',
+                    tool_name: 'preview_computer_action',
+                    tool_call_id: 'draft-1',
+                    tool_arguments_json: JSON.stringify(draft),
+                },
+            });
+            subscriber?.({
+                request_id: 'assistant-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'assistant-request-1',
+                    seq: 2,
+                    kind: 'tool_finished',
+                    tool_call_id: 'draft-1',
+                    tool_ok: true,
+                    tool_output: JSON.stringify(draft),
+                },
+            });
+            subscriber?.({
+                request_id: 'assistant-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'assistant-request-1',
+                    seq: 3,
+                    kind: 'answer',
+                    answer: 'I prepared a focus preview. Nothing was executed.',
+                },
+            });
+        });
+
+        expect(result.current.messages.filter(message => message.toolCallId === 'draft-1')).toHaveLength(1);
+        expect(result.current.tools.find(tool => tool.callId === 'draft-1')).toMatchObject({
+            name: 'preview_computer_action', argumentsJson: JSON.stringify(draft), output: JSON.stringify(draft), status: 'ok',
+        });
+        expect(result.current.draft?.actions).toHaveLength(1);
+        expect(result.current.messages.at(-1)?.text).toContain('Nothing was executed');
+        expect(result.current.running).toBe(false);
+        expect(result.current.status).toBe('done');
+    });
+
+    it('deduplicates visual evidence and keeps its live preview out of transcript state', () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage: () => 'assistant-request-1',
+        }));
+        act(() => { expect(result.current.start('Look at the screen.')).toBe(true); });
+        const evidence = {
+            schema_version: 1,
+            evidence_id: 'evidence-1',
+            conversation_id: 'conversation-1',
+            focus_input_revision: 1,
+            turn_id: 'turn-1',
+            tool_call_id: 'call-1',
+            frame_id: 'frame-1',
+            phase: 'observation' as const,
+            status: 'available' as const,
+            captured_at_unix_ms: 1,
+            expires_at_unix_ms: 2,
+            device_id: 'desk-1',
+            content: null,
+            digest_sha256: 'a'.repeat(64),
+            size_bytes: 3,
+            media_type: 'image/png',
+            preview_data_url: 'data:image/png;base64,AQID',
+        };
+        act(() => {
+            subscriber?.({
+                request_id: 'assistant-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'assistant-request-1', seq: 0, kind: 'visual_evidence',
+                    visual_evidence: evidence,
+                },
+            });
+            subscriber?.({
+                request_id: 'assistant-request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'assistant-request-1', seq: 1, kind: 'visual_evidence',
+                    visual_evidence: {
+                        ...evidence, status: 'not_retained', preview_data_url: null,
+                    },
+                },
+            });
+        });
+        expect(result.current.visualEvidence).toHaveLength(1);
+        expect(result.current.visualEvidence[0]?.preview_data_url).toBe(evidence.preview_data_url);
+        expect(result.current.messages).toHaveLength(1);
+        expect(result.current.messages[0]?.text).toBe('Look at the screen.');
+        act(() => { result.current.reset(); });
+        expect(result.current.visualEvidence).toEqual([]);
+    });
+
+    it('ignores a stale assistant stream', () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage: () => 'current',
+        }));
+        act(() => { result.current.start('Inspect the current UI.'); });
+        act(() => {
+            subscriber?.({
+                request_id: 'stale',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'stale',
+                    seq: 99,
+                    kind: 'answer',
+                    answer: 'stale answer',
+                },
+            });
+        });
+        expect(result.current.messages.some((message) => message.text === 'stale answer')).toBe(false);
+        expect(result.current.running).toBe(true);
+    });
+
+    it('restores ordered tool calls including tool-only turns, errors, and missing results', async () => {
+        localStorage.setItem('ai-assistant-conversation:tool-records', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 3, active: false, messages: [
+                { id: 'user', role: 'user', text: 'check' },
+                { id: 'calls', role: 'assistant', text: '', toolCalls: [
+                    { id: 'a', name: 'inspect_desktop_ui', argumentsJson: '{"query":{"name":"Calendar"}}' },
+                    { id: 'b', name: 'load_tool_details', argumentsJson: '{}' },
+                ] },
+                { id: 'result', role: 'tool', toolCallId: 'a', text: 'tool error: permission required' },
+                { id: 'answer', role: 'assistant', text: 'stopped' },
+            ],
+        } }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'tool-records',
+            subscribe: () => () => undefined, sendMessage: () => 'unused' }));
+        await waitFor(() => expect(result.current.messages).toHaveLength(4));
+        expect(result.current.messages.map(message => message.id)).toEqual(['user', 'tool-call-a', 'tool-call-b', 'answer']);
+        expect(result.current.tools[0]).toMatchObject({ name: 'inspect_desktop_ui', status: 'failed', output: 'tool error: permission required' });
+        expect(result.current.tools[1].output).toBeNull();
+        unmount();
+    });
+
+    it('restores reasoning on tool-only assistant messages and final answers', async () => {
+        localStorage.setItem('ai-assistant-conversation:reasoning', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 3, active: false, messages: [
+                { id: 'user', role: 'user', text: 'check', reasoning: 'ignore' },
+                { id: 'thinking', role: 'assistant', text: '', reasoning: 'Inspect first.' },
+                { id: 'answer', role: 'assistant', text: 'all good', reasoning: 'Evidence is sufficient.' },
+            ],
+        } }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'reasoning',
+            subscribe: () => () => undefined, sendMessage: () => 'unused' }));
+        await waitFor(() => expect(result.current.messages).toHaveLength(3));
+        expect(result.current.messages.map(message => message.reasoning)).toEqual([undefined, 'Inspect first.', 'Evidence is sufficient.']);
+        expect(result.current.messages[2].text).toBe('all good');
+        unmount();
+    });
+
+    it('restores command tasks and cancels only the selected original generation', async () => {
+        localStorage.setItem('ai-assistant-conversation:task-list', 'saved-conversation');
+        const tasks = [
+            { taskId: 'command-1', callId: 'call-1', executionGeneration: 'generation-1', state: 'running', updatedAt: '2026-09-08T00:00:00Z', result: null, resultTruncated: false },
+            { taskId: 'command-2', callId: 'call-2', executionGeneration: 'generation-2', state: 'succeeded', updatedAt: '2026-09-08T00:00:00Z', result: 'original output', resultTruncated: false },
+        ];
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', seq: 10, active: false, messages: [], commandTasks: tasks,
+        } }) }));
+        const sendMessage = vi.fn().mockReturnValue('control-request');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'task-list',
+            subscribe: () => () => undefined, sendMessage }));
+        await waitFor(() => expect(result.current.commandTasks).toHaveLength(2));
+        await act(async () => result.current.cancelTask('command', 'command-1'));
+        expect(sendMessage).toHaveBeenCalledExactlyOnceWith(SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
+            { execution_generation: 'generation-1', action: 'cancel', requested_by: 'control-end' }, 'task-list');
+        expect(result.current.commandTasks[0].state).toBe('running');
+        expect(result.current.commandTasks[1].result).toBe('original output');
+        await act(async () => { await expect(result.current.cancelTask('command', 'command-2')).rejects.toThrow(); });
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        unmount();
+    });
+
+    it('stops the current turn once without clearing its conversation or messages', () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const sendMessage = vi.fn().mockReturnValue('request-stop');
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'stop-local',
+            subscribe: handler => { subscriber = handler; return () => undefined; },
+            sendMessage,
+        }));
+        act(() => { result.current.start('keep this question'); });
+        const conversation = localStorage.getItem('ai-assistant-conversation:stop-local');
+        act(() => { result.current.stop(); result.current.stop(); });
+        expect(sendMessage).toHaveBeenCalledTimes(2);
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT, null, 'stop-local', 'request-stop');
+        expect(result.current.stopping).toBe(true);
+        expect(result.current.turnRunning).toBe(true);
+        expect(result.current.messages[0].text).toBe('keep this question');
+        expect(localStorage.getItem('ai-assistant-conversation:stop-local')).toBe(conversation);
+        act(() => subscriber?.({ request_id: 'request-stop',
+            signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { seq: 1, kind: 'error', error: { message: 'cancelled' } },
+        }));
+        expect(result.current.stopping).toBe(false);
+        expect(result.current.turnRunning).toBe(false);
+        expect(result.current.messages[0].text).toBe('keep this question');
+    });
+
+    it('clears a local stopping turn when the server lease expires without a terminal event', async () => {
+        vi.useFakeTimers();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'expired-session', requestId: 'expired-request', seq: 10, active: false,
+            messages: [{ id: 'user-1', role: 'user', text: 'keep this question' }],
+        } }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'expired-local',
+            subscribe: () => () => undefined, sendMessage: vi.fn().mockReturnValue('expired-request') }));
+        act(() => { result.current.start('keep this question'); });
+        act(() => { result.current.stop(); });
+        expect(result.current.stopping).toBe(true);
+        await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+        expect(result.current.stopping).toBe(false);
+        expect(result.current.turnRunning).toBe(false);
+        expect(result.current.messages[0].text).toBe('keep this question');
+        act(() => { result.current.reset(); });
+        expect(result.current.messages).toEqual([]);
+        unmount();
+        vi.useRealTimers();
+    });
+
+    it('stops a restored active turn using its server request id', async () => {
+        localStorage.setItem('ai-assistant-conversation:stop-restored', 'saved-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'saved-conversation', requestId: 'server-request', seq: 10, active: true,
+            messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
+        } }) }));
+        const sendMessage = vi.fn().mockReturnValue('unused');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({
+            deskId: 'stop-restored', subscribe: () => () => undefined, sendMessage,
+        }));
+        await waitFor(() => expect(result.current.turnRunning).toBe(true));
+        act(() => result.current.stop());
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT, null, 'stop-restored', 'server-request');
+        expect(result.current.messages[0].text).toBe('continue');
+        unmount();
+    });
+
+    it('accepts a follow-up while running and observes only the newest request stream', () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const sendMessage = vi
+            .fn()
+            .mockReturnValueOnce('request-1')
+            .mockReturnValueOnce('request-2');
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: (handler) => {
+                subscriber = handler;
+                return () => { subscriber = null; };
+            },
+            sendMessage,
+        }));
+
+        act(() => {
+            expect(result.current.start('first request')).toBe(true);
+            expect(result.current.start('new requirement')).toBe(true);
+        });
+        expect(result.current.messages.map((message) => message.text)).toEqual([
+            'first request',
+            'new requirement',
+        ]);
+        act(() => {
+            subscriber?.({
+                request_id: 'request-1',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'request-1',
+                    seq: 9,
+                    kind: 'answer',
+                    answer: 'stale answer',
+                },
+            });
+            subscriber?.({
+                request_id: 'request-2',
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: {
+                    request_id: 'request-2',
+                    seq: 1,
+                    kind: 'answer',
+                    answer: 'new answer',
+                },
+            });
+        });
+        expect(result.current.messages.map((message) => message.text)).toEqual([
+            'first request',
+            'new requirement',
+            'new answer',
+        ]);
+        expect(result.current.running).toBe(false);
+    });
+
+    it('hydrates a durable permission request and posts one complete mixed decision', async () => {
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        let state = 'pending';
+        const request = {
+            schemaVersion: 1,
+            requestId: 'permission-1',
+            inputRevision: 3,
+            state,
+            createdAt: '2026-08-26T00:00:00Z',
+            items: [{
+                itemId: 'inspect',
+                providerId: 'desktop.session',
+                toolName: 'inspect_desktop_session',
+                expectedEffect: 'read_device',
+                resourceScope: ['target:device-1'],
+                operationScope: ['observe'],
+                exportDestinations: [],
+                suggestedTtlSeconds: 300,
+                suggestedMaxUses: 1,
+                reason: 'Inspect the current target',
+            }, {
+                itemId: 'inspect-ui',
+                providerId: 'desktop.ui',
+                toolName: 'inspect_desktop_ui',
+                expectedEffect: 'read_device',
+                resourceScope: ['target:device-1'],
+                operationScope: ['observe-ui'],
+                exportDestinations: [],
+                suggestedTtlSeconds: 120,
+                suggestedMaxUses: 1,
+                reason: 'Inspect the current UI tree',
+            }],
+        };
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            if (String(input).endsWith('/permission-decision')) {
+                const body = JSON.parse(String(init?.body));
+                expect(body).toEqual({
+                    connection: 'desk-1',
+                    conversation: 'conversation-1',
+                    requestId: 'permission-1',
+                    items: [{
+                        itemId: 'inspect',
+                        decision: 'approve',
+                        resource_scope: [],
+                        operation_scope: ['observe'],
+                        export_destinations: [],
+                        ttl_seconds: 60,
+                        max_uses: 1,
+                    }, {
+                        itemId: 'inspect-ui',
+                        decision: 'deny',
+                    }],
+                });
+                state = 'partially_approved';
+                return { ok: true, json: async () => ({ success: true, data: { state } }) };
+            }
+            return {
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-1',
+                        seq: state === 'pending' ? 1 : 2,
+                        active: false,
+                        inputRevision: 3,
+                        messages: [{ id: 'user-1', role: 'user', text: 'inspect it' }],
+                        permissionRequests: [{ ...request, state }],
+                        contextAttachments: [],
+                    },
+                }),
+            };
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await waitFor(() => expect(result.current.permissionRequests[0]?.state).toBe('pending'));
+        expect(result.current.status).toBe('permission_required');
+        await act(async () => {
+            expect(await result.current.decidePermissionItems(
+                result.current.permissionRequests[0],
+                [{
+                    itemId: 'inspect',
+                    decision: 'approve',
+                    resource_scope: [],
+                    operation_scope: ['observe'],
+                    export_destinations: [],
+                    ttl_seconds: 60,
+                    max_uses: 1,
+                }, {
+                    itemId: 'inspect-ui',
+                    decision: 'deny',
+                }],
+            )).toBe(true);
+        });
+        await waitFor(() => expect(result.current.permissionRequests[0]?.state).toBe('partially_approved'));
+        expect(result.current.status).toBe('done');
+        expect(result.current.error).toBeNull();
+        expect(fetchMock).toHaveBeenCalledWith(
+            '/api/my/ai-assistant-session/permission-decision',
+            expect.objectContaining({ method: 'POST' }),
+        );
+    });
+
+    it('shows and revokes a durable capability grant without dispatching a tool', async () => {
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        let revokedAtUnixMs: number | null = null;
+        const grant = {
+            grantId: 'grant-1',
+            providerId: 'desktop.session',
+            capabilityId: 'desktop.session.inspect',
+            toolName: 'inspect_desktop_session',
+            riskTier: 'r0',
+            resourceScope: ['target:device-1'],
+            operationScope: ['observe'],
+            remainingUses: 1,
+            expiresAtUnixMs: Date.now() + 60_000,
+            revokedAtUnixMs,
+            revokedReason: null,
+        };
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            if (String(input).endsWith('/capability-grant/revoke')) {
+                expect(JSON.parse(String(init?.body))).toEqual({
+                    connection: 'desk-1',
+                    conversation: 'conversation-1',
+                    grantId: 'grant-1',
+                    reason: 'revoked_by_owner',
+                });
+                revokedAtUnixMs = Date.now();
+                return {
+                    ok: true,
+                    json: async () => ({
+                        success: true,
+                        data: { ...grant, revokedAtUnixMs, revokedReason: 'revoked_by_owner' },
+                    }),
+                };
+            }
+            return {
+                ok: true,
+                json: async () => ({
+                    data: {
+                        sessionId: 'session-1',
+                        seq: revokedAtUnixMs ? 2 : 1,
+                        active: false,
+                        messages: [],
+                        contextAttachments: [],
+                        capabilityGrants: [{
+                            ...grant,
+                            revokedAtUnixMs,
+                            revokedReason: revokedAtUnixMs ? 'revoked_by_owner' : null,
+                        }],
+                    },
+                }),
+            };
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await waitFor(() => expect(result.current.capabilityGrants).toHaveLength(1));
+        await act(async () => {
+            expect(await result.current.revokeCapabilityGrant('grant-1')).toBe(true);
+        });
+        await waitFor(() => expect(
+            result.current.capabilityGrants[0]?.revokedReason,
+        ).toBe('revoked_by_owner'));
+        expect(fetchMock).toHaveBeenCalledWith(
+            '/api/my/ai-assistant-session/capability-grant/revoke',
+            expect.objectContaining({ method: 'POST' }),
+        );
+    });
+
+    it('does not require user disposition after an inconclusive action', async () => {
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+            sessionId: 'session-1', seq: 1, active: false,
+            messages: [{ id: 'result-1', role: 'assistant', text: 'Read the current UI before continuing.' }],
+            contextAttachments: [],
+        } }) })));
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
+        }));
+        await waitFor(() => expect(result.current.status).toBe('done'));
+        expect(result.current.running).toBe(false);
+        expect('disposeUnknownOutcome' in result.current).toBe(false);
+    });
+});
+
+it.each([
+    ['file_artifact', 'patch_powerpoint_copy', 'copy.pptx'],
+    ['file_artifact', 'replace_word_copy_body', `${'a'.repeat(250)}.DOCX`],
+    ['batch_document_artifact', 'patch_keynote_copy', 'copy.key'],
+])('restores %s from %s as a visible file result after refresh', async (kind, tool, fileName) => {
+    localStorage.setItem('ai-assistant-conversation:copy-device', 'copy-conversation');
+    const value = kind === 'file_artifact'
+        ? { file_name: fileName, size_bytes: 123, digest_sha256: 'a'.repeat(64) }
+        : { file_name: fileName, byte_len: 123, sha256: 'a'.repeat(64), validation_byte_len: 32, validation_sha256: 'b'.repeat(64) };
+    const text = JSON.stringify({ result: 'verified', output: { kind, value } });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        sessionId: 'server-session', seq: 1, active: false,
+        messages: [
+            { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'copy-call', name: tool, argumentsJson: '{}' }] },
+            { id: 'copy-result', role: 'tool', toolCallId: 'copy-call', text },
+        ],
+    } }) })));
+    const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'copy-device', subscribe: () => () => {}, sendMessage: () => 'request' }));
+    try {
+        await waitFor(() => expect(result.current.messages.find(message => message.id === 'copy-result')).toMatchObject({ role: 'tool_result', text }));
+        expect(result.current.tools[0]).toMatchObject({ callId: 'copy-call', status: 'ok', output: text });
+        expect(result.current.messages.filter(message => message.id === 'copy-result')).toHaveLength(1);
+    } finally {
+        unmount();
+        localStorage.removeItem('ai-assistant-conversation:copy-device');
+        vi.unstubAllGlobals();
+    }
+});
+
+it('projects a failed native action with the reason bound to its work record', async () => {
+    localStorage.setItem('ai-assistant-conversation:reason-device', 'reason-conversation');
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        sessionId: 'server-session', seq: 1, active: false, actionPermissionReasons: { '44': 'Create the approved calendar event', '45': 'Unrelated reason' },
+        messages: [
+            { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'call', name: 'execute_ui_actions', argumentsJson: '{}' }] },
+            { id: 'result', role: 'tool', toolCallId: 'call', text: JSON.stringify({ work_id: '44', result: 'definitely_not_started', message: 'target missing' }) },
+        ],
+    } }) })));
+    const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'reason-device', subscribe: () => () => {}, sendMessage: () => 'request' }));
+    await waitFor(() => expect(result.current.messages.find(message => message.id === 'result')?.permissionReason).toBe('Create the approved calendar event'));
+    expect(result.current.tools[0]).toMatchObject({ status: 'failed', permissionReason: 'Create the approved calendar event' });
+    unmount();
+    localStorage.removeItem('ai-assistant-conversation:reason-device');
+    vi.unstubAllGlobals();
+});

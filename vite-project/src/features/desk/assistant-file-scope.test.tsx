@@ -11,17 +11,17 @@ describe('conversation directories', () => {
         const update = vi.fn((..._args: unknown[]) => true);
         render(<AssistantFileScope deskId="device" sessionTargetId={target} scope={{ revision: 7, directories: [] }} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);
         expect(screen.queryByRole('textbox')).toBeNull();
-        const button = screen.getByRole('button', { name: 'pages.deviceAssistant.directories.add' });
+        const button = screen.getByRole('button', { name: 'pages.aiAssistant.directories.add' });
         expect(button.getAttribute('type')).toBe('button');
         fireEvent.click(button);
         fireEvent.click(screen.getByText("choose"));
-        expect(update).toHaveBeenCalledWith({ kind: 'select_directory', path: '/private/tmp/a directory ', purpose: 'pages.deviceAssistant.directories.manualPurpose', expected_revision: 7 }, 'pages.deviceAssistant.directories.timeout');
+        expect(update).toHaveBeenCalledWith({ kind: 'select_directory', path: '/private/tmp/a directory ', purpose: 'pages.aiAssistant.directories.manualPurpose', expected_revision: 7 }, 'pages.aiAssistant.directories.timeout');
     });
 
     it('blocks unresolved targets and closes the picker when target readiness is lost', () => {
         const props = { deskId: 'device', scope: { revision: 0, directories: [] }, open: true, onOpenChange: vi.fn(), disabled: false, onUpdate: vi.fn() };
         const view = render(<AssistantFileScope {...props} />);
-        const add = screen.getByRole('button', { name: 'pages.deviceAssistant.directories.add' });
+        const add = screen.getByRole('button', { name: 'pages.aiAssistant.directories.add' });
         expect(add).toBeDisabled();
         view.rerender(<AssistantFileScope {...props} sessionTargetId={null} />);
         expect(add).toBeEnabled();
@@ -39,9 +39,9 @@ describe('conversation directories', () => {
             { requestId: 'approved', canonicalPath: '/other/path', purpose: 'purpose', state: 'approved', source: 'owner_selection', referenceExpiresAt: '2030-01-01T00:00:00Z' },
         ] };
         render(<AssistantFileScope scope={scope} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);
-        fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.directories.approve' }));
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.directories.approve' }));
         expect(update.mock.calls[0][0]).toEqual({ kind: 'decide_directory', directory_request_id: 'pending', approve: true, expected_revision: 9 });
-        fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.directories.remove' }));
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.directories.remove' }));
         expect(update.mock.calls[1][0]).toEqual({ kind: 'revoke_directory', directory_request_id: 'approved', expected_revision: 9 });
     });
 

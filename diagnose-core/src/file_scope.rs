@@ -398,7 +398,7 @@ impl PersistedAgentSession {
         device_id: &str,
         conversation_id: &str,
     ) -> Result<FileScopeSubject, FileScopeError> {
-        if self.surface != AgentSessionSurface::DeviceAssistant
+        if self.surface != AgentSessionSurface::AiAssistant
             || self.actor_id != actor_id
             || self.device_id != device_id
             || self.conversation_id != conversation_id

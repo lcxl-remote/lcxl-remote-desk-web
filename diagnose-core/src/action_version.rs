@@ -137,7 +137,7 @@ mod tests {
             },
             "now",
         );
-        session.surface = AgentSessionSurface::DeviceAssistant;
+        session.surface = AgentSessionSurface::AiAssistant;
         session.turn_state = TurnState::AwaitingApproval;
         session.current_turn_id = Some("turn".into());
         session.input_revision = 3;

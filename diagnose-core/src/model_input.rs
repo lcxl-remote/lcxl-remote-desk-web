@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, sync::OnceLock};
 fn tools() -> &'static BTreeMap<String, ToolSpec> {
     static TOOLS: OnceLock<BTreeMap<String, ToolSpec>> = OnceLock::new();
     TOOLS.get_or_init(|| {
-        crate::device_assistant::device_assistant_provider_registry()
+        crate::ai_assistant::ai_assistant_provider_registry()
             .registered_tools()
             .into_iter()
             .chain(crate::permission_tools::permission_planning_tool_registry())

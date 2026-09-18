@@ -163,7 +163,7 @@ pub(super) fn capped_session_permits_matrix_over_all_signaling_types() {
         InvokeAgentCapability,
         PreviewExecution,
         ResolveExecution,
-        AskTerminalCopilot,
+        AskTerminalAiAssistant,
         CollectEvidence,
         ExecuteEdgePlan,
         InvokeRemoteTool,

@@ -8,7 +8,7 @@ function record(value: unknown): Record<string, unknown> {
 
 export function AssistantObservationResult({ data }: { data: unknown }) {
     const { t } = useTranslation();
-    const label = (name: string, options?: Record<string, unknown>) => t(`pages.deviceAssistant.observation.${name}`, options);
+    const label = (name: string, options?: Record<string, unknown>) => t(`pages.aiAssistant.observation.${name}`, options);
     const context = record(record(data).ReadContext);
     const session = record(context.DesktopSessionInspect);
     const ui = record(context.DesktopUiInspect);
@@ -46,7 +46,7 @@ export function AssistantObservationResult({ data }: { data: unknown }) {
                 })}
             </ul>
         </> : <p>{label('unrecognized')}</p>}
-        <Disclosure className="rounded-md border p-3" title={<>{t('pages.deviceAssistant.workspace.technicalDetails')}</>} summaryClassName="cursor-pointer text-muted-foreground">
+        <Disclosure className="rounded-md border p-3" title={<>{t('pages.aiAssistant.workspace.technicalDetails')}</>} summaryClassName="cursor-pointer text-muted-foreground">
 
             <pre data-testid="observation-output" className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(data, null, 2)}</pre>
         </Disclosure>

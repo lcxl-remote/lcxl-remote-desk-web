@@ -1,6 +1,6 @@
 //! Production controller replay with isolated storage and synthetic connection identity.
 use super::*;
-use crate::controller::device_assistant_session::{PermissionDecisionBody, decide_permission_on};
+use crate::controller::ai_assistant_session::{PermissionDecisionBody, decide_permission_on};
 use desk_signal_facade::model::{
     auth_context::AuthContext,
     connection::{ConnectionModel, ConnectionState, SharedConnectionMap},

@@ -536,8 +536,8 @@ impl ValidatedTaskContract {
                 != (CommunicationSurfaceScope::WebOrigin {
                     origin: page.origin.clone(),
                 })
-            || destination.adapter_id != crate::device_assistant::GMAIL_WEB_ADAPTER_ID
-            || destination.adapter_version != crate::device_assistant::GMAIL_WEB_ADAPTER_VERSION
+            || destination.adapter_id != crate::ai_assistant::GMAIL_WEB_ADAPTER_ID
+            || destination.adapter_version != crate::ai_assistant::GMAIL_WEB_ADAPTER_VERSION
             || destination.profile_id != page.adapter.profile_incarnation
             || destination.account_id
                 != crate::communication::gmail_web_account_id(page)
@@ -621,8 +621,8 @@ impl ValidatedTaskContract {
                 != (CommunicationSurfaceScope::WebOrigin {
                     origin: page.origin.clone(),
                 })
-            || destination.adapter_id != crate::device_assistant::SLACK_WEB_ADAPTER_ID
-            || destination.adapter_version != crate::device_assistant::SLACK_WEB_ADAPTER_VERSION
+            || destination.adapter_id != crate::ai_assistant::SLACK_WEB_ADAPTER_ID
+            || destination.adapter_version != crate::ai_assistant::SLACK_WEB_ADAPTER_VERSION
             || destination.profile_id != page.adapter.profile_incarnation
             || destination.account_id
                 != crate::communication::slack_web_account_id(page)

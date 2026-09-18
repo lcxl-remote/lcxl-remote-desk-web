@@ -12,8 +12,8 @@ import { readSessionGrant } from "@/features/desk/session-grant"
 import { Button } from "@/components/ui/button"
 import { v4 } from "uuid"
 import { useDeskSignaling } from "../desk/use-desk-signaling"
-import { useTerminalCopilot, type TerminalCopilotMode, type TerminalContext } from "./use-terminal-copilot"
-import { TerminalCopilotPanel } from "./terminal-copilot-panel"
+import { useTerminalAiAssistant, type TerminalAiAssistantMode, type TerminalContext } from "./use-terminal-ai-assistant"
+import { TerminalAiAssistantPanel } from "./terminal-ai-assistant-panel"
 import { AiGeneratedMark, type AiProvenance } from "@/components/ai-generated-mark"
 import { ModelSelector } from "../desk/model-selector"
 import { useConfirmExec } from "../exec/use-confirm-exec"
@@ -31,18 +31,18 @@ import type { OperationSystemEnum } from "@/services/types"
 import { terminalOs, terminalShell } from "./terminal-environment"
 import {
     type AssistantTerminalObjectRef,
-    useDeviceAssistantTerminalContext,
-} from './use-device-assistant-terminal-context'
+    useAiAssistantTerminalContext,
+} from './use-ai-assistant-terminal-context'
 import {
     SessionTargetDialog,
     parseSessionTargetList,
     type SessionTargetDescriptor,
 } from '@/features/desk/session-target-selection'
 
-// Max bytes of recent terminal scrollback kept as a non-authoritative copilot
+// Max bytes of recent terminal scrollback kept as a non-authoritative assistant
 // prompt hint (the server re-redacts and re-caps it). Bounded so the ring buffer
 // never grows without limit on a chatty session.
-const COPILOT_RECENT_OUTPUT_LIMIT = 8_192
+const AI_ASSISTANT_RECENT_OUTPUT_LIMIT = 8_192
 
 // Legacy Signaling Constants
 const SIGNALING_TYPE_CODE_REPLY = 10011
@@ -69,17 +69,17 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
     const [sessionTargets, setSessionTargets] = useState<SessionTargetDescriptor[]>([])
     const { markStarted: markTerminalStarted, markClosed: markTerminalClosed } = useTerminalSessionGuard()
 
-    // Copilot: a control-plane signaling connection (separate from the terminal
+    // Assistant: a control-plane signaling connection (separate from the terminal
     // I/O WS above) plus a bounded ring buffer of recent output and the last
-    // submitted command line, all fed to the copilot as non-authoritative hints.
+    // submitted command line, all fed to the assistant as non-authoritative hints.
     const { subscribe, sendMessage } = useDeskSignaling()
-    const assistantContext = useDeviceAssistantTerminalContext({
+    const assistantContext = useAiAssistantTerminalContext({
         deskId: connectionId,
         subscribe,
         sendMessage,
     })
-    const copilot = useTerminalCopilot({ connectionId, subscribe, sendMessage })
-    // Confirmed execution of an operator-promoted copilot suggestion: ConfirmExec
+    const assistant = useTerminalAiAssistant({ connectionId, subscribe, sendMessage })
+    // Confirmed execution of an operator-promoted assistant suggestion: ConfirmExec
     // -> ExecPreview -> ResolveExec -> ExecResult, keyed by suggestion index. The
     // host re-classifies the command and gates it on the device execution ceiling;
     // the browser only relays and renders.
@@ -100,7 +100,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
         modelId: completionModelId,
         orgId,
     })
-    const [showCopilot, setShowCopilot] = useState(false)
+    const [showAssistant, setShowAssistant] = useState(false)
     const recentOutputRef = useRef<string>("")
     const [assistantObjectRef, setAssistantObjectRef] =
         useState<AssistantTerminalObjectRef | null>(null)
@@ -138,9 +138,9 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
     // The shell comes from the selected command, while the OS comes from the
     // remote host's connection handshake. Shell names are cross-platform (macOS
     // ships bash, and pwsh runs on Unix), so they cannot identify the OS.
-    const buildContext = useCallback((mode: TerminalCopilotMode): TerminalContext => {
+    const buildContext = useCallback((mode: TerminalAiAssistantMode): TerminalContext => {
         const shell = terminalShell(command)
-        const recent = recentOutputRef.current.slice(-COPILOT_RECENT_OUTPUT_LIMIT)
+        const recent = recentOutputRef.current.slice(-AI_ASSISTANT_RECENT_OUTPUT_LIMIT)
         return {
             os: terminalOs(operationSystem),
             shell,
@@ -152,9 +152,9 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
         }
     }, [command, operationSystem])
 
-    const askCopilot = useCallback((mode: TerminalCopilotMode, question: string, modelId: number | null) => {
-        copilot.ask({ mode, question: question || undefined, context: buildContext(mode), modelId, orgId })
-    }, [copilot, buildContext, orgId])
+    const askAssistant = useCallback((mode: TerminalAiAssistantMode, question: string, modelId: number | null) => {
+        assistant.ask({ mode, question: question || undefined, context: buildContext(mode), modelId, orgId })
+    }, [assistant, buildContext, orgId])
 
     // The (non-authoritative) environment hint for a completion ask.
     const completeContext = useCallback((): TerminalCompletionContext => {
@@ -162,7 +162,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
         return {
             os: terminalOs(operationSystem),
             shell,
-            recent_output: recentOutputRef.current.slice(-COPILOT_RECENT_OUTPUT_LIMIT),
+            recent_output: recentOutputRef.current.slice(-AI_ASSISTANT_RECENT_OUTPUT_LIMIT),
         }
     }, [command, operationSystem])
 
@@ -371,10 +371,10 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                                 } else if (msg.signaling_type === SIGNALING_TYPE_CODE_REPLY) {
                                     const content = msg.signaling_data.content
                                     term.write(content)
-                                    // Tap a bounded ring buffer of recent output for the copilot hint.
+                                    // Tap a bounded ring buffer of recent output for the assistant hint.
                                     if (typeof content === 'string') {
                                         recentOutputRef.current = (recentOutputRef.current + content)
-                                            .slice(-COPILOT_RECENT_OUTPUT_LIMIT)
+                                            .slice(-AI_ASSISTANT_RECENT_OUTPUT_LIMIT)
                                     }
                                     const assistantRef = msg.signaling_data.assistant_object_ref
                                     if (
@@ -454,7 +454,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                         signaling_data: { content: data },
                     };
                     socketRef.current.send(JSON.stringify(signal));
-                    // Track the last submitted command line (a non-authoritative copilot
+                    // Track the last submitted command line (a non-authoritative assistant
                     // hint). A CR/LF settles the current line; backspace pops; printable
                     // characters accumulate. Control sequences are otherwise ignored.
                     let settled = false
@@ -606,10 +606,10 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                         variant="secondary"
                         size="sm"
                         className="opacity-50 hover:opacity-100 transition-opacity"
-                        onClick={() => setShowCopilot((v) => !v)}
+                        onClick={() => setShowAssistant((v) => !v)}
                     >
                         <Sparkles className="h-4 w-4 mr-2" />
-                        {t('pages.deskTerminal.copilot.title')}
+                        {t('pages.deskTerminal.assistant.title')}
                     </Button>
                     <Button
                         variant="secondary"
@@ -673,12 +673,12 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                     </div>
                 )}
             </div>
-            {showCopilot && (
-                <TerminalCopilotPanel
-                    state={copilot.state}
-                    onAsk={askCopilot}
-                    onReset={copilot.reset}
-                    onClose={() => setShowCopilot(false)}
+            {showAssistant && (
+                <TerminalAiAssistantPanel
+                    state={assistant.state}
+                    onAsk={askAssistant}
+                    onReset={assistant.reset}
+                    onClose={() => setShowAssistant(false)}
                     onFill={fillCommand}
                     exec={exec}
                     orgId={orgId}

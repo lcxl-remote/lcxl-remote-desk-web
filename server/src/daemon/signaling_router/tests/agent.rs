@@ -143,12 +143,12 @@ async fn invoke_agent_capability_unknown_kind_emits_unsupported_outcome() {
 }
 
 #[tokio::test]
-async fn device_assistant_switch_rejects_new_capability_work_before_dispatch() {
+async fn ai_assistant_switch_rejects_new_capability_work_before_dispatch() {
     use desk_agent_protocol::{
         AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
     };
     let (ctx, mut rx) = make_ctx_with_rx().await;
-    ctx.settings.write().await.device_assistant.enabled = false;
+    ctx.settings.write().await.ai_assistant.enabled = false;
     let raw = serde_json::to_value(AgentRequestData {
         operation: AgentOperation {
             risk_hint: None,

@@ -39,7 +39,7 @@ pub fn mark_browser_input(input: &mut INPUT) {
     }
 }
 
-/// Mark one input produced by the Device Assistant raw-input fallback. This is
+/// Mark one input produced by the AI Assistant raw-input fallback. This is
 /// intentionally distinct from browser/controller input: browser input must
 /// preempt an AI writer lease, while the current AI step must not preempt
 /// itself. Unknown or stripped markers still classify as external.

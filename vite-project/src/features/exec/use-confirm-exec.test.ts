@@ -111,7 +111,7 @@ function render(orgId?: number, acceptUnsolicitedPreviews = false) {
 }
 
 describe('useConfirmExec', () => {
-    it('adopts a server-originated Device Assistant preview only when enabled', () => {
+    it('adopts a server-originated AI Assistant preview only when enabled', () => {
         const disabled = render();
         act(() => disabled.feed(previewFrame('agent-preview', executablePreview())));
         expect(disabled.hook.result.current.entries).toEqual({});

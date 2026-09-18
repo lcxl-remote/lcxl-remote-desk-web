@@ -20,15 +20,15 @@ pub fn receipt_event_id(subject: &FileScopeSubject, client_request_id: &str) -> 
 }
 
 pub fn owner_selection(
-    update: &desk_agent_protocol::device_assistant::DeviceAssistantObjectContextUpdate,
+    update: &desk_agent_protocol::ai_assistant::AiAssistantObjectContextUpdate,
     subject: FileScopeSubject,
     resolved: desk_agent_protocol::computer_use::FileDirectoryResolveOutput,
 ) -> Result<FileScopeUpdate, FileScopeError> {
-    use desk_agent_protocol::device_assistant::DeviceAssistantObjectContextOperation;
+    use desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation;
     update
         .validate()
         .map_err(|_| FileScopeError::InvalidProposal)?;
-    let DeviceAssistantObjectContextOperation::SelectDirectory {
+    let AiAssistantObjectContextOperation::SelectDirectory {
         path,
         purpose,
         expected_revision,
@@ -62,11 +62,11 @@ pub fn owner_selection(
 /// Match the original human intent before returning a resolution retry receipt.
 pub fn match_owner_selection(
     receipt: &FileScopeReceipt,
-    update: &desk_agent_protocol::device_assistant::DeviceAssistantObjectContextUpdate,
+    update: &desk_agent_protocol::ai_assistant::AiAssistantObjectContextUpdate,
     subject: &FileScopeSubject,
 ) -> Result<(), FileScopeError> {
-    use desk_agent_protocol::device_assistant::DeviceAssistantObjectContextOperation;
-    let DeviceAssistantObjectContextOperation::SelectDirectory {
+    use desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation;
+    let AiAssistantObjectContextOperation::SelectDirectory {
         path,
         purpose,
         expected_revision,
@@ -95,10 +95,10 @@ pub fn match_owner_selection(
 
 /// Bind an owner transport decision to the server-derived storage subject.
 pub fn from_owner_decision(
-    update: &desk_agent_protocol::device_assistant::DeviceAssistantObjectContextUpdate,
+    update: &desk_agent_protocol::ai_assistant::AiAssistantObjectContextUpdate,
     subject: FileScopeSubject,
 ) -> Option<FileScopeUpdate> {
-    use desk_agent_protocol::device_assistant::DeviceAssistantObjectContextOperation::*;
+    use desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::*;
     let (expected_revision, mutation) = match &update.operation {
         DecideDirectory {
             directory_request_id,

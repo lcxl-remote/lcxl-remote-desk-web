@@ -57,7 +57,7 @@ impl ReadContextSelection {
     pub fn validate(&self) -> Result<(), AgentError> {
         validate_objects(&self.object_attachments)?;
         live_read::validate_targets(self)?;
-        let providers = crate::device_assistant::device_assistant_provider_registry();
+        let providers = crate::ai_assistant::ai_assistant_provider_registry();
         let compiled = providers.registered_tools();
         if self.tool_names.len() > MAX_READ_TOOLS
             || self.tool_names.windows(2).any(|pair| pair[0] >= pair[1])

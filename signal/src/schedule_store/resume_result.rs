@@ -310,7 +310,7 @@ impl ScheduleStore {
             || session.device_id != task.target_device_id
             || row.device_id != session.device_id
             || session.conversation_id != work.conversation_id
-            || session.surface != AgentSessionSurface::DeviceAssistant
+            || session.surface != AgentSessionSurface::AiAssistant
             || session.trigger_origin != TriggerOrigin::ScheduledContinuation
             || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
             || session.current_request_id.as_deref() != Some(lease.run_id)

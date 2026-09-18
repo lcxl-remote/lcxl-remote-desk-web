@@ -26,11 +26,9 @@ fn selected_object_lineage_keeps_explicit_sources_without_later_context_expansio
         ObjectContextBuild, ObjectContextMutation, build_object_context_mutation,
     };
     use desk_agent_protocol::{
+        ai_assistant::{AiAssistantObjectContextOperation, AiAssistantObjectContextUpdate},
         computer_use::{ObjectKind, ObjectRef},
         data_lineage::DestinationIdentity,
-        device_assistant::{
-            DeviceAssistantObjectContextOperation, DeviceAssistantObjectContextUpdate,
-        },
     };
     let destination = DestinationIdentity::Model {
         connection_id: "gateway".into(),
@@ -53,13 +51,13 @@ fn selected_object_lineage_keeps_explicit_sources_without_later_context_expansio
     );
     session.adopt_client_metadata(
         Some("client"),
-        crate::session::AgentSessionSurface::DeviceAssistant,
+        crate::session::AgentSessionSurface::AiAssistant,
     );
     for id in ["selected", "unselected"] {
-        let update = DeviceAssistantObjectContextUpdate {
+        let update = AiAssistantObjectContextUpdate {
             conversation_id: "client".into(),
             client_request_id: id.into(),
-            operation: DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+            operation: AiAssistantObjectContextOperation::AttachTerminalOutput {
                 object_ref: ObjectRef {
                     token: id.into(),
                     snapshot_id: "snapshot".into(),
@@ -983,7 +981,7 @@ async fn response_locale_survives_serialization_and_missing_resume_preference() 
 async fn capability_discovery_replaces_working_set_without_persisting_schema() {
     use desk_agent_protocol::capability_provider::CapabilityBlockedReason;
 
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let target = providers
         .capability_for_tool("read_system_info")
         .expect("system info descriptor")
@@ -1019,7 +1017,7 @@ async fn capability_discovery_replaces_working_set_without_persisting_schema() {
         },
         "2026-09-03T00:00:00Z",
     );
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.input_revision = 1;
     seeded.latest_input_seq = 1;
     seeded.focus_epoch.input_revision = 1;
@@ -1123,7 +1121,7 @@ async fn capability_discovery_replaces_working_set_without_persisting_schema() {
 }
 
 #[tokio::test]
-async fn device_assistant_request_ends_with_server_input_watermark() {
+async fn ai_assistant_request_ends_with_server_input_watermark() {
     let mut seeded = PersistedAgentSession::new(
         "conv",
         "actor",
@@ -1132,7 +1130,7 @@ async fn device_assistant_request_ends_with_server_input_watermark() {
         scope(),
         "2026-06-20T00:00:00Z",
     );
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.input_revision = 3;
     seeded.latest_input_seq = 3;
     let sess = MemSession {
@@ -1166,7 +1164,7 @@ async fn device_assistant_request_ends_with_server_input_watermark() {
 }
 
 #[tokio::test]
-async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
+async fn ai_assistant_user_followup_reprojects_latest_browser_page_ref() {
     use desk_agent_protocol::browser_control::{
         BROWSER_CONTROL_SCHEMA_VERSION, BrowserActionOutcome, BrowserActionResult,
         BrowserAdapterRef, BrowserEngineKind, BrowserOrigin, BrowserOriginKind, BrowserPageRef,
@@ -1183,7 +1181,7 @@ async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
         scope(),
         "2026-06-20T00:00:00Z",
     );
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     let page = BrowserPageRef {
         account_id: None,
         schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
@@ -1371,7 +1369,7 @@ async fn device_assistant_user_followup_reprojects_latest_browser_page_ref() {
 }
 
 #[tokio::test]
-async fn device_assistant_followup_batch_repeats_exact_latest_input_at_recency_edge() {
+async fn ai_assistant_followup_batch_repeats_exact_latest_input_at_recency_edge() {
     let mut seeded = PersistedAgentSession::new(
         "conv",
         "actor",
@@ -1380,7 +1378,7 @@ async fn device_assistant_followup_batch_repeats_exact_latest_input_at_recency_e
         scope(),
         "2026-06-20T00:00:00Z",
     );
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     let mut latest = ChatMessage::text("u2", ChatRole::User, "latest correction");
     let digest = format!("{:x}", Sha256::digest(latest.text.as_bytes()));
     latest.data_envelope = Some(DataEnvelope {
@@ -1688,7 +1686,7 @@ async fn directory_planning_waits_for_decision_then_continues_without_granting_a
         );
         initial.adopt_client_metadata(
             Some("client"),
-            crate::session::AgentSessionSurface::DeviceAssistant,
+            crate::session::AgentSessionSurface::AiAssistant,
         );
         initial.latest_input_seq = 1;
         initial.input_revision = 1;
@@ -1814,17 +1812,17 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
         calls: Rc::new(RefCell::new(vec![])),
         reply: "must not run".into(),
     };
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let mut registry = vec![
         providers
-            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .capability(crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID)
             .unwrap()
             .registered_tool(),
     ];
     registry.extend(crate::permission_tools::permission_planning_tool_registry());
     let inventory = vec![crate::capability_availability::CapabilityAvailability {
         provider_id: "desktop.session".into(),
-        capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
+        capability_id: crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
         tool_name: "inspect_desktop_session".into(),
         compiled: true,
         enabled: true,
@@ -1879,9 +1877,9 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
 
 #[tokio::test]
 async fn permission_planning_accepts_valid_request_without_prior_loading() {
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let target = providers
-        .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+        .capability(crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID)
         .unwrap()
         .registered_tool();
     let mut registry = vec![target];
@@ -1890,7 +1888,7 @@ async fn permission_planning_accepts_valid_request_without_prior_loading() {
     let inventory = [
         crate::capability_availability::CapabilityAvailability {
             provider_id: "desktop.session".into(),
-            capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
+            capability_id: crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
             tool_name: "inspect_desktop_session".into(),
             compiled: true,
             enabled: true,
@@ -1933,7 +1931,7 @@ async fn permission_planning_accepts_valid_request_without_prior_loading() {
         scope(),
         "2026-09-03T00:00:00Z",
     );
-    initial.surface = AgentSessionSurface::DeviceAssistant;
+    initial.surface = AgentSessionSurface::AiAssistant;
     initial.latest_input_seq = 1;
     initial.input_revision = 1;
     initial.focus_epoch.input_revision = 1;
@@ -1990,7 +1988,7 @@ async fn permission_planning_accepts_valid_request_without_prior_loading() {
 
 #[tokio::test]
 async fn permission_planning_reuses_settled_equivalent_request_without_new_pending_item() {
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let prior_call = ToolCall {
         id: "prior-call".into(),
         name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
@@ -2040,14 +2038,14 @@ async fn permission_planning_reuses_settled_equivalent_request_without_new_pendi
     };
     let mut registry = vec![
         providers
-            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .capability(crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID)
             .unwrap()
             .registered_tool(),
     ];
     registry.extend(crate::permission_tools::permission_planning_tool_registry());
     let inventory = vec![crate::capability_availability::CapabilityAvailability {
         provider_id: "desktop.session".into(),
-        capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
+        capability_id: crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
         tool_name: "inspect_desktop_session".into(),
         compiled: true,
         enabled: true,
@@ -2086,7 +2084,7 @@ async fn permission_planning_reuses_settled_equivalent_request_without_new_pendi
 
 #[tokio::test]
 async fn exhausted_permission_renewal_creates_a_new_owner_decision_without_dispatch() {
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let prior_call = ToolCall {
         id: "prior-call".into(),
         name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
@@ -2139,14 +2137,14 @@ async fn exhausted_permission_renewal_creates_a_new_owner_decision_without_dispa
     };
     let mut registry = vec![
         providers
-            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .capability(crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID)
             .unwrap()
             .registered_tool(),
     ];
     registry.extend(crate::permission_tools::permission_planning_tool_registry());
     let inventory = vec![crate::capability_availability::CapabilityAvailability {
         provider_id: "desktop.session".into(),
-        capability_id: crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
+        capability_id: crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID.into(),
         tool_name: "inspect_desktop_session".into(),
         compiled: true,
         enabled: true,
@@ -2341,7 +2339,7 @@ async fn compression_precedes_main_call_and_counts_tokens_but_not_steps() {
 async fn checkpoint_compression_preserves_disclosure_selection_without_summarizing_schema() {
     use desk_agent_protocol::capability_provider::CapabilityBlockedReason;
 
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let target = providers
         .capability_for_tool("browser_open_page")
         .expect("browser descriptor")
@@ -2372,7 +2370,7 @@ async fn checkpoint_compression_preserves_disclosure_selection_without_summarizi
         scope(),
         "2026-09-03T00:00:00Z",
     );
-    existing.surface = AgentSessionSurface::DeviceAssistant;
+    existing.surface = AgentSessionSurface::AiAssistant;
     existing.input_revision = 1;
     existing.latest_input_seq = 1;
     existing.focus_epoch.input_revision = 1;
@@ -2944,7 +2942,7 @@ async fn next_model_step_exposes_targeting_after_screenshot() {
     );
     seeded.adopt_client_metadata(
         Some("client"),
-        crate::session::AgentSessionSurface::DeviceAssistant,
+        crate::session::AgentSessionSurface::AiAssistant,
     );
     seeded.pending_visual_verification = Some(crate::visual_evidence::VisualVerificationFence {
         focus_input_revision: 0,
@@ -3173,15 +3171,15 @@ async fn step_budget_circuit_breaks() {
     );
 }
 
-/// A tighter per-turn budget (the terminal copilot uses 2) circuit-breaks
+/// A tighter per-turn budget (the Terminal AI Assistant uses 2) circuit-breaks
 /// sooner than the diagnose default, proving `LoopDeps.max_steps_per_turn`
 /// is honored per call.
 #[tokio::test]
 async fn tight_step_budget_circuit_breaks_at_two() {
-    const COPILOT_MAX_STEPS: u32 = 2;
+    const AI_ASSISTANT_MAX_STEPS: u32 = 2;
     let sess = MemSession::default();
     let names = ["sysinfo", "logs", "ports"];
-    let turns: std::collections::VecDeque<_> = (0..COPILOT_MAX_STEPS + 5)
+    let turns: std::collections::VecDeque<_> = (0..AI_ASSISTANT_MAX_STEPS + 5)
         .map(|i| tool_use(&format!("c{i}"), names[i as usize % names.len()]))
         .collect();
     let model = ScriptModel {
@@ -3212,7 +3210,7 @@ async fn tight_step_budget_circuit_breaks_at_two() {
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
     let user = ChatMessage::text("u", ChatRole::User, "q");
     let deps = LoopDeps {
-        max_steps_per_turn: COPILOT_MAX_STEPS,
+        max_steps_per_turn: AI_ASSISTANT_MAX_STEPS,
         ..deps(&sess, &model, &tools, &reg, &clock)
     };
     let outcome = run_agent_turn(&deps, params, user, &mut sink)
@@ -3223,7 +3221,10 @@ async fn tight_step_budget_circuit_breaks_at_two() {
         LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget)
     );
     let s = sess.inner.borrow();
-    assert_eq!(s.as_ref().unwrap().current_turn_steps, COPILOT_MAX_STEPS);
+    assert_eq!(
+        s.as_ref().unwrap().current_turn_steps,
+        AI_ASSISTANT_MAX_STEPS
+    );
 }
 
 /// Repeatedly calling the *same* tool trips the same-tool cap before the step
@@ -3561,7 +3562,7 @@ async fn trims_history_to_budget() {
 #[tokio::test]
 async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded() {
     let mut observed = Vec::new();
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let inventory = providers
         .providers()
         .flat_map(|provider| {
@@ -3614,7 +3615,7 @@ async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded
             broad_scope.clone(),
             "2026-09-03T00:00:00Z",
         );
-        session.surface = AgentSessionSurface::DeviceAssistant;
+        session.surface = AgentSessionSurface::AiAssistant;
         session.input_revision = 1;
         session.latest_input_seq = 1;
         session.focus_epoch.input_revision = 1;
@@ -4037,7 +4038,7 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
 
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.input_revision = 1;
     seeded.latest_input_seq = 1;
     seeded.conversation.push(ChatMessage::text(
@@ -4108,7 +4109,7 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
 async fn exact_provider_permission_resume_omits_capability_discovery() {
     use crate::session::{AgentSessionSurface, TriggerOrigin};
 
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let exact = providers
         .capability_for_tool("read_system_info")
         .expect("system info Provider capability")
@@ -4152,7 +4153,7 @@ async fn exact_provider_permission_resume_omits_capability_discovery() {
     let scripted = tools(vec![]);
     let clock = || "2026-09-03T00:00:01Z".to_string();
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.input_revision = 1;
     seeded.latest_input_seq = 1;
     seeded.focus_epoch.input_revision = 1;
@@ -4240,7 +4241,7 @@ async fn exact_permission_resume_retries_one_precommit_protocol_error() {
     let clock = || "2026-08-30T12:00:00Z".to_string();
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.input_revision = 1;
     seeded.latest_input_seq = 1;
     seeded.conversation.push(ChatMessage::text(
@@ -4318,7 +4319,7 @@ async fn exact_permission_resume_retries_one_answer_without_invoking_the_approve
     let clock = || "2026-08-30T12:00:00Z".to_string();
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.input_revision = 1;
     seeded.latest_input_seq = 1;
     seeded.conversation.push(ChatMessage::text(
@@ -4398,7 +4399,7 @@ async fn exact_permissioned_read_clears_the_continuation_checkpoint_after_the_ca
     let clock = || "2026-08-30T12:00:00Z".to_string();
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.input_revision = 1;
     seeded.latest_input_seq = 1;
     seeded.conversation.push(ChatMessage::text(
@@ -4446,7 +4447,7 @@ async fn exact_permissioned_read_clears_the_continuation_checkpoint_after_the_ca
 }
 
 #[tokio::test]
-async fn device_assistant_retries_one_malformed_permission_plan_after_tool_result() {
+async fn ai_assistant_retries_one_malformed_permission_plan_after_tool_result() {
     use crate::session::AgentSessionSurface;
     use desk_agent_protocol::data_lineage::{
         DATA_ENVELOPE_SCHEMA_VERSION, DestinationIdentity, RetentionBoundary, Sensitivity,
@@ -4460,7 +4461,7 @@ async fn device_assistant_retries_one_malformed_permission_plan_after_tool_resul
         scope(),
         "2026-06-20T00:00:00Z",
     );
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.input_revision = 1;
     seeded.latest_input_seq = 1;
     let sess = MemSession {
@@ -4812,7 +4813,7 @@ async fn permission_resume_places_authorization_checkpoint_at_request_tail() {
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
 
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.conversation.push(ChatMessage::text(
         "owner-requirement",
         ChatRole::User,
@@ -5659,7 +5660,7 @@ async fn streams_read_tool_lifecycle_events() {
 #[tokio::test]
 async fn adaptive_read_closes_with_background_identity_and_keeps_followup_reads_available() {
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t0");
-    seeded.surface = crate::session::AgentSessionSurface::DeviceAssistant;
+    seeded.surface = crate::session::AgentSessionSurface::AiAssistant;
     seeded.input_revision = 1;
     seeded.latest_input_seq = 1;
     let sess = MemSession {
@@ -7465,7 +7466,7 @@ fn requested_file_operation_projection_requires_current_verified_device_evidence
         .as_mut()
         .unwrap()
         .provenance
-        .source_provider_id = crate::device_assistant::TEXT_FILE_PROVIDER_ID.into();
+        .source_provider_id = crate::ai_assistant::TEXT_FILE_PROVIDER_ID.into();
     let project = |receipt: ChatMessage| {
         requested_artifact_registry_projection(
             &[proposal.clone(), receipt, owner.clone()],
@@ -7901,12 +7902,12 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
         .is_ok()
     );
 
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let snapshot_descriptor = providers
-        .capability(crate::device_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID)
+        .capability(crate::ai_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID)
         .unwrap();
     let snapshot_provider = providers
-        .provider_for_capability(crate::device_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID)
+        .provider_for_capability(crate::ai_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID)
         .unwrap();
     let mut snapshot_request =
         request_for(serde_json::json!({"page": page.clone(), "max_elements": 64}).to_string());
@@ -8376,7 +8377,7 @@ async fn scope_blocked_exact_permission_resume_restores_reads_without_forcing_mu
     let exact_tools = vec!["exact_action".to_string()];
     let clock = || "2026-09-09T12:00:00Z".to_string();
     let mut seeded = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t0");
-    seeded.surface = AgentSessionSurface::DeviceAssistant;
+    seeded.surface = AgentSessionSurface::AiAssistant;
     seeded.input_revision = 1;
     seeded.latest_input_seq = 1;
     seeded.conversation.push(ChatMessage::text(
@@ -8463,20 +8464,20 @@ async fn unknown_outcome_allows_requesting_a_new_authorized_mutation() {
         calls: Rc::new(RefCell::new(vec![])),
         reply: "must not run".into(),
     };
-    let providers = crate::device_assistant::device_assistant_provider_registry();
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
     let mut registry = vec![
         providers
-            .capability(crate::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID)
+            .capability(crate::ai_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID)
             .unwrap()
             .registered_tool(),
     ];
     registry.extend([
         providers
-            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .capability(crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID)
             .unwrap()
             .registered_tool(),
         providers
-            .capability(crate::device_assistant::DESKTOP_UI_CAPABILITY_ID)
+            .capability(crate::ai_assistant::DESKTOP_UI_CAPABILITY_ID)
             .unwrap()
             .registered_tool(),
     ]);
@@ -8484,17 +8485,17 @@ async fn unknown_outcome_allows_requesting_a_new_authorized_mutation() {
     let inventory = [
         (
             "desktop.ui.action",
-            crate::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID,
+            crate::ai_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID,
             "execute_ui_actions",
         ),
         (
             "desktop.session",
-            crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID,
+            crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID,
             "inspect_desktop_session",
         ),
         (
             "desktop.ui",
-            crate::device_assistant::DESKTOP_UI_CAPABILITY_ID,
+            crate::ai_assistant::DESKTOP_UI_CAPABILITY_ID,
             "inspect_desktop_ui",
         ),
     ]

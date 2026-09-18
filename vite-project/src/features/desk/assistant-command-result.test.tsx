@@ -30,11 +30,11 @@ describe('command receipt presentation', () => {
         expect(details.getAttribute('data-state') === 'open').toBe(false);
         fireEvent.click(details.querySelector('button[aria-expanded]')!);
         expect(details.getAttribute('data-state') === 'open').toBe(true);
-        expect(screen.getByText('pages.deviceAssistant.commandReceipt.exitCode')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.commandReceipt.exitCode')).toBeTruthy();
         expect(screen.getByText('1')).toBeTruthy();
-        expect(screen.getByText('pages.deviceAssistant.commandReceipt.milliseconds: 1,234')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.commandReceipt.milliseconds: 1,234')).toBeTruthy();
         expect(screen.getByText('Permission denied')).toBeTruthy();
-        expect(screen.getByText('pages.deviceAssistant.commandReceipt.truncated')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.commandReceipt.truncated')).toBeTruthy();
         expect(screen.getByText('secret removed')).toBeTruthy();
         expect(details.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
         rerender(<AssistantCommandResult text={text} />);
@@ -46,16 +46,16 @@ describe('command receipt presentation', () => {
     it('keeps PTY output combined and renders device text without interpreting HTML or Markdown', () => {
         const terminal = '<img src=x onerror=alert(1)>\n[link](https://example.com)';
         const { container } = render(<AssistantCommandResult text={wire({ exit_code: 0, duration_ms: 0, streams: { type: 'pty_combined', terminal, truncated: true } })} />);
-        expect(screen.getByText('pages.deviceAssistant.commandReceipt.terminal')).toBeTruthy();
-        expect(screen.queryByText('pages.deviceAssistant.commandReceipt.stderr')).toBeNull();
+        expect(screen.getByText('pages.aiAssistant.commandReceipt.terminal')).toBeTruthy();
+        expect(screen.queryByText('pages.aiAssistant.commandReceipt.stderr')).toBeNull();
         expect(container.querySelector('pre')?.textContent).toBe(terminal);
         expect(container.querySelector('img, a')).toBeNull();
     });
 
     it('shows empty streams explicitly and no truncation warning when complete', () => {
         render(<AssistantCommandResult text={wire({ ...receipt, redactions: [], streams: { type: 'split', stdout: '', stderr: '', stdout_truncated: false, stderr_truncated: false } })} />);
-        expect(screen.getAllByText('pages.deviceAssistant.commandReceipt.empty')).toHaveLength(2);
-        expect(screen.queryByText('pages.deviceAssistant.commandReceipt.truncated')).toBeNull();
-        expect(screen.queryByText('pages.deviceAssistant.commandReceipt.redactions')).toBeNull();
+        expect(screen.getAllByText('pages.aiAssistant.commandReceipt.empty')).toHaveLength(2);
+        expect(screen.queryByText('pages.aiAssistant.commandReceipt.truncated')).toBeNull();
+        expect(screen.queryByText('pages.aiAssistant.commandReceipt.redactions')).toBeNull();
     });
 });

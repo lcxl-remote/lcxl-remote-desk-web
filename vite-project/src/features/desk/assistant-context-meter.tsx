@@ -21,8 +21,8 @@ export function contextMeterValues(usage: AssistantContextUsage | null, draft: s
 export function AssistantContextMeter({ usage, draft }: { usage: AssistantContextUsage | null; draft: string }) {
     const { t, i18n } = useTranslation();
     const values = contextMeterValues(usage, draft);
-    const bytes = (n: number) => t('pages.deviceAssistant.contextMeter.bytes', { value: new Intl.NumberFormat(i18n.language).format(n) });
-    const label = t(values ? 'pages.deviceAssistant.contextMeter.percent' : 'pages.deviceAssistant.contextMeter.unknown', { percent: values?.percent });
+    const bytes = (n: number) => t('pages.aiAssistant.contextMeter.bytes', { value: new Intl.NumberFormat(i18n.language).format(n) });
+    const label = t(values ? 'pages.aiAssistant.contextMeter.percent' : 'pages.aiAssistant.contextMeter.unknown', { percent: values?.percent });
     return <Popover><PopoverTrigger asChild>
         <Button variant="unstyled" type="button" aria-label={label} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <svg viewBox="0 0 40 40" className="h-10 w-10" aria-hidden="true">
@@ -34,16 +34,16 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
             </svg>
         </Button>
     </PopoverTrigger><PopoverContent side="top" className="max-w-xs space-y-2 p-3">
-        <p className="font-medium">{t('pages.deviceAssistant.contextMeter.title')}</p>
+        <p className="font-medium">{t('pages.aiAssistant.contextMeter.title')}</p>
         {values && usage ? <>
             <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1">
-                <dt>{t(`pages.deviceAssistant.contextMeter.limit.${usage.strategy}`)}</dt><dd>{bytes(usage.limitBytes)}</dd>
-                <dt>{t('pages.deviceAssistant.contextMeter.used')}</dt><dd>{bytes(usage.usedBytes)}</dd>
-                <dt>{t('pages.deviceAssistant.contextMeter.remaining')}</dt><dd>{bytes(values.remaining)}</dd>
-                <dt>{t('pages.deviceAssistant.contextMeter.draft')}</dt><dd>{bytes(values.draftBytes)}</dd>
+                <dt>{t(`pages.aiAssistant.contextMeter.limit.${usage.strategy}`)}</dt><dd>{bytes(usage.limitBytes)}</dd>
+                <dt>{t('pages.aiAssistant.contextMeter.used')}</dt><dd>{bytes(usage.usedBytes)}</dd>
+                <dt>{t('pages.aiAssistant.contextMeter.remaining')}</dt><dd>{bytes(values.remaining)}</dd>
+                <dt>{t('pages.aiAssistant.contextMeter.draft')}</dt><dd>{bytes(values.draftBytes)}</dd>
             </dl>
-            {values.draftBytes > values.remaining && <p>{t('pages.deviceAssistant.contextMeter.exceeds')}</p>}
-            <p>{t('pages.deviceAssistant.contextMeter.hint')}</p>
-        </> : <p>{t('pages.deviceAssistant.contextMeter.unknownHint')}</p>}
+            {values.draftBytes > values.remaining && <p>{t('pages.aiAssistant.contextMeter.exceeds')}</p>}
+            <p>{t('pages.aiAssistant.contextMeter.hint')}</p>
+        </> : <p>{t('pages.aiAssistant.contextMeter.unknownHint')}</p>}
     </PopoverContent></Popover>;
 }

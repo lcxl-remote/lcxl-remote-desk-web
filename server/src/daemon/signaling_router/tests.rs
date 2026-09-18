@@ -35,7 +35,7 @@ async fn make_ctx() -> RouterContext {
     let mut initial_settings = crate::model::settings::Settings::default();
     // Most router tests exercise the capability beneath the product gate. Tests
     // for the gate itself explicitly turn this back off.
-    initial_settings.device_assistant.enabled = true;
+    initial_settings.ai_assistant.enabled = true;
     let shared = crate::model::settings::SharedSettings::from(initial_settings);
     let settings = web::Data::new(shared);
     let settings_coordinator = Arc::new(

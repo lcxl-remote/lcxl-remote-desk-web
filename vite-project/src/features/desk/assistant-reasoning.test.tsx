@@ -8,7 +8,7 @@ describe('assistant reasoning', () => {
         const { container } = render(<AssistantReasoning text="Model supplied reasoning" />);
         const details = container.querySelector('[data-slot="disclosure"]')!;
         expect(details.getAttribute('data-state') === 'open').toBe(false);
-        fireEvent.click(screen.getByText('pages.deviceAssistant.reasoning'));
+        fireEvent.click(screen.getByText('pages.aiAssistant.reasoning'));
         expect(details.getAttribute('data-state') === 'open').toBe(true);
         expect(screen.getByText('Model supplied reasoning')).toBeTruthy();
     });

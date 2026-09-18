@@ -614,7 +614,7 @@ fn generated_send_binds_actual_payload_current_surface_and_run() {
             },
         };
         // Draft construction must preserve the sealed recipient while allowing new text.
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let descriptor = registry.capability_for_tool("send_gmail_message").unwrap();
         let mut observed_send = authority.clone();
         observed_send.tool_name = "send_gmail_message".into();
@@ -1049,9 +1049,9 @@ fn generated_message_contract_requires_stable_destination_scope() {
     );
     assert!(task_message_resource_scope("", destination).is_err());
     for account_id in [
-        crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID,
-        crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID,
-        crate::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID,
+        crate::ai_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID,
+        crate::ai_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID,
+        crate::ai_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID,
     ] {
         let mut unverified = destination.clone();
         unverified.account_id = account_id.into();
@@ -1216,7 +1216,7 @@ fn rehearsal_graph_requires_each_original_read_even_when_it_has_known_parents() 
         image_data_url: None,
     };
     let mut label = read_result_envelope(
-        &crate::device_assistant::device_assistant_provider_registry(),
+        &crate::ai_assistant::ai_assistant_provider_registry(),
         &call,
         &out,
         ReadResultLabel {
@@ -1444,7 +1444,7 @@ fn compressed_answer_preserves_original_read_scope() {
         image_data_url: None,
     };
     let label = read_result_envelope(
-        &crate::device_assistant::device_assistant_provider_registry(),
+        &crate::ai_assistant::ai_assistant_provider_registry(),
         &tool_call,
         &out,
         ReadResultLabel {
@@ -1643,7 +1643,7 @@ fn compressed_answer_preserves_original_read_scope() {
 fn publication_catalog_rechecks_current_identity_capability_and_limits() {
     use crate::provider_registry::ProviderRegistryBuilder;
     use desk_agent_protocol::capability_provider::ProductSurface;
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let capability = registry.capability_for_tool("read_system_info").unwrap();
     let provider = registry
         .provider_for_capability(&capability.wire.capability_id)
@@ -1933,8 +1933,8 @@ fn slack_generated_draft_binds_verified_account_page_and_destination() {
     destination.scope = CommunicationSurfaceScope::WebOrigin {
         origin: input.page.origin.clone(),
     };
-    destination.adapter_id = crate::device_assistant::SLACK_WEB_ADAPTER_ID.into();
-    destination.adapter_version = crate::device_assistant::SLACK_WEB_ADAPTER_VERSION.into();
+    destination.adapter_id = crate::ai_assistant::SLACK_WEB_ADAPTER_ID.into();
+    destination.adapter_version = crate::ai_assistant::SLACK_WEB_ADAPTER_VERSION.into();
     destination.account_id = input.page.account_id.clone().unwrap();
     destination.recipients = vec![RecipientIdentity {
         role: RecipientRole::ChatDestination,
@@ -1982,7 +1982,7 @@ fn slack_generated_draft_binds_verified_account_page_and_destination() {
             .is_err()
     );
     changed.page.account_id =
-        Some(crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into());
+        Some(crate::ai_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID.into());
     assert!(
         contract
             .verify_generated_slack_draft(&target, "send-report", &changed, &changed.page)
@@ -2011,7 +2011,7 @@ fn automatic_approval_candidate_keeps_exact_input_scope_and_bounded_lifetime() {
         chat::{ChatMessage, ChatRole, ToolCall},
         session::{PersistedAgentSession, TriggerOrigin},
     };
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let tool_name = "inspect_desktop_session";
     let capability = registry.capability_for_tool(tool_name).unwrap();
     let provider = registry

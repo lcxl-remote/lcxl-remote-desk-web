@@ -17,7 +17,7 @@ async fn setup() -> SignalAgentSessionStore {
 
 fn scoped(db: DatabaseConnection) -> SignalAgentSessionStore {
     SignalAgentSessionStore::new(db)
-        .with_client_metadata(Some("client".into()), AgentSessionSurface::DeviceAssistant)
+        .with_client_metadata(Some("client".into()), AgentSessionSurface::AiAssistant)
 }
 
 fn update() -> FileScopeUpdate {

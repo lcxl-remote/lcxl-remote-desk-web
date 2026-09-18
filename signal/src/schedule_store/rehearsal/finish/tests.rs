@@ -63,7 +63,7 @@ async fn fixture_with_blocker(
         scope.clone(),
         now.to_rfc3339(),
     );
-    session.surface = AgentSessionSurface::DeviceAssistant;
+    session.surface = AgentSessionSurface::AiAssistant;
     session.client_conversation_id = Some(started.client_conversation_id.clone());
     session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
     session.input_revision = 1;

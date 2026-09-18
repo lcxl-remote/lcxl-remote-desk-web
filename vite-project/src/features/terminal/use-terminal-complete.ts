@@ -4,12 +4,12 @@ import {
     SIGNALING_TYPE_CODE_TERMINAL_COMPLETIONS_GENERATED,
 } from '../desk/constants';
 import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-signaling';
-import type { ExecDecision, RiskLevel, AgentError } from './use-terminal-copilot';
+import type { ExecDecision, RiskLevel, AgentError } from './use-terminal-ai-assistant';
 import type { AiProvenance } from '@/components/ai-generated-mark';
 
 // Wire types — mirror `desk_agent_protocol::terminal_complete`. They ride the
 // `TerminalComplete{Ask,Result}` signaling types as `signaling_data`; like the
-// copilot payloads they are not part of the REST OpenAPI surface.
+// assistant payloads they are not part of the REST OpenAPI surface.
 
 /** Non-authoritative completion context — a prompt hint only. The server
  *  re-redacts and length-caps it before any model dial. */

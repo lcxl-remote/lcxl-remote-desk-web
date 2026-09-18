@@ -36,7 +36,7 @@ pub fn validate_claim(
     previous_revision: Option<i64>,
     params: &ClaimTurnParams,
 ) -> Result<(), AgentError> {
-    if surface != AgentSessionSurface::DeviceAssistant {
+    if surface != AgentSessionSurface::AiAssistant {
         return Ok(());
     }
     require_current_policy(params.policy_revision)?;
@@ -71,15 +71,15 @@ mod tests {
             trigger_origin: TriggerOrigin::User,
         };
         for previous in [None, Some(0), Some(1), Some(2)] {
-            assert!(validate_claim(AgentSessionSurface::DeviceAssistant, previous, &claim).is_ok());
+            assert!(validate_claim(AgentSessionSurface::AiAssistant, previous, &claim).is_ok());
             claim.trigger_origin = TriggerOrigin::PermissionDecision;
             assert_eq!(
-                validate_claim(AgentSessionSurface::DeviceAssistant, previous, &claim).is_ok(),
+                validate_claim(AgentSessionSurface::AiAssistant, previous, &claim).is_ok(),
                 previous == Some(PERSONAL_ASSISTANT_POLICY_REVISION)
             );
             claim.trigger_origin = TriggerOrigin::ExecCompletion;
             assert_eq!(
-                validate_claim(AgentSessionSurface::DeviceAssistant, previous, &claim).is_ok(),
+                validate_claim(AgentSessionSurface::AiAssistant, previous, &claim).is_ok(),
                 previous == Some(PERSONAL_ASSISTANT_POLICY_REVISION)
             );
             claim.trigger_origin = TriggerOrigin::User;
@@ -87,11 +87,15 @@ mod tests {
         for invalid in [-1, 0, 2, i64::MAX] {
             claim.policy_revision = invalid;
             assert!(
-                validate_claim(AgentSessionSurface::DeviceAssistant, Some(invalid), &claim)
-                    .is_err()
+                validate_claim(AgentSessionSurface::AiAssistant, Some(invalid), &claim).is_err()
             );
             assert!(
-                validate_claim(AgentSessionSurface::TerminalCopilot, Some(invalid), &claim).is_ok()
+                validate_claim(
+                    AgentSessionSurface::TerminalAiAssistant,
+                    Some(invalid),
+                    &claim
+                )
+                .is_ok()
             );
         }
     }

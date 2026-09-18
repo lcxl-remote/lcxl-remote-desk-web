@@ -1,6 +1,6 @@
 //! Single-node OSS Signal remote Provider transport.
 //!
-//! The Device Assistant loop runs in Signal while the host worker performs
+//! The AI Assistant loop runs in Signal while the host worker performs
 //! local reads and confirmed mutations. Reads use server-stamped remote-tool
 //! frames; writes use exact durable grants and sealed Computer Action plans.
 
@@ -60,16 +60,16 @@ use desk_agent_protocol::{
     AgentScope, AuditMeta, CallerRef, CallerType, ContextKind, ExecutionMode, OperationInput,
     ProtocolVersion, ReadContextInput, RequestId, TargetRef,
 };
+use desk_diagnose_core::ai_assistant::{
+    EXECUTE_BACKGROUND_INPUT_TOOL, EXECUTE_CONFIRMED_RAW_INPUT_TOOL,
+    EXECUTE_CONFIRMED_UI_ACTION_TOOL, PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call,
+};
 use desk_diagnose_core::capability_grant::{
     CapabilityGrantCall, canonical_compiled_scope, exact_external_url_resource_scope,
     fresh_object_resource_scope, is_capability_grant_candidate,
 };
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::chunk::ByteReassembler;
-use desk_diagnose_core::device_assistant::{
-    EXECUTE_BACKGROUND_INPUT_TOOL, EXECUTE_CONFIRMED_RAW_INPUT_TOOL,
-    EXECUTE_CONFIRMED_UI_ACTION_TOOL, PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call,
-};
 use desk_diagnose_core::permission_tools::canonical_tool_permission_input_json;
 use desk_diagnose_core::provider_registry::ProviderRegistry;
 use desk_diagnose_core::read_tools::build_read_operation;
@@ -447,7 +447,7 @@ impl SignalRemoteToolPendingStore {
             if let Some(pending) = map.remove(id) {
                 let _ = pending.completion.send(Err(error(
                     AgentErrorKind::TargetOffline,
-                    "the host disconnected during a Device Assistant observation",
+                    "the host disconnected during a AI Assistant observation",
                     true,
                     true,
                 )));
@@ -693,7 +693,7 @@ impl RemoteToolObserver for SignalRemoteToolObserver {
             let response = match model.get_data::<RemoteToolResponse>() {
                 Ok(response) => response,
                 Err(e) => {
-                    log::warn!("[device-assistant] malformed remote tool response: {e}");
+                    log::warn!("[ai-assistant] malformed remote tool response: {e}");
                     return;
                 }
             };
@@ -707,26 +707,26 @@ impl RemoteToolObserver for SignalRemoteToolObserver {
             };
             if let AcceptOutcome::Rejected(reason) = outcome {
                 log::warn!(
-                    "[device-assistant] dropped remote tool response from {source_id}: {reason}"
+                    "[ai-assistant] dropped remote tool response from {source_id}: {reason}"
                 );
             }
         })
     }
 }
 
-/// Per-turn Provider seam for the OSS Device Assistant.
+/// Per-turn Provider seam for the OSS AI Assistant.
 #[derive(Clone)]
-pub struct SignalDeviceAssistantTools(Arc<SignalDeviceAssistantToolState>);
+pub struct SignalAiAssistantTools(Arc<SignalAiAssistantToolState>);
 
-impl std::ops::Deref for SignalDeviceAssistantTools {
-    type Target = SignalDeviceAssistantToolState;
+impl std::ops::Deref for SignalAiAssistantTools {
+    type Target = SignalAiAssistantToolState;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 /// Shared state for one turn; fields remain private to the Provider implementation.
-pub struct SignalDeviceAssistantToolState {
+pub struct SignalAiAssistantToolState {
     db: DatabaseConnection,
     provider_registry: ProviderRegistry,
     connections: Arc<SharedConnectionMap>,
@@ -882,7 +882,7 @@ fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind
     }
 }
 
-impl SignalDeviceAssistantTools {
+impl SignalAiAssistantTools {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: DatabaseConnection,
@@ -918,7 +918,7 @@ impl SignalDeviceAssistantTools {
             target_connection_id.clone(),
             run_id.clone(),
             desk_agent_protocol::evidence::EvidenceSnapshot::record(
-                "device-assistant-command",
+                "ai-assistant-command",
                 "owner-approved exact command dispatch",
                 chrono::Utc::now().to_rfc3339(),
                 Vec::new(),
@@ -928,7 +928,7 @@ impl SignalDeviceAssistantTools {
             available_exec_shells,
             max_command_runtime_ms,
         );
-        Self(Arc::new(SignalDeviceAssistantToolState {
+        Self(Arc::new(SignalAiAssistantToolState {
             db,
             provider_registry,
             connections,
@@ -3024,7 +3024,7 @@ impl SignalDeviceAssistantTools {
                 granted: vec![required_capability],
                 mode: ExecutionMode::ConfirmEachAction,
                 expires_at: None,
-                policy_name: Some("oss-device-assistant-semantic-action".into()),
+                policy_name: Some("oss-ai-assistant-semantic-action".into()),
             },
             orchestrator_grants: vec![capability.wire.capability_id.clone()],
             max_risk: desk_agent_protocol::RiskLevel::Medium,
@@ -3199,7 +3199,7 @@ impl SignalDeviceAssistantTools {
                 )?),
                 desk_agent_protocol::Capability::FileArtifactCreateConfirmed,
                 "create_new_artifact",
-                desk_diagnose_core::device_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID,
+                desk_diagnose_core::ai_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID,
             ),
             "create_local_message_draft" => {
                 let args: LocalDraftArgs =
@@ -3223,7 +3223,7 @@ impl SignalDeviceAssistantTools {
                 ArtifactRequest::LocalDraft(args),
                 desk_agent_protocol::Capability::CommunicationLocalDraftCreateConfirmed,
                 "create_new_artifact",
-                desk_diagnose_core::device_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID,
+                desk_diagnose_core::ai_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID,
             )
             }
             "create_workbook" => (
@@ -3239,7 +3239,7 @@ impl SignalDeviceAssistantTools {
                 )?),
                 desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed,
                 "create_new_artifact",
-                desk_diagnose_core::device_assistant::SPREADSHEET_WORKBOOK_CREATE_CAPABILITY_ID,
+                desk_diagnose_core::ai_assistant::SPREADSHEET_WORKBOOK_CREATE_CAPABILITY_ID,
             ),
             "create_formula_workbook" => {
                 let args: SpreadsheetFormulaArgs =
@@ -3286,7 +3286,7 @@ impl SignalDeviceAssistantTools {
                 },
                 desk_agent_protocol::Capability::SpreadsheetFormulaWorkbookCreateConfirmed,
                 "create_new_artifact",
-                desk_diagnose_core::device_assistant::SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID,
+                desk_diagnose_core::ai_assistant::SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID,
             )
             }
             "create_word_report" => {
@@ -3313,7 +3313,7 @@ impl SignalDeviceAssistantTools {
                     ArtifactRequest::Word(args),
                     desk_agent_protocol::Capability::WordDocumentCreateConfirmed,
                     "create_new_artifact",
-                    desk_diagnose_core::device_assistant::WORD_DOCUMENT_CREATE_CAPABILITY_ID,
+                    desk_diagnose_core::ai_assistant::WORD_DOCUMENT_CREATE_CAPABILITY_ID,
                 )
             }
             _ => {
@@ -3737,7 +3737,7 @@ impl SignalDeviceAssistantTools {
                 granted: vec![required_capability],
                 mode: ExecutionMode::ConfirmEachAction,
                 expires_at: None,
-                policy_name: Some("oss-device-assistant-artifact".into()),
+                policy_name: Some("oss-ai-assistant-artifact".into()),
             },
             orchestrator_grants: vec![orchestrator_grant.into()],
             max_risk: desk_agent_protocol::RiskLevel::Medium,
@@ -4250,8 +4250,7 @@ impl SignalDeviceAssistantTools {
             interactive_session_incarnation: readiness.readiness.interactive_session_incarnation,
             adapter: ComputerUseAdapterRef {
                 kind: ComputerUseAdapterKind::BrowserExtension,
-                version: desk_diagnose_core::device_assistant::BROWSER_EXTENSION_ADAPTER_VERSION
-                    .into(),
+                version: desk_diagnose_core::ai_assistant::BROWSER_EXTENSION_ADAPTER_VERSION.into(),
             },
             approval_id: grant_id.clone(),
             approved_actor_id: self.actor_id.clone(),
@@ -4338,7 +4337,7 @@ impl SignalDeviceAssistantTools {
                 granted: vec![capability.required_capability],
                 mode: ExecutionMode::ConfirmEachAction,
                 expires_at: None,
-                policy_name: Some("oss-device-assistant-browser".into()),
+                policy_name: Some("oss-ai-assistant-browser".into()),
             },
             orchestrator_grants: vec![capability.wire.capability_id.clone()],
             max_risk,
@@ -4821,7 +4820,7 @@ impl SignalDeviceAssistantTools {
         adapter: ComputerUseAdapterRef {
             kind: ComputerUseAdapterKind::OutlookNewMailto,
             version:
-                desk_diagnose_core::device_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_VERSION
+                desk_diagnose_core::ai_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_VERSION
                     .into(),
         },
         approval_id: grant_id,
@@ -4853,7 +4852,7 @@ impl SignalDeviceAssistantTools {
                 granted: vec![capability.required_capability],
                 mode: ExecutionMode::ConfirmEachAction,
                 expires_at: None,
-                policy_name: Some("oss-device-assistant-outlook-handoff".into()),
+                policy_name: Some("oss-ai-assistant-outlook-handoff".into()),
             },
             orchestrator_grants: vec![capability.wire.capability_id.clone()],
             max_risk: desk_agent_protocol::RiskLevel::Medium,
@@ -5289,7 +5288,7 @@ impl SignalDeviceAssistantTools {
                 caller_type: CallerType::AiModel,
                 model_provider: self.model_provider.clone(),
                 model_name: self.model_name.clone(),
-                adapter: Some("device-assistant-read-v1".into()),
+                adapter: Some("ai-assistant-read-v1".into()),
             },
             scope: AgentScope {
                 granted: vec![capability],
@@ -5306,7 +5305,7 @@ impl SignalDeviceAssistantTools {
                         })?
                         .to_rfc3339(),
                 ),
-                policy_name: Some("oss-device-assistant-read-only".into()),
+                policy_name: Some("oss-ai-assistant-read-only".into()),
             },
             operation: AgentOperation {
                 risk_hint: None,
@@ -5314,14 +5313,14 @@ impl SignalDeviceAssistantTools {
             },
             audit: AuditMeta {
                 approval_id: None,
-                reason: Some("Device Assistant read-only observation".into()),
+                reason: Some("AI Assistant read-only observation".into()),
             },
         }
         .try_into()
         .map_err(|_| {
             error(
                 AgentErrorKind::Internal,
-                "failed to construct read-only Device Assistant envelope",
+                "failed to construct read-only AI Assistant envelope",
                 false,
                 false,
             )
@@ -5500,7 +5499,7 @@ impl SignalDeviceAssistantTools {
 }
 
 #[async_trait(?Send)]
-impl ToolSeam for SignalDeviceAssistantTools {
+impl ToolSeam for SignalAiAssistantTools {
     async fn current_grant_disclosure(
         &self,
     ) -> Result<Option<desk_diagnose_core::grant_disclosure::GrantDisclosureSnapshot>, AgentError>
@@ -5674,7 +5673,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 | "create_local_message_draft"
         ) {
             return Ok(ExecOutcome::Rejected {
-                reason: Some("this Device Assistant mutation is not enabled".into()),
+                reason: Some("this AI Assistant mutation is not enabled".into()),
             });
         }
         self.authorize_and_execute_artifact(call).await
@@ -5807,7 +5806,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
         call: &ToolCall,
         output: &ToolRunOutput,
     ) -> Result<Option<DataEnvelope>, AgentError> {
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         let capability = registry.capability_for_tool(&call.name).ok_or_else(|| {
             error(
                 AgentErrorKind::UnsupportedCapability,
@@ -5817,7 +5816,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
             )
         })?;
         let source_object_id = if capability.wire.capability_id
-            == desk_diagnose_core::device_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
+            == desk_diagnose_core::ai_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
         {
             let (_, digest) = Self::canonical_call_input(call)?;
             Some(format!("external_url_input:sha256:{digest}"))
@@ -5890,7 +5889,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
         call: &ToolCall,
         output: &ToolRunOutput,
     ) -> Result<Option<DataEnvelope>, AgentError> {
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         let capability = registry.capability_for_tool(&call.name).ok_or_else(|| {
             error(
                 AgentErrorKind::UnsupportedCapability,
@@ -6063,9 +6062,9 @@ mod tests {
     async fn office_batch_preflight_requires_file_without_live_selection() {
         let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
         let tools_for = |roots| {
-            SignalDeviceAssistantTools::new(
+            SignalAiAssistantTools::new(
                 db.clone(),
-                desk_diagnose_core::device_assistant::device_assistant_provider_registry(),
+                desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
                 Arc::new(SharedConnectionMap::default()),
                 Arc::new(SignalRemoteToolPendingStore::default()),
                 "host".into(),
@@ -6148,7 +6147,7 @@ mod tests {
 
     #[test]
     fn background_batch_preflight_targets_pass_signal_semantic_gate() {
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         for input in [
             serde_json::json!({"kind":"scroll","position":{"x":300,"y":450},"horizontal_pixels":0,"vertical_pixels":-400}),
             serde_json::json!({"kind":"type_text","text":"hello"}),
@@ -6276,9 +6275,9 @@ mod tests {
             ..first.clone()
         };
         let (first_json, first_digest) =
-            SignalDeviceAssistantTools::canonical_call_input(&first).unwrap();
+            SignalAiAssistantTools::canonical_call_input(&first).unwrap();
         let (second_json, second_digest) =
-            SignalDeviceAssistantTools::canonical_call_input(&second).unwrap();
+            SignalAiAssistantTools::canonical_call_input(&second).unwrap();
         assert_eq!(first_json, r#"{"a":true,"z":{"a":1,"b":2}}"#);
         assert_eq!(first_json, second_json);
         assert_eq!(first_digest, second_digest);
@@ -6297,9 +6296,9 @@ mod tests {
             arguments_json: r#"{"max_results":5,"query":"Rust language"}"#.into(),
         };
         let (omitted_json, omitted_digest) =
-            SignalDeviceAssistantTools::canonical_call_input(&omitted).unwrap();
+            SignalAiAssistantTools::canonical_call_input(&omitted).unwrap();
         let (explicit_json, explicit_digest) =
-            SignalDeviceAssistantTools::canonical_call_input(&explicit).unwrap();
+            SignalAiAssistantTools::canonical_call_input(&explicit).unwrap();
         assert_eq!(omitted_json, r#"{"max_results":5,"query":"Rust language"}"#);
         assert_eq!(omitted_json, explicit_json);
         assert_eq!(omitted_digest, explicit_digest);
@@ -6307,41 +6306,41 @@ mod tests {
 
     #[test]
     fn provider_risk_classifies_bounded_diagnostics_and_sensitive_reads() {
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         let call = |name: &str, arguments_json: &str| ToolCall {
             id: format!("call-{name}"),
             name: name.into(),
             arguments_json: arguments_json.into(),
         };
         let session = registry
-            .capability(desk_diagnose_core::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .capability(desk_diagnose_core::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID)
             .unwrap();
         let office = registry
-            .capability(desk_diagnose_core::device_assistant::OFFICE_DOCUMENT_CAPABILITY_ID)
+            .capability(desk_diagnose_core::ai_assistant::OFFICE_DOCUMENT_CAPABILITY_ID)
             .unwrap();
         let file = registry
-            .capability(desk_diagnose_core::device_assistant::FILE_METADATA_CAPABILITY_ID)
+            .capability(desk_diagnose_core::ai_assistant::FILE_METADATA_CAPABILITY_ID)
             .unwrap();
         let system = registry
-            .capability(desk_diagnose_core::device_assistant::SYSTEM_INFO_CAPABILITY_ID)
+            .capability(desk_diagnose_core::ai_assistant::SYSTEM_INFO_CAPABILITY_ID)
             .unwrap();
         let process = registry
-            .capability(desk_diagnose_core::device_assistant::SYSTEM_PROCESS_CAPABILITY_ID)
+            .capability(desk_diagnose_core::ai_assistant::SYSTEM_PROCESS_CAPABILITY_ID)
             .unwrap();
         let logs = registry
-            .capability(desk_diagnose_core::device_assistant::SYSTEM_LOG_CAPABILITY_ID)
+            .capability(desk_diagnose_core::ai_assistant::SYSTEM_LOG_CAPABILITY_ID)
             .unwrap();
         let browser_snapshot = registry
-            .capability(desk_diagnose_core::device_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID)
+            .capability(desk_diagnose_core::ai_assistant::BROWSER_SNAPSHOT_CAPABILITY_ID)
             .unwrap();
         let browser_open = registry
-            .capability(desk_diagnose_core::device_assistant::BROWSER_OPEN_CAPABILITY_ID)
+            .capability(desk_diagnose_core::ai_assistant::BROWSER_OPEN_CAPABILITY_ID)
             .unwrap();
         let browser_fill = registry
-            .capability(desk_diagnose_core::device_assistant::BROWSER_FILL_CAPABILITY_ID)
+            .capability(desk_diagnose_core::ai_assistant::BROWSER_FILL_CAPABILITY_ID)
             .unwrap();
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(
+            SignalAiAssistantTools::capability_risk(
                 session,
                 &call("inspect_desktop_session", "{}")
             )
@@ -6349,7 +6348,7 @@ mod tests {
             CapabilityRiskTier::R1
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(
+            SignalAiAssistantTools::capability_risk(
                 office,
                 &call("inspect_office_selection", "{}")
             )
@@ -6357,17 +6356,16 @@ mod tests {
             CapabilityRiskTier::R1
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(file, &call("inspect_files", "{}"))
-                .unwrap(),
+            SignalAiAssistantTools::capability_risk(file, &call("inspect_files", "{}")).unwrap(),
             CapabilityRiskTier::R1
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(system, &call("read_system_info", "{}"))
+            SignalAiAssistantTools::capability_risk(system, &call("read_system_info", "{}"))
                 .unwrap(),
             CapabilityRiskTier::R0
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(
+            SignalAiAssistantTools::capability_risk(
                 process,
                 &call("read_process_list", r#"{"queries":["Calendar"]}"#)
             )
@@ -6375,7 +6373,7 @@ mod tests {
             CapabilityRiskTier::R0
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(
+            SignalAiAssistantTools::capability_risk(
                 process,
                 &call(
                     "read_process_list",
@@ -6386,12 +6384,11 @@ mod tests {
             CapabilityRiskTier::R1
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(logs, &call("read_recent_logs", "{}"))
-                .unwrap(),
+            SignalAiAssistantTools::capability_risk(logs, &call("read_recent_logs", "{}")).unwrap(),
             CapabilityRiskTier::R1
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(
+            SignalAiAssistantTools::capability_risk(
                 browser_snapshot,
                 &call("browser_take_snapshot", "{}")
             )
@@ -6399,19 +6396,13 @@ mod tests {
             CapabilityRiskTier::R1
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(
-                browser_open,
-                &call("browser_open_page", "{}")
-            )
-            .unwrap(),
+            SignalAiAssistantTools::capability_risk(browser_open, &call("browser_open_page", "{}"))
+                .unwrap(),
             CapabilityRiskTier::R2
         );
         assert_eq!(
-            SignalDeviceAssistantTools::capability_risk(
-                browser_fill,
-                &call("browser_fill_form", "{}")
-            )
-            .unwrap(),
+            SignalAiAssistantTools::capability_risk(browser_fill, &call("browser_fill_form", "{}"))
+                .unwrap(),
             CapabilityRiskTier::R3
         );
     }
@@ -6467,7 +6458,7 @@ mod tests {
             .to_string(),
         };
         let request =
-            SignalDeviceAssistantTools::browser_action_from_call(&call, "server-call").unwrap();
+            SignalAiAssistantTools::browser_action_from_call(&call, "server-call").unwrap();
         assert_eq!(request.call_id, "server-call");
         assert!(matches!(
             request.action,
@@ -6531,7 +6522,7 @@ mod tests {
             .to_string(),
         };
         let request =
-            SignalDeviceAssistantTools::browser_action_from_call(&call, "server-call").unwrap();
+            SignalAiAssistantTools::browser_action_from_call(&call, "server-call").unwrap();
         assert!(matches!(
             request.action,
             BrowserAction::FillForm {
@@ -6606,7 +6597,7 @@ mod tests {
             .to_string(),
         };
         let request =
-            SignalDeviceAssistantTools::browser_action_from_call(&call, "server-call").unwrap();
+            SignalAiAssistantTools::browser_action_from_call(&call, "server-call").unwrap();
         assert!(matches!(
             request.action,
             BrowserAction::FillForm {
@@ -6650,7 +6641,7 @@ mod tests {
             name: "prepare_gmail_draft".into(),
             arguments_json: attachment_arguments.to_string(),
         };
-        let attachment_request = SignalDeviceAssistantTools::browser_action_from_call(
+        let attachment_request = SignalAiAssistantTools::browser_action_from_call(
             &attachment_call,
             "server-call-with-attachment",
         )
@@ -6764,7 +6755,7 @@ mod tests {
 
     #[test]
     fn browser_grant_and_runtime_share_compiled_operation_scope() {
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         let capability = registry
             .capability_for_tool("browser_open_page")
             .expect("browser open capability is compiled");

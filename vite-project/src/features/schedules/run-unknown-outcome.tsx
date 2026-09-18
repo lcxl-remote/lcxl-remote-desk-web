@@ -4,12 +4,12 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { v4 } from 'uuid';
-import { type DeviceAssistantSessionSnapshotDto } from '@/services/types';
+import { type AiAssistantSessionSnapshotDto } from '@/services/types';
 import type { ScheduleClient } from './client';
 
 export function RunUnknownOutcome({ client, scheduleId, runId, snapshot, connected, loading, onReload }: {
     client: Pick<ScheduleClient, 'request'>; scheduleId: string; runId: string;
-    snapshot: DeviceAssistantSessionSnapshotDto;
+    snapshot: AiAssistantSessionSnapshotDto;
     connected: boolean; loading: boolean; onReload: () => Promise<void>;
 }) {
     const { t } = useTranslation();

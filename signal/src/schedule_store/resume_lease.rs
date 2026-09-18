@@ -221,7 +221,7 @@ impl ScheduleStore {
             || session
                 .check_subject(&actor, &snapshot.target_device_id)
                 .is_err()
-            || session.surface != AgentSessionSurface::DeviceAssistant
+            || session.surface != AgentSessionSurface::AiAssistant
             || session.trigger_origin
                 != if fresh {
                     TriggerOrigin::ScheduledTask

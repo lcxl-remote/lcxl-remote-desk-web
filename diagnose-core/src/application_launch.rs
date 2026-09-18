@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn launch_contract_is_exact_one_shot_and_not_command_authority() {
-        let providers = crate::device_assistant::device_assistant_provider_registry();
+        let providers = crate::ai_assistant::ai_assistant_provider_registry();
         let launch = providers.capability_for_tool(TOOL_NAME).unwrap();
         assert_eq!(
             launch.required_capability,
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn application_catalog_requires_permission_and_is_not_a_diagnostic_tool() {
-        let providers = crate::device_assistant::device_assistant_provider_registry();
+        let providers = crate::ai_assistant::ai_assistant_provider_registry();
         let capability = providers.capability_for_tool("list_applications").unwrap();
         assert_eq!(
             capability.required_capability,
@@ -453,7 +453,7 @@ mod tests {
             ),
             desk_agent_protocol::capability_grant::CapabilityRiskTier::R1
         );
-        assert!(crate::device_assistant::is_requestable_desktop_read(
+        assert!(crate::ai_assistant::is_requestable_desktop_read(
             "list_applications"
         ));
         assert!(

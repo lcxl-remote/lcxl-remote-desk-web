@@ -1,4 +1,4 @@
-//! Bounded per-input working state for a long-lived Device Assistant conversation.
+//! Bounded per-input working state for a long-lived AI Assistant conversation.
 //!
 //! `input_revision` is the epoch identity. A new user input deterministically
 //! resets this state; permission decisions and background continuations inherit

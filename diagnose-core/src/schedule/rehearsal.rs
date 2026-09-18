@@ -26,7 +26,7 @@ pub fn answered_message<'a>(
         || session.device_id != source.device
         || session.conversation_id != source.conversation
         || session.client_conversation_id.as_deref() != Some(source.client_conversation)
-        || session.surface != AgentSessionSurface::DeviceAssistant
+        || session.surface != AgentSessionSurface::AiAssistant
         || !matches!(
             session.trigger_origin,
             TriggerOrigin::User | TriggerOrigin::PermissionDecision
@@ -118,7 +118,7 @@ pub fn terminal_without_tools(
         || session.device_id != source.device
         || session.conversation_id != source.conversation
         || session.client_conversation_id.as_deref() != Some(source.client_conversation)
-        || session.surface != AgentSessionSurface::DeviceAssistant
+        || session.surface != AgentSessionSurface::AiAssistant
         || session.trigger_origin != TriggerOrigin::User
         || session.current_turn_id.as_deref().is_none_or(str::is_empty)
         || session.execution_state != ExecutionState::None

@@ -332,12 +332,12 @@ impl ArtifactCallPreflight {
         match &self.action {
             FilePatchAction::CreateTextArtifact { .. }
             | FilePatchAction::CreateLocalCommunicationDraftArtifact { .. } => {
-                crate::device_assistant::FILE_ARTIFACT_ADAPTER_VERSION
+                crate::ai_assistant::FILE_ARTIFACT_ADAPTER_VERSION
             }
             FilePatchAction::CreateSpreadsheetArtifact { .. }
             | FilePatchAction::CreateSpreadsheetFormulaArtifact { .. }
             | FilePatchAction::CreateWordReportArtifact { .. } => {
-                crate::device_assistant::SPREADSHEET_FILE_ADAPTER_VERSION
+                crate::ai_assistant::SPREADSHEET_FILE_ADAPTER_VERSION
             }
             _ => unreachable!("artifact preflight only constructs create-new actions"),
         }

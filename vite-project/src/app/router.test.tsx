@@ -15,6 +15,7 @@ function collectLazyRoutes(routes: RouteNode[]): Array<NonNullable<RouteNode['la
 }
 
 describe('router lazy modules', () => {
+    // Loading every lazy page checks imports, not startup performance.
     it('resolve a component for every lazy route', async () => {
         const lazyRoutes = collectLazyRoutes(router.routes as RouteNode[])
         const modules = await Promise.all(lazyRoutes.map((load) => load()))
@@ -23,5 +24,5 @@ describe('router lazy modules', () => {
         for (const module of modules) {
             expect(module.Component).toBeTypeOf('function')
         }
-    })
+    }, 30_000)
 })

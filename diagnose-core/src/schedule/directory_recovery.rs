@@ -150,7 +150,7 @@ mod tests {
             },
             "2026-09-07T00:00:00Z",
         );
-        session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+        session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
         session.trigger_origin = TriggerOrigin::ScheduledTask;
         session.turn_state = TurnState::Running;
         session.current_turn_id = Some("turn".into());

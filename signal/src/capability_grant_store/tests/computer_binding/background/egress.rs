@@ -121,7 +121,7 @@ async fn fixture(
         client_request_id: "select-context".into(),
         actor_id: "actor-1".into(),
         device_id: "device-1".into(),
-        surface: AgentSessionSurface::DeviceAssistant,
+        surface: AgentSessionSurface::AiAssistant,
         kind: ContextAttachmentKind::InteractiveSession,
         object_ref: AttachmentObjectRef {
             opaque_token: "context-token".into(),
@@ -145,8 +145,8 @@ async fn fixture(
 
 #[actix_web::test]
 async fn production_publisher_uses_original_export_and_strict_model_before_network() {
-    crate::device_assistant_gate::global_device_assistant_gate().replace(
-        desk_agent_protocol::device_assistant::DeviceAssistantSettings {
+    crate::ai_assistant_gate::global_ai_assistant_gate().replace(
+        desk_agent_protocol::ai_assistant::AiAssistantSettings {
             revision: 1,
             enabled: true,
         },

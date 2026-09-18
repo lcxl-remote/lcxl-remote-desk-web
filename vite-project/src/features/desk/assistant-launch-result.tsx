@@ -35,16 +35,16 @@ export function parseLaunchReceipt(text: string): LaunchReceipt | null {
 }
 export function AssistantLaunchResult({ receipt, text }: { receipt: LaunchReceipt; text: string }) {
     const { t } = useTranslation();
-    return <Disclosure className="min-w-0" title={<>{t('pages.deviceAssistant.launchReceipt.title')} · {t(`pages.deviceAssistant.launchReceipt.${receipt.launch_outcome}`)}</>} summaryClassName="cursor-pointer font-medium">
+    return <Disclosure className="min-w-0" title={<>{t('pages.aiAssistant.launchReceipt.title')} · {t(`pages.aiAssistant.launchReceipt.${receipt.launch_outcome}`)}</>} summaryClassName="cursor-pointer font-medium">
         <div className="mt-3 space-y-2 text-sm">
-            <p>{t('pages.deviceAssistant.launchReceipt.readiness')}</p>
-            {receipt.launch_outcome === 'outcome_unknown' && <p className="font-medium text-amber-700 dark:text-amber-300">{t('pages.deviceAssistant.launchReceipt.noRetry')}</p>}
-            {receipt.failure_reason && <p>{t(`pages.deviceAssistant.launchFailure.${receipt.failure_reason}`)}</p>}
-            <p>{t(`pages.deviceAssistant.launchArguments.${receipt.argument_delivery}`)}</p>
-            <p>{t(receipt.requested_admin ? 'pages.deviceAssistant.launchReceipt.requestedAdmin' : 'pages.deviceAssistant.launchReceipt.requestedUser')}</p>
-            {receipt.created_process_id != null && <p>{t('pages.deviceAssistant.launchReceipt.pid', { pid: receipt.created_process_id })}</p>}
-            {receipt.created_process_elevated != null && <p>{t(receipt.created_process_elevated ? 'pages.deviceAssistant.launchReceipt.createdAdmin' : 'pages.deviceAssistant.launchReceipt.createdUser')}</p>}
+            <p>{t('pages.aiAssistant.launchReceipt.readiness')}</p>
+            {receipt.launch_outcome === 'outcome_unknown' && <p className="font-medium text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.launchReceipt.noRetry')}</p>}
+            {receipt.failure_reason && <p>{t(`pages.aiAssistant.launchFailure.${receipt.failure_reason}`)}</p>}
+            <p>{t(`pages.aiAssistant.launchArguments.${receipt.argument_delivery}`)}</p>
+            <p>{t(receipt.requested_admin ? 'pages.aiAssistant.launchReceipt.requestedAdmin' : 'pages.aiAssistant.launchReceipt.requestedUser')}</p>
+            {receipt.created_process_id != null && <p>{t('pages.aiAssistant.launchReceipt.pid', { pid: receipt.created_process_id })}</p>}
+            {receipt.created_process_elevated != null && <p>{t(receipt.created_process_elevated ? 'pages.aiAssistant.launchReceipt.createdAdmin' : 'pages.aiAssistant.launchReceipt.createdUser')}</p>}
         </div>
-        <Disclosure className="mt-3" title={<>{t('pages.deviceAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs"><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{text}</pre></Disclosure>
+        <Disclosure className="mt-3" title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs"><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{text}</pre></Disclosure>
     </Disclosure>;
 }

@@ -125,7 +125,7 @@ async fn execute(
     bool,
 ) {
     let mut held = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "now");
-    held.surface = AgentSessionSurface::DeviceAssistant;
+    held.surface = AgentSessionSurface::AiAssistant;
     held.turn_state = TurnState::Running;
     held.current_turn_id = Some("turn".into());
     held.input_revision = 1;

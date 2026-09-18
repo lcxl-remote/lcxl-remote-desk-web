@@ -271,7 +271,7 @@ pub fn inventory_snapshot(
             provider_display_name_key: provider.wire.display_name_key.clone(),
             provider_version: provider.wire.provider_version,
             capability: capability.wire.clone(),
-            context_selectable: crate::device_assistant::is_selectable_context_capability_id(
+            context_selectable: crate::ai_assistant::is_selectable_context_capability_id(
                 &item.capability_id,
             ),
             compiled: item.compiled,
@@ -368,10 +368,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::device_assistant::{
+    use crate::ai_assistant::{
         ACTION_PREVIEW_CAPABILITY_ID, DESKTOP_UI_CAPABILITY_ID, DESKTOP_UI_PROVIDER_ID,
         WEB_RESEARCH_FETCH_CAPABILITY_ID, WEB_RESEARCH_SEARCH_CAPABILITY_ID,
-        device_assistant_provider_registry,
+        ai_assistant_provider_registry,
     };
 
     fn ready_central() -> Vec<CentralCapabilityReadiness> {
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn missing_edge_readiness_is_discoverable_but_not_callable() {
-        let registry = device_assistant_provider_registry();
+        let registry = ai_assistant_provider_registry();
         let inventory = project_capability_availability(
             &registry,
             ProductSurface::OssPersonalOwner,
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn only_fresh_exact_edge_readiness_makes_tool_callable() {
-        let registry = device_assistant_provider_registry();
+        let registry = ai_assistant_provider_registry();
         let inventory = project_capability_availability(
             &registry,
             ProductSurface::OssPersonalOwner,
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn mismatched_adapter_fails_closed() {
-        let registry = device_assistant_provider_registry();
+        let registry = ai_assistant_provider_registry();
         let mut report = ready_ui();
         report.adapter_id = Some("office.excel.addin".into());
         assert!(matches!(
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn central_capabilities_require_an_explicit_host_report() {
-        let registry = device_assistant_provider_registry();
+        let registry = ai_assistant_provider_registry();
         let inventory = project_capability_availability(
             &registry,
             ProductSurface::ManagerPersonalOwner,

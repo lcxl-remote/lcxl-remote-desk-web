@@ -9,12 +9,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "prebuild": "node scripts/verify-services.cjs && node scripts/verify-auth-contract.cjs && node scripts/verify-i18n.cjs && node scripts/verify-error-codes.cjs",
+    "prebuild": "node scripts/verify-assistant-names.cjs && node scripts/verify-services.cjs && node scripts/verify-auth-contract.cjs && node scripts/verify-i18n.cjs && node scripts/verify-error-codes.cjs",
     "verify-services": "node scripts/verify-services.cjs",
     "verify-i18n": "node scripts/verify-i18n.cjs",
     "verify-error-codes": "node scripts/verify-error-codes.cjs",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify-assistant-names": "node scripts/verify-assistant-names.cjs"
   },
   "comment": "@kubb/* is pinned to an exact version on purpose. The generated client under src/services is committed, and CI asserts that regenerating it leaves the working tree clean; a caret range lets a patch release change the generator output and turn that check red for reasons unrelated to the API. The enterprise workspace that consumes this project as a submodule pins the same version, so both repos regenerate byte-identical clients.",
   "devDependencies": {

@@ -36,7 +36,7 @@ pub fn specs() -> Vec<ToolSpec> {
 }
 
 pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Action, &'static str> {
-    if session.surface != AgentSessionSurface::DeviceAssistant
+    if session.surface != AgentSessionSurface::AiAssistant
         || session.trigger_origin != TriggerOrigin::User
         || !session.turn_state.is_active()
         || session.input_revision == 0
@@ -146,7 +146,7 @@ mod tests {
             scope.clone(),
             "2026-09-09T00:00:00Z",
         );
-        session.surface = AgentSessionSurface::DeviceAssistant;
+        session.surface = AgentSessionSurface::AiAssistant;
         session.input_revision = 1;
         session
             .begin_turn(

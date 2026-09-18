@@ -81,7 +81,7 @@ export function WebSearchForm({ api }: { api: WebSearchSettingsApi }) {
                 {config && <>
                     <label className="block space-y-2">
                         <span>{t('pages.webSearch.provider')}</span>
-                        <SelectField className="block w-full rounded border bg-background p-2" value={provider} disabled={busy} onValueChange={nextValue => {
+                        <SelectField value={provider} disabled={busy} onValueChange={nextValue => {
                             setProvider(nextValue as SearchProvider); setKey(''); setKeyMode('replace'); setStatus(''); setTestResult(null);
                         }}>
                             {config.providers.map((item) => <SelectItem key={item.provider} value={item.provider}>{item.display_name}</SelectItem>)}
@@ -90,7 +90,7 @@ export function WebSearchForm({ api }: { api: WebSearchSettingsApi }) {
                     {!needsKey ? <p>{t('pages.webSearch.noKey')}</p> : <>
                         <label className="block space-y-2">
                             <span>{t('pages.webSearch.keyAction')}</span>
-                            <SelectField className="block w-full rounded border bg-background p-2" value={keyMode} disabled={busy} onValueChange={nextValue => { setKeyMode(nextValue as typeof keyMode); setKey(''); }}>
+                            <SelectField value={keyMode} disabled={busy} onValueChange={nextValue => { setKeyMode(nextValue as typeof keyMode); setKey(''); }}>
                                 <SelectItem value="keep" disabled={provider !== config.provider}>{t('pages.webSearch.keepKey')}</SelectItem>
                                 <SelectItem value="replace">{t('pages.webSearch.replaceKey')}</SelectItem>
                                 <SelectItem value="clear">{t('pages.webSearch.clearKey')}</SelectItem>

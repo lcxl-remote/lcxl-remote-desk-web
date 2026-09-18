@@ -491,18 +491,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_assistant_switch_is_durable_without_moving_security_policy() {
+    async fn ai_assistant_switch_is_durable_without_moving_security_policy() {
         let dir = tempfile::tempdir().unwrap();
         let coordinator = coordinator_at(&dir.path().join("config"));
         let seq = coordinator.seq();
 
         coordinator
             .commit(|settings| {
-                settings.device_assistant =
-                    desk_agent_protocol::device_assistant::DeviceAssistantSettings {
-                        revision: 1,
-                        enabled: true,
-                    };
+                settings.ai_assistant = desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                    revision: 1,
+                    enabled: true,
+                };
                 Ok(())
             })
             .await
@@ -511,8 +510,8 @@ mod tests {
         assert_eq!(coordinator.seq(), seq);
         let args = coordinator.settings.read().await.args.clone();
         assert_eq!(
-            Settings::load_readonly(&args).unwrap().device_assistant,
-            desk_agent_protocol::device_assistant::DeviceAssistantSettings {
+            Settings::load_readonly(&args).unwrap().ai_assistant,
+            desk_agent_protocol::ai_assistant::AiAssistantSettings {
                 revision: 1,
                 enabled: true,
             }

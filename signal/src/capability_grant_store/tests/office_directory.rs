@@ -13,7 +13,7 @@ async fn set_directory(db: &DatabaseConnection, directory: &ObjectRef, revoke: b
         .unwrap()
         .unwrap();
     let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
-    session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
     if !revoke {
         session
             .begin_focus_epoch(session.input_revision, std::iter::empty::<String>())

@@ -1,12 +1,12 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { DeviceAssistantMessage } from './use-device-assistant-chat';
+import type { AiAssistantMessage } from './use-ai-assistant-chat';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { deleteAssistantImage, getAssistantImage, listAssistantImages } from '@/services/clients';
-import type { DeviceAssistantVisualEvidence } from './device-assistant-event';
+import type { AiAssistantVisualEvidence } from './ai-assistant-event';
 
-function StoredImage({ frame, onDelete }: { frame: DeviceAssistantVisualEvidence; onDelete: (id: string) => void }) {
+function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; onDelete: (id: string) => void }) {
     const { t } = useTranslation();
     const [url, setUrl] = useState<string | null>(null);
     const [failed, setFailed] = useState(false);
@@ -31,7 +31,7 @@ function StoredImage({ frame, onDelete }: { frame: DeviceAssistantVisualEvidence
     }, [durable, requested, frame.conversation_id, frame.evidence_id]);
     const source = url ?? (!durable ? frame.preview_data_url : null);
     const remove = async () => {
-        if (!window.confirm(t('pages.deviceAssistant.imageDeleteConfirm'))) return;
+        if (!window.confirm(t('pages.aiAssistant.imageDeleteConfirm'))) return;
         setDeleting(true);
         try {
             await deleteAssistantImage({ session: frame.conversation_id, attachment: frame.evidence_id });
@@ -39,32 +39,32 @@ function StoredImage({ frame, onDelete }: { frame: DeviceAssistantVisualEvidence
         } catch { setFailed(true); } finally { setDeleting(false); }
     };
     return <div className="overflow-hidden rounded-md border bg-muted/30">
-        {source ? <Button variant="unstyled" type="button" className="block w-full" onClick={() => setOpen(true)} aria-label={t('pages.deviceAssistant.imageOpen')}>
-            <img src={source} alt={t('pages.deviceAssistant.visualEvidenceAlt')} loading="lazy" className="max-h-56 w-full object-contain" />
-        </Button> : durable && !requested ? <Button type="button" variant="ghost" className="w-full" onClick={() => setRequested(true)}>{t('pages.deviceAssistant.imageOpen')}</Button> : <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">
-            {t(durable ? (failed ? 'pages.deviceAssistant.imageUnavailable' : 'pages.deviceAssistant.imageLoading')
-                : frame.status === 'expired' ? 'pages.deviceAssistant.visualEvidenceExpired' : 'pages.deviceAssistant.visualEvidenceNotRetained')}
+        {source ? <Button variant="unstyled" type="button" className="block w-full" onClick={() => setOpen(true)} aria-label={t('pages.aiAssistant.imageOpen')}>
+            <img src={source} alt={t('pages.aiAssistant.visualEvidenceAlt')} loading="lazy" className="max-h-56 w-full object-contain" />
+        </Button> : durable && !requested ? <Button type="button" variant="ghost" className="w-full" onClick={() => setRequested(true)}>{t('pages.aiAssistant.imageOpen')}</Button> : <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">
+            {t(durable ? (failed ? 'pages.aiAssistant.imageUnavailable' : 'pages.aiAssistant.imageLoading')
+                : frame.status === 'expired' ? 'pages.aiAssistant.visualEvidenceExpired' : 'pages.aiAssistant.visualEvidenceNotRetained')}
         </div>}
         <div className="flex items-center justify-between gap-2 border-t p-2 text-xs">
-            <div><div>{t(`pages.deviceAssistant.visualEvidencePhase.${frame.phase}`)}</div>
+            <div><div>{t(`pages.aiAssistant.visualEvidencePhase.${frame.phase}`)}</div>
                 <div className="text-muted-foreground">{new Date(frame.captured_at_unix_ms).toLocaleString()}</div></div>
-            {durable && <Button type="button" size="sm" variant="ghost" disabled={deleting} onClick={() => void remove()}>{t('pages.deviceAssistant.imageDelete')}</Button>}
+            {durable && <Button type="button" size="sm" variant="ghost" disabled={deleting} onClick={() => void remove()}>{t('pages.aiAssistant.imageDelete')}</Button>}
         </div>
         <Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-w-[95vw] sm:max-w-[90vw]">
-            <DialogTitle>{t('pages.deviceAssistant.visualEvidenceAlt')}</DialogTitle>
-            {source && <img src={source} alt={t('pages.deviceAssistant.visualEvidenceAlt')} className="max-h-[80vh] w-full object-contain" />}
+            <DialogTitle>{t('pages.aiAssistant.visualEvidenceAlt')}</DialogTitle>
+            {source && <img src={source} alt={t('pages.aiAssistant.visualEvidenceAlt')} className="max-h-[80vh] w-full object-contain" />}
         </DialogContent></Dialog>
     </div>;
 }
 
 export function AssistantImages({ sessionId, evidence, messages, renderMessage }: {
     sessionId?: string;
-    evidence: DeviceAssistantVisualEvidence[];
-    messages?: DeviceAssistantMessage[];
-    renderMessage?: (message: DeviceAssistantMessage) => ReactNode;
+    evidence: AiAssistantVisualEvidence[];
+    messages?: AiAssistantMessage[];
+    renderMessage?: (message: AiAssistantMessage) => ReactNode;
 }) {
     const { t } = useTranslation();
-    const [stored, setStored] = useState<DeviceAssistantVisualEvidence[]>([]);
+    const [stored, setStored] = useState<AiAssistantVisualEvidence[]>([]);
     const [deleted, setDeleted] = useState<Set<string>>(new Set());
     const exhausted = useRef(false);
     const [cursor, setCursor] = useState<string | null>(null);
@@ -99,21 +99,21 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage }
             setFailed(false);
         } catch { setFailed(true); } finally { setLoading(false); }
     };
-    const renderImages = (items: DeviceAssistantVisualEvidence[]) => items.length > 0 ? (
-        <div data-testid="device-assistant-visual-evidence" className="grid max-w-[90%] gap-3 sm:grid-cols-2">
+    const renderImages = (items: AiAssistantVisualEvidence[]) => items.length > 0 ? (
+        <div data-testid="ai-assistant-visual-evidence" className="grid max-w-[90%] gap-3 sm:grid-cols-2">
             {items.map((frame) => <StoredImage key={frame.evidence_id} frame={frame}
                 onDelete={(id) => setDeleted((previous) => new Set([...previous, id]))} />)}
         </div>
     ) : null;
     const controls = <>
-        {failed && <p className="text-xs text-destructive">{t('pages.deviceAssistant.imageUnavailable')}</p>}
-        {cursor && <Button type="button" variant="outline" size="sm" disabled={loading} onClick={() => void more()}>{t('pages.deviceAssistant.imageMore')}</Button>}
+        {failed && <p className="text-xs text-destructive">{t('pages.aiAssistant.imageUnavailable')}</p>}
+        {cursor && <Button type="button" variant="outline" size="sm" disabled={loading} onClick={() => void more()}>{t('pages.aiAssistant.imageMore')}</Button>}
     </>;
     if (messages && renderMessage) {
         // Link to the final record for the call, so its result precedes its images.
         const anchors = new Map(messages.flatMap((message, index) => message.toolCallId ? [[message.toolCallId, index] as const] : []));
         const earlier = frames.filter(frame => !anchors.has(frame.tool_call_id));
-        const byMessage = new Map<number, DeviceAssistantVisualEvidence[]>();
+        const byMessage = new Map<number, AiAssistantVisualEvidence[]>();
         for (const frame of frames) {
             const index = anchors.get(frame.tool_call_id);
             if (index !== undefined) byMessage.set(index, [...(byMessage.get(index) ?? []), frame]);
@@ -121,7 +121,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage }
         return <>
             {controls}
             {earlier.length > 0 && <div className="space-y-2">
-                <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.imageEarlier')}</p>
+                <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.imageEarlier')}</p>
                 {renderImages(earlier)}
             </div>}
             {messages.map((message, index) => <Fragment key={message.id}>

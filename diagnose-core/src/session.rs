@@ -405,8 +405,8 @@ pub enum TriggerOrigin {
 pub enum AgentSessionSurface {
     #[default]
     Unknown,
-    TerminalCopilot,
-    DeviceAssistant,
+    TerminalAiAssistant,
+    AiAssistant,
 }
 
 impl TriggerOrigin {
@@ -478,16 +478,16 @@ pub struct PersistedAgentSession {
     pub surface: AgentSessionSurface,
     /// Version of persisted conversation/replay/context semantics. Fresh
     /// sessions always write the current schema version. This unreleased
-    /// Device Assistant state intentionally has no legacy compatibility path.
+    /// AI Assistant state intentionally has no legacy compatibility path.
     #[serde(default)]
     pub conversation_schema_version: u16,
     pub conversation: Vec<crate::chat::ChatMessage>,
-    /// Bounded state owned by the current Device Assistant user-input epoch.
+    /// Bounded state owned by the current AI Assistant user-input epoch.
     /// Permission, dispatch, work and receipt facts remain independent durable
     /// state and are not deleted when this state resets.
     #[serde(default)]
     pub focus_epoch: crate::focus_epoch::FocusEpochState,
-    /// Bounded, names-only working set for the current Device Assistant input
+    /// Bounded, names-only working set for the current AI Assistant input
     /// revision. Descriptors and authority are deliberately not persisted here.
     #[serde(default)]
     pub capability_disclosure: crate::capability_disclosure::CapabilityDisclosureState,
@@ -710,14 +710,14 @@ impl PersistedAgentSession {
         let has_visual_evidence = value.get("visual_evidence").is_some();
         let has_visual_verification = value.get("pending_visual_verification").is_some();
         let mut session: Self = serde_json::from_value(value)?;
-        if session.surface == AgentSessionSurface::DeviceAssistant
+        if session.surface == AgentSessionSurface::AiAssistant
             && (version < u64::from(CONVERSATION_SCHEMA_VERSION)
                 || !has_disclosure
                 || !has_focus_epoch
                 || !has_visual_evidence
                 || !has_visual_verification)
         {
-            // Device Assistant has not shipped with this persisted schema. Do
+            // AI Assistant has not shipped with this persisted schema. Do
             // not infer a working set or re-enable the old full catalog.
             return Err(SessionDecodeError::UnsupportedVersion(version));
         }
@@ -801,7 +801,7 @@ impl PersistedAgentSession {
             .capability_disclosure
             .validate(session.input_revision)
             .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
-        if session.surface == AgentSessionSurface::DeviceAssistant {
+        if session.surface == AgentSessionSurface::AiAssistant {
             session
                 .focus_epoch
                 .validate(
@@ -978,7 +978,7 @@ impl PersistedAgentSession {
         next_input_revision: u64,
         selected_attachment_ids: impl IntoIterator<Item = String>,
     ) -> Result<usize, &'static str> {
-        if self.surface == AgentSessionSurface::DeviceAssistant {
+        if self.surface == AgentSessionSurface::AiAssistant {
             let selected_attachment_ids = selected_attachment_ids.into_iter().collect::<Vec<_>>();
             if selected_attachment_ids.iter().any(|id| {
                 !self.context_attachments.iter().any(|attachment| {
@@ -1291,7 +1291,7 @@ impl PersistedAgentSession {
         self.lifetime_steps = self.lifetime_steps.saturating_add(1);
         add_usage(&mut self.current_turn_tokens, usage);
         add_usage(&mut self.lifetime_tokens, usage);
-        if self.surface == AgentSessionSurface::DeviceAssistant
+        if self.surface == AgentSessionSurface::AiAssistant
             && self.focus_epoch.input_revision == self.input_revision
         {
             self.focus_epoch.record_step(usage);
@@ -1304,7 +1304,7 @@ impl PersistedAgentSession {
     pub fn record_compression_usage(&mut self, usage: TokenUsage) {
         add_usage(&mut self.current_turn_tokens, usage);
         add_usage(&mut self.lifetime_tokens, usage);
-        if self.surface == AgentSessionSurface::DeviceAssistant
+        if self.surface == AgentSessionSurface::AiAssistant
             && self.focus_epoch.input_revision == self.input_revision
         {
             self.focus_epoch.record_tokens(usage);
@@ -1349,7 +1349,7 @@ impl PersistedAgentSession {
     /// Whether the per-turn step budget is exhausted (circuit breaker). The bound
     /// is supplied by the caller (via `LoopDeps`) so different runtimes can tune
     /// it — diagnose uses [`crate::MAX_STEPS_PER_TURN`], the latency-sensitive
-    /// terminal copilot uses a tighter bound.
+    /// Terminal AI Assistant uses a tighter bound.
     pub fn turn_step_budget_exhausted(&self, max_steps_per_turn: u32) -> bool {
         self.current_turn_steps >= max_steps_per_turn
     }
@@ -2290,7 +2290,7 @@ mod tests {
     #[test]
     fn new_user_input_resets_only_focus_state_and_revalidates_pending_permission() {
         let mut value = session();
-        value.surface = AgentSessionSurface::DeviceAssistant;
+        value.surface = AgentSessionSurface::AiAssistant;
         value.input_revision = 1;
         value.latest_input_seq = 1;
         value.focus_epoch.input_revision = 1;
@@ -2429,7 +2429,7 @@ mod tests {
             client_request_id: client_request_id.into(),
             actor_id: "actor-1".into(),
             device_id: "device-1".into(),
-            surface: AgentSessionSurface::DeviceAssistant,
+            surface: AgentSessionSurface::AiAssistant,
             kind: ContextAttachmentKind::Range,
             object_ref: AttachmentObjectRef {
                 opaque_token: format!("token-{id}"),
@@ -2474,7 +2474,7 @@ mod tests {
     #[test]
     fn refresh_context_is_atomic_immutable_and_idempotent() {
         let mut value = session();
-        value.surface = AgentSessionSurface::DeviceAssistant;
+        value.surface = AgentSessionSurface::AiAssistant;
         let old = context_attachment("old", "attach-old");
         let replacement = context_attachment("new", "refresh-new");
         assert!(value.attach_context(old).unwrap());
@@ -2702,18 +2702,18 @@ mod tests {
         let mut session = session();
         assert_eq!(session.surface, AgentSessionSurface::Unknown);
         assert_eq!(
-            session.check_surface(AgentSessionSurface::DeviceAssistant),
+            session.check_surface(AgentSessionSurface::AiAssistant),
             Err(SubjectMismatch::Surface)
         );
 
-        session.adopt_client_metadata(None, AgentSessionSurface::DeviceAssistant);
+        session.adopt_client_metadata(None, AgentSessionSurface::AiAssistant);
         assert!(
             session
-                .check_surface(AgentSessionSurface::DeviceAssistant)
+                .check_surface(AgentSessionSurface::AiAssistant)
                 .is_ok()
         );
         assert_eq!(
-            session.check_surface(AgentSessionSurface::TerminalCopilot),
+            session.check_surface(AgentSessionSurface::TerminalAiAssistant),
             Err(SubjectMismatch::Surface)
         );
     }
@@ -3490,9 +3490,9 @@ mod tests {
     }
 
     #[test]
-    fn old_device_assistant_schema_is_rejected_instead_of_inferred() {
+    fn old_ai_assistant_schema_is_rejected_instead_of_inferred() {
         let mut value = serde_json::to_value(session()).unwrap();
-        value["surface"] = serde_json::json!("device_assistant");
+        value["surface"] = serde_json::json!("ai_assistant");
         value["conversation_schema_version"] = serde_json::json!(1);
         value
             .as_object_mut()

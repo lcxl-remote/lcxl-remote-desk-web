@@ -284,8 +284,8 @@ fn exact_input_matches_current_contract(tool_name: &str, value: &serde_json::Val
     }
 
     match tool_name {
-        crate::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
-        | crate::device_assistant::EXECUTE_BACKGROUND_INPUT_TOOL => false,
+        crate::ai_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+        | crate::ai_assistant::EXECUTE_BACKGROUND_INPUT_TOOL => false,
         "browser_open_page" => serde_json::from_value::<BrowserOpenInput>(value.clone())
             .is_ok_and(|input| input.target.validate().is_ok()),
         "browser_navigate_page" => serde_json::from_value::<BrowserNavigateInput>(value.clone())
@@ -785,20 +785,20 @@ pub fn build_permission_request(
             == [AuthorizationResourceKind::ExternalQuery];
         let exact_command = capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExactCommand];
-        let exact_outlook_handoff = capability.wire.capability_id
-            == crate::device_assistant::OUTLOOK_NEW_HANDOFF_CAPABILITY_ID;
-        let exact_gmail_handoff = capability.wire.capability_id
-            == crate::device_assistant::GMAIL_WEB_HANDOFF_CAPABILITY_ID;
-        let exact_slack_handoff = capability.wire.capability_id
-            == crate::device_assistant::SLACK_WEB_HANDOFF_CAPABILITY_ID;
+        let exact_outlook_handoff =
+            capability.wire.capability_id == crate::ai_assistant::OUTLOOK_NEW_HANDOFF_CAPABILITY_ID;
+        let exact_gmail_handoff =
+            capability.wire.capability_id == crate::ai_assistant::GMAIL_WEB_HANDOFF_CAPABILITY_ID;
+        let exact_slack_handoff =
+            capability.wire.capability_id == crate::ai_assistant::SLACK_WEB_HANDOFF_CAPABILITY_ID;
         let exact_gmail_send =
-            capability.wire.capability_id == crate::device_assistant::GMAIL_WEB_SEND_CAPABILITY_ID;
+            capability.wire.capability_id == crate::ai_assistant::GMAIL_WEB_SEND_CAPABILITY_ID;
         let exact_slack_send =
-            capability.wire.capability_id == crate::device_assistant::SLACK_WEB_SEND_CAPABILITY_ID;
+            capability.wire.capability_id == crate::ai_assistant::SLACK_WEB_SEND_CAPABILITY_ID;
         let exact_browser_navigation = matches!(
             capability.wire.capability_id.as_str(),
-            crate::device_assistant::BROWSER_OPEN_CAPABILITY_ID
-                | crate::device_assistant::BROWSER_NAVIGATE_CAPABILITY_ID
+            crate::ai_assistant::BROWSER_OPEN_CAPABILITY_ID
+                | crate::ai_assistant::BROWSER_NAVIGATE_CAPABILITY_ID
         );
         if exact_browser_navigation && canonical_input_json.is_none() {
             return Err(invalid(
@@ -832,16 +832,16 @@ pub fn build_permission_request(
         let exact_semantic_action = application_scope.is_none()
             && matches!(
                 capability.wire.capability_id.as_str(),
-                crate::device_assistant::DESKTOP_RAW_INPUT_CAPABILITY_ID
-                    | crate::device_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
-                    | crate::device_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID
-                    | crate::device_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID
-                    | crate::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
-                    | crate::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
-                    | crate::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
-                    | crate::device_assistant::windows_excel::PATCH_CAPABILITY_ID
-                    | crate::device_assistant::windows_word::PATCH_CAPABILITY_ID
-                    | crate::device_assistant::windows_office::PATCH_CAPABILITY_ID
+                crate::ai_assistant::DESKTOP_RAW_INPUT_CAPABILITY_ID
+                    | crate::ai_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::windows_excel::PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::windows_word::PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::windows_office::PATCH_CAPABILITY_ID
             );
         let exact_semantic_refs = if exact_semantic_action {
             #[derive(Deserialize)]
@@ -894,12 +894,12 @@ pub fn build_permission_request(
             }
             let is_batch = matches!(
                 capability.wire.capability_id.as_str(),
-                crate::device_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
-                    | crate::device_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
-                    | crate::device_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
-                    | crate::device_assistant::windows_excel::PATCH_CAPABILITY_ID
-                    | crate::device_assistant::windows_word::PATCH_CAPABILITY_ID
-                    | crate::device_assistant::windows_office::PATCH_CAPABILITY_ID
+                crate::ai_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::windows_excel::PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::windows_word::PATCH_CAPABILITY_ID
+                    | crate::ai_assistant::windows_office::PATCH_CAPABILITY_ID
             );
             let mut refs = vec![input.target];
             if is_batch {
@@ -1076,8 +1076,7 @@ pub fn build_permission_request(
             } else if exact_outlook_handoff {
                 vec![
                     desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
-                        account_id: crate::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID
-                            .into(),
+                        account_id: crate::ai_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID.into(),
                     },
                 ]
             } else if exact_gmail_handoff {
@@ -1278,7 +1277,7 @@ mod tests {
 
     #[test]
     fn denial_projection_is_current_explicit_and_contains_no_rejected_content() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let mut request = build_permission_request(
             &call(r#"{"items":[{"item_id":"capture","tool_name":"read_current_screen","exact_input":{"display":"private-display"},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"private-reason"}]}"#),
             &registry, "permission-denied".into(), 3, "2026-09-17T00:00:00Z".into(),
@@ -1352,7 +1351,7 @@ mod tests {
 
     #[test]
     fn server_resolves_descriptor_and_narrows_limits() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let request = build_permission_request(
             &call(
                 r#"{"items":[{"item_id":" inspect ","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","resource_scope":[" target:device ","target:device"],"suggested_ttl_seconds":999999,"suggested_max_uses":999,"reason":" inspect the selected target "}]}"#,
@@ -1379,7 +1378,7 @@ mod tests {
 
     #[test]
     fn equivalent_request_ignores_model_labels_but_not_authority_or_limits() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let first = build_permission_request(
             &call(
                 r#"{"items":[{"item_id":"open-a","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","exact_input":{"target":{"origin":{"kind":"https","host_ascii":"app.slack.com","port":443},"url":"https://app.slack.com/"}},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"first wording"}]}"#,
@@ -1409,7 +1408,7 @@ mod tests {
 
     #[test]
     fn browser_navigation_permission_requires_exact_input() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let missing = call(
             r#"{"items":[{"item_id":"open","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"open Slack"}]}"#,
         );
@@ -1428,7 +1427,7 @@ mod tests {
     fn permission_request_derives_provider_and_effect_from_tool_name() {
         let request = build_permission_request(
             &call(r#"{"items":[{"item_id":"read","tool_name":"inspect_desktop_session","suggested_ttl_seconds":60,"suggested_max_uses":2,"reason":"Inspect windows"}]}"#),
-            &crate::device_assistant::device_assistant_provider_registry(), "permission-derived".into(),
+            &crate::ai_assistant::ai_assistant_provider_registry(), "permission-derived".into(),
             1, "2026-09-08T00:00:00Z".into()).unwrap();
         assert_eq!(request.items[0].provider_id, "desktop.session");
         assert_eq!(
@@ -1439,7 +1438,7 @@ mod tests {
 
     #[test]
     fn model_cannot_invent_provider_effect_or_grant_fields() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         for arguments in [
             r#"{"items":[{"item_id":"x","provider_id":"invented","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":10,"suggested_max_uses":1,"reason":"x"}]}"#,
             r#"{"items":[{"item_id":"x","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"send_external","suggested_ttl_seconds":10,"suggested_max_uses":1,"reason":"x"}]}"#,
@@ -1460,7 +1459,7 @@ mod tests {
 
     #[test]
     fn external_url_permission_requires_and_binds_exact_input() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let missing = r#"{"items":[{"item_id":"web","provider_id":"web.research","tool_name":"fetch_public_web_page","expected_effect":"read_external","resource_scope":["model:chosen"],"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Read the cited page"}]}"#;
         assert!(
             build_permission_request(
@@ -1499,7 +1498,7 @@ mod tests {
 
     #[test]
     fn exact_input_digest_ignores_nested_object_member_order() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let first = r#"{"items":[{"item_id":"browser","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","exact_input":{"target":{"url":"http://127.0.0.1:5174/user/login","origin":{"kind":"http_loopback","host_ascii":"127.0.0.1","port":5174}}},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Open the selected local development page"}]}"#;
         let reordered = r#"{"items":[{"item_id":"browser","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","exact_input":{"target":{"origin":{"port":5174,"host_ascii":"127.0.0.1","kind":"http_loopback"},"url":"http://127.0.0.1:5174/user/login"}},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Open the selected local development page"}]}"#;
 
@@ -1538,7 +1537,7 @@ mod tests {
 
     #[test]
     fn browser_navigation_permission_rejects_non_tool_wire_shape_before_approval() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let malformed = r#"{"items":[{"item_id":"browser","provider_id":"browser.page.open","tool_name":"browser_open_page","expected_effect":"mutate_application","exact_input":{"origin":{"kind":"https","host_ascii":"lcxl-remote.slack.com","port":443},"url":"https://lcxl-remote.slack.com/"},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Open the selected Slack workspace"}]}"#;
 
         let error = build_permission_request(
@@ -1555,7 +1554,7 @@ mod tests {
 
     #[test]
     fn external_query_permission_fixes_input_scope_and_connector_destination() {
-        let registry = crate::device_assistant::device_assistant_provider_registry()
+        let registry = crate::ai_assistant::ai_assistant_provider_registry()
             .with_web_search_binding(Some(crate::web_research::SearchBinding {
                 connector_id: "brave_web_v1".into(),
                 revision: 3,
@@ -1592,7 +1591,7 @@ mod tests {
             item.export_destinations,
             vec![
                 desk_agent_protocol::data_lineage::DestinationIdentity::WebResearch {
-                    connector_id: crate::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
+                    connector_id: crate::ai_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
                 }
             ]
         );
@@ -1649,8 +1648,8 @@ mod tests {
     fn command_permission_requires_exact_input_and_forces_one_shot_scope() {
         let mut policy = crate::command_confirmation::test_policy();
         policy.admission_policy = desk_agent_protocol::authz::ExecAdmissionPolicy::TemplateOnly;
-        let registry = crate::device_assistant::device_assistant_provider_registry()
-            .with_command_policy(policy);
+        let registry =
+            crate::ai_assistant::ai_assistant_provider_registry().with_command_policy(policy);
         let missing = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"exec_command","expected_effect":"execute_command","suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
         assert!(
             build_permission_request(
@@ -1697,7 +1696,7 @@ mod tests {
 
     #[test]
     fn input_fallback_permission_is_narrowed_to_one_shot_before_pending() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let page = serde_json::json!({
             "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
             "adapter": {
@@ -1747,7 +1746,7 @@ mod tests {
 
     #[test]
     fn semantic_ui_permission_requires_application_scope_and_includes_reads() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let missing = r#"{"items":[{"item_id":"ui","provider_id":"desktop.ui.action","tool_name":"execute_ui_actions","expected_effect":"mutate_application","suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update the selected control"}]}"#;
         let error = build_permission_request(
             &call(missing),
@@ -1830,7 +1829,7 @@ mod tests {
 
     #[test]
     fn raw_input_permission_is_r3_one_shot_and_binds_application_screen_and_step() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let exact = r#"{"items":[{"item_id":"raw","provider_id":"desktop.input.fallback","tool_name":"send_raw_input","expected_effect":"input_fallback","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"application-token","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"action":{"screen":{"display":"\\\\.\\DISPLAY1","width":1920,"height":1080,"dpi_x":96,"dpi_y":96},"step":{"kind":"click","params":{"x":100,"y":200,"button":"primary"}}}},"suggested_ttl_seconds":300,"suggested_max_uses":9,"reason":"Last-resort click after semantic controls were unavailable"}]}"#;
         let request = build_permission_request(
             &call(exact),
@@ -1861,7 +1860,7 @@ mod tests {
 
     #[test]
     fn batch_iwork_permission_binds_target_and_selected_output_directory() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let missing = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_numbers_copy","expected_effect":"mutate_application","suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
         assert!(
             build_permission_request(
@@ -1899,7 +1898,7 @@ mod tests {
 
     #[test]
     fn windows_excel_batch_permission_seals_range_and_output() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let reference = |token, kind| {
             serde_json::json!({
                 "token": token, "snapshot_id": "snapshot", "object_kind": kind,
@@ -1943,7 +1942,7 @@ mod tests {
 
     #[test]
     fn formula_workbook_permission_requires_and_binds_exact_input() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let missing = r#"{"items":[{"item_id":"formula","provider_id":"spreadsheet.formula_artifact","tool_name":"create_formula_workbook","expected_effect":"write_artifact","suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Create the requested formula workbook copy"}]}"#;
         let error = build_permission_request(
             &call(missing),
@@ -1980,16 +1979,16 @@ mod tests {
 
     #[test]
     fn catalog_and_request_validation_share_live_edge_readiness() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let desktop = registry
-            .capability(crate::device_assistant::DESKTOP_SESSION_CAPABILITY_ID)
+            .capability(crate::ai_assistant::DESKTOP_SESSION_CAPABILITY_ID)
             .unwrap();
         let office = registry
-            .capability(crate::device_assistant::OFFICE_DOCUMENT_CAPABILITY_ID)
+            .capability(crate::ai_assistant::OFFICE_DOCUMENT_CAPABILITY_ID)
             .unwrap();
         let inventory = vec![
             CapabilityAvailability {
-                provider_id: crate::device_assistant::DESKTOP_SESSION_PROVIDER_ID.into(),
+                provider_id: crate::ai_assistant::DESKTOP_SESSION_PROVIDER_ID.into(),
                 capability_id: desktop.wire.capability_id.clone(),
                 tool_name: desktop.tool_spec.name.clone(),
                 compiled: true,
@@ -1999,7 +1998,7 @@ mod tests {
                 reason: None,
             },
             CapabilityAvailability {
-                provider_id: crate::device_assistant::OFFICE_DOCUMENT_PROVIDER_ID.into(),
+                provider_id: crate::ai_assistant::OFFICE_DOCUMENT_PROVIDER_ID.into(),
                 capability_id: office.wire.capability_id.clone(),
                 tool_name: office.tool_spec.name.clone(),
                 compiled: true,
@@ -2084,10 +2083,10 @@ mod tests {
         assert!(error.message.contains("not runtime-ready"));
 
         let file = registry
-            .capability(crate::device_assistant::SPREADSHEET_FILE_CAPABILITY_ID)
+            .capability(crate::ai_assistant::SPREADSHEET_FILE_CAPABILITY_ID)
             .unwrap();
         let file_inventory = vec![CapabilityAvailability {
-            provider_id: crate::device_assistant::SPREADSHEET_FILE_PROVIDER_ID.into(),
+            provider_id: crate::ai_assistant::SPREADSHEET_FILE_PROVIDER_ID.into(),
             capability_id: file.wire.capability_id.clone(),
             tool_name: file.tool_spec.name.clone(),
             compiled: true,
@@ -2114,12 +2113,12 @@ mod tests {
 
     #[test]
     fn manager_catalog_keeps_unavailable_schemas_out_and_stays_within_budget() {
+        use crate::ai_assistant::ACTION_PREVIEW_CAPABILITY_ID;
         use crate::capability_availability::{
             CentralCapabilityReadiness, project_capability_availability,
         };
-        use crate::device_assistant::ACTION_PREVIEW_CAPABILITY_ID;
 
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let inventory = project_capability_availability(
             &registry,
             desk_agent_protocol::capability_provider::ProductSurface::ManagerPersonalOwner,
@@ -2160,7 +2159,7 @@ mod tests {
 
     #[test]
     fn catalog_metrics_measure_the_real_serializer_without_content() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let inventory = registry
             .providers()
             .flat_map(|provider| {
@@ -2221,8 +2220,8 @@ mod tests {
             surface: ProductSurface::OssPersonalOwner,
             target_device_id: "device".into(),
             target_session_id: None,
-            provider_id: crate::device_assistant::OFFICE_DOCUMENT_PROVIDER_ID.into(),
-            capability_id: crate::device_assistant::OFFICE_DOCUMENT_CAPABILITY_ID.into(),
+            provider_id: crate::ai_assistant::OFFICE_DOCUMENT_PROVIDER_ID.into(),
+            capability_id: crate::ai_assistant::OFFICE_DOCUMENT_CAPABILITY_ID.into(),
             tool_name: "inspect_office_selection".into(),
             tool_schema_version: 1,
             effect: CapabilityEffect::ReadDevice,
@@ -2468,7 +2467,7 @@ mod tests {
 
     #[test]
     fn outlook_external_draft_permission_is_exact_one_shot_and_destination_bound() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let request = build_permission_request(
             &call(
                 r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_draft","expected_effect":"write_external_draft","resource_scope":[],"operation_scope":[],"export_destinations":[],"exact_input":{"draft":{"schema_version":4,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":5,"reason":"Prepare a manual Outlook draft"}]}"#,
@@ -2486,7 +2485,7 @@ mod tests {
             item.export_destinations,
             vec![
                 desk_agent_protocol::data_lineage::DestinationIdentity::EmailAccount {
-                    account_id: crate::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID.into(),
+                    account_id: crate::ai_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID.into(),
                 }
             ]
         );
@@ -2506,7 +2505,7 @@ mod tests {
 
     #[test]
     fn slack_external_draft_permission_validates_site_and_fixes_destination() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let exact_input = serde_json::json!({
             "schema_version": desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,
             "page": {
@@ -2545,7 +2544,7 @@ mod tests {
         let arguments = serde_json::json!({
             "items": [{
                 "item_id": "slack",
-                "provider_id": crate::device_assistant::SLACK_WEB_HANDOFF_PROVIDER_ID,
+                "provider_id": crate::ai_assistant::SLACK_WEB_HANDOFF_PROVIDER_ID,
                 "tool_name": "prepare_slack_message",
                 "expected_effect": "write_external_draft",
                 "resource_scope": ["model:chosen"],
@@ -2595,7 +2594,7 @@ mod tests {
 
     #[test]
     fn gmail_external_draft_permission_validates_fields_and_fixes_destination() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let page = serde_json::json!({
             "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
             "adapter": {
@@ -2646,7 +2645,7 @@ mod tests {
         let arguments = serde_json::json!({
             "items": [{
                 "item_id": "gmail",
-                "provider_id": crate::device_assistant::GMAIL_WEB_HANDOFF_PROVIDER_ID,
+                "provider_id": crate::ai_assistant::GMAIL_WEB_HANDOFF_PROVIDER_ID,
                 "tool_name": "prepare_gmail_draft",
                 "expected_effect": "write_external_draft",
                 "resource_scope": ["model:chosen"],
@@ -2697,12 +2696,12 @@ mod tests {
     #[test]
     fn exact_external_send_permission_is_separate_exact_and_one_shot() {
         use crate::{
+            ai_assistant::{GMAIL_WEB_SEND_PROVIDER_ID, SLACK_WEB_SEND_PROVIDER_ID},
             communication::test_support::{gmail_exact_send_input, slack_exact_send_input},
-            device_assistant::{GMAIL_WEB_SEND_PROVIDER_ID, SLACK_WEB_SEND_PROVIDER_ID},
         };
         use desk_agent_protocol::data_lineage::DestinationIdentity;
 
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         for (tool_name, provider_id, input, expected_destination) in [
             (
                 "send_gmail_message",

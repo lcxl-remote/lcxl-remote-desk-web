@@ -189,7 +189,7 @@ pub fn build_exact_argv_draft(
 }
 
 /// As [`build_exact_argv_draft`], with an explicit sealed I/O mode for an
-/// interactive Device Assistant execution.
+/// interactive AI Assistant execution.
 pub fn build_exact_argv_draft_with_io_mode(
     template: &SyncedCommandTemplate,
     request_wall_ms: Option<u32>,

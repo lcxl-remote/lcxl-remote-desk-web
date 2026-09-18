@@ -127,7 +127,7 @@ impl ContextAttachment {
         ] {
             validate_id(field, value)?;
         }
-        if self.surface != AgentSessionSurface::DeviceAssistant {
+        if self.surface != AgentSessionSurface::AiAssistant {
             return Err(ContextAttachmentError::InvalidSurface);
         }
         if self.display_summary.len() > MAX_ATTACHMENT_DISPLAY_SUMMARY_BYTES {
@@ -350,7 +350,7 @@ mod tests {
             client_request_id: request.into(),
             actor_id: "owner".into(),
             device_id: "device".into(),
-            surface: AgentSessionSurface::DeviceAssistant,
+            surface: AgentSessionSurface::AiAssistant,
             kind: ContextAttachmentKind::Range,
             object_ref: AttachmentObjectRef {
                 opaque_token: format!("token-{id}"),

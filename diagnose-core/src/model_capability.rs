@@ -77,7 +77,7 @@ pub fn apply_model_compatibility(
     }
     for item in inventory
         .iter_mut()
-        .filter(|item| item.capability_id == crate::device_assistant::CURRENT_SCREEN_CAPABILITY_ID)
+        .filter(|item| item.capability_id == crate::ai_assistant::CURRENT_SCREEN_CAPABILITY_ID)
     {
         item.ready = false;
         item.reason = Some(CapabilityBlockedReason::ModelIncompatible);
@@ -152,8 +152,8 @@ mod tests {
     #[test]
     fn text_model_marks_current_screen_unavailable_in_inventory() {
         let mut inventory = vec![CapabilityAvailability {
-            provider_id: crate::device_assistant::CURRENT_SCREEN_PROVIDER_ID.into(),
-            capability_id: crate::device_assistant::CURRENT_SCREEN_CAPABILITY_ID.into(),
+            provider_id: crate::ai_assistant::CURRENT_SCREEN_PROVIDER_ID.into(),
+            capability_id: crate::ai_assistant::CURRENT_SCREEN_CAPABILITY_ID.into(),
             tool_name: "read_current_screen".into(),
             compiled: true,
             enabled: true,

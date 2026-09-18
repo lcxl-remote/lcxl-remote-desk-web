@@ -6,7 +6,7 @@ import type { BackgroundTaskDto, CommandTaskDto } from '@/services/types';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import type { DeviceAssistantToolActivity } from './use-device-assistant-chat';
+import type { AiAssistantToolActivity } from './use-ai-assistant-chat';
 import { formatLocalTime } from '@/lib/local-time';
 
 export function AssistantBackgroundTasks({ open, onOpenChange, commands, providers, tools,
@@ -15,7 +15,7 @@ export function AssistantBackgroundTasks({ open, onOpenChange, commands, provide
     onOpenChange: (open: boolean) => void;
     commands: CommandTaskDto[];
     providers: BackgroundTaskDto[];
-    tools: DeviceAssistantToolActivity[];
+    tools: AiAssistantToolActivity[];
     connected: boolean;
     canCancelProvider: boolean;
     cancelling: string | null;
@@ -25,7 +25,7 @@ export function AssistantBackgroundTasks({ open, onOpenChange, commands, provide
     const [notice, setNotice] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const tasks = [
-        ...commands.map(task => ({ kind: 'command' as const, id: task.taskId, name: t('pages.deviceAssistant.tasks.command'),
+        ...commands.map(task => ({ kind: 'command' as const, id: task.taskId, name: t('pages.aiAssistant.tasks.command'),
             state: task.state, updatedAt: task.updatedAt, reference: task.taskId,
             result: task.result, truncated: task.resultTruncated, supportsCancel: connected })),
         ...providers.map(task => ({ kind: 'provider' as const, id: task.taskId, name: task.toolName,
@@ -40,38 +40,38 @@ export function AssistantBackgroundTasks({ open, onOpenChange, commands, provide
         setError(null); setNotice(null);
         try {
             await onCancel(kind, id);
-            setNotice(t('pages.deviceAssistant.tasks.cancelSent'));
+            setNotice(t('pages.aiAssistant.tasks.cancelSent'));
         } catch {
-            setError(t('pages.deviceAssistant.tasks.cancelFailed'));
+            setError(t('pages.aiAssistant.tasks.cancelFailed'));
         }
     };
     return <Sheet open={open} onOpenChange={onOpenChange}>
         <SheetContent className="flex w-full flex-col overflow-hidden sm:max-w-xl">
             <SheetHeader>
-                <SheetTitle>{t('pages.deviceAssistant.tasks.title')}</SheetTitle>
-                <SheetDescription>{t('pages.deviceAssistant.tasks.description')}</SheetDescription>
+                <SheetTitle>{t('pages.aiAssistant.tasks.title')}</SheetTitle>
+                <SheetDescription>{t('pages.aiAssistant.tasks.description')}</SheetDescription>
             </SheetHeader>
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto py-4">
                 {notice && <p role="status" className="text-sm text-muted-foreground">{notice}</p>}
                 {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-                {!connected && <p className="text-sm text-muted-foreground">{t('pages.deviceAssistant.tasks.offline')}</p>}
-                {tasks.length === 0 && <p className="text-sm text-muted-foreground">{t('pages.deviceAssistant.tasks.empty')}</p>}
+                {!connected && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.tasks.offline')}</p>}
+                {tasks.length === 0 && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.tasks.empty')}</p>}
                 {tasks.map(task => <section key={`${task.kind}:${task.id}`} className="space-y-2 rounded-md border p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm font-medium">{task.name}</p>
-                        <Badge variant="outline">{t(`pages.deviceAssistant.backgroundState.${task.state}`)}</Badge>
+                        <Badge variant="outline">{t(`pages.aiAssistant.backgroundState.${task.state}`)}</Badge>
                     </div>
                     <p className="break-all text-xs text-muted-foreground">{task.reference}</p>
-                    <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.backgroundUpdated', { time: formatLocalTime(task.updatedAt) })}</p>
-                    {task.result != null ? <Disclosure title={<>{t('pages.deviceAssistant.tasks.result')}</>} summaryClassName="cursor-pointer text-sm">
+                    <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.backgroundUpdated', { time: formatLocalTime(task.updatedAt) })}</p>
+                    {task.result != null ? <Disclosure title={<>{t('pages.aiAssistant.tasks.result')}</>} summaryClassName="cursor-pointer text-sm">
 
                         <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">{task.result}</pre>
-                        {task.truncated && <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.tasks.truncated')}</p>}
-                    </Disclosure> : <p className="text-xs text-muted-foreground">{t('pages.deviceAssistant.tasks.noResult')}</p>}
+                        {task.truncated && <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.tasks.truncated')}</p>}
+                    </Disclosure> : <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.tasks.noResult')}</p>}
                     {task.supportsCancel && ['running', 'outcome_unknown'].includes(task.state) && <Button type="button" size="sm" variant="outline"
                         disabled={cancelling !== null} onClick={() => void cancel(task.kind, task.id)}>
                         {cancelling === `${task.kind}:${task.id}` && <LoaderCircle className="mr-1 h-4 w-4 animate-spin" aria-hidden="true" />}
-                        {t('pages.deviceAssistant.tasks.cancel')}
+                        {t('pages.aiAssistant.tasks.cancel')}
                     </Button>}
                 </section>)}
             </div>

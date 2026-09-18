@@ -2,7 +2,7 @@ import { Disclosure } from '@/components/ui/disclosure';
 import { useState } from 'react';
 import { CheckCircle2, CircleHelp, Loader2, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { DeviceAssistantToolActivity } from './use-device-assistant-chat';
+import type { AiAssistantToolActivity } from './use-ai-assistant-chat';
 import { hasUnknownActionResult } from './action-result-status';
 
 function formatPayload(value: string) {
@@ -10,7 +10,7 @@ function formatPayload(value: string) {
     catch { return value; }
 }
 
-function batchResult(tool: DeviceAssistantToolActivity) {
+function batchResult(tool: AiAssistantToolActivity) {
     if (!['execute_ui_actions', 'send_background_input'].includes(tool.name) || !tool.output) return null;
     try {
         let value = JSON.parse(tool.output);
@@ -34,11 +34,11 @@ function batchResult(tool: DeviceAssistantToolActivity) {
     return null;
 }
 
-export function AssistantToolCall({ tool, running }: { tool?: DeviceAssistantToolActivity; running: boolean }) {
+export function AssistantToolCall({ tool, running }: { tool?: AiAssistantToolActivity; running: boolean }) {
     const { t } = useTranslation();
     const [open, setOpen] = useState(false);
     if (!tool) return null;
-    const prefix = 'pages.deviceAssistant.toolCall.';
+    const prefix = 'pages.aiAssistant.toolCall.';
     const batch = batchResult(tool);
     const outcomeUnknown = hasUnknownActionResult(tool.output, tool.callId);
     const status = tool.status === 'running' && !running ? 'missing' : tool.status;
@@ -56,7 +56,7 @@ export function AssistantToolCall({ tool, running }: { tool?: DeviceAssistantToo
         </>} summaryClassName="cursor-pointer select-none break-words text-sm [overflow-wrap:anywhere]">
 
         {open && <div className="mt-3 min-w-0 space-y-3 text-xs">
-            {tool.permissionReason && <p className="whitespace-pre-wrap break-words">{t('pages.deviceAssistant.permissionReasonLabel', { reason: tool.permissionReason })}</p>}
+            {tool.permissionReason && <p className="whitespace-pre-wrap break-words">{t('pages.aiAssistant.permissionReasonLabel', { reason: tool.permissionReason })}</p>}
             <div><p className="mb-1 font-medium">{t(`${prefix}input`)}</p>
                 <pre className="max-h-80 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere]">{tool.name === 'unknown' ? t(`${prefix}missingInput`) : formatPayload(tool.argumentsJson)}</pre></div>
             <div><p className="mb-1 font-medium">{t(`${prefix}output`)}</p>

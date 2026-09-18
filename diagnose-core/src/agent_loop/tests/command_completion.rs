@@ -63,7 +63,7 @@ impl TurnSink for NoProvisionalText {
 async fn check_completion_usage(with_usage: bool, invalid_count: usize) {
     let sess = MemSession::default();
     let mut session = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "now");
-    session.surface = crate::session::AgentSessionSurface::DeviceAssistant;
+    session.surface = crate::session::AgentSessionSurface::AiAssistant;
     session.input_revision = 1;
     session.latest_input_seq = 1;
     session.chain_id = "original-chain".into();

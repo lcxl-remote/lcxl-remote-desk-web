@@ -79,7 +79,7 @@ fn signaling_type_connection_removed_wire_format_is_stable() {
 /// and a manager / host on mismatched builds would otherwise desync, with the
 /// frame silently collapsing to `SignalingType::Unknown`. The ask (620) routes
 /// through the AI authorizer branch and the result (621) through the plain
-/// host → control relay branch, exactly like the copilot ask/event pair.
+/// host → control relay branch, exactly like the assistant ask/event pair.
 #[test]
 fn terminal_complete_signaling_discriminants_are_stable() {
     assert_eq!(SignalingType::GenerateTerminalCompletions as i32, 620);

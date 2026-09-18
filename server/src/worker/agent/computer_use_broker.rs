@@ -44,15 +44,15 @@ use desk_agent_protocol::computer_use::{
 };
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability, ScreenCaptureParams};
 #[cfg(target_os = "macos")]
-use desk_diagnose_core::device_assistant::MACOS_ACCESSIBILITY_ADAPTER_ID;
+use desk_diagnose_core::ai_assistant::MACOS_ACCESSIBILITY_ADAPTER_ID;
 #[cfg(not(target_os = "macos"))]
-use desk_diagnose_core::device_assistant::WINDOWS_UIA_ADAPTER_ID;
-use desk_diagnose_core::device_assistant::{
+use desk_diagnose_core::ai_assistant::WINDOWS_UIA_ADAPTER_ID;
+use desk_diagnose_core::ai_assistant::{
     CURRENT_SCREEN_ADAPTER_ID, DESKTOP_SESSION_ADAPTER_ID, FILE_ARTIFACT_ADAPTER_ID,
     FILE_WORKSPACE_ADAPTER_ID, IWORK_ADAPTER_VERSION, OFFICE_EXCEL_ADAPTER_ID,
     OUTLOOK_NEW_MAILTO_ADAPTER_VERSION, SPREADSHEET_FILE_ADAPTER_ID, SYSTEM_COMMAND_ADAPTER_ID,
     SYSTEM_DIAGNOSTICS_ADAPTER_ID, TERMINAL_OUTPUT_ADAPTER_ID, WINDOWS_RAW_INPUT_ADAPTER_ID,
-    device_assistant_edge_adapter_registry,
+    ai_assistant_edge_adapter_registry,
 };
 
 use crate::model::settings::ComputerUseSettings;
@@ -1025,7 +1025,7 @@ impl ComputerUseBroker {
         allow_screen: bool,
         display_selected: bool,
     ) -> ComputerUseReadiness {
-        let edge_registry = device_assistant_edge_adapter_registry();
+        let edge_registry = ai_assistant_edge_adapter_registry();
         let session_adapter_version = edge_registry
             .adapter(DESKTOP_SESSION_ADAPTER_ID)
             .expect("compiled desktop session adapter is registered")
@@ -1494,13 +1494,17 @@ impl ComputerUseBroker {
                         Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
                     } else if !application_catalog_host_available() {
                         Some(ComputerUseReadinessReason::AdapterUnavailable)
-                    } else { None },
+                    } else {
+                        None
+                    },
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::ApplicationList,
                     adapter: ComputerUseAdapterRef {
                         kind: ComputerUseAdapterKind::NativeApplication,
-                        version: desk_diagnose_core::device_assistant::APPLICATION_CATALOG_ADAPTER_VERSION.into(),
+                        version:
+                            desk_diagnose_core::ai_assistant::APPLICATION_CATALOG_ADAPTER_VERSION
+                                .into(),
                     },
                     supported: cfg!(any(windows, target_os = "macos", target_os = "linux")),
                     ready: ceiling.observation_enabled() && application_catalog_host_available(),
@@ -1508,7 +1512,9 @@ impl ComputerUseBroker {
                         Some(ComputerUseReadinessReason::DisabledByLocalCeiling)
                     } else if !application_catalog_host_available() {
                         Some(ComputerUseReadinessReason::AdapterUnavailable)
-                    } else { None },
+                    } else {
+                        None
+                    },
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DesktopUiInspect,
@@ -1797,8 +1803,7 @@ impl ComputerUseBroker {
                     capability: Capability::FilePatchConfirmed,
                     adapter: ComputerUseAdapterRef {
                         kind: ComputerUseAdapterKind::FileSystem,
-                        version: desk_diagnose_core::device_assistant::TEXT_FILE_ADAPTER_VERSION
-                            .into(),
+                        version: desk_diagnose_core::ai_assistant::TEXT_FILE_ADAPTER_VERSION.into(),
                     },
                     supported: text_file_supported,
                     ready: text_file_supported && text_file_storage_ready && ceiling.enabled,
@@ -1814,8 +1819,7 @@ impl ComputerUseBroker {
                     capability: Capability::FileDeleteConfirmed,
                     adapter: ComputerUseAdapterRef {
                         kind: ComputerUseAdapterKind::FileSystem,
-                        version: desk_diagnose_core::device_assistant::TEXT_FILE_ADAPTER_VERSION
-                            .into(),
+                        version: desk_diagnose_core::ai_assistant::TEXT_FILE_ADAPTER_VERSION.into(),
                     },
                     supported: text_file_supported,
                     ready: text_file_supported && text_file_storage_ready && ceiling.enabled,
@@ -5366,7 +5370,7 @@ mod tests {
                 );
                 assert_eq!(
                     entry.adapter.version,
-                    desk_diagnose_core::device_assistant::TEXT_FILE_ADAPTER_VERSION
+                    desk_diagnose_core::ai_assistant::TEXT_FILE_ADAPTER_VERSION
                 );
             }
             assert!(

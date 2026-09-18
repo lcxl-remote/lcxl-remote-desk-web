@@ -2,18 +2,18 @@
 
 use desk_agent_protocol::{
     AgentError, AgentErrorKind,
+    ai_assistant::{AiAssistantObjectContextOperation, AiAssistantObjectContextUpdate},
     computer_use::{ObjectKind, ObjectRef},
     data_lineage::{
         ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance,
         DestinationIdentity, RetentionBoundary, Sensitivity,
     },
-    device_assistant::{DeviceAssistantObjectContextOperation, DeviceAssistantObjectContextUpdate},
 };
 use sha2::{Digest, Sha256};
 
 use crate::{
+    ai_assistant::*,
     context_attachment::*,
-    device_assistant::*,
     session::{AgentSessionSurface, PersistedAgentSession},
 };
 
@@ -35,11 +35,11 @@ pub struct ObjectContextBuild<'a> {
 }
 
 pub fn build_object_context_mutation(
-    update: &DeviceAssistantObjectContextUpdate,
+    update: &AiAssistantObjectContextUpdate,
     context: ObjectContextBuild<'_>,
 ) -> Result<ObjectContextMutation, AgentError> {
     update.validate().map_err(|_| invalid())?;
-    use DeviceAssistantObjectContextOperation::*;
+    use AiAssistantObjectContextOperation::*;
     match &update.operation {
         DecideDirectory { .. } | RevokeDirectory { .. } | SelectDirectory { .. } => Err(invalid()),
         Detach { attachment_id } => Ok(ObjectContextMutation::Detach {
@@ -124,7 +124,7 @@ pub fn build_read_attachment(
         client_request_id: client_request_id.into(),
         actor_id: context.actor_id.into(),
         device_id: context.device_id.into(),
-        surface: AgentSessionSurface::DeviceAssistant,
+        surface: AgentSessionSurface::AiAssistant,
         kind,
         object_ref: AttachmentObjectRef {
             opaque_token: serde_json::to_string(object_ref).map_err(|_| invalid())?,

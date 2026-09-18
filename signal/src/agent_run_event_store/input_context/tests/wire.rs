@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::remote_tool_edge::{
-    SignalDeviceAssistantTools, SignalRemoteToolObserver, SignalRemoteToolPendingStore,
+    SignalAiAssistantTools, SignalRemoteToolObserver, SignalRemoteToolPendingStore,
 };
 use desk_agent_protocol::{
     AgentOutcome, ContextKind, ReadContextInput,
@@ -12,7 +12,7 @@ use desk_agent_protocol::{
     remote_tool::{RemoteToolOutput, RemoteToolRequest, RemoteToolResponse},
 };
 use desk_diagnose_core::{
-    chunk::chunk_bytes, device_assistant::device_assistant_provider_registry, seam::ToolSeam,
+    ai_assistant::ai_assistant_provider_registry, chunk::chunk_bytes, seam::ToolSeam,
 };
 use desk_signal_facade::{
     model::{
@@ -176,9 +176,9 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             )
             .unwrap();
         let reference: ObjectRef = serde_json::from_str(&object.object_ref.opaque_token).unwrap();
-        let tools = SignalDeviceAssistantTools::new(
+        let tools = SignalAiAssistantTools::new(
             store.db.clone(),
-            device_assistant_provider_registry(),
+            ai_assistant_provider_registry(),
             map.clone(),
             pending,
             host,
@@ -223,7 +223,7 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             CapabilityGrantLimits, CapabilityGrantUsePolicy, CapabilityRiskTier,
         };
         use sha2::{Digest, Sha256};
-        let registry = device_assistant_provider_registry();
+        let registry = ai_assistant_provider_registry();
         let capability = registry.capability_for_tool(&call.name).unwrap();
         let provider = registry
             .provider_for_capability(&capability.wire.capability_id)

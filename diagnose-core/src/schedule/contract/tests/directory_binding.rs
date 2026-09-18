@@ -48,7 +48,7 @@ fn saved_directory_requires_current_approval_and_exact_device_object() {
             },
             "2026-09-14T00:00:00Z",
         );
-        session.adopt_client_metadata(Some("intent"), AgentSessionSurface::DeviceAssistant);
+        session.adopt_client_metadata(Some("intent"), AgentSessionSurface::AiAssistant);
         let subject = FileScopeSubject {
             actor_id: "owner".into(),
             device_id: "device-1".into(),

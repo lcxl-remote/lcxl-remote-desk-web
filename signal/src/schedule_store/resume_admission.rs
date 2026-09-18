@@ -132,7 +132,7 @@ async fn lock_action_session_inner(
             || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
             || session.active_control_connection_id.is_some()
             || !session.turn_state.is_active()
-            || session.surface != AgentSessionSurface::DeviceAssistant
+            || session.surface != AgentSessionSurface::AiAssistant
             || row
                 .lease_deadline
                 .is_none_or(|deadline| deadline.timestamp_millis() <= now)
@@ -150,7 +150,7 @@ pub(crate) async fn fresh_action_authority_on(
     session: &PersistedAgentSession,
 ) -> Result<super::CurrentTaskAuthority, DbErr> {
     if session.trigger_origin != TriggerOrigin::ScheduledTask
-        || session.surface != AgentSessionSurface::DeviceAssistant
+        || session.surface != AgentSessionSurface::AiAssistant
         || session.input_revision != 1
         || session.lease_token == 0
         || session.current_request_id.as_deref() != Some(session.conversation_id.as_str())

@@ -177,11 +177,11 @@ export function DeskControlBar({
                             <TooltipTrigger asChild>
                                 <Button className={`controlButton ${assistantOpen ? "bg-white/20" : ""}`} variant="ghost"
                                     onClick={onToggleAssistant} aria-pressed={!!assistantOpen}
-                                    aria-label={t("pages.deskDashboard.deviceAssistant")}>
+                                    aria-label={t("pages.deskDashboard.aiAssistant")}>
                                     <AiAssistantIcon />
                                 </Button>
                             </TooltipTrigger>
-                            <TooltipContent>{t("pages.deskDashboard.deviceAssistant")}</TooltipContent>
+                            <TooltipContent>{t("pages.deskDashboard.aiAssistant")}</TooltipContent>
                         </Tooltip>
                     )}
                     {restricted.isRestricted && (

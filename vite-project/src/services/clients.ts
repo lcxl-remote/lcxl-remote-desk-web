@@ -5,7 +5,7 @@
 
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, GetContextManagementQueryResponse, UpdateContextManagementMutationRequest, UpdateContextManagementMutationResponse, GetScheduleBudgetPolicyQueryResponse, UpdateScheduleBudgetPolicyMutationRequest, UpdateScheduleBudgetPolicyMutationResponse, GetWebSearchQueryResponse, UpdateWebSearchMutationRequest, UpdateWebSearchMutationResponse, TestWebSearchMutationRequest, TestWebSearchMutationResponse, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, GetBrowserExtensionPairingQueryResponse, GetBrowserExtensionPairing500, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, OpenExecPtyCarrierQueryResponse, RetryLocalFileRecoveryCleanupMutationResponse, ConfirmLocalFileRecoveryClockMutationRequest, ConfirmLocalFileRecoveryClockMutationResponse, DiscardLocalFileRecoveryMutationRequest, DiscardLocalFileRecoveryMutationResponse, ExportLocalFileRecoveryMutationRequest, ExportLocalFileRecoveryMutationResponse, UpdateLocalFileRecoveryPolicyMutationRequest, UpdateLocalFileRecoveryPolicyMutationResponse, QueryLocalFileRecoveryMutationRequest, QueryLocalFileRecoveryMutationResponse, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, UpdateComputerUseApplicationPolicyMutationRequest, UpdateComputerUseApplicationPolicyMutationResponse, QueryComputerUseApplicationPolicyMutationResponse, UpdateComputerUseCommunicationPolicyMutationRequest, UpdateComputerUseCommunicationPolicyMutationResponse, QueryComputerUseCommunicationPolicyMutationResponse, QueryDeviceAssistantSettingsQueryResponse, UpdateDeviceAssistantSettingsMutationRequest, UpdateDeviceAssistantSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetDeviceAssistantSessionQueryResponse, GetDeviceAssistantSessionQueryParams, GetAssistantAttachmentQueryResponse, GetAssistantAttachmentQueryParams, ReadAssistantAttachmentMutationRequest, ReadAssistantAttachmentMutationResponse, ListAssistantAttachmentsQueryResponse, ListAssistantAttachmentsQueryParams, DeleteAssistantAttachmentsMutationRequest, DeleteAssistantAttachmentsMutationResponse, CancelDeviceAssistantBackgroundTaskMutationRequest, CancelDeviceAssistantBackgroundTaskMutationResponse, RevokeDeviceAssistantCapabilityGrantMutationRequest, RevokeDeviceAssistantCapabilityGrantMutationResponse, DeleteDeviceAssistantSessionMutationRequest, DeleteDeviceAssistantSessionMutationResponse, GetAssistantImageQueryResponse, GetAssistantImageQueryParams, GetAssistantImage404, DeleteAssistantImageMutationResponse, DeleteAssistantImageQueryParams, ListAssistantImagesQueryResponse, ListAssistantImagesQueryParams, DecideDeviceAssistantPermissionMutationRequest, DecideDeviceAssistantPermissionMutationResponse, ListDeviceAssistantSessionsQueryResponse, ListDeviceAssistantSessionsQueryParams, RetryFileRecoveryCleanupMutationRequest, RetryFileRecoveryCleanupMutationResponse, ListFileRecoveryCleanupQueryResponse, ListFileRecoveryCleanupQueryParams, ExportDeviceFileRecoveryMutationRequest, ExportDeviceFileRecoveryMutationResponse, ManageDeviceFileRecoveryMutationRequest, ManageDeviceFileRecoveryMutationResponse, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, GetContextManagementQueryResponse, UpdateContextManagementMutationRequest, UpdateContextManagementMutationResponse, GetScheduleBudgetPolicyQueryResponse, UpdateScheduleBudgetPolicyMutationRequest, UpdateScheduleBudgetPolicyMutationResponse, GetWebSearchQueryResponse, UpdateWebSearchMutationRequest, UpdateWebSearchMutationResponse, TestWebSearchMutationRequest, TestWebSearchMutationResponse, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, GetBrowserExtensionPairingQueryResponse, GetBrowserExtensionPairing500, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, OpenExecPtyCarrierQueryResponse, RetryLocalFileRecoveryCleanupMutationResponse, ConfirmLocalFileRecoveryClockMutationRequest, ConfirmLocalFileRecoveryClockMutationResponse, DiscardLocalFileRecoveryMutationRequest, DiscardLocalFileRecoveryMutationResponse, ExportLocalFileRecoveryMutationRequest, ExportLocalFileRecoveryMutationResponse, UpdateLocalFileRecoveryPolicyMutationRequest, UpdateLocalFileRecoveryPolicyMutationResponse, QueryLocalFileRecoveryMutationRequest, QueryLocalFileRecoveryMutationResponse, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiAssistantSettingsQueryResponse, UpdateAiAssistantSettingsMutationRequest, UpdateAiAssistantSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, UpdateComputerUseApplicationPolicyMutationRequest, UpdateComputerUseApplicationPolicyMutationResponse, QueryComputerUseApplicationPolicyMutationResponse, UpdateComputerUseCommunicationPolicyMutationRequest, UpdateComputerUseCommunicationPolicyMutationResponse, QueryComputerUseCommunicationPolicyMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, GetAiAssistantSessionQueryResponse, GetAiAssistantSessionQueryParams, GetAssistantAttachmentQueryResponse, GetAssistantAttachmentQueryParams, ReadAssistantAttachmentMutationRequest, ReadAssistantAttachmentMutationResponse, ListAssistantAttachmentsQueryResponse, ListAssistantAttachmentsQueryParams, DeleteAssistantAttachmentsMutationRequest, DeleteAssistantAttachmentsMutationResponse, CancelAiAssistantBackgroundTaskMutationRequest, CancelAiAssistantBackgroundTaskMutationResponse, RevokeAiAssistantCapabilityGrantMutationRequest, RevokeAiAssistantCapabilityGrantMutationResponse, DeleteAiAssistantSessionMutationRequest, DeleteAiAssistantSessionMutationResponse, GetAssistantImageQueryResponse, GetAssistantImageQueryParams, GetAssistantImage404, DeleteAssistantImageMutationResponse, DeleteAssistantImageQueryParams, ListAssistantImagesQueryResponse, ListAssistantImagesQueryParams, DecideAiAssistantPermissionMutationRequest, DecideAiAssistantPermissionMutationResponse, ListAiAssistantSessionsQueryResponse, ListAiAssistantSessionsQueryParams, RetryFileRecoveryCleanupMutationRequest, RetryFileRecoveryCleanupMutationResponse, ListFileRecoveryCleanupQueryResponse, ListFileRecoveryCleanupQueryParams, ExportDeviceFileRecoveryMutationRequest, ExportDeviceFileRecoveryMutationResponse, ManageDeviceFileRecoveryMutationRequest, ManageDeviceFileRecoveryMutationResponse, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 
 function getGetContextManagementUrl() {
   const res = { method: 'GET', url: `/api/admin/system/ai-context-management` as const }
@@ -692,6 +692,42 @@ export async function updateSettings(data: UpdateSettingsMutationRequest, config
   return res.data
 }
 
+function getQueryAiAssistantSettingsUrl() {
+  const res = { method: 'GET', url: `/api/desk/settings/ai-assistant` as const }
+  return res
+}
+
+/**
+ * @summary Query the authoritative device-owned AI Assistant switch
+ * {@link /api/desk/settings/ai-assistant}
+ */
+export async function queryAiAssistantSettings(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<QueryAiAssistantSettingsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryAiAssistantSettingsUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUpdateAiAssistantSettingsUrl() {
+  const res = { method: 'POST', url: `/api/desk/settings/ai-assistant` as const }
+  return res
+}
+
+/**
+ * @summary Compare-and-set the authoritative device-owned AI Assistant switch
+ * {@link /api/desk/settings/ai-assistant}
+ */
+export async function updateAiAssistantSettings(data: UpdateAiAssistantSettingsMutationRequest, config: Partial<RequestConfig<UpdateAiAssistantSettingsMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateAiAssistantSettingsMutationResponse, ResponseErrorConfig<Error>, UpdateAiAssistantSettingsMutationRequest>({ method : "POST", url : getUpdateAiAssistantSettingsUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
 function getQueryAiPolicySettingsUrl() {
   const res = { method: 'GET', url: `/api/desk/settings/ai-policy` as const }
   return res
@@ -833,42 +869,6 @@ export async function queryComputerUseCommunicationPolicy(config: Partial<Reques
 
 
   const res = await request<QueryComputerUseCommunicationPolicyMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getQueryComputerUseCommunicationPolicyUrl().url.toString(), ... requestConfig })
-  return res.data
-}
-
-function getQueryDeviceAssistantSettingsUrl() {
-  const res = { method: 'GET', url: `/api/desk/settings/device-assistant` as const }
-  return res
-}
-
-/**
- * @summary Query the authoritative device-owned Device Assistant switch
- * {@link /api/desk/settings/device-assistant}
- */
-export async function queryDeviceAssistantSettings(config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<QueryDeviceAssistantSettingsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryDeviceAssistantSettingsUrl().url.toString(), ... requestConfig })
-  return res.data
-}
-
-function getUpdateDeviceAssistantSettingsUrl() {
-  const res = { method: 'POST', url: `/api/desk/settings/device-assistant` as const }
-  return res
-}
-
-/**
- * @summary Compare-and-set the authoritative device-owned Device Assistant switch
- * {@link /api/desk/settings/device-assistant}
- */
-export async function updateDeviceAssistantSettings(data: UpdateDeviceAssistantSettingsMutationRequest, config: Partial<RequestConfig<UpdateDeviceAssistantSettingsMutationRequest>> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-  const requestData = data
-
-  const res = await request<UpdateDeviceAssistantSettingsMutationResponse, ResponseErrorConfig<Error>, UpdateDeviceAssistantSettingsMutationRequest>({ method : "POST", url : getUpdateDeviceAssistantSettingsUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
@@ -1358,31 +1358,31 @@ export async function getModelUsage(params?: GetModelUsageQueryParams, config: P
   return res.data
 }
 
-function getGetDeviceAssistantSessionUrl() {
-  const res = { method: 'GET', url: `/api/my/device-assistant-session` as const }
+function getGetAiAssistantSessionUrl() {
+  const res = { method: 'GET', url: `/api/my/ai-assistant-session` as const }
   return res
 }
 
 /**
- * @summary Read a Device Assistant conversation snapshot (browser view)
- * {@link /api/my/device-assistant-session}
+ * @summary Read a AI Assistant conversation snapshot (browser view)
+ * {@link /api/my/ai-assistant-session}
  */
-export async function getDeviceAssistantSession(params?: GetDeviceAssistantSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export async function getAiAssistantSession(params?: GetAiAssistantSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
 
 
-  const res = await request<GetDeviceAssistantSessionQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetDeviceAssistantSessionUrl().url.toString(), params, ... requestConfig })
+  const res = await request<GetAiAssistantSessionQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetAiAssistantSessionUrl().url.toString(), params, ... requestConfig })
   return res.data
 }
 
 function getGetAssistantAttachmentUrl() {
-  const res = { method: 'GET', url: `/api/my/device-assistant-session/attachment` as const }
+  const res = { method: 'GET', url: `/api/my/ai-assistant-session/attachment` as const }
   return res
 }
 
 /**
- * {@link /api/my/device-assistant-session/attachment}
+ * {@link /api/my/ai-assistant-session/attachment}
  */
 export async function getAssistantAttachment(params: GetAssistantAttachmentQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
@@ -1394,12 +1394,12 @@ export async function getAssistantAttachment(params: GetAssistantAttachmentQuery
 }
 
 function getReadAssistantAttachmentUrl() {
-  const res = { method: 'POST', url: `/api/my/device-assistant-session/attachment/read` as const }
+  const res = { method: 'POST', url: `/api/my/ai-assistant-session/attachment/read` as const }
   return res
 }
 
 /**
- * {@link /api/my/device-assistant-session/attachment/read}
+ * {@link /api/my/ai-assistant-session/attachment/read}
  */
 export async function readAssistantAttachment(data: ReadAssistantAttachmentMutationRequest, config: Partial<RequestConfig<ReadAssistantAttachmentMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
@@ -1411,12 +1411,12 @@ export async function readAssistantAttachment(data: ReadAssistantAttachmentMutat
 }
 
 function getListAssistantAttachmentsUrl() {
-  const res = { method: 'GET', url: `/api/my/device-assistant-session/attachments` as const }
+  const res = { method: 'GET', url: `/api/my/ai-assistant-session/attachments` as const }
   return res
 }
 
 /**
- * {@link /api/my/device-assistant-session/attachments}
+ * {@link /api/my/ai-assistant-session/attachments}
  */
 export async function listAssistantAttachments(params: ListAssistantAttachmentsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
@@ -1428,12 +1428,12 @@ export async function listAssistantAttachments(params: ListAssistantAttachmentsQ
 }
 
 function getDeleteAssistantAttachmentsUrl() {
-  const res = { method: 'POST', url: `/api/my/device-assistant-session/attachments/delete` as const }
+  const res = { method: 'POST', url: `/api/my/ai-assistant-session/attachments/delete` as const }
   return res
 }
 
 /**
- * {@link /api/my/device-assistant-session/attachments/delete}
+ * {@link /api/my/ai-assistant-session/attachments/delete}
  */
 export async function deleteAssistantAttachments(data: DeleteAssistantAttachmentsMutationRequest, config: Partial<RequestConfig<DeleteAssistantAttachmentsMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
@@ -1444,67 +1444,67 @@ export async function deleteAssistantAttachments(data: DeleteAssistantAttachment
   return res.data
 }
 
-function getCancelDeviceAssistantBackgroundTaskUrl() {
-  const res = { method: 'POST', url: `/api/my/device-assistant-session/background-task/cancel` as const }
+function getCancelAiAssistantBackgroundTaskUrl() {
+  const res = { method: 'POST', url: `/api/my/ai-assistant-session/background-task/cancel` as const }
   return res
 }
 
 /**
- * @summary Request cancellation of an authorized Device Assistant background task
- * {@link /api/my/device-assistant-session/background-task/cancel}
+ * @summary Request cancellation of an authorized AI Assistant background task
+ * {@link /api/my/ai-assistant-session/background-task/cancel}
  */
-export async function cancelDeviceAssistantBackgroundTask(data: CancelDeviceAssistantBackgroundTaskMutationRequest, config: Partial<RequestConfig<CancelDeviceAssistantBackgroundTaskMutationRequest>> & { client?: Client } = {}) {
+export async function cancelAiAssistantBackgroundTask(data: CancelAiAssistantBackgroundTaskMutationRequest, config: Partial<RequestConfig<CancelAiAssistantBackgroundTaskMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
   const requestData = data
 
-  const res = await request<CancelDeviceAssistantBackgroundTaskMutationResponse, ResponseErrorConfig<Error>, CancelDeviceAssistantBackgroundTaskMutationRequest>({ method : "POST", url : getCancelDeviceAssistantBackgroundTaskUrl().url.toString(), data : requestData, ... requestConfig })
+  const res = await request<CancelAiAssistantBackgroundTaskMutationResponse, ResponseErrorConfig<Error>, CancelAiAssistantBackgroundTaskMutationRequest>({ method : "POST", url : getCancelAiAssistantBackgroundTaskUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
-function getRevokeDeviceAssistantCapabilityGrantUrl() {
-  const res = { method: 'POST', url: `/api/my/device-assistant-session/capability-grant/revoke` as const }
+function getRevokeAiAssistantCapabilityGrantUrl() {
+  const res = { method: 'POST', url: `/api/my/ai-assistant-session/capability-grant/revoke` as const }
   return res
 }
 
 /**
- * @summary Revoke one owner-scoped Device Assistant capability grant
- * {@link /api/my/device-assistant-session/capability-grant/revoke}
+ * @summary Revoke one owner-scoped AI Assistant capability grant
+ * {@link /api/my/ai-assistant-session/capability-grant/revoke}
  */
-export async function revokeDeviceAssistantCapabilityGrant(data: RevokeDeviceAssistantCapabilityGrantMutationRequest, config: Partial<RequestConfig<RevokeDeviceAssistantCapabilityGrantMutationRequest>> & { client?: Client } = {}) {
+export async function revokeAiAssistantCapabilityGrant(data: RevokeAiAssistantCapabilityGrantMutationRequest, config: Partial<RequestConfig<RevokeAiAssistantCapabilityGrantMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
   const requestData = data
 
-  const res = await request<RevokeDeviceAssistantCapabilityGrantMutationResponse, ResponseErrorConfig<Error>, RevokeDeviceAssistantCapabilityGrantMutationRequest>({ method : "POST", url : getRevokeDeviceAssistantCapabilityGrantUrl().url.toString(), data : requestData, ... requestConfig })
+  const res = await request<RevokeAiAssistantCapabilityGrantMutationResponse, ResponseErrorConfig<Error>, RevokeAiAssistantCapabilityGrantMutationRequest>({ method : "POST", url : getRevokeAiAssistantCapabilityGrantUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
-function getDeleteDeviceAssistantSessionUrl() {
-  const res = { method: 'POST', url: `/api/my/device-assistant-session/delete` as const }
+function getDeleteAiAssistantSessionUrl() {
+  const res = { method: 'POST', url: `/api/my/ai-assistant-session/delete` as const }
   return res
 }
 
 /**
- * @summary Delete a Device Assistant conversation and stop its AI turn
- * {@link /api/my/device-assistant-session/delete}
+ * @summary Delete a AI Assistant conversation and stop its AI turn
+ * {@link /api/my/ai-assistant-session/delete}
  */
-export async function deleteDeviceAssistantSession(data: DeleteDeviceAssistantSessionMutationRequest, config: Partial<RequestConfig<DeleteDeviceAssistantSessionMutationRequest>> & { client?: Client } = {}) {
+export async function deleteAiAssistantSession(data: DeleteAiAssistantSessionMutationRequest, config: Partial<RequestConfig<DeleteAiAssistantSessionMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
   const requestData = data
 
-  const res = await request<DeleteDeviceAssistantSessionMutationResponse, ResponseErrorConfig<Error>, DeleteDeviceAssistantSessionMutationRequest>({ method : "POST", url : getDeleteDeviceAssistantSessionUrl().url.toString(), data : requestData, ... requestConfig })
+  const res = await request<DeleteAiAssistantSessionMutationResponse, ResponseErrorConfig<Error>, DeleteAiAssistantSessionMutationRequest>({ method : "POST", url : getDeleteAiAssistantSessionUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
 function getGetAssistantImageUrl() {
-  const res = { method: 'GET', url: `/api/my/device-assistant-session/image` as const }
+  const res = { method: 'GET', url: `/api/my/ai-assistant-session/image` as const }
   return res
 }
 
 /**
- * {@link /api/my/device-assistant-session/image}
+ * {@link /api/my/ai-assistant-session/image}
  */
 export async function getAssistantImage(params: GetAssistantImageQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
@@ -1516,12 +1516,12 @@ export async function getAssistantImage(params: GetAssistantImageQueryParams, co
 }
 
 function getDeleteAssistantImageUrl() {
-  const res = { method: 'POST', url: `/api/my/device-assistant-session/image/delete` as const }
+  const res = { method: 'POST', url: `/api/my/ai-assistant-session/image/delete` as const }
   return res
 }
 
 /**
- * {@link /api/my/device-assistant-session/image/delete}
+ * {@link /api/my/ai-assistant-session/image/delete}
  */
 export async function deleteAssistantImage(params: DeleteAssistantImageQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
@@ -1533,12 +1533,12 @@ export async function deleteAssistantImage(params: DeleteAssistantImageQueryPara
 }
 
 function getListAssistantImagesUrl() {
-  const res = { method: 'GET', url: `/api/my/device-assistant-session/images` as const }
+  const res = { method: 'GET', url: `/api/my/ai-assistant-session/images` as const }
   return res
 }
 
 /**
- * {@link /api/my/device-assistant-session/images}
+ * {@link /api/my/ai-assistant-session/images}
  */
 export async function listAssistantImages(params: ListAssistantImagesQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
@@ -1549,39 +1549,39 @@ export async function listAssistantImages(params: ListAssistantImagesQueryParams
   return res.data
 }
 
-function getDecideDeviceAssistantPermissionUrl() {
-  const res = { method: 'POST', url: `/api/my/device-assistant-session/permission-decision` as const }
+function getDecideAiAssistantPermissionUrl() {
+  const res = { method: 'POST', url: `/api/my/ai-assistant-session/permission-decision` as const }
   return res
 }
 
 /**
- * @summary Decide one pending Device Assistant permission request
- * {@link /api/my/device-assistant-session/permission-decision}
+ * @summary Decide one pending AI Assistant permission request
+ * {@link /api/my/ai-assistant-session/permission-decision}
  */
-export async function decideDeviceAssistantPermission(data: DecideDeviceAssistantPermissionMutationRequest, config: Partial<RequestConfig<DecideDeviceAssistantPermissionMutationRequest>> & { client?: Client } = {}) {
+export async function decideAiAssistantPermission(data: DecideAiAssistantPermissionMutationRequest, config: Partial<RequestConfig<DecideAiAssistantPermissionMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
   const requestData = data
 
-  const res = await request<DecideDeviceAssistantPermissionMutationResponse, ResponseErrorConfig<Error>, DecideDeviceAssistantPermissionMutationRequest>({ method : "POST", url : getDecideDeviceAssistantPermissionUrl().url.toString(), data : requestData, ... requestConfig })
+  const res = await request<DecideAiAssistantPermissionMutationResponse, ResponseErrorConfig<Error>, DecideAiAssistantPermissionMutationRequest>({ method : "POST", url : getDecideAiAssistantPermissionUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
-function getListDeviceAssistantSessionsUrl() {
-  const res = { method: 'GET', url: `/api/my/device-assistant-sessions` as const }
+function getListAiAssistantSessionsUrl() {
+  const res = { method: 'GET', url: `/api/my/ai-assistant-sessions` as const }
   return res
 }
 
 /**
- * @summary List recent Device Assistant conversations for a device
- * {@link /api/my/device-assistant-sessions}
+ * @summary List recent AI Assistant conversations for a device
+ * {@link /api/my/ai-assistant-sessions}
  */
-export async function listDeviceAssistantSessions(params: ListDeviceAssistantSessionsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export async function listAiAssistantSessions(params: ListAiAssistantSessionsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
 
 
-  const res = await request<ListDeviceAssistantSessionsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getListDeviceAssistantSessionsUrl().url.toString(), params, ... requestConfig })
+  const res = await request<ListAiAssistantSessionsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getListAiAssistantSessionsUrl().url.toString(), params, ... requestConfig })
   return res.data
 }
 

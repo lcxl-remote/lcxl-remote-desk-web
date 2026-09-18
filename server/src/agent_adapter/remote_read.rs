@@ -1,4 +1,4 @@
-//! Edge-side execution of a central Device Assistant read Provider call.
+//! Edge-side execution of a central AI Assistant read Provider call.
 //!
 //! When the agentic loop runs centrally on the manager, the manager ships a
 //! server-stamped [`RemoteToolRequest`](desk_agent_protocol::remote_tool::RemoteToolRequest)

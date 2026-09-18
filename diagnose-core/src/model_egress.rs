@@ -1,4 +1,4 @@
-//! Fail-closed projection of Device Assistant messages into one exact model sink.
+//! Fail-closed projection of AI Assistant messages into one exact model sink.
 //!
 //! Provider dialects are deliberately downstream of this module. A caller must
 //! first authorize every dynamic message payload, then hand the returned request
@@ -379,7 +379,7 @@ impl ModelEgressPolicy {
                 media_type: "text/plain;charset=utf-8".into(),
             },
             provenance: DataProvenance {
-                source_provider_id: "device-assistant-runtime".into(),
+                source_provider_id: "ai-assistant-runtime".into(),
                 source_tool_name: "system-prompt-projector".into(),
                 source_object_id: Some(message_id.to_string()),
                 source_envelope_ids: Vec::new(),
@@ -578,7 +578,7 @@ impl std::fmt::Display for ModelEgressError {
                 "message {message_id} from {source_tool_name} is not selected for model export"
             ),
             Self::ImageNotSupported => {
-                formatter.write_str("image egress is not enabled for Device Assistant Stage 1")
+                formatter.write_str("image egress is not enabled for AI Assistant Stage 1")
             }
             Self::EmptySystemPrompt => formatter.write_str("system prompt is empty"),
             Self::EmptyInputs => formatter.write_str("model output has no source envelopes"),
@@ -1149,9 +1149,7 @@ mod tests {
             )),
         );
         let system = |catalog| {
-            crate::device_assistant::build_device_assistant_system_message_with_catalog(
-                None, catalog,
-            )
+            crate::ai_assistant::build_ai_assistant_system_message_with_catalog(None, catalog)
         };
         let first = policy
             .authorize_request(ModelRequest::text_only(

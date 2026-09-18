@@ -308,8 +308,8 @@ pub trait ModelSeam {
         None
     }
 
-    /// Exact data-egress policy for Device Assistant context transformations.
-    /// Ordinary diagnostic/copilot seams leave this unset. A strict seam must
+    /// Exact data-egress policy for AI Assistant context transformations.
+    /// Ordinary diagnostic/assistant seams leave this unset. A strict seam must
     /// also enforce the same policy inside `call`, before its transport starts.
     fn model_egress_policy(
         &self,
@@ -607,7 +607,7 @@ pub enum WaitOutcome {
 /// so a control end can never influence the work item's subject.
 #[derive(Debug, Clone)]
 pub struct ExecContext {
-    /// Frozen by the loop for Device Assistant, never inferred by an executor
+    /// Frozen by the loop for AI Assistant, never inferred by an executor
     /// from newer input. Other surfaces retain their existing authorization path.
     pub assistant_turn_fence: Option<crate::action_turn_fence::AssistantTurnFence>,
     pub conversation_id: String,

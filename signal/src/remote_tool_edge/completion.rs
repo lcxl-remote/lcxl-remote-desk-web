@@ -14,7 +14,7 @@ impl Drop for PendingWaitGuard {
     }
 }
 
-impl SignalDeviceAssistantTools {
+impl SignalAiAssistantTools {
     pub(super) async fn finish_computer_action(
         &self,
         store: &SignalCapabilityGrantStore,

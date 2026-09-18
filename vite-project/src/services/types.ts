@@ -73,6 +73,1558 @@ export type AgentError = {
     safe_for_model: boolean;
 };
 
+/**
+ * @description AI Assistant product features implemented by one server target.\n\nAuthentication, ownership, target readiness and grants remain request-time\nchecks. Clients gate every optional control independently and treat an absent\nprofile as unsupported.
+*/
+export type AiAssistantClientCapabilities = {
+    /**
+     * @type boolean
+    */
+    background_task_cancel: boolean;
+    /**
+     * @type boolean
+    */
+    capability_inventory: boolean;
+    /**
+     * @description This server exposes the dedicated one-shot exec-PTY carrier surface.\nPer-device/session readiness is still proven by a successful prepare.
+     * @type boolean
+    */
+    exec_pty: boolean;
+    /**
+     * @type boolean
+    */
+    full_session_snapshot: boolean;
+    /**
+     * @type boolean
+    */
+    grant_revoke: boolean;
+    /**
+     * @type boolean
+    */
+    object_context: boolean;
+    /**
+     * @type boolean
+    */
+    permission_decision: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schema_version: number;
+    /**
+     * @type boolean
+    */
+    turn_stream: boolean;
+};
+
+export type AiAssistantSessionSummaryDto = {
+    /**
+     * @type boolean
+    */
+    active: boolean;
+    /**
+     * @description Validated client continuation intent.
+     * @type string,null
+    */
+    conversationId?: string | null;
+    /**
+     * @type string
+    */
+    createdAt: string;
+    /**
+     * @type string,null
+    */
+    firstQuestion?: string | null;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    messageCount: number;
+    /**
+     * @description Opaque server-side selector. Authorization is rechecked when it is used.
+     * @type string
+    */
+    sessionId: string;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
+export type AiAssistantSessionListDto = {
+    /**
+     * @type array
+    */
+    sessions: AiAssistantSessionSummaryDto[];
+};
+
+export const capabilityEffectEnum = {
+    read_device: "read_device",
+    read_file: "read_file",
+    read_external: "read_external",
+    export_data: "export_data",
+    write_artifact: "write_artifact",
+    mutate_application: "mutate_application",
+    write_external_draft: "write_external_draft",
+    send_external: "send_external",
+    capture_screen: "capture_screen",
+    input_fallback: "input_fallback",
+    execute_command: "execute_command",
+    launch_application: "launch_application"
+} as const;
+
+export type CapabilityEffectEnumKey = (typeof capabilityEffectEnum)[keyof typeof capabilityEffectEnum];
+
+export type CapabilityEffect = CapabilityEffectEnumKey;
+
+export const backgroundTaskStateDtoEnum = {
+    running: "running",
+    cancel_requested: "cancel_requested",
+    succeeded: "succeeded",
+    failed: "failed",
+    cancelled: "cancelled",
+    outcome_unknown: "outcome_unknown"
+} as const;
+
+export type BackgroundTaskStateDtoEnumKey = (typeof backgroundTaskStateDtoEnum)[keyof typeof backgroundTaskStateDtoEnum];
+
+export type BackgroundTaskStateDto = BackgroundTaskStateDtoEnumKey;
+
+export type BackgroundTaskDto = {
+    /**
+     * @type string
+    */
+    callId: string;
+    /**
+     * @type string
+    */
+    capabilityId: string;
+    /**
+     * @type string
+    */
+    effect: CapabilityEffect;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    progressSequence: number;
+    /**
+     * @type string
+    */
+    providerId: string;
+    /**
+     * @type string
+    */
+    state: BackgroundTaskStateDto;
+    /**
+     * @type boolean
+    */
+    supportsCancel: boolean;
+    /**
+     * @type string
+    */
+    taskId: string;
+    /**
+     * @type string,null
+    */
+    terminalAt?: string | null;
+    /**
+     * @type string
+    */
+    toolName: string;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
+export type CapabilityGrantDto = {
+    /**
+     * @type string
+    */
+    capabilityId: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expiresAtUnixMs: number;
+    /**
+     * @type string
+    */
+    grantId: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    inputRevision: number;
+    /**
+     * @type array
+    */
+    operationScope: string[];
+    /**
+     * @type string
+    */
+    providerId: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    remainingUses: number;
+    /**
+     * @type array
+    */
+    resourceScope: string[];
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    revokedAtUnixMs?: number | null;
+    /**
+     * @type string,null
+    */
+    revokedReason?: string | null;
+    /**
+     * @type string
+    */
+    riskTier: string;
+    /**
+     * @type string
+    */
+    toolName: string;
+};
+
+export type CommandTaskDto = {
+    /**
+     * @type string
+    */
+    callId: string;
+    /**
+     * @type string
+    */
+    executionGeneration: string;
+    /**
+     * @type string,null
+    */
+    result?: string | null;
+    /**
+     * @type boolean
+    */
+    resultTruncated: boolean;
+    /**
+     * @type string
+    */
+    state: BackgroundTaskStateDto;
+    /**
+     * @type string
+    */
+    taskId: string;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
+/**
+ * @description Browser-safe attachment metadata. Opaque tokens, envelope digests and model\ndestination identities remain server-side; the selector only needs enough\ninformation to show provenance, expiry and whether a refresh is required.
+*/
+export type ContextAttachmentDto = {
+    /**
+     * @type string
+    */
+    capabilityId: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    createdAtUnixMs: number;
+    /**
+     * @type string
+    */
+    displaySummary: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expiresAtUnixMs: number;
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string
+    */
+    kind: string;
+    /**
+     * @type string
+    */
+    providerId: string;
+    /**
+     * @type string,null
+    */
+    staleReason?: string | null;
+    /**
+     * @type string
+    */
+    state: string;
+};
+
+export const contextNoticeKindDtoEnum = {
+    refreshed: "refreshed",
+    restricted: "restricted",
+    trimmed: "trimmed",
+    compacted: "compacted"
+} as const;
+
+export type ContextNoticeKindDtoEnumKey = (typeof contextNoticeKindDtoEnum)[keyof typeof contextNoticeKindDtoEnum];
+
+export type ContextNoticeKindDto = ContextNoticeKindDtoEnumKey;
+
+export type ContextNoticeDto = {
+    /**
+     * @type string,null
+    */
+    afterMessageId?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    checkpointGeneration?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    coveredMessageCount?: number | null;
+    /**
+     * @type string,null
+    */
+    createdAt?: string | null;
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string
+    */
+    kind: ContextNoticeKindDto;
+    /**
+     * @type string
+    */
+    turnId: string;
+};
+
+export type ContextUsageDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    limitBytes: number;
+    /**
+     * @type string
+    */
+    strategy: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    usedBytes: number;
+};
+
+export type EvidenceArtifactDto = {
+    /**
+     * @type string
+    */
+    artifactId: string;
+    /**
+     * @type string
+    */
+    digestSha256: string;
+    /**
+     * @type string
+    */
+    fileName: string;
+    /**
+     * @type string
+    */
+    mediaType: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    sizeBytes: number;
+    /**
+     * @type string
+    */
+    sourceEnvelopeId: string;
+};
+
+export type EvidenceHandoffReceiptDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    handedOffAtUnixMs: number;
+    /**
+     * @type string
+    */
+    handoffId: string;
+    /**
+     * @type string
+    */
+    preparedPayloadSha256: string;
+    /**
+     * @type string,null
+    */
+    readbackPayloadSha256?: string | null;
+    /**
+     * @type string
+    */
+    runId: string;
+    /**
+     * @type string
+    */
+    sendAuthority: string;
+    /**
+     * @type string
+    */
+    sourceEnvelopeId: string;
+    /**
+     * @type string
+    */
+    surfaceKind: string;
+    /**
+     * @type string
+    */
+    verification: string;
+};
+
+export type EvidenceNodeDto = {
+    /**
+     * @type string
+    */
+    contentKind: string;
+    /**
+     * @type string,null
+    */
+    contentSha256?: string | null;
+    /**
+     * @type string
+    */
+    envelopeDigestSha256: string;
+    /**
+     * @type string
+    */
+    envelopeId: string;
+    /**
+     * @type string,null
+    */
+    mediaType?: string | null;
+    /**
+     * @type string
+    */
+    sensitivity: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    sizeBytes: number;
+    /**
+     * @type array
+    */
+    sourceEnvelopeIds: string[];
+    /**
+     * @type string,null
+    */
+    sourceObjectId?: string | null;
+    /**
+     * @type string
+    */
+    sourceProviderId: string;
+    /**
+     * @type string
+    */
+    sourceToolName: string;
+};
+
+export type EvidenceSummaryDto = {
+    /**
+     * @type array
+    */
+    artifacts: EvidenceArtifactDto[];
+    /**
+     * @type boolean
+    */
+    graphComplete: boolean;
+    /**
+     * @type array
+    */
+    handoffReceipts: EvidenceHandoffReceiptDto[];
+    /**
+     * @type array
+    */
+    missingSourceEnvelopeIds: string[];
+    /**
+     * @type array
+    */
+    nodes: EvidenceNodeDto[];
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
+    /**
+     * @type boolean
+    */
+    truncated: boolean;
+};
+
+export type DirectoryConsentDto = {
+    /**
+     * @type string
+    */
+    canonicalPath: string;
+    /**
+     * @type string
+    */
+    purpose: string;
+    /**
+     * @type string
+    */
+    referenceExpiresAt: string;
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @type string
+    */
+    source: string;
+    /**
+     * @type string
+    */
+    state: string;
+};
+
+export type FileScopeDto = {
+    /**
+     * @type array
+    */
+    directories: DirectoryConsentDto[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
+export type SnapshotMessagePageDto = {
+    /**
+     * @type boolean
+    */
+    hasMore: boolean;
+    /**
+     * @minLength 0
+     * @type integer
+    */
+    limit: number;
+    /**
+     * @type string,null
+    */
+    nextBeforeMessageId?: string | null;
+};
+
+export type SnapshotToolCallDto = {
+    /**
+     * @type string
+    */
+    argumentsJson: string;
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string
+    */
+    name: string;
+};
+
+export type SnapshotMessageDto = {
+    /**
+     * @description Server-issued id that correlates a delayed background completion with\nthe task originally returned by `exec_command`.
+     * @type string,null
+    */
+    backgroundTaskId?: string | null;
+    /**
+     * @description Stable message id used to key and deduplicate rendered turns.
+     * @type string
+    */
+    id: string;
+    /**
+     * @description Reviewed readable reasoning; no signatures or opaque provider replay.
+     * @type string,null
+    */
+    reasoning?: string | null;
+    /**
+     * @description Wire role token. An `assistant` message is AI-generated.
+     * @type string
+    */
+    role: string;
+    /**
+     * @type string
+    */
+    text: string;
+    /**
+     * @type string,null
+    */
+    toolCallId?: string | null;
+    /**
+     * @type array | undefined
+    */
+    toolCalls?: SnapshotToolCallDto[];
+    /**
+     * @type string,null
+    */
+    turnId?: string | null;
+};
+
+export const applicationActionKindEnum = {
+    invoke: "invoke",
+    select: "select",
+    focus: "focus",
+    toggle: "toggle",
+    set_value: "set_value",
+    click: "click",
+    double_click: "double_click",
+    scroll: "scroll",
+    type_text: "type_text",
+    key_press: "key_press"
+} as const;
+
+export type ApplicationActionKindEnumKey = (typeof applicationActionKindEnum)[keyof typeof applicationActionKindEnum];
+
+export type ApplicationActionKind = ApplicationActionKindEnumKey;
+
+export const objectKindEnum = {
+    desktop_session: "desktop_session",
+    application: "application",
+    window: "window",
+    ui_element: "ui_element",
+    office_document: "office_document",
+    document: "document",
+    worksheet: "worksheet",
+    range: "range",
+    presentation: "presentation",
+    slide: "slide",
+    shape: "shape",
+    file: "file",
+    directory: "directory",
+    terminal_output: "terminal_output",
+    browser_surface: "browser_surface",
+    application_launch_target: "application_launch_target"
+} as const;
+
+export type ObjectKindEnumKey = (typeof objectKindEnum)[keyof typeof objectKindEnum];
+
+export type ObjectKind = ObjectKindEnumKey;
+
+/**
+ * @description Device-issued reference to an observed object. Desktop references follow native lifetimes.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
+*/
+export type ObjectRef = {
+    /**
+     * @description Empty for lifecycle-bound objects; RFC3339 for other object types.\nThis field never grants authority.
+     * @type string
+    */
+    expires_at: string;
+    /**
+     * @type string
+    */
+    object_kind: ObjectKind;
+    /**
+     * @type string
+    */
+    snapshot_id: string;
+    /**
+     * @type string
+    */
+    token: string;
+};
+
+/**
+ * @description Owner-reviewed application boundary for reusable native UI operations.
+*/
+export type UiApplicationScope = {
+    /**
+     * @type array
+    */
+    actions: ApplicationActionKind[];
+    /**
+     * @description Device-issued reference to an observed object. Desktop references follow native lifetimes.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
+     * @type object
+    */
+    application: ObjectRef;
+    /**
+     * @description Resolved from an observed application by the server, never model authority.
+     * @type string,null
+    */
+    application_name?: string | null;
+};
+
+export const execExecutionBasisEnum = {
+    template: "template",
+    owner_blocklist_only: "owner_blocklist_only"
+} as const;
+
+export type ExecExecutionBasisEnumKey = (typeof execExecutionBasisEnum)[keyof typeof execExecutionBasisEnum];
+
+/**
+ * @description The trust basis under which an execution draft was produced.\n\nThis is classification metadata. It is compared as part of the full draft\nbut deliberately excluded from the worker-field fingerprint.
+*/
+export type ExecExecutionBasis = ExecExecutionBasisEnumKey;
+
+/**
+ * @description Owner-visible projection of the exact persisted command plan.
+*/
+export type CommandConfirmationDto = {
+    /**
+     * @type string
+    */
+    command: string;
+    /**
+     * @type string,null
+    */
+    cwd?: string | null;
+    /**
+     * @description The trust basis under which an execution draft was produced.\n\nThis is classification metadata. It is compared as part of the full draft\nbut deliberately excluded from the worker-field fingerprint.
+     * @type string
+    */
+    executionBasis: ExecExecutionBasis;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxStderrBytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxStdoutBytes: number;
+    /**
+     * @type boolean
+    */
+    oneShot: boolean;
+    /**
+     * @type string
+    */
+    shell: string;
+    /**
+     * @type string
+    */
+    targetDeviceId: string;
+    /**
+     * @type string
+    */
+    targetSessionId: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    timeoutMs: number;
+};
+
+export const destinationIdentityKindEnum = {
+    model: "model"
+} as const;
+
+export type DestinationIdentityKindEnumKey = (typeof destinationIdentityKindEnum)[keyof typeof destinationIdentityKindEnum];
+
+export const destinationIdentityKindEnum2 = {
+    web_research: "web_research"
+} as const;
+
+export type DestinationIdentityKindEnum2Key = (typeof destinationIdentityKindEnum2)[keyof typeof destinationIdentityKindEnum2];
+
+export const destinationIdentityKindEnum3 = {
+    email_account: "email_account"
+} as const;
+
+export type DestinationIdentityKindEnum3Key = (typeof destinationIdentityKindEnum3)[keyof typeof destinationIdentityKindEnum3];
+
+export const destinationIdentityKindEnum4 = {
+    chat_account: "chat_account"
+} as const;
+
+export type DestinationIdentityKindEnum4Key = (typeof destinationIdentityKindEnum4)[keyof typeof destinationIdentityKindEnum4];
+
+export const destinationIdentityKindEnum5 = {
+    local_artifact: "local_artifact"
+} as const;
+
+export type DestinationIdentityKindEnum5Key = (typeof destinationIdentityKindEnum5)[keyof typeof destinationIdentityKindEnum5];
+
+export type DestinationIdentity = ({
+    /**
+     * @type string
+    */
+    connection_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    connection_revision: number;
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnumKey;
+    /**
+     * @type string
+    */
+    model_id: string;
+    /**
+     * @type integer, int64
+    */
+    profile_revision: number;
+} | {
+    /**
+     * @type string
+    */
+    connector_id: string;
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnum2Key;
+} | {
+    /**
+     * @type string
+    */
+    account_id: string;
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnum3Key;
+} | {
+    /**
+     * @type string
+    */
+    account_id: string;
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnum4Key;
+} | {
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnum5Key;
+    /**
+     * @type string
+    */
+    workspace_id: string;
+});
+
+export type ExternalSendAttachmentDto = {
+    /**
+     * @type string
+    */
+    fileName: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    sizeBytes: number;
+};
+
+export const communicationChannelEnum = {
+    email: "email",
+    chat: "chat",
+    local_draft: "local_draft"
+} as const;
+
+export type CommunicationChannelEnumKey = (typeof communicationChannelEnum)[keyof typeof communicationChannelEnum];
+
+export type CommunicationChannel = CommunicationChannelEnumKey;
+
+/**
+ * @description Safe owner-facing projection of a frozen exact-send request. Browser\nreferences, canonical permission JSON, credentials, and pairing secrets are\ndeliberately excluded.
+*/
+export type ExternalSendConfirmationDto = {
+    /**
+     * @type string
+    */
+    accountId: string;
+    /**
+     * @type array
+    */
+    attachments: ExternalSendAttachmentDto[];
+    /**
+     * @type string
+    */
+    bodyPlainText: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    bodySizeBytes: number;
+    /**
+     * @type string
+    */
+    channel: CommunicationChannel;
+    /**
+     * @type string
+    */
+    destination: string;
+    /**
+     * @type boolean
+    */
+    oneShot: boolean;
+    /**
+     * @type string,null
+    */
+    subject?: string | null;
+};
+
+export const applicationTargetKindEnum = {
+    executable: "executable",
+    macos_bundle: "macos_bundle",
+    windows_app_id: "windows_app_id"
+} as const;
+
+export type ApplicationTargetKindEnumKey = (typeof applicationTargetKindEnum)[keyof typeof applicationTargetKindEnum];
+
+export type ApplicationTargetKind = ApplicationTargetKindEnumKey;
+
+export type ApplicationTarget = {
+    /**
+     * @type string
+    */
+    kind: ApplicationTargetKind;
+    /**
+     * @type string
+    */
+    value: string;
+};
+
+/**
+ * @description Owner-visible native launch identity; no opaque approval token is exposed.
+*/
+export type LaunchConfirmationDto = {
+    /**
+     * @type array
+    */
+    args: string[];
+    /**
+     * @type string,null
+    */
+    cwd?: string | null;
+    /**
+     * @type boolean
+    */
+    oneShot: boolean;
+    /**
+     * @type string
+    */
+    resolvedTarget: string;
+    /**
+     * @type boolean
+    */
+    runAsAdmin: boolean;
+    /**
+     * @type object
+    */
+    target: ApplicationTarget;
+    /**
+     * @type string
+    */
+    targetDeviceId: string;
+    /**
+     * @type string
+    */
+    targetSessionId: string;
+};
+
+export const textFileChangeKindEnum = {
+    replace_all: "replace_all"
+} as const;
+
+export type TextFileChangeKindEnumKey = (typeof textFileChangeKindEnum)[keyof typeof textFileChangeKindEnum];
+
+export const textFileChangeKindEnum2 = {
+    replace_once: "replace_once"
+} as const;
+
+export type TextFileChangeKindEnum2Key = (typeof textFileChangeKindEnum2)[keyof typeof textFileChangeKindEnum2];
+
+/**
+ * @description Closed UTF-8 edits. No shell, executable patch format, or implicit overwrite.
+*/
+export type TextFileChange = ({
+    /**
+     * @type string
+    */
+    content_utf8: string;
+    /**
+     * @type string
+    */
+    kind: TextFileChangeKindEnumKey;
+} | {
+    /**
+     * @type string
+    */
+    after: string;
+    /**
+     * @type string
+    */
+    before: string;
+    /**
+     * @type string
+    */
+    kind: TextFileChangeKindEnum2Key;
+});
+
+export const textFileMutationOperationEnum = {
+    update: "update",
+    delete: "delete"
+} as const;
+
+export type TextFileMutationOperationEnumKey = (typeof textFileMutationOperationEnum)[keyof typeof textFileMutationOperationEnum];
+
+/**
+ * @description Device facts, not authorization. A recovery location must be retained even\nwhen a mutation crossed the commit point but could not be verified.
+*/
+export type TextFileMutationOperation = TextFileMutationOperationEnumKey;
+
+export type TextFileConfirmationDto = {
+    change?: (null | TextFileChange);
+    /**
+     * @type string
+    */
+    expectedSha256: string;
+    /**
+     * @type string
+    */
+    fileName: string;
+    /**
+     * @type string
+    */
+    fileResultCallId: string;
+    /**
+     * @type boolean
+    */
+    oneShot: boolean;
+    /**
+     * @description Device facts, not authorization. A recovery location must be retained even\nwhen a mutation crossed the commit point but could not be verified.
+     * @type string
+    */
+    operation: TextFileMutationOperation;
+    /**
+     * @type boolean
+    */
+    recoverable: boolean;
+};
+
+export type GrantRequestItemDto = {
+    applicationScope?: (null | UiApplicationScope);
+    commandConfirmation?: (null | CommandConfirmationDto);
+    /**
+     * @type string
+    */
+    expectedEffect: CapabilityEffect;
+    /**
+     * @type array
+    */
+    exportDestinations: DestinationIdentity[];
+    externalSendConfirmation?: (null | ExternalSendConfirmationDto);
+    /**
+     * @type string
+    */
+    itemId: string;
+    launchConfirmation?: (null | LaunchConfirmationDto);
+    /**
+     * @type array
+    */
+    operationScope: string[];
+    /**
+     * @type string
+    */
+    providerId: string;
+    /**
+     * @type string
+    */
+    reason: string;
+    /**
+     * @type array
+    */
+    resourceScope: string[];
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    suggestedMaxUses: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    suggestedTtlSeconds: number;
+    textFileConfirmation?: (null | TextFileConfirmationDto);
+    /**
+     * @type string
+    */
+    toolName: string;
+};
+
+export const permissionRequestStateDtoEnum = {
+    pending: "pending",
+    needs_revalidation: "needs_revalidation",
+    approved: "approved",
+    partially_approved: "partially_approved",
+    denied: "denied",
+    replaced: "replaced",
+    withdrawn: "withdrawn"
+} as const;
+
+export type PermissionRequestStateDtoEnumKey = (typeof permissionRequestStateDtoEnum)[keyof typeof permissionRequestStateDtoEnum];
+
+export type PermissionRequestStateDto = PermissionRequestStateDtoEnumKey;
+
+export type PermissionRequestDto = {
+    /**
+     * @type string
+    */
+    createdAt: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    inputRevision: number;
+    /**
+     * @type array
+    */
+    items: GrantRequestItemDto[];
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
+    /**
+     * @type string
+    */
+    state: PermissionRequestStateDto;
+};
+
+export const taskStatusDtoEnum = {
+    todo: "todo",
+    in_progress: "in_progress",
+    blocked: "blocked",
+    done: "done",
+    skipped: "skipped"
+} as const;
+
+export type TaskStatusDtoEnumKey = (typeof taskStatusDtoEnum)[keyof typeof taskStatusDtoEnum];
+
+export type TaskStatusDto = TaskStatusDtoEnumKey;
+
+export type TaskStatusItemDto = {
+    /**
+     * @type string
+    */
+    description: string;
+    /**
+     * @type string
+    */
+    itemId: string;
+    /**
+     * @type string
+    */
+    lastUpdatedStepId: string;
+    /**
+     * @type string,null
+    */
+    note?: string | null;
+    /**
+     * @type string
+    */
+    status: TaskStatusDto;
+};
+
+export type TaskStatusProjectionDto = {
+    /**
+     * @type array
+    */
+    items: TaskStatusItemDto[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
+/**
+ * @description Receipt correlation for independent automation run review, not a conversation write gate.
+*/
+export type UnknownOutcomeDto = {
+    /**
+     * @type string
+    */
+    actionRequestId: string;
+    /**
+     * @type string
+    */
+    executionId: string;
+    /**
+     * @type integer, int64
+    */
+    workId: number;
+    /**
+     * @type string
+    */
+    workKind: string;
+};
+
+export const contentRefKindEnum = {
+    immutable_blob: "immutable_blob"
+} as const;
+
+export type ContentRefKindEnumKey = (typeof contentRefKindEnum)[keyof typeof contentRefKindEnum];
+
+export const contentRefKindEnum2 = {
+    ephemeral_observation: "ephemeral_observation"
+} as const;
+
+export type ContentRefKindEnum2Key = (typeof contentRefKindEnum2)[keyof typeof contentRefKindEnum2];
+
+export const contentRefKindEnum3 = {
+    artifact: "artifact"
+} as const;
+
+export type ContentRefKindEnum3Key = (typeof contentRefKindEnum3)[keyof typeof contentRefKindEnum3];
+
+export type ContentRef = ({
+    /**
+     * @type string
+    */
+    blob_id: string;
+    /**
+     * @type string
+    */
+    kind: ContentRefKindEnumKey;
+    /**
+     * @type string
+    */
+    media_type: string;
+    /**
+     * @type string
+    */
+    sha256: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+} | {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expires_at_unix_ms: number;
+    /**
+     * @type string
+    */
+    kind: ContentRefKindEnum2Key;
+    /**
+     * @type string
+    */
+    observation_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+} | {
+    /**
+     * @type string
+    */
+    artifact_id: string;
+    /**
+     * @type string
+    */
+    kind: ContentRefKindEnum3Key;
+    /**
+     * @type string
+    */
+    media_type: string;
+    /**
+     * @type string
+    */
+    sha256: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+});
+
+export const visualEvidencePhaseEnum = {
+    before: "before",
+    observation: "observation",
+    after: "after"
+} as const;
+
+export type VisualEvidencePhaseEnumKey = (typeof visualEvidencePhaseEnum)[keyof typeof visualEvidencePhaseEnum];
+
+export type VisualEvidencePhase = VisualEvidencePhaseEnumKey;
+
+export const visualEvidenceStatusEnum = {
+    available: "available",
+    expired: "expired",
+    not_retained: "not_retained",
+    failed: "failed",
+    blocked: "blocked"
+} as const;
+
+export type VisualEvidenceStatusEnumKey = (typeof visualEvidenceStatusEnum)[keyof typeof visualEvidenceStatusEnum];
+
+export type VisualEvidenceStatus = VisualEvidenceStatusEnumKey;
+
+/**
+ * @description The optional preview is emitted only on the live owner stream. Durable\nsession JSON and snapshot DTOs carry metadata plus `content`, never pixels.
+*/
+export type VisualEvidenceFrame = {
+    /**
+     * @type string,null
+    */
+    application_summary?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    captured_at_unix_ms: number;
+    content?: (null | ContentRef);
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type string
+    */
+    device_id: string;
+    /**
+     * @type string,null
+    */
+    digest_sha256?: string | null;
+    /**
+     * @type string,null
+    */
+    display_summary?: string | null;
+    /**
+     * @type string
+    */
+    evidence_id: string;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    expires_at_unix_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    focus_input_revision: number;
+    /**
+     * @type string
+    */
+    frame_id: string;
+    /**
+     * @type string,null
+    */
+    media_type?: string | null;
+    /**
+     * @type string
+    */
+    phase: VisualEvidencePhase;
+    /**
+     * @description Bounded data URL already authorized for this active owner stream. It is\nnever accepted from a client and is never persisted by the session store.
+     * @type string,null
+    */
+    preview_data_url?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schema_version: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+    /**
+     * @type string
+    */
+    status: VisualEvidenceStatus;
+    /**
+     * @type string
+    */
+    tool_call_id: string;
+    /**
+     * @type string
+    */
+    turn_id: string;
+};
+
+export type AiAssistantSessionSnapshotDto = {
+    /**
+     * @description Original permission request reasons, keyed by the server-bound work ID.
+     * @type object
+    */
+    actionPermissionReasons: {
+        [key: string]: string;
+    };
+    /**
+     * @description Whether the persisted turn is still running or awaiting approval.
+     * @type boolean
+    */
+    active: boolean;
+    /**
+     * @description Running background command generation that may be cancelled.
+     * @type string,null
+    */
+    activeExecutionGeneration?: string | null;
+    /**
+     * @description Durable Provider executions that outlived their foreground wait.
+     * @type array
+    */
+    backgroundTasks: BackgroundTaskDto[];
+    /**
+     * @description Server-issued authority metadata. It never proves a call was dispatched.
+     * @type array
+    */
+    capabilityGrants: CapabilityGrantDto[];
+    /**
+     * @description Persisted command executions, including terminal results after reconnect.
+     * @type array
+    */
+    commandTasks: CommandTaskDto[];
+    /**
+     * @description Durable selection metadata only; no UI tree, cells, files or screenshots.
+     * @type array
+    */
+    contextAttachments: ContextAttachmentDto[];
+    /**
+     * @description Durable transcript metadata for context-window changes. No omitted text is exposed.
+     * @type array
+    */
+    contextNotices: ContextNoticeDto[];
+    contextUsage?: (null | ContextUsageDto);
+    /**
+     * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
+     * @type object
+    */
+    evidenceSummary: EvidenceSummaryDto;
+    /**
+     * @type object
+    */
+    fileScope: FileScopeDto;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    handledInputSeq: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    inputRevision: number;
+    /**
+     * @description Latest durably accepted user input and the model-processing watermark.
+     * @minLength 0
+     * @type integer, int64
+    */
+    latestInputSeq: number;
+    /**
+     * @description Cursor metadata for the bounded `messages` page.
+     * @type object
+    */
+    messagePage: SnapshotMessagePageDto;
+    /**
+     * @description The persisted conversation, oldest first.
+     * @type array
+    */
+    messages: SnapshotMessageDto[];
+    /**
+     * @description Model-proposed, server-normalized requests. Pending is approvable;\nNeedsRevalidation is display-only until the model replaces/reissues it.
+     * @type array
+    */
+    permissionRequests: PermissionRequestDto[];
+    /**
+     * @description AI Assistant request currently represented by the persisted turn.
+     * @type string,null
+    */
+    requestId?: string | null;
+    /**
+     * @description Monotonic session-store snapshot version used for out-of-order reconciliation.
+     * @type integer, int64
+    */
+    seq: number;
+    /**
+     * @description Opaque recovery selector; ownership is rechecked on every read or stop.
+     * @type string
+    */
+    sessionId: string;
+    taskStatusProjection?: (null | TaskStatusProjectionDto);
+    terminalError?: (null | AgentError);
+    unresolvedOutcome?: (null | UnknownOutcomeDto);
+    /**
+     * @description Recent screen observations, bound to epoch/turn/tool/frame. Durable\nsnapshots contain no pixel bytes; live previews arrive on AgentEvent.
+     * @type array
+    */
+    visualEvidence: VisualEvidenceFrame[];
+};
+
+/**
+ * @description Device-owned product switch projected to trusted central orchestrators.\n\nThe device is the only authority for this value. Central services may cache\nthe latest observed snapshot for routing and UI, but may never synthesize a\nnewer revision or treat their cache as desired state.
+*/
+export type AiAssistantSettings = {
+    /**
+     * @description The one product-level AI Assistant switch. Defaults fail closed.
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @description Monotonic device-local revision. Revision zero is the initial state.
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
+/**
+ * @description Compare-and-set request accepted by the device-local settings endpoint.
+*/
+export type AiAssistantSettingsUpdate = {
+    /**
+     * @description Exact desired product-switch value.
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @description Revision returned by the most recent authoritative device read.
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+};
+
 export const executionModeEnum = {
     suggest_only: "suggest_only",
     read_only: "read_only",
@@ -175,44 +1727,6 @@ export type AiProvenance = {
      * @type string,null
     */
     model_id?: string | null;
-};
-
-export const applicationActionKindEnum = {
-    invoke: "invoke",
-    select: "select",
-    focus: "focus",
-    toggle: "toggle",
-    set_value: "set_value",
-    click: "click",
-    double_click: "double_click",
-    scroll: "scroll",
-    type_text: "type_text",
-    key_press: "key_press"
-} as const;
-
-export type ApplicationActionKindEnumKey = (typeof applicationActionKindEnum)[keyof typeof applicationActionKindEnum];
-
-export type ApplicationActionKind = ApplicationActionKindEnumKey;
-
-export const applicationTargetKindEnum = {
-    executable: "executable",
-    macos_bundle: "macos_bundle",
-    windows_app_id: "windows_app_id"
-} as const;
-
-export type ApplicationTargetKindEnumKey = (typeof applicationTargetKindEnum)[keyof typeof applicationTargetKindEnum];
-
-export type ApplicationTargetKind = ApplicationTargetKindEnumKey;
-
-export type ApplicationTarget = {
-    /**
-     * @type string
-    */
-    kind: ApplicationTargetKind;
-    /**
-     * @type string
-    */
-    value: string;
 };
 
 export type ApprovalAckParams = {
@@ -652,86 +2166,6 @@ export type BackgroundStart = {
     path_valid: boolean;
 };
 
-export const capabilityEffectEnum = {
-    read_device: "read_device",
-    read_file: "read_file",
-    read_external: "read_external",
-    export_data: "export_data",
-    write_artifact: "write_artifact",
-    mutate_application: "mutate_application",
-    write_external_draft: "write_external_draft",
-    send_external: "send_external",
-    capture_screen: "capture_screen",
-    input_fallback: "input_fallback",
-    execute_command: "execute_command",
-    launch_application: "launch_application"
-} as const;
-
-export type CapabilityEffectEnumKey = (typeof capabilityEffectEnum)[keyof typeof capabilityEffectEnum];
-
-export type CapabilityEffect = CapabilityEffectEnumKey;
-
-export const backgroundTaskStateDtoEnum = {
-    running: "running",
-    cancel_requested: "cancel_requested",
-    succeeded: "succeeded",
-    failed: "failed",
-    cancelled: "cancelled",
-    outcome_unknown: "outcome_unknown"
-} as const;
-
-export type BackgroundTaskStateDtoEnumKey = (typeof backgroundTaskStateDtoEnum)[keyof typeof backgroundTaskStateDtoEnum];
-
-export type BackgroundTaskStateDto = BackgroundTaskStateDtoEnumKey;
-
-export type BackgroundTaskDto = {
-    /**
-     * @type string
-    */
-    callId: string;
-    /**
-     * @type string
-    */
-    capabilityId: string;
-    /**
-     * @type string
-    */
-    effect: CapabilityEffect;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    progressSequence: number;
-    /**
-     * @type string
-    */
-    providerId: string;
-    /**
-     * @type string
-    */
-    state: BackgroundTaskStateDto;
-    /**
-     * @type boolean
-    */
-    supportsCancel: boolean;
-    /**
-     * @type string
-    */
-    taskId: string;
-    /**
-     * @type string,null
-    */
-    terminalAt?: string | null;
-    /**
-     * @type string
-    */
-    toolName: string;
-    /**
-     * @type string
-    */
-    updatedAt: string;
-};
-
 export type BrowserExtensionPairing = {
     /**
      * @type string
@@ -787,61 +2221,6 @@ export type CancelWaylandRequest = {
      * @type string
     */
     operation_id: string;
-};
-
-export type CapabilityGrantDto = {
-    /**
-     * @type string
-    */
-    capabilityId: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    expiresAtUnixMs: number;
-    /**
-     * @type string
-    */
-    grantId: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    inputRevision: number;
-    /**
-     * @type array
-    */
-    operationScope: string[];
-    /**
-     * @type string
-    */
-    providerId: string;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    remainingUses: number;
-    /**
-     * @type array
-    */
-    resourceScope: string[];
-    /**
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    revokedAtUnixMs?: number | null;
-    /**
-     * @type string,null
-    */
-    revokedReason?: string | null;
-    /**
-     * @type string
-    */
-    riskTier: string;
-    /**
-     * @type string
-    */
-    toolName: string;
 };
 
 export type CapabilityGrantLimits = {
@@ -927,109 +2306,6 @@ export type CollectionPolicySettingsUpdate = {
     */
     allow_screen?: boolean | null;
 };
-
-export const execExecutionBasisEnum = {
-    template: "template",
-    owner_blocklist_only: "owner_blocklist_only"
-} as const;
-
-export type ExecExecutionBasisEnumKey = (typeof execExecutionBasisEnum)[keyof typeof execExecutionBasisEnum];
-
-/**
- * @description The trust basis under which an execution draft was produced.\n\nThis is classification metadata. It is compared as part of the full draft\nbut deliberately excluded from the worker-field fingerprint.
-*/
-export type ExecExecutionBasis = ExecExecutionBasisEnumKey;
-
-/**
- * @description Owner-visible projection of the exact persisted command plan.
-*/
-export type CommandConfirmationDto = {
-    /**
-     * @type string
-    */
-    command: string;
-    /**
-     * @type string,null
-    */
-    cwd?: string | null;
-    /**
-     * @description The trust basis under which an execution draft was produced.\n\nThis is classification metadata. It is compared as part of the full draft\nbut deliberately excluded from the worker-field fingerprint.
-     * @type string
-    */
-    executionBasis: ExecExecutionBasis;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    maxStderrBytes: number;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    maxStdoutBytes: number;
-    /**
-     * @type boolean
-    */
-    oneShot: boolean;
-    /**
-     * @type string
-    */
-    shell: string;
-    /**
-     * @type string
-    */
-    targetDeviceId: string;
-    /**
-     * @type string
-    */
-    targetSessionId: string;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    timeoutMs: number;
-};
-
-export type CommandTaskDto = {
-    /**
-     * @type string
-    */
-    callId: string;
-    /**
-     * @type string
-    */
-    executionGeneration: string;
-    /**
-     * @type string,null
-    */
-    result?: string | null;
-    /**
-     * @type boolean
-    */
-    resultTruncated: boolean;
-    /**
-     * @type string
-    */
-    state: BackgroundTaskStateDto;
-    /**
-     * @type string
-    */
-    taskId: string;
-    /**
-     * @type string
-    */
-    updatedAt: string;
-};
-
-export const communicationChannelEnum = {
-    email: "email",
-    chat: "chat",
-    local_draft: "local_draft"
-} as const;
-
-export type CommunicationChannelEnumKey = (typeof communicationChannelEnum)[keyof typeof communicationChannelEnum];
-
-export type CommunicationChannel = CommunicationChannelEnumKey;
 
 export const communicationSurfaceKindEnum = {
     classic_outlook_desktop: "classic_outlook_desktop",
@@ -1184,6 +2460,17 @@ export type RemoteDeskTypeEnum = RemoteDeskTypeEnumEnumKey;
 */
 export type VersionInfo = {
     /**
+     * @description Device-owned AI Assistant value projected at the same revision.
+     * @type boolean,null
+    */
+    ai_assistant_enabled?: boolean | null;
+    /**
+     * @description Device-owned AI Assistant revision projected at connection time.
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    ai_assistant_revision?: number | null;
+    /**
      * @description The version of the API. This is a simple integer that increments when API is changed.
      * @type integer, int32
     */
@@ -1213,17 +2500,6 @@ export type VersionInfo = {
      * @type boolean | undefined
     */
     debug_build?: boolean;
-    /**
-     * @description Device-owned Device Assistant value projected at the same revision.
-     * @type boolean,null
-    */
-    device_assistant_enabled?: boolean | null;
-    /**
-     * @description Device-owned Device Assistant revision projected at connection time.
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    device_assistant_revision?: number | null;
     /**
      * @description Display name of the remote desk.
      * @type string,null
@@ -1396,133 +2672,6 @@ export type ConnectionsFetchedData = {
     current_connection_id: string;
 };
 
-export const contentRefKindEnum = {
-    immutable_blob: "immutable_blob"
-} as const;
-
-export type ContentRefKindEnumKey = (typeof contentRefKindEnum)[keyof typeof contentRefKindEnum];
-
-export const contentRefKindEnum2 = {
-    ephemeral_observation: "ephemeral_observation"
-} as const;
-
-export type ContentRefKindEnum2Key = (typeof contentRefKindEnum2)[keyof typeof contentRefKindEnum2];
-
-export const contentRefKindEnum3 = {
-    artifact: "artifact"
-} as const;
-
-export type ContentRefKindEnum3Key = (typeof contentRefKindEnum3)[keyof typeof contentRefKindEnum3];
-
-export type ContentRef = ({
-    /**
-     * @type string
-    */
-    blob_id: string;
-    /**
-     * @type string
-    */
-    kind: ContentRefKindEnumKey;
-    /**
-     * @type string
-    */
-    media_type: string;
-    /**
-     * @type string
-    */
-    sha256: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    size_bytes: number;
-} | {
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    expires_at_unix_ms: number;
-    /**
-     * @type string
-    */
-    kind: ContentRefKindEnum2Key;
-    /**
-     * @type string
-    */
-    observation_id: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    size_bytes: number;
-} | {
-    /**
-     * @type string
-    */
-    artifact_id: string;
-    /**
-     * @type string
-    */
-    kind: ContentRefKindEnum3Key;
-    /**
-     * @type string
-    */
-    media_type: string;
-    /**
-     * @type string
-    */
-    sha256: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    size_bytes: number;
-});
-
-/**
- * @description Browser-safe attachment metadata. Opaque tokens, envelope digests and model\ndestination identities remain server-side; the selector only needs enough\ninformation to show provenance, expiry and whether a refresh is required.
-*/
-export type ContextAttachmentDto = {
-    /**
-     * @type string
-    */
-    capabilityId: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    createdAtUnixMs: number;
-    /**
-     * @type string
-    */
-    displaySummary: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    expiresAtUnixMs: number;
-    /**
-     * @type string
-    */
-    id: string;
-    /**
-     * @type string
-    */
-    kind: string;
-    /**
-     * @type string
-    */
-    providerId: string;
-    /**
-     * @type string,null
-    */
-    staleReason?: string | null;
-    /**
-     * @type string
-    */
-    state: string;
-};
-
 export const contextManagementStrategyDtoEnum = {
     window: "window",
     checkpoint_summary: "checkpoint_summary"
@@ -1542,67 +2691,6 @@ export type ContextManagementDto = {
      * @type string
     */
     strategy: ContextManagementStrategyDto;
-};
-
-export const contextNoticeKindDtoEnum = {
-    refreshed: "refreshed",
-    restricted: "restricted",
-    trimmed: "trimmed",
-    compacted: "compacted"
-} as const;
-
-export type ContextNoticeKindDtoEnumKey = (typeof contextNoticeKindDtoEnum)[keyof typeof contextNoticeKindDtoEnum];
-
-export type ContextNoticeKindDto = ContextNoticeKindDtoEnumKey;
-
-export type ContextNoticeDto = {
-    /**
-     * @type string,null
-    */
-    afterMessageId?: string | null;
-    /**
-     * @minLength 0
-     * @type integer,null, int32
-    */
-    checkpointGeneration?: number | null;
-    /**
-     * @minLength 0
-     * @type integer,null, int32
-    */
-    coveredMessageCount?: number | null;
-    /**
-     * @type string,null
-    */
-    createdAt?: string | null;
-    /**
-     * @type string
-    */
-    id: string;
-    /**
-     * @type string
-    */
-    kind: ContextNoticeKindDto;
-    /**
-     * @type string
-    */
-    turnId: string;
-};
-
-export type ContextUsageDto = {
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    limitBytes: number;
-    /**
-     * @type string
-    */
-    strategy: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    usedBytes: number;
 };
 
 /**
@@ -1688,18 +2776,7 @@ export type CurrentUserDto = {
     user_id?: number | null;
 };
 
-export type DeleteAttachments = {
-    /**
-     * @type array
-    */
-    attachment_ids: string[];
-    /**
-     * @type string
-    */
-    session: string;
-};
-
-export type DeleteDeviceAssistantSessionBody = {
+export type DeleteAiAssistantSessionBody = {
     /**
      * @type string
     */
@@ -1710,7 +2787,7 @@ export type DeleteDeviceAssistantSessionBody = {
     session: string;
 };
 
-export type DeleteDeviceAssistantSessionResponse = {
+export type DeleteAiAssistantSessionResponse = {
     /**
      * @description Cleanup intent is durable; physical removal awaits a device acknowledgment.
      * @type boolean
@@ -1720,6 +2797,17 @@ export type DeleteDeviceAssistantSessionResponse = {
      * @type boolean
     */
     deleted: boolean;
+};
+
+export type DeleteAttachments = {
+    /**
+     * @type array
+    */
+    attachment_ids: string[];
+    /**
+     * @type string
+    */
+    session: string;
 };
 
 export const deskErrorCodeEnum = {
@@ -1765,18 +2853,18 @@ export const deskErrorCodeEnum = {
     DEVICE_CLIENT_ID_REQUIRED: 47,
     API_TOKEN_QUOTA_EXCEEDED: 48,
     PLAN_IN_USE: 49,
-    TERMINAL_COPILOT_DISABLED: 50,
+    TERMINAL_AI_ASSISTANT_DISABLED: 50,
     AI_MODEL_NOT_CONFIGURED: 51,
     AI_MODEL_NOT_AUTHORIZED: 54,
     PLAN_NO_PRICE: 52,
     PLAN_PRICE_REQUIRED: 53,
     SETTLEMENT_DEBT_OUTSTANDING: 55,
     BILLING_ACCOUNT_NOT_FOUND: 56,
-    COPILOT_STEP_LIMIT_EXCEEDED: 57,
-    COPILOT_RESPONSE_TRUNCATED: 58,
-    COPILOT_PROTOCOL_VIOLATION: 59,
-    COPILOT_TURN_BUSY: 60,
-    COPILOT_SUBJECT_MISMATCH: 61,
+    AI_ASSISTANT_STEP_LIMIT_EXCEEDED: 57,
+    AI_ASSISTANT_RESPONSE_TRUNCATED: 58,
+    AI_ASSISTANT_PROTOCOL_VIOLATION: 59,
+    AI_ASSISTANT_TURN_BUSY: 60,
+    AI_ASSISTANT_SUBJECT_MISMATCH: 61,
     AGENT_SAME_TOOL_REPEAT_LIMIT: 70,
     AI_EXEC_SHELL_UNSUPPORTED: 71,
     ACCOUNT_PENDING_DELETION: 62,
@@ -2092,1094 +3180,6 @@ export type DeskSettings = {
      * @default null
     */
     x264_encoder?: (null | X264EncoderSettings);
-};
-
-export const destinationIdentityKindEnum = {
-    model: "model"
-} as const;
-
-export type DestinationIdentityKindEnumKey = (typeof destinationIdentityKindEnum)[keyof typeof destinationIdentityKindEnum];
-
-export const destinationIdentityKindEnum2 = {
-    web_research: "web_research"
-} as const;
-
-export type DestinationIdentityKindEnum2Key = (typeof destinationIdentityKindEnum2)[keyof typeof destinationIdentityKindEnum2];
-
-export const destinationIdentityKindEnum3 = {
-    email_account: "email_account"
-} as const;
-
-export type DestinationIdentityKindEnum3Key = (typeof destinationIdentityKindEnum3)[keyof typeof destinationIdentityKindEnum3];
-
-export const destinationIdentityKindEnum4 = {
-    chat_account: "chat_account"
-} as const;
-
-export type DestinationIdentityKindEnum4Key = (typeof destinationIdentityKindEnum4)[keyof typeof destinationIdentityKindEnum4];
-
-export const destinationIdentityKindEnum5 = {
-    local_artifact: "local_artifact"
-} as const;
-
-export type DestinationIdentityKindEnum5Key = (typeof destinationIdentityKindEnum5)[keyof typeof destinationIdentityKindEnum5];
-
-export type DestinationIdentity = ({
-    /**
-     * @type string
-    */
-    connection_id: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    connection_revision: number;
-    /**
-     * @type string
-    */
-    kind: DestinationIdentityKindEnumKey;
-    /**
-     * @type string
-    */
-    model_id: string;
-    /**
-     * @type integer, int64
-    */
-    profile_revision: number;
-} | {
-    /**
-     * @type string
-    */
-    connector_id: string;
-    /**
-     * @type string
-    */
-    kind: DestinationIdentityKindEnum2Key;
-} | {
-    /**
-     * @type string
-    */
-    account_id: string;
-    /**
-     * @type string
-    */
-    kind: DestinationIdentityKindEnum3Key;
-} | {
-    /**
-     * @type string
-    */
-    account_id: string;
-    /**
-     * @type string
-    */
-    kind: DestinationIdentityKindEnum4Key;
-} | {
-    /**
-     * @type string
-    */
-    kind: DestinationIdentityKindEnum5Key;
-    /**
-     * @type string
-    */
-    workspace_id: string;
-});
-
-/**
- * @description Device Assistant product features implemented by one server target.\n\nAuthentication, ownership, target readiness and grants remain request-time\nchecks. Clients gate every optional control independently and treat an absent\nprofile as unsupported.
-*/
-export type DeviceAssistantClientCapabilities = {
-    /**
-     * @type boolean
-    */
-    background_task_cancel: boolean;
-    /**
-     * @type boolean
-    */
-    capability_inventory: boolean;
-    /**
-     * @description This server exposes the dedicated one-shot exec-PTY carrier surface.\nPer-device/session readiness is still proven by a successful prepare.
-     * @type boolean
-    */
-    exec_pty: boolean;
-    /**
-     * @type boolean
-    */
-    full_session_snapshot: boolean;
-    /**
-     * @type boolean
-    */
-    grant_revoke: boolean;
-    /**
-     * @type boolean
-    */
-    object_context: boolean;
-    /**
-     * @type boolean
-    */
-    permission_decision: boolean;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    schema_version: number;
-    /**
-     * @type boolean
-    */
-    turn_stream: boolean;
-};
-
-export type DeviceAssistantSessionSummaryDto = {
-    /**
-     * @type boolean
-    */
-    active: boolean;
-    /**
-     * @description Validated client continuation intent.
-     * @type string,null
-    */
-    conversationId?: string | null;
-    /**
-     * @type string
-    */
-    createdAt: string;
-    /**
-     * @type string,null
-    */
-    firstQuestion?: string | null;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    messageCount: number;
-    /**
-     * @description Opaque server-side selector. Authorization is rechecked when it is used.
-     * @type string
-    */
-    sessionId: string;
-    /**
-     * @type string
-    */
-    updatedAt: string;
-};
-
-export type DeviceAssistantSessionListDto = {
-    /**
-     * @type array
-    */
-    sessions: DeviceAssistantSessionSummaryDto[];
-};
-
-export type EvidenceArtifactDto = {
-    /**
-     * @type string
-    */
-    artifactId: string;
-    /**
-     * @type string
-    */
-    digestSha256: string;
-    /**
-     * @type string
-    */
-    fileName: string;
-    /**
-     * @type string
-    */
-    mediaType: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    sizeBytes: number;
-    /**
-     * @type string
-    */
-    sourceEnvelopeId: string;
-};
-
-export type EvidenceHandoffReceiptDto = {
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    handedOffAtUnixMs: number;
-    /**
-     * @type string
-    */
-    handoffId: string;
-    /**
-     * @type string
-    */
-    preparedPayloadSha256: string;
-    /**
-     * @type string,null
-    */
-    readbackPayloadSha256?: string | null;
-    /**
-     * @type string
-    */
-    runId: string;
-    /**
-     * @type string
-    */
-    sendAuthority: string;
-    /**
-     * @type string
-    */
-    sourceEnvelopeId: string;
-    /**
-     * @type string
-    */
-    surfaceKind: string;
-    /**
-     * @type string
-    */
-    verification: string;
-};
-
-export type EvidenceNodeDto = {
-    /**
-     * @type string
-    */
-    contentKind: string;
-    /**
-     * @type string,null
-    */
-    contentSha256?: string | null;
-    /**
-     * @type string
-    */
-    envelopeDigestSha256: string;
-    /**
-     * @type string
-    */
-    envelopeId: string;
-    /**
-     * @type string,null
-    */
-    mediaType?: string | null;
-    /**
-     * @type string
-    */
-    sensitivity: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    sizeBytes: number;
-    /**
-     * @type array
-    */
-    sourceEnvelopeIds: string[];
-    /**
-     * @type string,null
-    */
-    sourceObjectId?: string | null;
-    /**
-     * @type string
-    */
-    sourceProviderId: string;
-    /**
-     * @type string
-    */
-    sourceToolName: string;
-};
-
-export type EvidenceSummaryDto = {
-    /**
-     * @type array
-    */
-    artifacts: EvidenceArtifactDto[];
-    /**
-     * @type boolean
-    */
-    graphComplete: boolean;
-    /**
-     * @type array
-    */
-    handoffReceipts: EvidenceHandoffReceiptDto[];
-    /**
-     * @type array
-    */
-    missingSourceEnvelopeIds: string[];
-    /**
-     * @type array
-    */
-    nodes: EvidenceNodeDto[];
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    schemaVersion: number;
-    /**
-     * @type boolean
-    */
-    truncated: boolean;
-};
-
-export type DirectoryConsentDto = {
-    /**
-     * @type string
-    */
-    canonicalPath: string;
-    /**
-     * @type string
-    */
-    purpose: string;
-    /**
-     * @type string
-    */
-    referenceExpiresAt: string;
-    /**
-     * @type string
-    */
-    requestId: string;
-    /**
-     * @type string
-    */
-    source: string;
-    /**
-     * @type string
-    */
-    state: string;
-};
-
-export type FileScopeDto = {
-    /**
-     * @type array
-    */
-    directories: DirectoryConsentDto[];
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    revision: number;
-};
-
-export type SnapshotMessagePageDto = {
-    /**
-     * @type boolean
-    */
-    hasMore: boolean;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    limit: number;
-    /**
-     * @type string,null
-    */
-    nextBeforeMessageId?: string | null;
-};
-
-export type SnapshotToolCallDto = {
-    /**
-     * @type string
-    */
-    argumentsJson: string;
-    /**
-     * @type string
-    */
-    id: string;
-    /**
-     * @type string
-    */
-    name: string;
-};
-
-export type SnapshotMessageDto = {
-    /**
-     * @description Server-issued id that correlates a delayed background completion with\nthe task originally returned by `exec_command`.
-     * @type string,null
-    */
-    backgroundTaskId?: string | null;
-    /**
-     * @description Stable message id used to key and deduplicate rendered turns.
-     * @type string
-    */
-    id: string;
-    /**
-     * @description Reviewed readable reasoning; no signatures or opaque provider replay.
-     * @type string,null
-    */
-    reasoning?: string | null;
-    /**
-     * @description Wire role token. An `assistant` message is AI-generated.
-     * @type string
-    */
-    role: string;
-    /**
-     * @type string
-    */
-    text: string;
-    /**
-     * @type string,null
-    */
-    toolCallId?: string | null;
-    /**
-     * @type array | undefined
-    */
-    toolCalls?: SnapshotToolCallDto[];
-    /**
-     * @type string,null
-    */
-    turnId?: string | null;
-};
-
-export const objectKindEnum = {
-    desktop_session: "desktop_session",
-    application: "application",
-    window: "window",
-    ui_element: "ui_element",
-    office_document: "office_document",
-    document: "document",
-    worksheet: "worksheet",
-    range: "range",
-    presentation: "presentation",
-    slide: "slide",
-    shape: "shape",
-    file: "file",
-    directory: "directory",
-    terminal_output: "terminal_output",
-    browser_surface: "browser_surface",
-    application_launch_target: "application_launch_target"
-} as const;
-
-export type ObjectKindEnumKey = (typeof objectKindEnum)[keyof typeof objectKindEnum];
-
-export type ObjectKind = ObjectKindEnumKey;
-
-/**
- * @description Device-issued reference to an observed object. Desktop references follow native lifetimes.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
-*/
-export type ObjectRef = {
-    /**
-     * @description Empty for lifecycle-bound objects; RFC3339 for other object types.\nThis field never grants authority.
-     * @type string
-    */
-    expires_at: string;
-    /**
-     * @type string
-    */
-    object_kind: ObjectKind;
-    /**
-     * @type string
-    */
-    snapshot_id: string;
-    /**
-     * @type string
-    */
-    token: string;
-};
-
-/**
- * @description Owner-reviewed application boundary for reusable native UI operations.
-*/
-export type UiApplicationScope = {
-    /**
-     * @type array
-    */
-    actions: ApplicationActionKind[];
-    /**
-     * @description Device-issued reference to an observed object. Desktop references follow native lifetimes.\n\n`token` is opaque to the model and must bind the native locator,\ninteractive-session incarnation, adapter version, snapshot generation,\nfingerprint and expiry in the device-side reference store. Native handles,\nprocess ids, paths and coordinates are never authoritative wire inputs.
-     * @type object
-    */
-    application: ObjectRef;
-    /**
-     * @description Resolved from an observed application by the server, never model authority.
-     * @type string,null
-    */
-    application_name?: string | null;
-};
-
-export type ExternalSendAttachmentDto = {
-    /**
-     * @type string
-    */
-    fileName: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    sizeBytes: number;
-};
-
-/**
- * @description Safe owner-facing projection of a frozen exact-send request. Browser\nreferences, canonical permission JSON, credentials, and pairing secrets are\ndeliberately excluded.
-*/
-export type ExternalSendConfirmationDto = {
-    /**
-     * @type string
-    */
-    accountId: string;
-    /**
-     * @type array
-    */
-    attachments: ExternalSendAttachmentDto[];
-    /**
-     * @type string
-    */
-    bodyPlainText: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    bodySizeBytes: number;
-    /**
-     * @type string
-    */
-    channel: CommunicationChannel;
-    /**
-     * @type string
-    */
-    destination: string;
-    /**
-     * @type boolean
-    */
-    oneShot: boolean;
-    /**
-     * @type string,null
-    */
-    subject?: string | null;
-};
-
-/**
- * @description Owner-visible native launch identity; no opaque approval token is exposed.
-*/
-export type LaunchConfirmationDto = {
-    /**
-     * @type array
-    */
-    args: string[];
-    /**
-     * @type string,null
-    */
-    cwd?: string | null;
-    /**
-     * @type boolean
-    */
-    oneShot: boolean;
-    /**
-     * @type string
-    */
-    resolvedTarget: string;
-    /**
-     * @type boolean
-    */
-    runAsAdmin: boolean;
-    /**
-     * @type object
-    */
-    target: ApplicationTarget;
-    /**
-     * @type string
-    */
-    targetDeviceId: string;
-    /**
-     * @type string
-    */
-    targetSessionId: string;
-};
-
-export const textFileChangeKindEnum = {
-    replace_all: "replace_all"
-} as const;
-
-export type TextFileChangeKindEnumKey = (typeof textFileChangeKindEnum)[keyof typeof textFileChangeKindEnum];
-
-export const textFileChangeKindEnum2 = {
-    replace_once: "replace_once"
-} as const;
-
-export type TextFileChangeKindEnum2Key = (typeof textFileChangeKindEnum2)[keyof typeof textFileChangeKindEnum2];
-
-/**
- * @description Closed UTF-8 edits. No shell, executable patch format, or implicit overwrite.
-*/
-export type TextFileChange = ({
-    /**
-     * @type string
-    */
-    content_utf8: string;
-    /**
-     * @type string
-    */
-    kind: TextFileChangeKindEnumKey;
-} | {
-    /**
-     * @type string
-    */
-    after: string;
-    /**
-     * @type string
-    */
-    before: string;
-    /**
-     * @type string
-    */
-    kind: TextFileChangeKindEnum2Key;
-});
-
-export const textFileMutationOperationEnum = {
-    update: "update",
-    delete: "delete"
-} as const;
-
-export type TextFileMutationOperationEnumKey = (typeof textFileMutationOperationEnum)[keyof typeof textFileMutationOperationEnum];
-
-/**
- * @description Device facts, not authorization. A recovery location must be retained even\nwhen a mutation crossed the commit point but could not be verified.
-*/
-export type TextFileMutationOperation = TextFileMutationOperationEnumKey;
-
-export type TextFileConfirmationDto = {
-    change?: (null | TextFileChange);
-    /**
-     * @type string
-    */
-    expectedSha256: string;
-    /**
-     * @type string
-    */
-    fileName: string;
-    /**
-     * @type string
-    */
-    fileResultCallId: string;
-    /**
-     * @type boolean
-    */
-    oneShot: boolean;
-    /**
-     * @description Device facts, not authorization. A recovery location must be retained even\nwhen a mutation crossed the commit point but could not be verified.
-     * @type string
-    */
-    operation: TextFileMutationOperation;
-    /**
-     * @type boolean
-    */
-    recoverable: boolean;
-};
-
-export type GrantRequestItemDto = {
-    applicationScope?: (null | UiApplicationScope);
-    commandConfirmation?: (null | CommandConfirmationDto);
-    /**
-     * @type string
-    */
-    expectedEffect: CapabilityEffect;
-    /**
-     * @type array
-    */
-    exportDestinations: DestinationIdentity[];
-    externalSendConfirmation?: (null | ExternalSendConfirmationDto);
-    /**
-     * @type string
-    */
-    itemId: string;
-    launchConfirmation?: (null | LaunchConfirmationDto);
-    /**
-     * @type array
-    */
-    operationScope: string[];
-    /**
-     * @type string
-    */
-    providerId: string;
-    /**
-     * @type string
-    */
-    reason: string;
-    /**
-     * @type array
-    */
-    resourceScope: string[];
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    suggestedMaxUses: number;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    suggestedTtlSeconds: number;
-    textFileConfirmation?: (null | TextFileConfirmationDto);
-    /**
-     * @type string
-    */
-    toolName: string;
-};
-
-export const permissionRequestStateDtoEnum = {
-    pending: "pending",
-    needs_revalidation: "needs_revalidation",
-    approved: "approved",
-    partially_approved: "partially_approved",
-    denied: "denied",
-    replaced: "replaced",
-    withdrawn: "withdrawn"
-} as const;
-
-export type PermissionRequestStateDtoEnumKey = (typeof permissionRequestStateDtoEnum)[keyof typeof permissionRequestStateDtoEnum];
-
-export type PermissionRequestStateDto = PermissionRequestStateDtoEnumKey;
-
-export type PermissionRequestDto = {
-    /**
-     * @type string
-    */
-    createdAt: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    inputRevision: number;
-    /**
-     * @type array
-    */
-    items: GrantRequestItemDto[];
-    /**
-     * @type string
-    */
-    requestId: string;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    schemaVersion: number;
-    /**
-     * @type string
-    */
-    state: PermissionRequestStateDto;
-};
-
-export const taskStatusDtoEnum = {
-    todo: "todo",
-    in_progress: "in_progress",
-    blocked: "blocked",
-    done: "done",
-    skipped: "skipped"
-} as const;
-
-export type TaskStatusDtoEnumKey = (typeof taskStatusDtoEnum)[keyof typeof taskStatusDtoEnum];
-
-export type TaskStatusDto = TaskStatusDtoEnumKey;
-
-export type TaskStatusItemDto = {
-    /**
-     * @type string
-    */
-    description: string;
-    /**
-     * @type string
-    */
-    itemId: string;
-    /**
-     * @type string
-    */
-    lastUpdatedStepId: string;
-    /**
-     * @type string,null
-    */
-    note?: string | null;
-    /**
-     * @type string
-    */
-    status: TaskStatusDto;
-};
-
-export type TaskStatusProjectionDto = {
-    /**
-     * @type array
-    */
-    items: TaskStatusItemDto[];
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    revision: number;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    schemaVersion: number;
-    /**
-     * @type string
-    */
-    updatedAt: string;
-};
-
-/**
- * @description Receipt correlation for independent automation run review, not a conversation write gate.
-*/
-export type UnknownOutcomeDto = {
-    /**
-     * @type string
-    */
-    actionRequestId: string;
-    /**
-     * @type string
-    */
-    executionId: string;
-    /**
-     * @type integer, int64
-    */
-    workId: number;
-    /**
-     * @type string
-    */
-    workKind: string;
-};
-
-export const visualEvidencePhaseEnum = {
-    before: "before",
-    observation: "observation",
-    after: "after"
-} as const;
-
-export type VisualEvidencePhaseEnumKey = (typeof visualEvidencePhaseEnum)[keyof typeof visualEvidencePhaseEnum];
-
-export type VisualEvidencePhase = VisualEvidencePhaseEnumKey;
-
-export const visualEvidenceStatusEnum = {
-    available: "available",
-    expired: "expired",
-    not_retained: "not_retained",
-    failed: "failed",
-    blocked: "blocked"
-} as const;
-
-export type VisualEvidenceStatusEnumKey = (typeof visualEvidenceStatusEnum)[keyof typeof visualEvidenceStatusEnum];
-
-export type VisualEvidenceStatus = VisualEvidenceStatusEnumKey;
-
-/**
- * @description The optional preview is emitted only on the live owner stream. Durable\nsession JSON and snapshot DTOs carry metadata plus `content`, never pixels.
-*/
-export type VisualEvidenceFrame = {
-    /**
-     * @type string,null
-    */
-    application_summary?: string | null;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    captured_at_unix_ms: number;
-    content?: (null | ContentRef);
-    /**
-     * @type string
-    */
-    conversation_id: string;
-    /**
-     * @type string
-    */
-    device_id: string;
-    /**
-     * @type string,null
-    */
-    digest_sha256?: string | null;
-    /**
-     * @type string,null
-    */
-    display_summary?: string | null;
-    /**
-     * @type string
-    */
-    evidence_id: string;
-    /**
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    expires_at_unix_ms?: number | null;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    focus_input_revision: number;
-    /**
-     * @type string
-    */
-    frame_id: string;
-    /**
-     * @type string,null
-    */
-    media_type?: string | null;
-    /**
-     * @type string
-    */
-    phase: VisualEvidencePhase;
-    /**
-     * @description Bounded data URL already authorized for this active owner stream. It is\nnever accepted from a client and is never persisted by the session store.
-     * @type string,null
-    */
-    preview_data_url?: string | null;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    schema_version: number;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    size_bytes: number;
-    /**
-     * @type string
-    */
-    status: VisualEvidenceStatus;
-    /**
-     * @type string
-    */
-    tool_call_id: string;
-    /**
-     * @type string
-    */
-    turn_id: string;
-};
-
-export type DeviceAssistantSessionSnapshotDto = {
-    /**
-     * @description Original permission request reasons, keyed by the server-bound work ID.
-     * @type object
-    */
-    actionPermissionReasons: {
-        [key: string]: string;
-    };
-    /**
-     * @description Whether the persisted turn is still running or awaiting approval.
-     * @type boolean
-    */
-    active: boolean;
-    /**
-     * @description Running background command generation that may be cancelled.
-     * @type string,null
-    */
-    activeExecutionGeneration?: string | null;
-    /**
-     * @description Durable Provider executions that outlived their foreground wait.
-     * @type array
-    */
-    backgroundTasks: BackgroundTaskDto[];
-    /**
-     * @description Server-issued authority metadata. It never proves a call was dispatched.
-     * @type array
-    */
-    capabilityGrants: CapabilityGrantDto[];
-    /**
-     * @description Persisted command executions, including terminal results after reconnect.
-     * @type array
-    */
-    commandTasks: CommandTaskDto[];
-    /**
-     * @description Durable selection metadata only; no UI tree, cells, files or screenshots.
-     * @type array
-    */
-    contextAttachments: ContextAttachmentDto[];
-    /**
-     * @description Durable transcript metadata for context-window changes. No omitted text is exposed.
-     * @type array
-    */
-    contextNotices: ContextNoticeDto[];
-    contextUsage?: (null | ContextUsageDto);
-    /**
-     * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
-     * @type object
-    */
-    evidenceSummary: EvidenceSummaryDto;
-    /**
-     * @type object
-    */
-    fileScope: FileScopeDto;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    handledInputSeq: number;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    inputRevision: number;
-    /**
-     * @description Latest durably accepted user input and the model-processing watermark.
-     * @minLength 0
-     * @type integer, int64
-    */
-    latestInputSeq: number;
-    /**
-     * @description Cursor metadata for the bounded `messages` page.
-     * @type object
-    */
-    messagePage: SnapshotMessagePageDto;
-    /**
-     * @description The persisted conversation, oldest first.
-     * @type array
-    */
-    messages: SnapshotMessageDto[];
-    /**
-     * @description Model-proposed, server-normalized requests. Pending is approvable;\nNeedsRevalidation is display-only until the model replaces/reissues it.
-     * @type array
-    */
-    permissionRequests: PermissionRequestDto[];
-    /**
-     * @description Device Assistant request currently represented by the persisted turn.
-     * @type string,null
-    */
-    requestId?: string | null;
-    /**
-     * @description Monotonic session-store snapshot version used for out-of-order reconciliation.
-     * @type integer, int64
-    */
-    seq: number;
-    /**
-     * @description Opaque recovery selector; ownership is rechecked on every read or stop.
-     * @type string
-    */
-    sessionId: string;
-    taskStatusProjection?: (null | TaskStatusProjectionDto);
-    terminalError?: (null | AgentError);
-    unresolvedOutcome?: (null | UnknownOutcomeDto);
-    /**
-     * @description Recent screen observations, bound to epoch/turn/tool/frame. Durable\nsnapshots contain no pixel bytes; live previews arrive on AgentEvent.
-     * @type array
-    */
-    visualEvidence: VisualEvidenceFrame[];
-};
-
-/**
- * @description Device-owned product switch projected to trusted central orchestrators.\n\nThe device is the only authority for this value. Central services may cache\nthe latest observed snapshot for routing and UI, but may never synthesize a\nnewer revision or treat their cache as desired state.
-*/
-export type DeviceAssistantSettings = {
-    /**
-     * @description The one product-level Device Assistant switch. Defaults fail closed.
-     * @type boolean
-    */
-    enabled: boolean;
-    /**
-     * @description Monotonic device-local revision. Revision zero is the initial state.
-     * @minLength 0
-     * @type integer, int64
-    */
-    revision: number;
-};
-
-/**
- * @description Compare-and-set request accepted by the device-local settings endpoint.
-*/
-export type DeviceAssistantSettingsUpdate = {
-    /**
-     * @description Exact desired product-switch value.
-     * @type boolean
-    */
-    enabled: boolean;
-    /**
-     * @description Revision returned by the most recent authoritative device read.
-     * @minLength 0
-     * @type integer, int64
-    */
-    expected_revision: number;
 };
 
 export type DeviceCodeBatchDeleteParams = {
@@ -5801,6 +5801,188 @@ export type RequestRemoteModel = {
     session_target_id?: string | null;
 };
 
+export type RestResponseAiAssistantSessionListDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        sessions: AiAssistantSessionSummaryDto[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantSessionSnapshotDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Original permission request reasons, keyed by the server-bound work ID.
+         * @type object
+        */
+        actionPermissionReasons: {
+            [key: string]: string;
+        };
+        /**
+         * @description Whether the persisted turn is still running or awaiting approval.
+         * @type boolean
+        */
+        active: boolean;
+        /**
+         * @description Running background command generation that may be cancelled.
+         * @type string,null
+        */
+        activeExecutionGeneration?: string | null;
+        /**
+         * @description Durable Provider executions that outlived their foreground wait.
+         * @type array
+        */
+        backgroundTasks: BackgroundTaskDto[];
+        /**
+         * @description Server-issued authority metadata. It never proves a call was dispatched.
+         * @type array
+        */
+        capabilityGrants: CapabilityGrantDto[];
+        /**
+         * @description Persisted command executions, including terminal results after reconnect.
+         * @type array
+        */
+        commandTasks: CommandTaskDto[];
+        /**
+         * @description Durable selection metadata only; no UI tree, cells, files or screenshots.
+         * @type array
+        */
+        contextAttachments: ContextAttachmentDto[];
+        /**
+         * @description Durable transcript metadata for context-window changes. No omitted text is exposed.
+         * @type array
+        */
+        contextNotices: ContextNoticeDto[];
+        contextUsage?: (null | ContextUsageDto);
+        /**
+         * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
+         * @type object
+        */
+        evidenceSummary: EvidenceSummaryDto;
+        /**
+         * @type object
+        */
+        fileScope: FileScopeDto;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        handledInputSeq: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        inputRevision: number;
+        /**
+         * @description Latest durably accepted user input and the model-processing watermark.
+         * @minLength 0
+         * @type integer, int64
+        */
+        latestInputSeq: number;
+        /**
+         * @description Cursor metadata for the bounded `messages` page.
+         * @type object
+        */
+        messagePage: SnapshotMessagePageDto;
+        /**
+         * @description The persisted conversation, oldest first.
+         * @type array
+        */
+        messages: SnapshotMessageDto[];
+        /**
+         * @description Model-proposed, server-normalized requests. Pending is approvable;\nNeedsRevalidation is display-only until the model replaces/reissues it.
+         * @type array
+        */
+        permissionRequests: PermissionRequestDto[];
+        /**
+         * @description AI Assistant request currently represented by the persisted turn.
+         * @type string,null
+        */
+        requestId?: string | null;
+        /**
+         * @description Monotonic session-store snapshot version used for out-of-order reconciliation.
+         * @type integer, int64
+        */
+        seq: number;
+        /**
+         * @description Opaque recovery selector; ownership is rechecked on every read or stop.
+         * @type string
+        */
+        sessionId: string;
+        taskStatusProjection?: (null | TaskStatusProjectionDto);
+        terminalError?: (null | AgentError);
+        unresolvedOutcome?: (null | UnknownOutcomeDto);
+        /**
+         * @description Recent screen observations, bound to epoch/turn/tool/frame. Durable\nsnapshots contain no pixel bytes; live previews arrive on AgentEvent.
+         * @type array
+        */
+        visualEvidence: VisualEvidenceFrame[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Device-owned product switch projected to trusted central orchestrators.\n\nThe device is the only authority for this value. Central services may cache\nthe latest observed snapshot for routing and UI, but may never synthesize a\nnewer revision or treat their cache as desired state.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description The one product-level AI Assistant switch. Defaults fail closed.
+         * @type boolean
+        */
+        enabled: boolean;
+        /**
+         * @description Monotonic device-local revision. Revision zero is the initial state.
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseAiExecutionPolicyPublic = {
     /**
      * @type integer, int32
@@ -6431,7 +6613,7 @@ export type RestResponseCurrentUserDto = {
     success: boolean;
 };
 
-export type RestResponseDeleteDeviceAssistantSessionResponse = {
+export type RestResponseDeleteAiAssistantSessionResponse = {
     /**
      * @type integer, int32
     */
@@ -6449,188 +6631,6 @@ export type RestResponseDeleteDeviceAssistantSessionResponse = {
          * @type boolean
         */
         deleted: boolean;
-    };
-    /**
-     * @type string,null
-    */
-    message?: string | null;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-};
-
-export type RestResponseDeviceAssistantSessionListDto = {
-    /**
-     * @type integer, int32
-    */
-    code: number;
-    /**
-     * @type object | undefined
-    */
-    data?: {
-        /**
-         * @type array
-        */
-        sessions: DeviceAssistantSessionSummaryDto[];
-    };
-    /**
-     * @type string,null
-    */
-    message?: string | null;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-};
-
-export type RestResponseDeviceAssistantSessionSnapshotDto = {
-    /**
-     * @type integer, int32
-    */
-    code: number;
-    /**
-     * @type object | undefined
-    */
-    data?: {
-        /**
-         * @description Original permission request reasons, keyed by the server-bound work ID.
-         * @type object
-        */
-        actionPermissionReasons: {
-            [key: string]: string;
-        };
-        /**
-         * @description Whether the persisted turn is still running or awaiting approval.
-         * @type boolean
-        */
-        active: boolean;
-        /**
-         * @description Running background command generation that may be cancelled.
-         * @type string,null
-        */
-        activeExecutionGeneration?: string | null;
-        /**
-         * @description Durable Provider executions that outlived their foreground wait.
-         * @type array
-        */
-        backgroundTasks: BackgroundTaskDto[];
-        /**
-         * @description Server-issued authority metadata. It never proves a call was dispatched.
-         * @type array
-        */
-        capabilityGrants: CapabilityGrantDto[];
-        /**
-         * @description Persisted command executions, including terminal results after reconnect.
-         * @type array
-        */
-        commandTasks: CommandTaskDto[];
-        /**
-         * @description Durable selection metadata only; no UI tree, cells, files or screenshots.
-         * @type array
-        */
-        contextAttachments: ContextAttachmentDto[];
-        /**
-         * @description Durable transcript metadata for context-window changes. No omitted text is exposed.
-         * @type array
-        */
-        contextNotices: ContextNoticeDto[];
-        contextUsage?: (null | ContextUsageDto);
-        /**
-         * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
-         * @type object
-        */
-        evidenceSummary: EvidenceSummaryDto;
-        /**
-         * @type object
-        */
-        fileScope: FileScopeDto;
-        /**
-         * @minLength 0
-         * @type integer, int64
-        */
-        handledInputSeq: number;
-        /**
-         * @minLength 0
-         * @type integer, int64
-        */
-        inputRevision: number;
-        /**
-         * @description Latest durably accepted user input and the model-processing watermark.
-         * @minLength 0
-         * @type integer, int64
-        */
-        latestInputSeq: number;
-        /**
-         * @description Cursor metadata for the bounded `messages` page.
-         * @type object
-        */
-        messagePage: SnapshotMessagePageDto;
-        /**
-         * @description The persisted conversation, oldest first.
-         * @type array
-        */
-        messages: SnapshotMessageDto[];
-        /**
-         * @description Model-proposed, server-normalized requests. Pending is approvable;\nNeedsRevalidation is display-only until the model replaces/reissues it.
-         * @type array
-        */
-        permissionRequests: PermissionRequestDto[];
-        /**
-         * @description Device Assistant request currently represented by the persisted turn.
-         * @type string,null
-        */
-        requestId?: string | null;
-        /**
-         * @description Monotonic session-store snapshot version used for out-of-order reconciliation.
-         * @type integer, int64
-        */
-        seq: number;
-        /**
-         * @description Opaque recovery selector; ownership is rechecked on every read or stop.
-         * @type string
-        */
-        sessionId: string;
-        taskStatusProjection?: (null | TaskStatusProjectionDto);
-        terminalError?: (null | AgentError);
-        unresolvedOutcome?: (null | UnknownOutcomeDto);
-        /**
-         * @description Recent screen observations, bound to epoch/turn/tool/frame. Durable\nsnapshots contain no pixel bytes; live previews arrive on AgentEvent.
-         * @type array
-        */
-        visualEvidence: VisualEvidenceFrame[];
-    };
-    /**
-     * @type string,null
-    */
-    message?: string | null;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-};
-
-export type RestResponseDeviceAssistantSettings = {
-    /**
-     * @type integer, int32
-    */
-    code: number;
-    /**
-     * @description Device-owned product switch projected to trusted central orchestrators.\n\nThe device is the only authority for this value. Central services may cache\nthe latest observed snapshot for routing and UI, but may never synthesize a\nnewer revision or treat their cache as desired state.
-     * @type object | undefined
-    */
-    data?: {
-        /**
-         * @description The one product-level Device Assistant switch. Defaults fail closed.
-         * @type boolean
-        */
-        enabled: boolean;
-        /**
-         * @description Monotonic device-local revision. Revision zero is the initial state.
-         * @minLength 0
-         * @type integer, int64
-        */
-        revision: number;
     };
     /**
      * @type string,null
@@ -7610,6 +7610,7 @@ export type RestResponseServerInfo = {
      * @type object | undefined
     */
     data?: {
+        ai_assistant?: (null | AiAssistantClientCapabilities);
         /**
          * @description Current API version supported by the server
          * @type integer, int32
@@ -7621,7 +7622,6 @@ export type RestResponseServerInfo = {
          * @type string
         */
         default_install_path: string;
-        device_assistant?: (null | DeviceAssistantClientCapabilities);
         /**
          * @description Indicates whether the system is initialized (e.g., admin password set)
          * @type boolean
@@ -10448,6 +10448,7 @@ export type SecurityApprovalSubmitParams = {
  * @description Server information
 */
 export type ServerInfo = {
+    ai_assistant?: (null | AiAssistantClientCapabilities);
     /**
      * @description Current API version supported by the server
      * @type integer, int32
@@ -10459,7 +10460,6 @@ export type ServerInfo = {
      * @type string
     */
     default_install_path: string;
-    device_assistant?: (null | DeviceAssistantClientCapabilities);
     /**
      * @description Indicates whether the system is initialized (e.g., admin password set)
      * @type boolean
@@ -11737,6 +11737,33 @@ export type UpdateSettingsMutation = {
 };
 
 /**
+ * @description Current device-owned switch and revision
+*/
+export type QueryAiAssistantSettings200 = RestResponseAiAssistantSettings;
+
+export type QueryAiAssistantSettingsQueryResponse = QueryAiAssistantSettings200;
+
+export type QueryAiAssistantSettingsQuery = {
+    Response: QueryAiAssistantSettings200;
+    Errors: any;
+};
+
+/**
+ * @description Updated snapshot, or REVISION_CONFLICT carrying the current snapshot
+*/
+export type UpdateAiAssistantSettings200 = RestResponseAiAssistantSettings;
+
+export type UpdateAiAssistantSettingsMutationRequest = AiAssistantSettingsUpdate;
+
+export type UpdateAiAssistantSettingsMutationResponse = UpdateAiAssistantSettings200;
+
+export type UpdateAiAssistantSettingsMutation = {
+    Response: UpdateAiAssistantSettings200;
+    Request: UpdateAiAssistantSettingsMutationRequest;
+    Errors: any;
+};
+
+/**
  * @description Query AI execution policy successfully
 */
 export type QueryAiPolicySettings200 = RestResponseAiExecutionPolicyPublic;
@@ -11829,33 +11856,6 @@ export type QueryComputerUseCommunicationPolicyMutationResponse = QueryComputerU
 
 export type QueryComputerUseCommunicationPolicyMutation = {
     Response: QueryComputerUseCommunicationPolicy200;
-    Errors: any;
-};
-
-/**
- * @description Current device-owned switch and revision
-*/
-export type QueryDeviceAssistantSettings200 = RestResponseDeviceAssistantSettings;
-
-export type QueryDeviceAssistantSettingsQueryResponse = QueryDeviceAssistantSettings200;
-
-export type QueryDeviceAssistantSettingsQuery = {
-    Response: QueryDeviceAssistantSettings200;
-    Errors: any;
-};
-
-/**
- * @description Updated snapshot, or REVISION_CONFLICT carrying the current snapshot
-*/
-export type UpdateDeviceAssistantSettings200 = RestResponseDeviceAssistantSettings;
-
-export type UpdateDeviceAssistantSettingsMutationRequest = DeviceAssistantSettingsUpdate;
-
-export type UpdateDeviceAssistantSettingsMutationResponse = UpdateDeviceAssistantSettings200;
-
-export type UpdateDeviceAssistantSettingsMutation = {
-    Response: UpdateDeviceAssistantSettings200;
-    Request: UpdateDeviceAssistantSettingsMutationRequest;
     Errors: any;
 };
 
@@ -12052,16 +12052,16 @@ export type OpenSignalingHandleQueryParams = {
     */
     exec_pty_elevation?: boolean;
     /**
-     * @description Device-owned Device Assistant revision projected at connection time.
+     * @description Device-owned AI Assistant revision projected at connection time.
      * @minLength 0
      * @type integer | undefined, int64
     */
-    device_assistant_revision?: number;
+    ai_assistant_revision?: number;
     /**
-     * @description Device-owned Device Assistant value projected at the same revision.
+     * @description Device-owned AI Assistant value projected at the same revision.
      * @type boolean | undefined
     */
-    device_assistant_enabled?: boolean;
+    ai_assistant_enabled?: boolean;
 };
 
 /**
@@ -12372,7 +12372,7 @@ export type GetModelUsageQuery = {
     Errors: any;
 };
 
-export type GetDeviceAssistantSessionQueryParams = {
+export type GetAiAssistantSessionQueryParams = {
     /**
      * @description Target connection id
      * @type string | undefined
@@ -12414,13 +12414,13 @@ export type GetDeviceAssistantSessionQueryParams = {
 /**
  * @description Conversation snapshot, or a uniform not-found/not-accessible response
 */
-export type GetDeviceAssistantSession200 = RestResponseDeviceAssistantSessionSnapshotDto;
+export type GetAiAssistantSession200 = RestResponseAiAssistantSessionSnapshotDto;
 
-export type GetDeviceAssistantSessionQueryResponse = GetDeviceAssistantSession200;
+export type GetAiAssistantSessionQueryResponse = GetAiAssistantSession200;
 
-export type GetDeviceAssistantSessionQuery = {
-    Response: GetDeviceAssistantSession200;
-    QueryParams: GetDeviceAssistantSessionQueryParams;
+export type GetAiAssistantSessionQuery = {
+    Response: GetAiAssistantSession200;
+    QueryParams: GetAiAssistantSessionQueryParams;
     Errors: any;
 };
 
@@ -12496,42 +12496,42 @@ export type DeleteAssistantAttachmentsMutation = {
 /**
  * @description Durable cancellation intent; Provider delivery is asynchronous
 */
-export type CancelDeviceAssistantBackgroundTask200 = RestResponseBackgroundTaskDto;
+export type CancelAiAssistantBackgroundTask200 = RestResponseBackgroundTaskDto;
 
-export type CancelDeviceAssistantBackgroundTaskMutationRequest = BackgroundCancelBody;
+export type CancelAiAssistantBackgroundTaskMutationRequest = BackgroundCancelBody;
 
-export type CancelDeviceAssistantBackgroundTaskMutationResponse = CancelDeviceAssistantBackgroundTask200;
+export type CancelAiAssistantBackgroundTaskMutationResponse = CancelAiAssistantBackgroundTask200;
 
-export type CancelDeviceAssistantBackgroundTaskMutation = {
-    Response: CancelDeviceAssistantBackgroundTask200;
-    Request: CancelDeviceAssistantBackgroundTaskMutationRequest;
+export type CancelAiAssistantBackgroundTaskMutation = {
+    Response: CancelAiAssistantBackgroundTask200;
+    Request: CancelAiAssistantBackgroundTaskMutationRequest;
     Errors: any;
 };
 
 /**
  * @description Revoked grant metadata; no work is dispatched
 */
-export type RevokeDeviceAssistantCapabilityGrant200 = RestResponseCapabilityGrantDto;
+export type RevokeAiAssistantCapabilityGrant200 = RestResponseCapabilityGrantDto;
 
-export type RevokeDeviceAssistantCapabilityGrantMutationRequest = CapabilityGrantRevokeBody;
+export type RevokeAiAssistantCapabilityGrantMutationRequest = CapabilityGrantRevokeBody;
 
-export type RevokeDeviceAssistantCapabilityGrantMutationResponse = RevokeDeviceAssistantCapabilityGrant200;
+export type RevokeAiAssistantCapabilityGrantMutationResponse = RevokeAiAssistantCapabilityGrant200;
 
-export type RevokeDeviceAssistantCapabilityGrantMutation = {
-    Response: RevokeDeviceAssistantCapabilityGrant200;
-    Request: RevokeDeviceAssistantCapabilityGrantMutationRequest;
+export type RevokeAiAssistantCapabilityGrantMutation = {
+    Response: RevokeAiAssistantCapabilityGrant200;
+    Request: RevokeAiAssistantCapabilityGrantMutationRequest;
     Errors: any;
 };
 
-export type DeleteDeviceAssistantSession200 = RestResponseDeleteDeviceAssistantSessionResponse;
+export type DeleteAiAssistantSession200 = RestResponseDeleteAiAssistantSessionResponse;
 
-export type DeleteDeviceAssistantSessionMutationRequest = DeleteDeviceAssistantSessionBody;
+export type DeleteAiAssistantSessionMutationRequest = DeleteAiAssistantSessionBody;
 
-export type DeleteDeviceAssistantSessionMutationResponse = DeleteDeviceAssistantSession200;
+export type DeleteAiAssistantSessionMutationResponse = DeleteAiAssistantSession200;
 
-export type DeleteDeviceAssistantSessionMutation = {
-    Response: DeleteDeviceAssistantSession200;
-    Request: DeleteDeviceAssistantSessionMutationRequest;
+export type DeleteAiAssistantSessionMutation = {
+    Response: DeleteAiAssistantSession200;
+    Request: DeleteAiAssistantSessionMutationRequest;
     Errors: any;
 };
 
@@ -12606,19 +12606,19 @@ export type ListAssistantImagesQuery = {
 /**
  * @description Durable decision projection; no tool is dispatched
 */
-export type DecideDeviceAssistantPermission200 = RestResponsePermissionDecisionResponse;
+export type DecideAiAssistantPermission200 = RestResponsePermissionDecisionResponse;
 
-export type DecideDeviceAssistantPermissionMutationRequest = PermissionDecisionBody;
+export type DecideAiAssistantPermissionMutationRequest = PermissionDecisionBody;
 
-export type DecideDeviceAssistantPermissionMutationResponse = DecideDeviceAssistantPermission200;
+export type DecideAiAssistantPermissionMutationResponse = DecideAiAssistantPermission200;
 
-export type DecideDeviceAssistantPermissionMutation = {
-    Response: DecideDeviceAssistantPermission200;
-    Request: DecideDeviceAssistantPermissionMutationRequest;
+export type DecideAiAssistantPermissionMutation = {
+    Response: DecideAiAssistantPermission200;
+    Request: DecideAiAssistantPermissionMutationRequest;
     Errors: any;
 };
 
-export type ListDeviceAssistantSessionsQueryParams = {
+export type ListAiAssistantSessionsQueryParams = {
     /**
      * @description Target connection id
      * @type string
@@ -12633,15 +12633,15 @@ export type ListDeviceAssistantSessionsQueryParams = {
 };
 
 /**
- * @description Authorized recent Device Assistant sessions
+ * @description Authorized recent AI Assistant sessions
 */
-export type ListDeviceAssistantSessions200 = RestResponseDeviceAssistantSessionListDto;
+export type ListAiAssistantSessions200 = RestResponseAiAssistantSessionListDto;
 
-export type ListDeviceAssistantSessionsQueryResponse = ListDeviceAssistantSessions200;
+export type ListAiAssistantSessionsQueryResponse = ListAiAssistantSessions200;
 
-export type ListDeviceAssistantSessionsQuery = {
-    Response: ListDeviceAssistantSessions200;
-    QueryParams: ListDeviceAssistantSessionsQueryParams;
+export type ListAiAssistantSessionsQuery = {
+    Response: ListAiAssistantSessions200;
+    QueryParams: ListAiAssistantSessionsQueryParams;
     Errors: any;
 };
 

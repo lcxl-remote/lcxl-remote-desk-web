@@ -182,9 +182,9 @@ fn destination(value: &TaskMessageDestination) -> Result<(), TaskContractError> 
     }
     // A browser profile or OS session is not a fixed signed-in account.
     if [
-        crate::device_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID,
-        crate::device_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID,
-        crate::device_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID,
+        crate::ai_assistant::GMAIL_WEB_CURRENT_PROFILE_ACCOUNT_ID,
+        crate::ai_assistant::SLACK_WEB_CURRENT_PROFILE_ACCOUNT_ID,
+        crate::ai_assistant::OUTLOOK_NEW_UNVERIFIED_ACCOUNT_ID,
     ]
     .contains(&value.account_id.as_str())
     {

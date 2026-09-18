@@ -6,7 +6,7 @@ use desk_agent_protocol::file_recovery::{
 
 pub(super) async fn handle(ctx: &RouterContext, model: &SignalingModel) -> Result<(), RouterError> {
     // This is a user management operation, not an AI action. It remains available
-    // when Device Assistant is disabled so owners can retrieve/clean old backups.
+    // when AI Assistant is disabled so owners can retrieve/clean old backups.
     let reject = |reason| reply_failure(ctx, model, reason);
     let Some(authz) = ctx.inbound_authz.as_ref() else {
         reject(FileRecoveryFailure::Unauthorized);

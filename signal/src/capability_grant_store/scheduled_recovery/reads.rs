@@ -8,7 +8,7 @@ pub(super) async fn close_untracked_on(
     session: &mut PersistedAgentSession,
     matched: &mut BTreeSet<String>,
 ) -> Result<(), DbErr> {
-    let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+    let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
     let turn = session.current_turn_id.clone().ok_or_else(invalid)?;
     let calls: Vec<_> = session
         .conversation

@@ -1,4 +1,4 @@
-//! Model-agnostic Device Assistant logic shared by the thin edge and central brain.
+//! Model-agnostic AI Assistant logic shared by the thin edge and central brain.
 //!
 //! Splitting this out of `server` lets the manager run the same capability
 //! selection, prompt assembly, response parsing, and evidence chunking the edge
@@ -28,6 +28,7 @@ pub mod agent_loop;
 #[cfg(test)]
 mod agent_loop_acceptance;
 pub mod agentic_prompt;
+pub mod ai_assistant;
 pub mod application_batch;
 pub mod application_launch;
 pub mod application_ui;
@@ -51,7 +52,6 @@ pub mod conversation_attachment;
 pub mod conversation_history;
 pub mod conversation_key;
 pub mod data_policy;
-pub mod device_assistant;
 pub mod directory_tools;
 pub mod durable_action;
 pub mod dynamic_run;
@@ -93,8 +93,8 @@ pub mod sink_authorizer;
 pub mod spreadsheet_formula;
 pub mod stream;
 pub mod task_status_tools;
+pub mod terminal_ai_assistant;
 pub mod terminal_complete;
-pub mod terminal_copilot;
 mod text_parse;
 pub mod trim;
 pub mod visual_evidence;

@@ -148,7 +148,7 @@ mod tests {
     use super::*;
     #[test]
     fn repeated_reads_keep_observed_scope_and_reject_a_different_scope() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let descriptor = registry.capability_for_tool("read_system_info").unwrap();
         let observed = ObservedCapabilityAuthority {
             target_session_id: None,

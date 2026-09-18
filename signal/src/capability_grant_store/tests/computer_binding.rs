@@ -82,7 +82,7 @@ impl Fixture {
         row.actor_id = actor.into();
         session.policy_revision =
             desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
-        session.surface = AgentSessionSurface::DeviceAssistant;
+        session.surface = AgentSessionSurface::AiAssistant;
         session
             .begin_focus_epoch(session.input_revision, std::iter::empty::<String>())
             .unwrap();
@@ -151,7 +151,7 @@ impl Fixture {
             expires_at: expires_at.clone(),
         };
         let call_id = stable_id("capability-call", &format!("run-1:{turn_id}:{}", call.id));
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         let evaluated = BrowserCallPreflight::build(
             &registry,
             ProductSurface::OssPersonalOwner,

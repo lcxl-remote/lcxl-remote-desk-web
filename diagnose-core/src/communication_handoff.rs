@@ -212,8 +212,8 @@ pub fn project_web_draft_handoff(
             },
             device_id: result.page.adapter.device_id.clone(),
             os_session_id: result.page.adapter.os_session_id.clone(),
-            adapter_id: crate::device_assistant::GMAIL_WEB_ADAPTER_ID.into(),
-            adapter_version: crate::device_assistant::GMAIL_WEB_ADAPTER_VERSION.into(),
+            adapter_id: crate::ai_assistant::GMAIL_WEB_ADAPTER_ID.into(),
+            adapter_version: crate::ai_assistant::GMAIL_WEB_ADAPTER_VERSION.into(),
             profile_id: result.page.adapter.profile_incarnation.clone(),
             account_id: crate::communication::gmail_web_account_id(&result.page)
                 .map_err(|_| invalid())?,
@@ -308,8 +308,8 @@ pub fn project_web_draft_handoff(
         },
         device_id: result.page.adapter.device_id.clone(),
         os_session_id: result.page.adapter.os_session_id.clone(),
-        adapter_id: crate::device_assistant::SLACK_WEB_ADAPTER_ID.into(),
-        adapter_version: crate::device_assistant::SLACK_WEB_ADAPTER_VERSION.into(),
+        adapter_id: crate::ai_assistant::SLACK_WEB_ADAPTER_ID.into(),
+        adapter_version: crate::ai_assistant::SLACK_WEB_ADAPTER_VERSION.into(),
         profile_id: result.page.adapter.profile_incarnation.clone(),
         account_id: crate::communication::slack_web_account_id(&result.page)
             .map_err(|_| invalid())?,

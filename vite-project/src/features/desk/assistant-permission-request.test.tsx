@@ -13,7 +13,7 @@ const request = (items = [item()]): PermissionRequestDto => ({
     schemaVersion: 1, requestId: 'permission-1', inputRevision: 1,
     createdAt: '2026-09-06T00:00:00Z', state: 'pending', items,
 });
-const submit = () => screen.getByRole('button', { name: 'pages.deviceAssistant.permissionSubmitSelection' });
+const submit = () => screen.getByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' });
 describe('shared permission review', () => {
     it.each([
         ['execute_ui_actions', 'ui:scroll'],
@@ -25,7 +25,7 @@ describe('shared permission review', () => {
             applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Test app', actions: ['scroll'] },
         })]);
         render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
-        expect(screen.getByRole('checkbox', { name: 'pages.deviceAssistant.uiAction_scroll' })).toBeChecked();
+        expect(screen.getByRole('checkbox', { name: 'pages.aiAssistant.uiAction_scroll' })).toBeChecked();
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', operation_scope: [operation] });
     });
@@ -38,7 +38,7 @@ describe('shared permission review', () => {
         render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
         expect(screen.getByTestId('application-ui-scope')).toBeInTheDocument();
         expect(screen.getByRole('checkbox', { name: 'Calendar' })).toBeChecked();
-        fireEvent.click(screen.getByRole('checkbox', { name: 'pages.deviceAssistant.uiAction_invoke' }));
+        fireEvent.click(screen.getByRole('checkbox', { name: 'pages.aiAssistant.uiAction_invoke' }));
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', resource_scope: ['ui_application:sha256:opaque'], operation_scope: ['ui:set_value'], max_uses: 8 });
     });
@@ -51,14 +51,14 @@ describe('shared permission review', () => {
         render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
         expect(screen.getByTestId('application-ui-scope')).toBeInTheDocument();
         expect(screen.getByRole('checkbox', { name: 'Calendar' })).toBeChecked();
-        fireEvent.click(screen.getByRole('checkbox', { name: 'pages.deviceAssistant.uiAction_click' }));
+        fireEvent.click(screen.getByRole('checkbox', { name: 'pages.aiAssistant.uiAction_click' }));
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', resource_scope: ['ui_application:sha256:opaque'], operation_scope: ['background_input:type_text'], max_uses: 8 });
     });
     it('rejects native UI approval without an application scope', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         render(<AssistantPermissionRequest request={request([item({ toolName: 'execute_ui_actions', expectedEffect: 'mutate_application' })])} canDecide onDecide={onDecide} />);
-        expect(screen.getByText('pages.deviceAssistant.applicationUiScopeMissing')).toBeInTheDocument();
+        expect(screen.getByText('pages.aiAssistant.applicationUiScopeMissing')).toBeInTheDocument();
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0].decision).toBe('deny');
     });
@@ -82,10 +82,10 @@ describe('shared permission review', () => {
             item({ itemId: 'included-inspect_desktop_ui', toolName: 'inspect_desktop_ui', suggestedMaxUses: 16 }),
         ]);
         render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
-        expect(screen.getByText('pages.deviceAssistant.permissionIncludedDesktopReads')).toBeInTheDocument();
+        expect(screen.getByText('pages.aiAssistant.permissionIncludedDesktopReads')).toBeInTheDocument();
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1].map((entry: { decision: string }) => entry.decision)).toEqual(['approve', 'approve', 'approve']);
-        const toggles = screen.getAllByRole('checkbox', { name: 'pages.deviceAssistant.permissionItemToggle' });
+        const toggles = screen.getAllByRole('checkbox', { name: 'pages.aiAssistant.permissionItemToggle' });
         fireEvent.click(toggles[2]);
         fireEvent.click(submit());
         expect(onDecide.mock.calls[1][1][2]).toEqual({ itemId: 'included-inspect_desktop_ui', decision: 'deny' });
@@ -108,17 +108,17 @@ describe('shared permission review', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         render(<AssistantPermissionRequest request={request()} canDecide {...{ [flag]: true }} onDecide={onDecide} />);
         expect(submit()).toBeDisabled();
-        const deny = screen.getByRole('button', { name: 'pages.deviceAssistant.permissionDeny' });
+        const deny = screen.getByRole('button', { name: 'pages.aiAssistant.permissionDeny' });
         expect(deny).toBeDisabled();
         fireEvent.click(submit()); fireEvent.click(deny);
         expect(onDecide).not.toHaveBeenCalled();
-        if (flag === 'waitingForTurn') expect(screen.getByRole('status')).toHaveTextContent('pages.deviceAssistant.permissionWaitingForTurn');
+        if (flag === 'waitingForTurn') expect(screen.getByRole('status')).toHaveTextContent('pages.aiAssistant.permissionWaitingForTurn');
     });
     it('allows reading completed reviews while decisions are disabled', () => {
         render(<AssistantPermissionRequest request={{ ...request(), state: 'approved' }} canDecide disabled onDecide={vi.fn()} />);
         fireEvent.click(screen.getByRole('button'));
         expect(screen.getByText('Inspect selected device')).toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: 'pages.deviceAssistant.permissionSubmitSelection' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' })).not.toBeInTheDocument();
     });
     it('does not offer decision controls on a viewing-only surface', () => {
         render(<AssistantPermissionRequest request={request()} canDecide={false} onDecide={vi.fn()} />);

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { AssistantCapabilityList } from './assistant-capability-list';
-import type { CapabilityInventoryEntry } from './use-device-assistant-capabilities';
+import type { CapabilityInventoryEntry } from './use-ai-assistant-capabilities';
 import zh from '@/locales/zh-CN/pages';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, options?: { defaultValue?: string }) =>
@@ -60,7 +60,7 @@ describe('complete device capability inventory', () => {
         expect(screen.getAllByText('ready', { exact: true }).length).toBeGreaterThan(0);
         expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
         expect(refresh).not.toHaveBeenCalled();
-        fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.refreshCapabilities' }));
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.refreshCapabilities' }));
         expect(refresh).toHaveBeenCalledOnce();
     });
 
@@ -78,7 +78,7 @@ describe('complete device capability inventory', () => {
     it('keeps errors distinct from an empty inventory and disables offline refresh', () => {
         render(<AssistantCapabilityList entries={[]} loading={false} error refreshDisabled onRefresh={() => {}} />);
         expect(screen.getByRole('alert').textContent).toContain('capabilityLoadError');
-        expect(screen.queryByText('pages.deviceAssistant.capabilityEmpty')).toBeNull();
+        expect(screen.queryByText('pages.aiAssistant.capabilityEmpty')).toBeNull();
         expect((screen.getByRole('button') as HTMLButtonElement).disabled).toBe(true);
     });
 });

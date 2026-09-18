@@ -107,7 +107,7 @@ async fn exercise(model_budget: u64) {
     let executor = crate::schedule_executor::SignalScheduleExecutor::new(
         db.clone(),
         connections,
-        Arc::new(DeviceAssistantGate::new(DeviceAssistantSettings {
+        Arc::new(AiAssistantGate::new(AiAssistantSettings {
             enabled: true,
             revision: 1,
         })),

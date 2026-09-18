@@ -110,12 +110,12 @@ fn select_assistant_session_model(
 ) -> SignalingModel {
     SignalingModel::new(
         request_id,
-        SignalingType::SelectDeviceAssistantSession,
+        SignalingType::SelectAiAssistantSession,
         Some(connection_id.to_string()),
         None,
         Some(
             serde_json::to_value(
-                desk_signal_facade::model::signal::SelectDeviceAssistantSessionData {
+                desk_signal_facade::model::signal::SelectAiAssistantSessionData {
                     session_target_id: target_id,
                 },
             )
@@ -134,7 +134,7 @@ pub(super) async fn assistant_session_selection_succeeds_for_portable_worker() {
     let response = read_response(&mut outbound_rx);
     assert_eq!(
         response.signaling_type,
-        SignalingType::DeviceAssistantSessionSelected
+        SignalingType::AiAssistantSessionSelected
     );
     assert_eq!(
         response
@@ -144,7 +144,7 @@ pub(super) async fn assistant_session_selection_succeeds_for_portable_worker() {
             .error_code,
         DeskErrorCode::SUCCESS.code()
     );
-    let data: desk_signal_facade::model::signal::DeviceAssistantSessionSelectedData =
+    let data: desk_signal_facade::model::signal::AiAssistantSessionSelectedData =
         response.get_data().expect("selected payload");
     assert_eq!(data.revision, 0);
     assert!(data.target.is_none());
@@ -170,7 +170,7 @@ pub(super) async fn assistant_session_selection_auto_binds_the_only_ready_target
             .error_code,
         DeskErrorCode::SUCCESS.code()
     );
-    let data: desk_signal_facade::model::signal::DeviceAssistantSessionSelectedData =
+    let data: desk_signal_facade::model::signal::AiAssistantSessionSelectedData =
         response.get_data().expect("selected payload");
     assert_eq!(
         data.target.expect("selected target").display_name,

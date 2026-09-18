@@ -298,7 +298,7 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
             image_data_url: None,
         };
         let envelope = crate::model_message_labels::read_result_envelope(
-            &crate::device_assistant::device_assistant_provider_registry(),
+            &crate::ai_assistant::ai_assistant_provider_registry(),
             &call,
             &output,
             crate::model_message_labels::ReadResultLabel {
@@ -375,7 +375,7 @@ fn durable_selection_withdrawal_and_later_reselection_cannot_revive_old_input() 
     };
     use desk_agent_protocol::{AgentScope, ExecutionMode, data_lineage::DestinationIdentity};
 
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let capability = registry
         .capability_for_tool("inspect_live_document")
         .unwrap();
@@ -432,7 +432,7 @@ fn durable_selection_withdrawal_and_later_reselection_cannot_revive_old_input() 
         },
         "2026-08-31T00:00:00Z",
     );
-    session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
     let ids = vec![capability.wire.capability_id.clone()];
     let selected = claim("select", &ids, now());
     reconcile_live_context(&mut session, &selected).unwrap();
@@ -519,7 +519,7 @@ fn all_live_read_grants_survive_readiness_ref_rotation_on_both_servers() {
         data_lineage::DestinationIdentity,
     };
     let original = captured();
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let destination = DestinationIdentity::Model {
         connection_id: "gateway".into(),
         connection_revision: 1,

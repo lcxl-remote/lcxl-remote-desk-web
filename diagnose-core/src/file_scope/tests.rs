@@ -72,7 +72,7 @@ fn artifact_boundary_requires_exact_current_directory_without_granting_tools() {
         },
         "2026-09-05T00:00:00Z",
     );
-    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::AiAssistant);
     let tool = "create_text_file";
     let resources = crate::capability_grant::fresh_object_resource_scope(&[proposal().directory]);
     assert!(validate_artifact_scope(&session, tool, &resources, 1).is_err());
@@ -129,7 +129,7 @@ fn all_native_file_writes_require_a_current_directory_but_live_edits_do_not() {
         },
         "2026-09-05T00:00:00Z",
     );
-    session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
     session.file_scope = approved();
     let root = crate::capability_grant::fresh_object_resource_scope(&[proposal().directory]);
     let resources = vec!["object:exact-source".into(), root[0].clone()];
@@ -369,7 +369,7 @@ fn conversation_storage_preserves_scope_without_putting_it_in_model_messages() {
         session.file_scope_subject("owner", "device", "conversation"),
         Err(FileScopeError::WrongSubject)
     );
-    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::AiAssistant);
     assert_eq!(
         session.file_scope_subject("owner", "device", "browser-intent"),
         Err(FileScopeError::WrongSubject)
@@ -395,14 +395,14 @@ fn conversation_storage_preserves_scope_without_putting_it_in_model_messages() {
 #[test]
 fn canonical_path_changes_require_confirmation_and_retries_bind_original_intent() {
     use super::transaction::*;
-    use desk_agent_protocol::computer_use::FileDirectoryResolveOutput;
-    use desk_agent_protocol::device_assistant::{
-        DeviceAssistantObjectContextOperation, DeviceAssistantObjectContextUpdate,
+    use desk_agent_protocol::ai_assistant::{
+        AiAssistantObjectContextOperation, AiAssistantObjectContextUpdate,
     };
-    let wire = DeviceAssistantObjectContextUpdate {
+    use desk_agent_protocol::computer_use::FileDirectoryResolveOutput;
+    let wire = AiAssistantObjectContextUpdate {
         conversation_id: "browser-intent".into(),
         client_request_id: "directory-request".into(),
-        operation: DeviceAssistantObjectContextOperation::SelectDirectory {
+        operation: AiAssistantObjectContextOperation::SelectDirectory {
             path: "/tmp/assistant-test".into(),
             purpose: "test".into(),
             expected_revision: 0,
@@ -430,7 +430,7 @@ fn canonical_path_changes_require_confirmation_and_retries_bind_original_intent(
         },
         "2026-09-05T00:00:00Z",
     );
-    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::AiAssistant);
     let (mut stored, receipt) = prepare(&session, &selection, 1).unwrap();
     assert_eq!(
         stored.file_scope.records()[0].state,
@@ -438,8 +438,7 @@ fn canonical_path_changes_require_confirmation_and_retries_bind_original_intent(
     );
     assert!(match_owner_selection(&receipt, &wire, &subject()).is_ok());
     let mut changed = wire.clone();
-    if let DeviceAssistantObjectContextOperation::SelectDirectory { path, .. } =
-        &mut changed.operation
+    if let AiAssistantObjectContextOperation::SelectDirectory { path, .. } = &mut changed.operation
     {
         *path = "/other".into();
     }
@@ -459,14 +458,14 @@ fn canonical_path_changes_require_confirmation_and_retries_bind_original_intent(
 #[test]
 fn windows_prefix_conversion_keeps_owner_selection_but_not_target_changes() {
     use super::transaction::*;
-    use desk_agent_protocol::computer_use::FileDirectoryResolveOutput;
-    use desk_agent_protocol::device_assistant::{
-        DeviceAssistantObjectContextOperation, DeviceAssistantObjectContextUpdate,
+    use desk_agent_protocol::ai_assistant::{
+        AiAssistantObjectContextOperation, AiAssistantObjectContextUpdate,
     };
-    let wire = DeviceAssistantObjectContextUpdate {
+    use desk_agent_protocol::computer_use::FileDirectoryResolveOutput;
+    let wire = AiAssistantObjectContextUpdate {
         conversation_id: "browser-intent".into(),
         client_request_id: "directory-request".into(),
-        operation: DeviceAssistantObjectContextOperation::SelectDirectory {
+        operation: AiAssistantObjectContextOperation::SelectDirectory {
             path: r"D:\测试 输入".into(),
             purpose: "test".into(),
             expected_revision: 0,
@@ -499,7 +498,7 @@ fn windows_prefix_conversion_keeps_owner_selection_but_not_target_changes() {
             },
             "2026-09-05T00:00:00Z",
         );
-        session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::DeviceAssistant);
+        session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::AiAssistant);
         let (stored, receipt) = prepare(&session, &selection, 1).unwrap();
         assert_eq!(
             stored.file_scope.records()[0].state == DirectoryConsentState::Approved,
@@ -508,7 +507,7 @@ fn windows_prefix_conversion_keeps_owner_selection_but_not_target_changes() {
         assert!(stored.scope_snapshot.granted.is_empty());
         match_owner_selection(&receipt, &wire, &subject()).unwrap();
         let mut changed = wire.clone();
-        let DeviceAssistantObjectContextOperation::SelectDirectory { path, .. } =
+        let AiAssistantObjectContextOperation::SelectDirectory { path, .. } =
             &mut changed.operation
         else {
             panic!()
@@ -534,7 +533,7 @@ fn owner_selection_transaction_is_atomic_and_does_not_grant_tool_execution() {
         },
         "2026-09-05T00:00:00Z",
     );
-    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::AiAssistant);
     let mut directory = proposal();
     directory.source = DirectoryConsentSource::OwnerSelection;
     let update = FileScopeUpdate {
@@ -576,7 +575,7 @@ fn task_directory_consent_keeps_distinct_source_and_requires_active_scheduled_ru
         },
         "2026-09-05T00:00:00Z",
     );
-    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::AiAssistant);
     let mut directory = proposal();
     directory.source = DirectoryConsentSource::TaskContract;
     let mut update = FileScopeUpdate {

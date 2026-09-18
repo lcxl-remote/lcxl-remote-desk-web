@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent_session_store::SignalAgentSessionStore;
-use crate::controller::device_assistant_session::recovery::resolve;
+use crate::controller::ai_assistant_session::recovery::resolve;
 use desk_signal_facade::model::connection::SharedConnectionMap;
 
 #[tokio::test]

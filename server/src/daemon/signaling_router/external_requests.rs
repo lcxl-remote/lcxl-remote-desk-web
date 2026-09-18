@@ -130,12 +130,12 @@ pub(super) async fn handle_remote_tool_request_inbound(
     };
     let request_id = request.request_id.clone();
 
-    if !ctx.settings.read().await.device_assistant.enabled {
+    if !ctx.settings.read().await.ai_assistant.enabled {
         send_remote_tool_error(
             &ctx.outbound_tx,
             &request_id,
             AgentErrorKind::UnsupportedCapability,
-            "Device Assistant is disabled on this device",
+            "AI Assistant is disabled on this device",
         );
         return Ok(());
     }

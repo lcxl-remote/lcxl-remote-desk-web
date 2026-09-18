@@ -5,16 +5,16 @@ import en from '@/locales/en-US/pages';
 describe('assistant capability disclosure', () => {
     it('removes redundant general notices', () => {
         for (const locale of [zh, en]) {
-            expect(Object.keys(locale)).not.toContain('pages.deviceAssistant.workspace.reviewNotice');
-            expect(Object.keys(locale)).not.toContain('pages.deviceAssistant.disclosure');
-            expect(Object.keys(locale)).not.toContain('pages.deviceAssistant.disclosureTitle');
+            expect(Object.keys(locale)).not.toContain('pages.aiAssistant.workspace.reviewNotice');
+            expect(Object.keys(locale)).not.toContain('pages.aiAssistant.disclosure');
+            expect(Object.keys(locale)).not.toContain('pages.aiAssistant.disclosureTitle');
         }
     });
     it('avoids obsolete layout and developer wording', () => {
         for (const locale of [zh, en]) {
-            expect(locale['pages.deviceAssistant.sessionDescription']).not.toContain('daemon/worker');
-            expect(locale['pages.deviceAssistant.providerBoundary']).toContain('{{model}}');
-            expect(locale['pages.deviceAssistant.providerBoundary']).toContain('{{provider}}');
+            expect(locale['pages.aiAssistant.sessionDescription']).not.toContain('daemon/worker');
+            expect(locale['pages.aiAssistant.providerBoundary']).toContain('{{model}}');
+            expect(locale['pages.aiAssistant.providerBoundary']).toContain('{{provider}}');
         }
     });
 });

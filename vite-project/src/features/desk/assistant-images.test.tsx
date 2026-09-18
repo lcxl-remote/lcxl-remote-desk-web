@@ -2,10 +2,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AssistantImages } from './assistant-images';
 import { deleteAssistantImage, getAssistantImage, listAssistantImages } from '@/services/clients';
-import type { DeviceAssistantVisualEvidence } from './device-assistant-event';
+import type { AiAssistantVisualEvidence } from './ai-assistant-event';
 vi.mock('@/services/clients', () => ({ deleteAssistantImage: vi.fn(), getAssistantImage: vi.fn(), listAssistantImages: vi.fn() }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-const frame: DeviceAssistantVisualEvidence = {
+const frame: AiAssistantVisualEvidence = {
     content: { kind: 'artifact', artifact_id: 'visual-image', media_type: 'image/png', sha256: 'a'.repeat(64), size_bytes: 3 },
     schema_version: 1, evidence_id: 'visual-image', conversation_id: 'stored-run', focus_input_revision: 1,
     turn_id: 'turn', tool_call_id: 'capture-call', frame_id: 'frame', phase: 'observation', status: 'available',
@@ -23,7 +23,7 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 describe('durable assistant images', () => {
     it('does not load durable pixels while listing conversation history', async () => {
         render(<AssistantImages sessionId="stored-run" evidence={[]} />);
-        await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' });
+        await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' });
         expect(getAssistantImage).not.toHaveBeenCalled();
         expect(screen.queryByRole('img')).toBeNull();
     });
@@ -33,33 +33,33 @@ describe('durable assistant images', () => {
             { id: 'capture', role: 'tool_call', toolCallId: 'capture-call', text: 'Screenshot tool' },
             { id: 'answer', role: 'assistant', text: 'The result is visible' },
         ]} renderMessage={message => <p>{message.text}</p>} />);
-        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
         const image = await screen.findByRole('img');
         expect(screen.getByText('Screenshot tool').compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(image.compareDocumentPosition(screen.getByText('The result is visible')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-        expect(screen.queryByText('pages.deviceAssistant.imageEarlier')).toBeNull();
+        expect(screen.queryByText('pages.aiAssistant.imageEarlier')).toBeNull();
     });
     it('moves an older screenshot to its tool when earlier messages are loaded without duplicating it', async () => {
         const renderMessage = (message: { text: string }) => <p>{message.text}</p>;
         const view = render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
             { id: 'answer', role: 'assistant', text: 'Later reply' },
         ]} renderMessage={renderMessage} />);
-        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
         await screen.findByRole('img');
-        expect(screen.getByText('pages.deviceAssistant.imageEarlier')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.imageEarlier')).toBeTruthy();
         view.rerender(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
             { id: 'capture', role: 'tool_call', toolCallId: 'capture-call', text: 'Earlier capture' },
             { id: 'answer', role: 'assistant', text: 'Later reply' },
         ]} renderMessage={renderMessage} />);
-        await waitFor(() => expect(screen.queryByText('pages.deviceAssistant.imageEarlier')).toBeNull());
-        const button = screen.getByRole('button', { name: 'pages.deviceAssistant.imageOpen' });
-        expect(screen.getAllByRole('button', { name: 'pages.deviceAssistant.imageOpen' })).toHaveLength(1);
+        await waitFor(() => expect(screen.queryByText('pages.aiAssistant.imageEarlier')).toBeNull());
+        const button = screen.getByRole('button', { name: 'pages.aiAssistant.imageOpen' });
+        expect(screen.getAllByRole('button', { name: 'pages.aiAssistant.imageOpen' })).toHaveLength(1);
         expect(screen.getByText('Earlier capture').compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(getAssistantImage).toHaveBeenCalledTimes(1);
     });
     it('loads persisted images without any live preview and releases pixel URLs', async () => {
         const view = render(<AssistantImages sessionId="stored-run" evidence={[]} />);
-        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
         const image = await screen.findByRole('img');
         expect(image.getAttribute('src')).toBe('blob:stored-image');
         expect(getAssistantImage).toHaveBeenCalledWith({ session: 'stored-run', attachment: 'visual-image' }, expect.objectContaining({ responseType: 'blob' }));
@@ -68,9 +68,9 @@ describe('durable assistant images', () => {
     });
     it('removes deleted attachments even when a stale snapshot still contains them', async () => {
         const view = render(<AssistantImages sessionId="stored-run" evidence={[frame]} />);
-        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
         await screen.findByRole('img');
-        fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.imageDelete' }));
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.imageDelete' }));
         await waitFor(() => expect(screen.queryByRole('img')).toBeNull());
         view.rerender(<AssistantImages sessionId="stored-run" evidence={[{ ...frame }]} />);
         await waitFor(() => expect(listAssistantImages).toHaveBeenCalledTimes(2));
@@ -86,8 +86,8 @@ describe('durable assistant images', () => {
     it('does not treat an unavailable attachment as a retained live preview', async () => {
         vi.mocked(getAssistantImage).mockRejectedValue(new Error('not found'));
         render(<AssistantImages sessionId="stored-run" evidence={[{ ...frame, preview_data_url: 'data:image/png;base64,AQID' }]} />);
-        fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.imageOpen' }));
-        await screen.findByText('pages.deviceAssistant.imageUnavailable');
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
+        await screen.findByText('pages.aiAssistant.imageUnavailable');
         expect(screen.queryByRole('img')).toBeNull();
     });
 });

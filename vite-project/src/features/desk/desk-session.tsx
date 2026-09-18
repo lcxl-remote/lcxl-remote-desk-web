@@ -1,8 +1,8 @@
-import { DeviceAssistantWorkspace } from "./device-assistant-page"
+import { AiAssistantWorkspace } from "./ai-assistant-page"
 import { DeskAssistantPanel } from "./desk-assistant-panel"
-import { OSS_DEVICE_ASSISTANT_FEATURES, hasDeviceAssistantBrowserEntry, type DeviceAssistantFeatureProfile } from "./device-assistant-features"
+import { OSS_AI_ASSISTANT_FEATURES, hasAiAssistantBrowserEntry, type AiAssistantFeatureProfile } from "./ai-assistant-features"
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
-import { isDeviceAssistantEnabled } from "./device-assistant-switch"
+import { isAiAssistantEnabled } from "./ai-assistant-switch"
 import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
@@ -144,7 +144,7 @@ const SETTINGS_EFFECT_KEYS: Record<string, string> = {
  *  with no props, keeping the AI model selection personal-scoped. */
 type DeskSessionProps = {
     showAssistant?: boolean
-    assistantFeatureProfile?: DeviceAssistantFeatureProfile | null
+    assistantFeatureProfile?: AiAssistantFeatureProfile | null
     orgId?: number
     /** Manager injects `u:<user_id>`; standalone omits it for its fixed owner. */
     preferenceOwnerKey?: string | null
@@ -155,7 +155,7 @@ type DeskSessionProps = {
 export default function DeskSession({
     orgId,
     showAssistant = import.meta.env.BASE_URL !== "/console/",
-    assistantFeatureProfile = OSS_DEVICE_ASSISTANT_FEATURES,
+    assistantFeatureProfile = OSS_AI_ASSISTANT_FEATURES,
     preferenceOwnerKey,
     preferenceOwnerLoading = false,
 }: DeskSessionProps = {}) {
@@ -193,8 +193,8 @@ export default function DeskSession({
     // Restriction state derived from the redeemed grant (if any) for this target.
     const restricted = useRestrictedSession(deskId);
     const assistantAvailable = showAssistant && restricted.ownerPlaneVisible
-        && isDeviceAssistantEnabled(assistantConnection?.version_info)
-        && hasDeviceAssistantBrowserEntry(assistantFeatureProfile);
+        && isAiAssistantEnabled(assistantConnection?.version_info)
+        && hasAiAssistantBrowserEntry(assistantFeatureProfile);
     useEffect(() => {
         setAssistantOpen(false);
         setAssistantMounted(false);
@@ -1841,7 +1841,7 @@ export default function DeskSession({
                         {assistantAvailable && assistantMounted && deskId && assistantConnection && assistantFeatureProfile && (
                             <DeskAssistantPanel open={assistantOpen}
                                 onClose={() => setAssistantOpen(false)} onFocus={releaseAllInputs}>
-                                <DeviceAssistantWorkspace key={deskId}
+                                <AiAssistantWorkspace key={deskId}
                                     deskId={deskId}
                                     stableDeviceId={assistantConnection.version_info.client_id ?? assistantConnection.device_id ?? deskId}
                                     localPairingAvailable={!assistantConnection.device_id}

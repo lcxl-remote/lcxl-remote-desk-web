@@ -31,7 +31,7 @@ async fn fixture() -> (
         },
         "2026-09-06T00:00:00Z",
     );
-    session.surface = AgentSessionSurface::DeviceAssistant;
+    session.surface = AgentSessionSurface::AiAssistant;
     session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
     session.input_revision = 1;
     let row = session_row::ActiveModel {
@@ -170,7 +170,7 @@ async fn activation_does_not_bypass_task_kind_or_source_surface() {
     let mut changed: entity::ActiveModel = fresh.into();
     changed.kind = Set("conversation_resume".into());
     changed.update(&store.db).await.unwrap();
-    session.surface = AgentSessionSurface::TerminalCopilot;
+    session.surface = AgentSessionSurface::TerminalAiAssistant;
     let mut changed: session_row::ActiveModel = row.into();
     changed.state_json = Set(session.encode_json_for_storage().unwrap());
     changed.update(&store.db).await.unwrap();

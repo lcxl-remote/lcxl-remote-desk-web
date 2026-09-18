@@ -315,7 +315,7 @@ impl SignalAgentSessionStore {
         };
         if params.trigger_origin != TriggerOrigin::PermissionDecision
             || params.turn_id != turn_id(&params.conversation_id, request_id)
-            || self.surface != AgentSessionSurface::DeviceAssistant
+            || self.surface != AgentSessionSurface::AiAssistant
         {
             return Err(ClaimError::Backend(invalid()));
         }

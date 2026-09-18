@@ -348,7 +348,7 @@ fn support_code_issued_is_trusted_central_only() {
     // confining it stops a bare relay forging a teardown of a live session.
     assert!(is_trusted_central_only(SignalingType::RevokeAccessGrant));
     assert!(is_trusted_central_only(
-        SignalingType::UpdateDeviceAssistantSettings
+        SignalingType::UpdateAiAssistantSettings
     ));
     // Alongside the other central→daemon plumbing.
     assert!(is_trusted_central_only(SignalingType::SyncCommandBlocklist));
@@ -1317,9 +1317,9 @@ fn computer_action_stop_requires_a_trusted_central_wrapper_and_exact_audience() 
     ));
 }
 
-// A ConfirmExec carrying the operator-promoted copilot command, wrapped by the
+// A ConfirmExec carrying the operator-promoted assistant command, wrapped by the
 // central brain exactly as `control_authorizer::build_wrapper_outcome` emits
-// it. Source-gating it proves the terminal copilot exec path is reachable on
+// it. Source-gating it proves the Terminal AI Assistant exec path is reachable on
 // the same trusted-central links as diagnose exec, and unreachable elsewhere.
 fn wrapped_confirm_exec_model(request_id: &str, audience: &str) -> SignalingModel {
     use desk_agent_protocol::exec::ConfirmExecData;
@@ -1340,7 +1340,7 @@ fn wrapped_confirm_exec_model(request_id: &str, audience: &str) -> SignalingMode
                     max_stderr_bytes: 0,
                 }),
             },
-            reason: Some("operator promoted a copilot suggestion".to_string()),
+            reason: Some("operator promoted a assistant suggestion".to_string()),
             org_id: None,
         },
         authz: block(request_id, audience),
@@ -1357,7 +1357,7 @@ fn wrapped_confirm_exec_model(request_id: &str, audience: &str) -> SignalingMode
 
 #[test]
 fn wrapped_confirm_exec_from_trusted_central_is_unwrapped_to_router() {
-    // The end-to-end inbound path for an operator-promoted copilot exec on a
+    // The end-to-end inbound path for an operator-promoted assistant exec on a
     // trusted-central link: the wrapper validates, is stripped, and the bare
     // ConfirmExec plus its authorization block flow on to the router (which
     // re-classifies the command before any preview).
@@ -1371,7 +1371,7 @@ fn wrapped_confirm_exec_from_trusted_central_is_unwrapped_to_router() {
                 .expect("inner ConfirmExecData");
             assert_eq!(
                 inner.reason.as_deref(),
-                Some("operator promoted a copilot suggestion")
+                Some("operator promoted a assistant suggestion")
             );
             assert_eq!(authz.request_id, "ce-1");
             assert_eq!(authz.audience, "dev-1");
@@ -1389,7 +1389,7 @@ fn wrapped_confirm_exec_from_trusted_central_is_unwrapped_to_router() {
 fn wrapped_confirm_exec_from_non_central_source_is_dropped() {
     // The same wrapped ConfirmExec arriving over a bare remote-signaling (or
     // local) upstream is dropped at the source gate — a non-central relay can
-    // never inject an authorization wrapper. This is why copilot exec (like
+    // never inject an authorization wrapper. This is why assistant exec (like
     // diagnose exec) is only reachable on trusted-central links.
     for source in [
         InboundSignalingSource::RemoteSignaling,

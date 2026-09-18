@@ -7,7 +7,7 @@ use crate::{
     control_authorizer::SignalControlAuthorizer,
     entity::{model_probe_observation, model_provider},
 };
-use desk_agent_protocol::device_assistant::DeviceAssistantObjectContextUpdated;
+use desk_agent_protocol::ai_assistant::AiAssistantObjectContextUpdated;
 use desk_diagnose_core::model_profile::WireProtocol;
 use desk_signal_facade::{
     model::{
@@ -48,8 +48,8 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
     let authorizer = Arc::new(SignalControlAuthorizer::new(
         store.db.clone(),
         map.clone(),
-        Arc::new(crate::device_assistant_gate::DeviceAssistantGate::new(
-            desk_agent_protocol::device_assistant::DeviceAssistantSettings {
+        Arc::new(crate::ai_assistant_gate::AiAssistantGate::new(
+            desk_agent_protocol::ai_assistant::AiAssistantSettings {
                 revision: 1,
                 enabled: true,
             },
@@ -118,7 +118,7 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
                                             serde_json::from_str(&text).unwrap();
                                         assert_eq!(
                                             frame.signaling_type,
-                                            SignalingType::UpdateDeviceAssistantObjectContext
+                                            SignalingType::UpdateAiAssistantObjectContext
                                         );
                                         assert!(matches!(
                                             authorizer.authorize(&actor, &map, &frame).await,
@@ -154,10 +154,10 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
 
     macro_rules! exchange {
         ($request:expr, $transport_id:expr) => {{
-            let update: &DeviceAssistantObjectContextUpdate = $request;
+            let update: &AiAssistantObjectContextUpdate = $request;
             let frame = SignalingModel::new(
                 $transport_id,
-                SignalingType::UpdateDeviceAssistantObjectContext,
+                SignalingType::UpdateAiAssistantObjectContext,
                 Some("untrusted-sender-is-ignored".into()),
                 Some("host".into()),
                 Some(serde_json::to_value(update).unwrap()),
@@ -181,10 +181,10 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
             assert_eq!(reply.request_id, $transport_id);
             assert_eq!(
                 reply.signaling_type,
-                SignalingType::DeviceAssistantObjectContextUpdated
+                SignalingType::AiAssistantObjectContextUpdated
             );
             assert_eq!(reply.to_connection_id.as_deref(), Some("controller"));
-            let ack: DeviceAssistantObjectContextUpdated = reply.get_data().unwrap();
+            let ack: AiAssistantObjectContextUpdated = reply.get_data().unwrap();
             assert_eq!(ack.conversation_id, update.conversation_id);
             assert_eq!(ack.client_request_id, update.client_request_id);
             ack
@@ -210,7 +210,7 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
     assert_eq!(row(&store).await, saved);
 
     let mut conflicting = original.update.clone();
-    if let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+    if let AiAssistantObjectContextOperation::AttachTerminalOutput {
         display_summary, ..
     } = &mut conflicting.operation
     {
@@ -226,9 +226,9 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
     assert!(!rejected.changed && rejected.error.is_some());
     assert_eq!(row(&store).await, saved);
 
-    let detach = DeviceAssistantObjectContextUpdate {
+    let detach = AiAssistantObjectContextUpdate {
         client_request_id: "detach".into(),
-        operation: DeviceAssistantObjectContextOperation::Detach {
+        operation: AiAssistantObjectContextOperation::Detach {
             attachment_id: attachment.attachment_id.clone(),
         },
         ..original.update.clone()
@@ -256,7 +256,7 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
     anonymous.auth_context = AuthContext::anonymous(RemoteDeskTypeEnum::Browser);
     let frame = SignalingModel::new(
         "anonymous-retry",
-        SignalingType::UpdateDeviceAssistantObjectContext,
+        SignalingType::UpdateAiAssistantObjectContext,
         None,
         Some("host".into()),
         Some(serde_json::to_value(&original.update).unwrap()),

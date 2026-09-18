@@ -168,7 +168,7 @@ mod tests {
     fn scope_review_uses_observed_application_name_and_owner_expiry() {
         let app = json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
         let call = ToolCall { id:"request".into(),name:REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:json!({"items":[{"item_id":"app","tool_name":"execute_ui_actions","reason":"Add meeting","suggested_ttl_seconds":900,"suggested_max_uses":8,"application_scope":{"application":app,"application_name":"invented label","actions":["invoke","set_value"]}}]}).to_string() };
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let mut request = build_permission_request(
             &call,
             &registry,
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn exact_approval_cannot_accidentally_use_application_scoped_call_arguments() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let application = json!({"token":"app","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
         let target = json!({"token":"control","snapshot_id":"ui","object_kind":"ui_element","expires_at":"2026-09-11T03:10:00Z"});
         let call = ToolCall {
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn invalid_batch_reports_no_card_and_prerequisite_recovery() {
-        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let call = ToolCall { id:"batch".into(),name:REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:json!({"items":[{"item_id":"read","tool_name":"inspect_desktop_ui","reason":"Inspect","suggested_ttl_seconds":300,"suggested_max_uses":8},{"item_id":"click","tool_name":"execute_ui_actions","reason":"Click unknown target","suggested_ttl_seconds":300,"suggested_max_uses":1}]}).to_string() };
         let error = build_permission_request(
             &call,

@@ -15,14 +15,14 @@ describe('assistant background tasks', () => {
         const onTasks = vi.fn(); const onSubmit = vi.fn();
         render(<form onSubmit={onSubmit}><AssistantComposerTools meter={null} onDetails={vi.fn()}
             onPermissionHistory={vi.fn()} onTasks={onTasks} runningTaskCount={2} /></form>);
-        const button = screen.getByRole('button', { name: 'pages.deviceAssistant.tasks.title' });
+        const button = screen.getByRole('button', { name: 'pages.aiAssistant.tasks.title' });
         expect(button.textContent).toContain('(2)');
         fireEvent.click(button);
         expect(onTasks).toHaveBeenCalledOnce(); expect(onSubmit).not.toHaveBeenCalled();
     });
     it('shows an empty state', () => {
         render(<AssistantBackgroundTasks {...base} />);
-        expect(screen.getByText('pages.deviceAssistant.tasks.empty')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.tasks.empty')).toBeTruthy();
     });
     it('keeps completed results and cancels only the selected unfinished command', async () => {
         const onCancel = vi.fn().mockResolvedValue(undefined);
@@ -30,16 +30,16 @@ describe('assistant background tasks', () => {
             { ...command, taskId: 'done', executionGeneration: 'done-generation', state: 'succeeded', result: 'saved result' }, command,
         ]} />);
         expect(screen.getByText('saved result')).toBeTruthy();
-        const buttons = screen.getAllByRole('button', { name: 'pages.deviceAssistant.tasks.cancel' });
+        const buttons = screen.getAllByRole('button', { name: 'pages.aiAssistant.tasks.cancel' });
         expect(buttons).toHaveLength(1);
         fireEvent.click(buttons[0]);
         await waitFor(() => expect(onCancel).toHaveBeenCalledWith('command', 'command-1'));
         expect(await screen.findByRole('status')).toBeTruthy();
-        expect(screen.getByText('pages.deviceAssistant.backgroundState.running')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.backgroundState.running')).toBeTruthy();
     });
     it('does not offer command cancellation while the device is offline', () => {
         render(<AssistantBackgroundTasks {...base} commands={[command]} connected={false} />);
-        expect(screen.queryByRole('button', { name: 'pages.deviceAssistant.tasks.cancel' })).toBeNull();
-        expect(within(screen.getByRole('dialog')).getByText('pages.deviceAssistant.tasks.offline')).toBeTruthy();
+        expect(screen.queryByRole('button', { name: 'pages.aiAssistant.tasks.cancel' })).toBeNull();
+        expect(within(screen.getByRole('dialog')).getByText('pages.aiAssistant.tasks.offline')).toBeTruthy();
     });
 });

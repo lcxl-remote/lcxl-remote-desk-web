@@ -37,7 +37,7 @@ pub(super) fn session(
         || session.conversation_id != run_id
         || session.actor_id != actor_id
         || session.device_id != device_id
-        || session.surface != AgentSessionSurface::DeviceAssistant
+        || session.surface != AgentSessionSurface::AiAssistant
         || row.version < 0
     {
         return Err(invalid());

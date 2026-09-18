@@ -77,7 +77,7 @@ impl ModelSeam for MeteredModel {
         metrics: desk_diagnose_core::seam::ModelRequestProjectionMetrics,
     ) {
         log::debug!(
-            "[device-assistant] model projection messages={} message_json_bytes={} tools={} tool_json_bytes={} registry={} ready={} permission_candidates={} catalog_bytes={} index_bytes={} detail_bytes={} conversation_messages={} session_snapshot_bytes={} attachments={} permission_requests={} pending_work={}",
+            "[ai-assistant] model projection messages={} message_json_bytes={} tools={} tool_json_bytes={} registry={} ready={} permission_candidates={} catalog_bytes={} index_bytes={} detail_bytes={} conversation_messages={} session_snapshot_bytes={} attachments={} permission_requests={} pending_work={}",
             metrics.message_count,
             metrics.message_json_bytes,
             metrics.advertised_tool_count,
@@ -106,11 +106,11 @@ impl ModelSeam for MeteredModel {
         if is_compression {
             *self.completed_compression_receipt.borrow_mut() = None;
         }
-        let policy = self.model_egress_policy()?.ok_or_else(|| {
-            transport_error("device assistant model egress policy is unavailable")
-        })?;
+        let policy = self
+            .model_egress_policy()?
+            .ok_or_else(|| transport_error("AI assistant model egress policy is unavailable"))?;
         let authorized = policy.authorize_request(request).map_err(|error| {
-            log::warn!("[device-assistant] model egress denied: {error}");
+            log::warn!("[ai-assistant] model egress denied: {error}");
             error.agent_error()
         })?;
         let model_call_ordinal = self
@@ -129,7 +129,7 @@ impl ModelSeam for MeteredModel {
             .await
             .map_err(|error| {
                 error.into_agent_error(|error| {
-                    log::warn!("[device-assistant] failed to persist model egress: {error}");
+                    log::warn!("[ai-assistant] failed to persist model egress: {error}");
                     AgentError {
                         kind: AgentErrorKind::Internal,
                         message: "The AI model request could not be audited safely.".into(),
@@ -140,7 +140,7 @@ impl ModelSeam for MeteredModel {
                 })
             })?;
         log::info!(
-            "[device-assistant] authorized model egress receipt_id={} destination={:?} envelopes={:?} digests={:?} total_bytes={}",
+            "[ai-assistant] authorized model egress receipt_id={} destination={:?} envelopes={:?} digests={:?} total_bytes={}",
             receipt_id,
             authorized.audit.destination,
             authorized.audit.envelope_ids,
@@ -152,7 +152,7 @@ impl ModelSeam for MeteredModel {
             Err(error) => {
                 if let Err(audit_error) = egress_store.mark_failed(&receipt_id).await {
                     log::warn!(
-                        "[device-assistant] failed to close rejected model egress receipt_id={receipt_id}: {audit_error}"
+                        "[ai-assistant] failed to close rejected model egress receipt_id={receipt_id}: {audit_error}"
                     );
                 }
                 return Err(error);
@@ -175,7 +175,7 @@ impl ModelSeam for MeteredModel {
                 .await
                 .map_err(|error| {
                     log::warn!(
-                        "[device-assistant] failed to close empty model egress receipt_id={receipt_id}: {error}"
+                        "[ai-assistant] failed to close empty model egress receipt_id={receipt_id}: {error}"
                     );
                     AgentError {
                         kind: AgentErrorKind::Internal,
@@ -205,10 +205,10 @@ impl ModelSeam for MeteredModel {
         {
             Ok(envelope) => envelope,
             Err(error) => {
-                log::warn!("[device-assistant] failed to label model output: {error}");
+                log::warn!("[ai-assistant] failed to label model output: {error}");
                 if let Err(audit_error) = egress_store.mark_failed(&receipt_id).await {
                     log::warn!(
-                        "[device-assistant] failed to close unlabeled model egress receipt_id={receipt_id}: {audit_error}"
+                        "[ai-assistant] failed to close unlabeled model egress receipt_id={receipt_id}: {audit_error}"
                     );
                 }
                 return Err(AgentError {
@@ -225,7 +225,7 @@ impl ModelSeam for MeteredModel {
             .await
             .map_err(|error| {
                 log::warn!(
-                    "[device-assistant] failed to complete model egress receipt_id={receipt_id}: {error}"
+                    "[ai-assistant] failed to complete model egress receipt_id={receipt_id}: {error}"
                 );
                 AgentError {
                     kind: AgentErrorKind::Internal,

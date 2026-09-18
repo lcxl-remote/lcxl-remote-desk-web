@@ -176,10 +176,10 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
     ]
 }
 
-/// The read-only tools reserved for the Device Assistant surface. They are kept
+/// The read-only tools reserved for the AI Assistant surface. They are kept
 /// out of [`read_tool_registry`] so Diagnose can never acquire Computer Use by a
 /// broad scope or a future default-set change.
-pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
+pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
     vec![
         read(
             "list_applications",
@@ -712,7 +712,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             })
         }
         "inspect_excel_cell" => {
-            let args = serde_json::from_str::<crate::device_assistant::windows_excel::InspectArgs>(
+            let args = serde_json::from_str::<crate::ai_assistant::windows_excel::InspectArgs>(
                 &call.arguments_json,
             )
             .map_err(bad_arguments)?;
@@ -1065,7 +1065,7 @@ mod tests {
     }
 
     #[test]
-    fn device_assistant_registry_is_isolated_and_maps_to_computer_use_reads() {
+    fn ai_assistant_registry_is_isolated_and_maps_to_computer_use_reads() {
         let diagnostic_names: Vec<_> = read_tool_registry()
             .into_iter()
             .map(|tool| tool.spec.name)
@@ -1074,7 +1074,7 @@ mod tests {
         assert!(!diagnostic_names.contains(&"inspect_desktop_ui".to_string()));
         assert!(!diagnostic_names.contains(&"inspect_office_selection".to_string()));
 
-        let tools = device_assistant_read_tool_registry();
+        let tools = ai_assistant_read_tool_registry();
         assert_eq!(tools.len(), 10);
         for tool in tools {
             assert_eq!(tool.effect, ToolEffect::ReadOnly);

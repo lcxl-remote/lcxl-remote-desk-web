@@ -40,7 +40,7 @@ fn build(
     readiness: Option<&ComputerUseReadiness>,
     ready: bool,
 ) -> Result<ContextSelectionClaim, AgentError> {
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let inventory = ids
         .iter()
         .map(|id| CapabilityAvailability {
@@ -95,7 +95,7 @@ fn session() -> PersistedAgentSession {
         },
         "2026-08-31T00:00:01Z",
     );
-    session.adopt_client_metadata(Some("client-1"), AgentSessionSurface::DeviceAssistant);
+    session.adopt_client_metadata(Some("client-1"), AgentSessionSurface::AiAssistant);
     session
 }
 
@@ -159,7 +159,7 @@ fn live_metadata_uses_matching_edge_reference_expiry_beyond_readiness_heartbeat(
         },
     }];
     let selection = build(
-        &[crate::device_assistant::PRESENTATION_BATCH_INSPECT_CAPABILITY_ID.into()],
+        &[crate::ai_assistant::PRESENTATION_BATCH_INSPECT_CAPABILITY_ID.into()],
         Some(&readiness),
         true,
     )
@@ -252,7 +252,7 @@ fn worker_change_replaces_live_metadata_without_rebinding_the_old_reference() {
 #[test]
 fn screen_is_ephemeral_and_invalid_or_unready_context_is_rejected() {
     let screen = build(
-        &[crate::device_assistant::CURRENT_SCREEN_CAPABILITY_ID.into()],
+        &[crate::ai_assistant::CURRENT_SCREEN_CAPABILITY_ID.into()],
         Some(&readiness()),
         true,
     )
@@ -269,15 +269,15 @@ fn screen_is_ephemeral_and_invalid_or_unready_context_is_rejected() {
 
 #[test]
 fn durable_selection_validation_rejects_screen_unknown_and_duplicate_ids() {
-    use desk_agent_protocol::device_assistant::DeviceAssistantContextUpdate;
-    let mut update = DeviceAssistantContextUpdate {
+    use desk_agent_protocol::ai_assistant::AiAssistantContextUpdate;
+    let mut update = AiAssistantContextUpdate {
         conversation_id: "client-1".into(),
         client_request_id: "request-1".into(),
         selected_capability_ids: vec![],
     };
     assert!(validate_durable_update(&update).is_ok());
     for ids in [
-        vec![crate::device_assistant::CURRENT_SCREEN_CAPABILITY_ID.into()],
+        vec![crate::ai_assistant::CURRENT_SCREEN_CAPABILITY_ID.into()],
         vec!["unknown".into()],
         vec!["desktop.ui.inspect".into(), "desktop.ui.inspect".into()],
     ] {

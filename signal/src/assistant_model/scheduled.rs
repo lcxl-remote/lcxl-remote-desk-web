@@ -1,8 +1,8 @@
 //! Fresh-task admission on the audited model dispatch path.
 use super::*;
 use crate::{
+    ai_assistant_gate::AiAssistantGate,
     control_authorizer::SINGLE_ACCOUNT_USER_ID,
-    device_assistant_gate::DeviceAssistantGate,
     entity::agent_session,
     schedule_store::{ScheduleStore, TaskBudgetKind, TaskBudgetRequest},
 };
@@ -22,7 +22,7 @@ pub(crate) struct FreshTaskModelContext {
     pub session_token: u64,
     pub target_connection_id: String,
     pub connections: actix_web::web::Data<SharedConnectionMap>,
-    pub gate: Arc<DeviceAssistantGate>,
+    pub gate: Arc<AiAssistantGate>,
 }
 
 fn denied() -> DbErr {

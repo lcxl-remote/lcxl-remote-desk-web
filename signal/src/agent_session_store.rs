@@ -116,7 +116,7 @@ impl SignalAgentSessionStore {
             run_id: conversation_id.into(),
             actor_id: actor_id.into(),
             device_id: device_id.into(),
-            update: desk_agent_protocol::device_assistant::DeviceAssistantContextUpdate {
+            update: desk_agent_protocol::ai_assistant::AiAssistantContextUpdate {
                 conversation_id: self
                     .client_conversation_id
                     .clone()
@@ -444,7 +444,7 @@ impl SignalAgentSessionStore {
         row.map(snapshot_from_row).transpose()
     }
 
-    pub async fn list_device_assistant_sessions(
+    pub async fn list_ai_assistant_sessions(
         &self,
         actor_id: &str,
         device_id: &str,
@@ -479,7 +479,7 @@ impl SignalAgentSessionStore {
                         return None;
                     }
                 };
-                if session.surface != AgentSessionSurface::DeviceAssistant {
+                if session.surface != AgentSessionSurface::AiAssistant {
                     return None;
                 }
                 let first_question = session
@@ -1768,12 +1768,12 @@ impl SessionSeam for SignalAgentSessionStore {
                 txn.rollback().await.ok();
                 return Ok(false);
             }
-            if current.surface != AgentSessionSurface::DeviceAssistant
+            if current.surface != AgentSessionSurface::AiAssistant
                 || !matches!(current.execution_state, ExecutionState::None)
             {
                 txn.rollback().await.ok();
                 return Err(internal(
-                    "only read-only Device Assistant turns may be superseded in Stage 2",
+                    "only read-only AI Assistant turns may be superseded in Stage 2",
                 ));
             }
 
@@ -2026,7 +2026,7 @@ mod tests {
             let mut params = claim(id);
             params.conversation_id = id.into();
             let mut session = store.claim_turn(params).await.unwrap();
-            session.surface = AgentSessionSurface::DeviceAssistant;
+            session.surface = AgentSessionSurface::AiAssistant;
             if !active {
                 session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
             }
@@ -2042,7 +2042,7 @@ mod tests {
                 .unwrap();
         }
         let rows = store
-            .list_device_assistant_sessions("1", "device-1", 10)
+            .list_ai_assistant_sessions("1", "device-1", 10)
             .await
             .unwrap();
         assert_eq!(
@@ -2057,13 +2057,13 @@ mod tests {
             let mut params = claim(&id);
             params.conversation_id = id;
             let mut session = store.claim_turn(params).await.unwrap();
-            session.surface = AgentSessionSurface::DeviceAssistant;
+            session.surface = AgentSessionSurface::AiAssistant;
             session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
             store.save(&mut session).await.unwrap();
         }
         assert_eq!(
             store
-                .list_device_assistant_sessions("1", "device-1", 1)
+                .list_ai_assistant_sessions("1", "device-1", 1)
                 .await
                 .unwrap()[0]
                 .session_id,
@@ -2075,7 +2075,7 @@ mod tests {
     async fn deleting_history_checks_subject_and_fences_running_writes() {
         let store = store().await.with_client_metadata(
             Some("delete-client".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let schema = sea_orm::Schema::new(store.db.get_database_backend());
         store
@@ -2162,7 +2162,7 @@ mod tests {
 
         assert!(
             store
-                .list_device_assistant_sessions("1", "device-1", 30)
+                .list_ai_assistant_sessions("1", "device-1", 30)
                 .await
                 .unwrap()
                 .is_empty()
@@ -2310,7 +2310,7 @@ mod tests {
                 media_type: "text/plain;charset=utf-8".into(),
             },
             provenance: DataProvenance {
-                source_provider_id: "device-assistant-user".into(),
+                source_provider_id: "ai-assistant-user".into(),
                 source_tool_name: "send-message".into(),
                 source_object_id: Some(message_id.into()),
                 source_envelope_ids: Vec::new(),
@@ -2337,7 +2337,7 @@ mod tests {
             client_conversation_id: Some("client-conversation-1".into()),
             actor_id: "1".into(),
             device_id: "device-1".into(),
-            surface: AgentSessionSurface::DeviceAssistant,
+            surface: AgentSessionSurface::AiAssistant,
             policy_revision: 0,
             current_scope: claim("scope").current_pdp_scope,
             read_context: None,
@@ -2523,7 +2523,7 @@ mod tests {
             .unwrap();
         let first = SignalAgentSessionStore::new(db).with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let mut session = first.claim_turn(claim("disclosure-turn")).await.unwrap();
         session.input_revision = 7;
@@ -2556,11 +2556,11 @@ mod tests {
 
         let stale = SignalAgentSessionStore::new(reopened_db.clone()).with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let owner = SignalAgentSessionStore::new(reopened_db).with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let mut claimed = owner.claim_turn(claim("next-owner")).await.unwrap();
         let mut stale_snapshot = restored;
@@ -2571,10 +2571,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn obsolete_device_assistant_session_is_rejected_without_reinitializing_the_row() {
+    async fn obsolete_ai_assistant_session_is_rejected_without_reinitializing_the_row() {
         let store = store().await.with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let mut session = store.claim_turn(claim("current-schema")).await.unwrap();
         session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
@@ -2603,7 +2603,7 @@ mod tests {
 
         let restarted = SignalAgentSessionStore::new(store.db.clone()).with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         assert!(matches!(
             restarted.claim_turn(claim("must-not-reinitialize")).await,
@@ -2646,7 +2646,7 @@ mod tests {
             .unwrap();
         let owner = SignalAgentSessionStore::new(db).with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let mut session = owner.claim_turn(claim("matrix-owner")).await.unwrap();
         populate_thousand_turn_lcc_matrix(&mut session);
@@ -2676,11 +2676,11 @@ mod tests {
 
         let store_a = SignalAgentSessionStore::new(reopened_db.clone()).with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let store_b = SignalAgentSessionStore::new(reopened_db).with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let mut winner = store_a
             .claim_turn(claim("matrix-next-owner"))
@@ -2697,7 +2697,7 @@ mod tests {
     async fn permission_request_event_is_atomic_and_new_input_fences_approval() {
         let store = store().await.with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let events = SignalAgentRunEventStore::new(store.db.clone());
         events
@@ -2781,7 +2781,7 @@ mod tests {
     async fn permission_decision_mints_scoped_grant_but_never_dispatches() {
         let store = store().await.with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let events = SignalAgentRunEventStore::new(store.db.clone());
         events
@@ -2840,7 +2840,7 @@ mod tests {
         session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
         store.save(&mut session).await.unwrap();
 
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         let inventory = vec![CapabilityAvailability {
             provider_id: "desktop.session".into(),
             capability_id: "desktop.session.inspect".into(),
@@ -2957,9 +2957,8 @@ mod tests {
                 command_confirmation: None,
                 launch_confirmation: None,
                 item_id: "ui-action".into(),
-                provider_id: desk_diagnose_core::device_assistant::DESKTOP_UI_ACTION_PROVIDER_ID
-                    .into(),
-                tool_name: desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
+                provider_id: desk_diagnose_core::ai_assistant::DESKTOP_UI_ACTION_PROVIDER_ID.into(),
+                tool_name: desk_diagnose_core::ai_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
                     .into(),
                 expected_effect: CapabilityEffect::MutateApplication,
                 resource_scope: exact_resource_scope.clone(),
@@ -2985,13 +2984,11 @@ mod tests {
                 max_uses: 1,
             },
         }];
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         let inventory = vec![CapabilityAvailability {
-            provider_id: desk_diagnose_core::device_assistant::DESKTOP_UI_ACTION_PROVIDER_ID.into(),
-            capability_id: desk_diagnose_core::device_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID
-                .into(),
-            tool_name: desk_diagnose_core::device_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL
-                .into(),
+            provider_id: desk_diagnose_core::ai_assistant::DESKTOP_UI_ACTION_PROVIDER_ID.into(),
+            capability_id: desk_diagnose_core::ai_assistant::DESKTOP_UI_ACTION_CAPABILITY_ID.into(),
+            tool_name: desk_diagnose_core::ai_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL.into(),
             compiled: true,
             enabled: true,
             connected: true,
@@ -3049,7 +3046,7 @@ mod tests {
 
         let store = store().await.with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let events = SignalAgentRunEventStore::new(store.db.clone());
         events
@@ -3190,7 +3187,7 @@ mod tests {
             client_request_id: client_request_id.into(),
             actor_id: "1".into(),
             device_id: "device-1".into(),
-            surface: AgentSessionSurface::DeviceAssistant,
+            surface: AgentSessionSurface::AiAssistant,
             kind: ContextAttachmentKind::InteractiveSession,
             object_ref: AttachmentObjectRef {
                 opaque_token: format!("opaque-{id}"),
@@ -3275,7 +3272,7 @@ mod tests {
     async fn next_context_claim_purges_legacy_current_screen_metadata() {
         let base = store().await.with_client_metadata(
             Some("screen-client-conversation".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let now_unix_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap();
         let mut session = base.claim_turn(claim("screen-turn-1")).await.unwrap();
@@ -3362,7 +3359,7 @@ mod tests {
     async fn assistant_policy_upgrade_requires_user_input_and_preserves_original_history() {
         let store = store().await.with_client_metadata(
             Some("client-conversation-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let mut original = store.claim_turn(claim("first")).await.unwrap();
         original
@@ -3412,7 +3409,7 @@ mod tests {
 
         let ordinary = store
             .clone()
-            .with_client_metadata(None, AgentSessionSurface::TerminalCopilot);
+            .with_client_metadata(None, AgentSessionSurface::TerminalAiAssistant);
         let mut legacy = claim("ordinary");
         legacy.conversation_id = "ordinary-conversation".into();
         legacy.policy_revision = 0;
@@ -3450,7 +3447,7 @@ mod tests {
             let device_id = "device-1".to_string();
             let store = SignalAgentSessionStore::new(db.clone()).with_client_metadata(
                 Some("client-bridge".into()),
-                AgentSessionSurface::DeviceAssistant,
+                AgentSessionSurface::AiAssistant,
             );
             let mut claim = claim("bridge-turn");
             claim.actor_id = "1".into();
@@ -3523,7 +3520,7 @@ mod tests {
             assert_eq!(persisted.conversation, vec![bridge, user]);
             assert_eq!(persisted.input_revision, input_revision);
             let history = store
-                .list_device_assistant_sessions("1", &device_id, 30)
+                .list_ai_assistant_sessions("1", &device_id, 30)
                 .await
                 .unwrap();
             assert_eq!(history.len(), 1);
@@ -3597,7 +3594,7 @@ mod tests {
             .clone()
             .with_client_metadata(
                 Some("assistant-context".into()),
-                AgentSessionSurface::DeviceAssistant,
+                AgentSessionSurface::AiAssistant,
             )
             .with_context_selection(context_selection(
                 true,
@@ -3646,7 +3643,7 @@ mod tests {
             .clone()
             .with_client_metadata(
                 Some("assistant-context".into()),
-                AgentSessionSurface::DeviceAssistant,
+                AgentSessionSurface::AiAssistant,
             )
             .with_context_selection(context_selection(
                 false,
@@ -3686,10 +3683,7 @@ mod tests {
         let now_unix_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap();
         let first = create_file_store(&path)
             .await
-            .with_client_metadata(
-                Some("client-1".into()),
-                AgentSessionSurface::DeviceAssistant,
-            )
+            .with_client_metadata(Some("client-1".into()), AgentSessionSurface::AiAssistant)
             .with_context_selection(context_selection(
                 true,
                 "attachment-1",
@@ -3708,10 +3702,7 @@ mod tests {
             .await
             .unwrap();
         let reopened = SignalAgentSessionStore::new(reopened_db)
-            .with_client_metadata(
-                Some("client-1".into()),
-                AgentSessionSurface::DeviceAssistant,
-            )
+            .with_client_metadata(Some("client-1".into()), AgentSessionSurface::AiAssistant)
             .with_context_selection(context_selection(
                 true,
                 "attachment-2",
@@ -3735,10 +3726,7 @@ mod tests {
         reopened.save(&mut after_respawn).await.unwrap();
 
         let deselected = SignalAgentSessionStore::new(reopened.db.clone())
-            .with_client_metadata(
-                Some("client-1".into()),
-                AgentSessionSurface::DeviceAssistant,
-            )
+            .with_client_metadata(Some("client-1".into()), AgentSessionSurface::AiAssistant)
             .with_context_selection(context_selection(
                 false,
                 "unused",
@@ -3836,7 +3824,7 @@ mod tests {
         let db = base.db.clone();
         let diagnose = SignalAgentSessionStore::new(db.clone()).with_client_metadata(
             Some("client-conv-1".into()),
-            AgentSessionSurface::DeviceAssistant,
+            AgentSessionSurface::AiAssistant,
         );
         let mut session = diagnose.claim_turn(claim("turn-1")).await.unwrap();
         session
@@ -3847,7 +3835,7 @@ mod tests {
 
         let terminal = SignalAgentSessionStore::new(db).with_client_metadata(
             Some("terminal-conv-1".into()),
-            AgentSessionSurface::TerminalCopilot,
+            AgentSessionSurface::TerminalAiAssistant,
         );
         let mut terminal_claim = claim("terminal-turn");
         terminal_claim.conversation_id = "terminal-session".into();
@@ -3856,7 +3844,7 @@ mod tests {
         terminal.save(&mut terminal_session).await.unwrap();
 
         let initial = diagnose
-            .list_device_assistant_sessions("1", "device-1", 30)
+            .list_ai_assistant_sessions("1", "device-1", 30)
             .await
             .unwrap();
         assert_eq!(initial.len(), 1);
@@ -3871,7 +3859,7 @@ mod tests {
             .await
             .unwrap();
         let summaries = diagnose
-            .list_device_assistant_sessions("1", "device-1", 30)
+            .list_ai_assistant_sessions("1", "device-1", 30)
             .await
             .unwrap();
         assert_eq!(summaries.len(), 1);

@@ -74,7 +74,7 @@ fn decision_fixture() -> (
 fn desktop_action_bundle_issues_only_owner_selected_bounded_reads_on_both_surfaces() {
     let (mut session, _, _) = decision_fixture();
     session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let call = crate::chat::ToolCall { id: "click-request".into(),
         name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
         arguments_json: serde_json::json!({"items":[{
@@ -201,8 +201,8 @@ fn owner_freeform_approval_is_exact_one_shot_and_rechecks_the_frozen_policy() {
         "command":"du -d 1 \"a directory\" | sort -n\ndf -h", "timeout_ms":20000})
     .to_string();
     let snapshot = policy.prepare(&canonical, 1).unwrap();
-    let registry = crate::device_assistant::device_assistant_provider_registry()
-        .with_command_policy(policy.clone());
+    let registry =
+        crate::ai_assistant::ai_assistant_provider_registry().with_command_policy(policy.clone());
     let capability = registry
         .capability_for_tool(crate::command_confirmation::COMMAND_TOOL)
         .unwrap();
@@ -280,7 +280,7 @@ fn compile(
     decisions: &[PermissionDecisionItem],
     ready: bool,
 ) -> Result<Vec<CapabilityGrant>, AgentError> {
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let inventory = vec![CapabilityAvailability {
         provider_id: "desktop.session".into(),
         capability_id: "desktop.session.inspect".into(),
@@ -422,7 +422,7 @@ fn exact_external_grant_never_restores_removed_scopes_or_destinations() {
     item.resource_scope = crate::capability_grant::exact_external_query_resource_scope(&digest);
     item.operation_scope = vec!["search_public_web".into()];
     item.export_destinations = vec![DestinationIdentity::WebResearch {
-        connector_id: crate::device_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
+        connector_id: crate::ai_assistant::BRAVE_WEB_SEARCH_CONNECTOR_ID.into(),
     }];
     item.canonical_input_json = Some(canonical);
     item.canonical_input_digest_sha256 = Some(digest);
@@ -433,7 +433,7 @@ fn exact_external_grant_never_restores_removed_scopes_or_destinations() {
         ttl_seconds: 30,
         max_uses: 1,
     };
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let capability = registry
         .provider("web.search")
         .unwrap()
@@ -484,7 +484,7 @@ fn context_attachment(
         client_request_id: client_request_id.into(),
         actor_id: "1".into(),
         device_id: "device-1".into(),
-        surface: AgentSessionSurface::DeviceAssistant,
+        surface: AgentSessionSurface::AiAssistant,
         kind: ContextAttachmentKind::InteractiveSession,
         object_ref: AttachmentObjectRef {
             opaque_token: format!("opaque-{id}"),
@@ -642,7 +642,7 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
     use crate::provider_preflight::{ProviderCallSubject, UiCallPreflight};
     let (mut session, _, _) = decision_fixture();
     session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let app = serde_json::json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
     let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"execute_ui_actions", "application_scope":{"application":app,"actions":["invoke","set_value"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
     let request = crate::permission_tools::build_permission_request(
@@ -779,7 +779,7 @@ fn scroll_approval_keeps_semantic_and_background_authority_separate() {
     use crate::provider_preflight::{ProviderCallSubject, UiCallPreflight};
     let (mut session, _, _) = decision_fixture();
     session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let app = serde_json::json!({"token":"app","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-11T03:09:00Z")
         .unwrap()
@@ -879,7 +879,7 @@ fn background_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
     use crate::provider_preflight::{BackgroundInputCallPreflight, ProviderCallSubject};
     let (mut session, _, _) = decision_fixture();
     session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let app = serde_json::json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
     let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"send_background_input", "application_scope":{"application":app,"actions":["key_press","type_text"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
     let request = crate::permission_tools::build_permission_request(

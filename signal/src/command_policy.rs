@@ -20,7 +20,7 @@ pub(crate) async fn current(
         error_code: None,
     };
     if actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
-        || !crate::device_assistant_gate::global_device_assistant_gate().is_enabled()
+        || !crate::ai_assistant_gate::global_ai_assistant_gate().is_enabled()
     {
         return Err(denied());
     }

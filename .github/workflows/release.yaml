@@ -222,7 +222,7 @@ jobs:
             <key>NSScreenCaptureUsageDescription</key><string>Screen capture for remote desktop sessions.</string>
             <key>NSMicrophoneUsageDescription</key><string>Audio capture for remote desktop sessions.</string>
             <key>NSCameraUsageDescription</key><string>Camera access for remote desktop sessions.</string>
-            <key>NSAppleEventsUsageDescription</key><string>Control Pages, Numbers, and Keynote only after you approve a Device Assistant action.</string>
+            <key>NSAppleEventsUsageDescription</key><string>Control Pages, Numbers, and Keynote only after you approve a AI Assistant action.</string>
           </dict>
           </plist>
           PLIST

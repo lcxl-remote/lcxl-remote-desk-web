@@ -16,7 +16,7 @@ describe('assistant history', () => {
         render(<AssistantHistory deskId="connection" disabled={false} onSelect={() => true} />);
         fireEvent.click(screen.getByRole('button'));
         await screen.findByText('Backup test');
-        fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.history.delete' }));
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.delete' }));
         await screen.findByText('pages.fileRecovery.deleteBackup.present');
         expect(manageDeviceFileRecovery).toHaveBeenLastCalledWith({ connection: 'connection', device_id: undefined,
             request: { command: { operation: 'query', conversation_id: 'server-session' } } },
@@ -44,9 +44,9 @@ describe('assistant history', () => {
         render(<AssistantHistory deskId="d" disabled onSelect={() => false} />);
         fireEvent.click(screen.getByRole('button'));
         expect(await screen.findByRole('alert')).toBeTruthy();
-        expect(screen.queryByText('pages.deviceAssistant.history.empty')).toBeNull();
-        fireEvent.click(screen.getByText('pages.deviceAssistant.history.retry'));
-        expect(await screen.findByText('pages.deviceAssistant.history.empty')).toBeTruthy();
+        expect(screen.queryByText('pages.aiAssistant.history.empty')).toBeNull();
+        fireEvent.click(screen.getByText('pages.aiAssistant.history.retry'));
+        expect(await screen.findByText('pages.aiAssistant.history.empty')).toBeTruthy();
     });
 
     it('does not switch away from an active task', async () => {
@@ -68,15 +68,15 @@ it('shows a running spinner and confirms deletion before sending the request', a
     vi.stubGlobal('fetch', fetcher);
     const deleted = vi.fn();
     render(<AssistantHistory deskId="d" disabled={false} onSelect={() => true} onDeleted={deleted} />);
-    fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.history.title' }));
-    await screen.findByLabelText('pages.deviceAssistant.history.running');
-    fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.history.delete' }));
-    const dialog = screen.getByRole('dialog', { name: 'pages.deviceAssistant.history.deleteTitle' });
-    expect(within(dialog).getByText('pages.deviceAssistant.history.deleteRunning')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.title' }));
+    await screen.findByLabelText('pages.aiAssistant.history.running');
+    fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.delete' }));
+    const dialog = screen.getByRole('dialog', { name: 'pages.aiAssistant.history.deleteTitle' });
+    expect(within(dialog).getByText('pages.aiAssistant.history.deleteRunning')).toBeTruthy();
     expect(fetcher).toHaveBeenCalledTimes(1);
-    fireEvent.click(within(dialog).getByRole('button', { name: 'pages.deviceAssistant.history.delete' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'pages.aiAssistant.history.delete' }));
     await waitFor(() => expect(deleted).toHaveBeenCalledWith('c'));
-    expect(fetcher).toHaveBeenCalledWith('/api/my/device-assistant-session/delete', expect.objectContaining({
+    expect(fetcher).toHaveBeenCalledWith('/api/my/ai-assistant-session/delete', expect.objectContaining({
         method: 'POST', body: JSON.stringify({ connection: 'd', session: 's' }),
     }));
 });
@@ -87,10 +87,10 @@ it('can cancel an idle conversation deletion without sending a mutation', async 
     ] } }) });
     vi.stubGlobal('fetch', fetcher);
     render(<AssistantHistory deskId="d" disabled={false} onSelect={() => true} />);
-    fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.history.title' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.history.delete' }));
-    expect(screen.queryByText('pages.deviceAssistant.history.deleteRunning')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.history.keep' }));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.title' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.history.delete' }));
+    expect(screen.queryByText('pages.aiAssistant.history.deleteRunning')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.keep' }));
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Idle task')).toBeTruthy();
 });
@@ -102,11 +102,11 @@ it('keeps the confirmation visible when deletion fails', async () => {
         ] } }) }));
     const deleted = vi.fn();
     render(<AssistantHistory deskId="d" disabled={false} onSelect={() => true} onDeleted={deleted} />);
-    fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.history.title' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'pages.deviceAssistant.history.delete' }));
-    const dialog = screen.getByRole('dialog', { name: 'pages.deviceAssistant.history.deleteTitle' });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'pages.deviceAssistant.history.delete' }));
-    await screen.findByText('pages.deviceAssistant.history.deleteError');
+    fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.title' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.history.delete' }));
+    const dialog = screen.getByRole('dialog', { name: 'pages.aiAssistant.history.deleteTitle' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'pages.aiAssistant.history.delete' }));
+    await screen.findByText('pages.aiAssistant.history.deleteError');
     expect(deleted).not.toHaveBeenCalled();
     expect(dialog).toBeTruthy();
 });
@@ -120,7 +120,7 @@ it('orders running conversations first and each group by last activity', async (
     ];
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions } }) }));
     render(<AssistantHistory deskId="d" disabled={false} onSelect={() => true} />);
-    fireEvent.click(screen.getByRole('button', { name: 'pages.deviceAssistant.history.title' }));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.title' }));
     await screen.findByText('Running newer');
     expect(screen.getAllByRole('button').filter(button => /^(Idle|Running) /.test(button.textContent ?? '')).map(button => button.querySelector('span')?.textContent))
         .toEqual(['Running newer', 'Running older', 'Idle newer', 'Idle older']);

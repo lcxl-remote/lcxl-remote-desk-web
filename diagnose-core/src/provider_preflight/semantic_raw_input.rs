@@ -19,7 +19,7 @@ pub fn raw_input_from_call(call: &ToolCall) -> Result<(ObjectRef, RawInputAction
         target: ObjectRef,
         action: RawInputAction,
     }
-    if call.name != crate::device_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL
+    if call.name != crate::ai_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL
         || call.arguments_json.len() > 64 * 1024
     {
         return Err(unavailable());

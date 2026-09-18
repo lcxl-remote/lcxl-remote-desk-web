@@ -75,7 +75,7 @@ fn is_allowed(cap: Capability, request: &DiagnoseRequestData, policy: &Collectio
         | Capability::NetworkPorts
         | Capability::ServiceStatus
         | Capability::ContainerList => true,
-        // DeviceAssistant observations and every mutation capability are never
+        // AiAssistant observations and every mutation capability are never
         // collected by the diagnose surface.
         Capability::DesktopSessionInspect
         | Capability::DesktopUiInspect

@@ -21,7 +21,7 @@ async fn all_object_read_grants_ignore_later_objects_display_names_and_ambient_r
     let now = Utc::now().timestamp_millis() as u64;
     let deadline = now + 60_000;
     let ambient = [serde_json::from_str::<ObjectRef>(&later.object_ref.opaque_token).unwrap()];
-    let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+    let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
     for surface in [
         ProductSurface::OssPersonalOwner,
         ProductSurface::ManagerPersonalOwner,

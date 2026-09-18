@@ -50,12 +50,12 @@ pub struct VersionInfo {
     /// that a privileged command can be contained safely.
     #[serde(default)]
     pub exec_pty_elevation: bool,
-    /// Device-owned Device Assistant revision projected at connection time.
+    /// Device-owned AI Assistant revision projected at connection time.
     #[serde(default)]
-    pub device_assistant_revision: Option<u64>,
-    /// Device-owned Device Assistant value projected at the same revision.
+    pub ai_assistant_revision: Option<u64>,
+    /// Device-owned AI Assistant value projected at the same revision.
     #[serde(default)]
-    pub device_assistant_enabled: Option<bool>,
+    pub ai_assistant_enabled: Option<bool>,
 }
 
 impl VersionInfo {
@@ -84,8 +84,8 @@ impl VersionInfo {
             max_ai_command_runtime_ms: None,
             exec_pty: false,
             exec_pty_elevation: false,
-            device_assistant_revision: None,
-            device_assistant_enabled: None,
+            ai_assistant_revision: None,
+            ai_assistant_enabled: None,
         }
     }
 
@@ -106,23 +106,21 @@ impl VersionInfo {
             .collect()
     }
 
-    pub fn set_device_assistant_settings(
+    pub fn set_ai_assistant_settings(
         &mut self,
-        settings: desk_agent_protocol::device_assistant::DeviceAssistantSettings,
+        settings: desk_agent_protocol::ai_assistant::AiAssistantSettings,
     ) {
-        self.device_assistant_revision = Some(settings.revision);
-        self.device_assistant_enabled = Some(settings.enabled);
+        self.ai_assistant_revision = Some(settings.revision);
+        self.ai_assistant_enabled = Some(settings.enabled);
     }
 
-    pub fn device_assistant_settings(
+    pub fn ai_assistant_settings(
         &self,
-    ) -> Option<desk_agent_protocol::device_assistant::DeviceAssistantSettings> {
-        Some(
-            desk_agent_protocol::device_assistant::DeviceAssistantSettings {
-                revision: self.device_assistant_revision?,
-                enabled: self.device_assistant_enabled?,
-            },
-        )
+    ) -> Option<desk_agent_protocol::ai_assistant::AiAssistantSettings> {
+        Some(desk_agent_protocol::ai_assistant::AiAssistantSettings {
+            revision: self.ai_assistant_revision?,
+            enabled: self.ai_assistant_enabled?,
+        })
     }
 }
 
@@ -148,12 +146,10 @@ mod tests {
         info.max_ai_command_runtime_ms = Some(600_000);
         info.exec_pty = true;
         info.exec_pty_elevation = true;
-        info.set_device_assistant_settings(
-            desk_agent_protocol::device_assistant::DeviceAssistantSettings {
-                revision: 9,
-                enabled: true,
-            },
-        );
+        info.set_ai_assistant_settings(desk_agent_protocol::ai_assistant::AiAssistantSettings {
+            revision: 9,
+            enabled: true,
+        });
 
         let query = serde_urlencoded::to_string(&info).unwrap();
         let decoded: VersionInfo = serde_urlencoded::from_str(&query).unwrap();
@@ -171,13 +167,11 @@ mod tests {
         assert!(decoded.exec_pty);
         assert!(decoded.exec_pty_elevation);
         assert_eq!(
-            decoded.device_assistant_settings(),
-            Some(
-                desk_agent_protocol::device_assistant::DeviceAssistantSettings {
-                    revision: 9,
-                    enabled: true,
-                }
-            )
+            decoded.ai_assistant_settings(),
+            Some(desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                revision: 9,
+                enabled: true,
+            })
         );
     }
 
@@ -195,7 +189,7 @@ mod tests {
         assert_eq!(decoded.max_ai_command_runtime_ms, None);
         assert!(!decoded.exec_pty);
         assert!(!decoded.exec_pty_elevation);
-        assert_eq!(decoded.device_assistant_settings(), None);
+        assert_eq!(decoded.ai_assistant_settings(), None);
     }
 
     #[test]

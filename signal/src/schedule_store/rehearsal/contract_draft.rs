@@ -90,7 +90,7 @@ impl ScheduleStore {
             exception_mode: TaskExceptionMode::Deny,
             budget: crate::schedule_budget_policy::read(&txn).await?.maximum,
         };
-        let registry = desk_diagnose_core::device_assistant::device_assistant_provider_registry();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         for read in &reads.reads {
             observed_rule(&mut contract, &read.authority, None, None, &registry)
                 .map_err(|_| ScheduleStoreError::Conflict)?;

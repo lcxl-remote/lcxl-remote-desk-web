@@ -8,7 +8,7 @@ vi.mock('@/services/clients', () => ({
     listAssistantAttachments: vi.fn(), readAssistantAttachment: vi.fn(),
 }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-const key = (name: string) => `pages.deviceAssistant.attachments.${name}`;
+const key = (name: string) => `pages.aiAssistant.attachments.${name}`;
 const item = {
     attachment_id: 'attachment-a', message_id: 'message', tool_call_id: 'call', part: 'stdout',
     kind: 'text', media_type: 'text/plain', original_bytes: 5000, stored_bytes: 5000,

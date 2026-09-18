@@ -193,7 +193,7 @@ impl ScheduleStore {
                 .check_subject(&actor, &task.target_device_id)
                 .is_err()
             || session
-                .check_surface(AgentSessionSurface::DeviceAssistant)
+                .check_surface(AgentSessionSurface::AiAssistant)
                 .is_err()
         {
             return Err(ScheduleStoreError::NotFound);

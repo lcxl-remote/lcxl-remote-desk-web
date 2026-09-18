@@ -83,7 +83,7 @@ impl ScheduleStore {
         let mut session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         if session.trigger_origin != TriggerOrigin::ScheduledTask
-            || session.surface != desk_diagnose_core::session::AgentSessionSurface::DeviceAssistant
+            || session.surface != desk_diagnose_core::session::AgentSessionSurface::AiAssistant
             || session.conversation_id != work.run_id
             || session.actor_id != work.owner_user_id.to_string()
             || row.actor_id != session.actor_id

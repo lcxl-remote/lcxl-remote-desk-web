@@ -1,4 +1,4 @@
-//! SQLite append-only event ledger for the OSS dynamic Device Assistant run.
+//! SQLite append-only event ledger for the OSS dynamic AI Assistant run.
 
 pub(crate) mod input_context;
 pub use desk_diagnose_core::input_read_context::ReadContextSelection;
@@ -326,8 +326,8 @@ fn validate_append_params(params: &AppendUserFollowupParams) -> Result<(), Agent
     if let Some(selection) = &params.read_context {
         selection.validate()?;
     }
-    if params.surface != AgentSessionSurface::DeviceAssistant {
-        return Err(internal("user follow-up ledger is Device Assistant only"));
+    if params.surface != AgentSessionSurface::AiAssistant {
+        return Err(internal("user follow-up ledger is AI Assistant only"));
     }
     if params.message.role != ChatRole::User
         || params.message.text.trim().is_empty()
@@ -452,7 +452,7 @@ mod tests {
                 media_type: "text/plain;charset=utf-8".into(),
             },
             provenance: DataProvenance {
-                source_provider_id: "device-assistant-user".into(),
+                source_provider_id: "ai-assistant-user".into(),
                 source_tool_name: "send-message".into(),
                 source_object_id: Some(message_id.into()),
                 source_envelope_ids: Vec::new(),
@@ -475,7 +475,7 @@ mod tests {
             client_conversation_id: Some("client-run-1".into()),
             actor_id: "actor-1".into(),
             device_id: "device-1".into(),
-            surface: AgentSessionSurface::DeviceAssistant,
+            surface: AgentSessionSurface::AiAssistant,
             policy_revision: 0,
             current_scope: scope(),
             read_context: None,

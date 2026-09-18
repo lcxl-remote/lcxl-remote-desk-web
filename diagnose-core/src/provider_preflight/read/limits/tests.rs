@@ -33,7 +33,7 @@ fn output(value: ReadContextOutput) -> ToolRunOutput {
 
 #[test]
 fn read_limits_narrow_typed_bounds_without_dropping_selected_roots() {
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let call = call("inspect_files");
     let (_, mut input) = build_read_operation(&call).unwrap();
     let OperationInput::ReadContext(ref mut input_value) = input else {
@@ -59,7 +59,7 @@ fn read_limits_narrow_typed_bounds_without_dropping_selected_roots() {
 
 #[test]
 fn read_output_limits_count_wire_bytes_and_actual_projections() {
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let text = output(ReadContextOutput::FileContentRead(FileContentReadOutput {
         file: reference(),
         display_name: "synthetic".into(),
@@ -112,7 +112,7 @@ fn read_output_limits_count_wire_bytes_and_actual_projections() {
 
 #[test]
 fn desktop_ui_limits_narrow_request_and_count_returned_nodes() {
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let mut ui_call = call("inspect_desktop_ui");
     ui_call.arguments_json = r#"{"allow_unfiltered":true}"#.into();
     let (_, mut input) = build_read_operation(&ui_call).unwrap();
@@ -160,7 +160,7 @@ fn desktop_ui_limits_narrow_request_and_count_returned_nodes() {
 
 #[test]
 fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
-    let registry = crate::device_assistant::device_assistant_provider_registry();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let search_call = ToolCall {
         id: "search-1".into(),
         name: crate::web_research::WEB_SEARCH_TOOL_NAME.into(),

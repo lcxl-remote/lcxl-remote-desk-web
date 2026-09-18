@@ -50,7 +50,7 @@ pub(super) async fn reconcile_on(
         return Err(invalid());
     }
     let mut expected = ActionResultOrigin::capture(
-        &desk_diagnose_core::device_assistant::device_assistant_provider_registry(),
+        &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
         session,
         &call,
     )

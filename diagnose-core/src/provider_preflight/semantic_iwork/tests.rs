@@ -47,8 +47,7 @@ fn add_directory_source(
         directory,
     )
     .envelope;
-    envelope.provenance.source_provider_id =
-        crate::device_assistant::FILE_WORKSPACE_PROVIDER_ID.into();
+    envelope.provenance.source_provider_id = crate::ai_assistant::FILE_WORKSPACE_PROVIDER_ID.into();
     envelope.provenance.source_tool_name = "inspect_files".into();
     envelope.digest_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
     let mut result = ChatMessage::tool_result("listing-result", "listing", text);
@@ -67,11 +66,11 @@ fn add_directory_source(
     ]);
 }
 use crate::{
+    ai_assistant::ai_assistant_provider_registry,
     context_attachment::{
         AttachmentBounds, AttachmentObjectRef, AttachmentState, CONTEXT_ATTACHMENT_SCHEMA_VERSION,
         ContextAttachment, ContextAttachmentKind,
     },
-    device_assistant::device_assistant_provider_registry,
     input_read_context::live_read::LiveReadTarget,
     session::AgentSessionSurface,
 };
@@ -134,7 +133,7 @@ fn attachment(id: &str, kind: ContextAttachmentKind, reference: &ObjectRef) -> C
         client_request_id: format!("request-{id}"),
         actor_id: "actor".into(),
         device_id: "device".into(),
-        surface: AgentSessionSurface::DeviceAssistant,
+        surface: AgentSessionSurface::AiAssistant,
         kind,
         object_ref: AttachmentObjectRef {
             opaque_token: serde_json::to_string(reference).unwrap(),
@@ -216,7 +215,7 @@ fn live_iwork_calls_bind_exact_original_objects_and_authority() {
             arguments_json: arguments.to_string(),
         };
         let preflight = IworkCallPreflight::build(
-            &device_assistant_provider_registry(),
+            &ai_assistant_provider_registry(),
             ProductSurface::ManagerPersonalOwner,
             &call,
             &original(read_tool, target.clone()),
@@ -256,7 +255,7 @@ fn changed_or_missing_original_live_target_fails_closed() {
     changed.token = "other".into();
     assert!(
         IworkCallPreflight::build(
-            &device_assistant_provider_registry(),
+            &ai_assistant_provider_registry(),
             ProductSurface::ManagerPersonalOwner,
             &call,
             &original("inspect_live_document", changed),
@@ -267,7 +266,7 @@ fn changed_or_missing_original_live_target_fails_closed() {
     );
     assert!(
         IworkCallPreflight::build(
-            &device_assistant_provider_registry(),
+            &ai_assistant_provider_registry(),
             ProductSurface::ManagerPersonalOwner,
             &call,
             &ReadContextSelection {
@@ -297,7 +296,7 @@ fn live_iwork_calls_accept_fresh_read_target_from_same_worker_incarnation() {
         .to_string(),
     };
     let preflight = IworkCallPreflight::build(
-        &device_assistant_provider_registry(),
+        &ai_assistant_provider_registry(),
         ProductSurface::ManagerPersonalOwner,
         &call,
         &original("inspect_live_presentation", frozen),
@@ -330,7 +329,7 @@ fn fresh_read_target_outlives_original_short_readiness_lease() {
     };
 
     let preflight = IworkCallPreflight::build(
-        &device_assistant_provider_registry(),
+        &ai_assistant_provider_registry(),
         ProductSurface::ManagerPersonalOwner,
         &call,
         &selection,
@@ -360,7 +359,7 @@ fn original_live_target_still_expires_with_original_readiness_lease() {
 
     assert!(
         IworkCallPreflight::build(
-            &device_assistant_provider_registry(),
+            &ai_assistant_provider_registry(),
             ProductSurface::ManagerPersonalOwner,
             &call,
             &selection,
@@ -397,7 +396,7 @@ fn live_iwork_calls_reject_untrusted_derived_targets() {
         };
         assert!(
             IworkCallPreflight::build(
-                &device_assistant_provider_registry(),
+                &ai_assistant_provider_registry(),
                 ProductSurface::ManagerPersonalOwner,
                 &call,
                 &original("inspect_live_presentation", frozen.clone()),
@@ -464,7 +463,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
                         snapshot_id: slide.snapshot_id.clone(),
                         adapter: ComputerUseAdapterRef {
                             kind: if tool == "patch_powerpoint_copy" { ComputerUseAdapterKind::OfficePowerPoint } else { ComputerUseAdapterKind::IworkKeynote },
-                            version: if tool == "patch_powerpoint_copy" { desk_agent_protocol::computer_use::office_batch::PPTX_ADAPTER_VERSION } else { crate::device_assistant::IWORK_ADAPTER_VERSION }.into(),
+                            version: if tool == "patch_powerpoint_copy" { desk_agent_protocol::computer_use::office_batch::PPTX_ADAPTER_VERSION } else { crate::ai_assistant::IWORK_ADAPTER_VERSION }.into(),
                         },
                         projection: LiveDocumentProjection::Presentation {
                             presentation,
@@ -514,7 +513,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             live_targets: vec![],
         };
         let preflight = IworkCallPreflight::build_with_presentation_binding(
-            &device_assistant_provider_registry(),
+            &ai_assistant_provider_registry(),
             ProductSurface::ManagerPersonalOwner,
             &call,
             &original,
@@ -544,7 +543,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
                 },
                 "2026-08-31T00:00:01Z",
             );
-            session.adopt_client_metadata(Some("client"), AgentSessionSurface::DeviceAssistant);
+            session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
             let subject = session
                 .file_scope_subject("owner", "device", "conversation")
                 .unwrap();
@@ -594,7 +593,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             });
             let mut receipt = ChatMessage::tool_result("receipt", "read", text.clone());
             let mut envelope = original.object_attachments[1].envelope.clone();
-            let registry = device_assistant_provider_registry();
+            let registry = ai_assistant_provider_registry();
             let capability = registry.capability_for_tool(read_tool).unwrap();
             envelope.provenance.source_provider_id = registry
                 .provider_for_capability(&capability.wire.capability_id)
@@ -671,7 +670,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
         // Selecting a source or attaching a directory is not directory consent.
         assert!(
             IworkCallPreflight::build_with_presentation_binding(
-                &device_assistant_provider_registry(),
+                &ai_assistant_provider_registry(),
                 ProductSurface::ManagerPersonalOwner,
                 &call,
                 &original,
@@ -687,7 +686,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             .retain(|attachment| attachment.kind != ContextAttachmentKind::DirectorySelection);
         assert!(
             IworkCallPreflight::build_with_presentation_binding(
-                &device_assistant_provider_registry(),
+                &ai_assistant_provider_registry(),
                 ProductSurface::ManagerPersonalOwner,
                 &call,
                 &source_only,
@@ -705,7 +704,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
         changed.arguments_json = changed_json.to_string();
         assert!(
             IworkCallPreflight::build_with_presentation_binding(
-                &device_assistant_provider_registry(),
+                &ai_assistant_provider_registry(),
                 ProductSurface::ManagerPersonalOwner,
                 &changed,
                 &original,

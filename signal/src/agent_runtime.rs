@@ -1,4 +1,4 @@
-//! Shared OSS Signal runtime helpers for Device Assistant work.
+//! Shared OSS Signal runtime helpers for AI Assistant work.
 //!
 //! This module intentionally contains no Diagnose product loop or signaling
 //! contract. It owns only model metering and the bounded, tool-free follow-up
@@ -83,7 +83,7 @@ pub(crate) async fn record_usage(
     };
     let bucket = ai_usage::truncate_to_hour(chrono::Utc::now());
     if let Err(error) = ai_usage::upsert_ai_usage(db, bucket, &delta).await {
-        log::warn!("[device-assistant] failed to record model usage: {error}");
+        log::warn!("[ai-assistant] failed to record model usage: {error}");
     }
 }
 
@@ -115,7 +115,7 @@ impl ModelSeam for MeteredSignalModel {
         metrics: desk_diagnose_core::seam::ModelRequestProjectionMetrics,
     ) {
         log::debug!(
-            "[device-assistant] completion projection messages={} message_json_bytes={} tools={} tool_json_bytes={} conversation_messages={} session_snapshot_bytes={}",
+            "[ai-assistant] completion projection messages={} message_json_bytes={} tools={} tool_json_bytes={} conversation_messages={} session_snapshot_bytes={}",
             metrics.message_count,
             metrics.message_json_bytes,
             metrics.advertised_tool_count,
@@ -292,12 +292,12 @@ pub async fn resume_completion_turn(
     session: PersistedAgentSession,
     work_kind: desk_diagnose_core::session::WorkKind,
 ) -> Result<LoopOutcome, AgentError> {
-    if session.surface == AgentSessionSurface::DeviceAssistant
-        && !crate::device_assistant_gate::global_device_assistant_gate().is_enabled()
+    if session.surface == AgentSessionSurface::AiAssistant
+        && !crate::ai_assistant_gate::global_ai_assistant_gate().is_enabled()
     {
         return Err(AgentError {
             kind: AgentErrorKind::UnsupportedCapability,
-            message: "Device Assistant is disabled on this device".into(),
+            message: "AI Assistant is disabled on this device".into(),
             retryable: false,
             safe_for_model: true,
             error_code: Some(DeskErrorCode::FEATURE_UNAVAILABLE.code()),
@@ -308,7 +308,7 @@ pub async fn resume_completion_turn(
     })?;
     let seam = SignalModelSeam::from_config(&config)?.with_context_db(db.clone());
     let turn_id = uuid::Uuid::new_v4().to_string();
-    let model: Box<dyn ModelSeam> = if session.surface == AgentSessionSurface::DeviceAssistant {
+    let model: Box<dyn ModelSeam> = if session.surface == AgentSessionSurface::AiAssistant {
         // Legacy completions lacking an original export selection stay visible
         // to the owner, but cannot mint new permission from an execution grant.
         let pending = session

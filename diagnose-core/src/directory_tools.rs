@@ -19,7 +19,7 @@ pub fn pending_result(request_id: &str) -> serde_json::Value {
 /// Bounded current scope metadata, rebuilt each step rather than appended to
 /// durable messages. Paths are labels/data, never instructions or tool grants.
 pub fn scope_prompt(session: &crate::session::PersistedAgentSession, now_unix_ms: u64) -> String {
-    if session.surface != crate::session::AgentSessionSurface::DeviceAssistant {
+    if session.surface != crate::session::AgentSessionSurface::AiAssistant {
         return String::new();
     }
     let mut entries = Vec::new();

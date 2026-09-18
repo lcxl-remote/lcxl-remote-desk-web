@@ -8,7 +8,7 @@ vi.mock('./use-file-transfer', () => ({ useFileTransfer: (...args: unknown[]) =>
     h.hook(...args);
     return { listFiles: h.list, querySystemInfo: h.info, closeConnection: h.close };
 } }));
-const key = (name: string) => `pages.deviceAssistant.directories.${name}`;
+const key = (name: string) => `pages.aiAssistant.directories.${name}`;
 
 describe('remote directory picker', () => {
     beforeEach(() => { vi.clearAllMocks(); h.info.mockResolvedValue({ name: 'Windows' }); });

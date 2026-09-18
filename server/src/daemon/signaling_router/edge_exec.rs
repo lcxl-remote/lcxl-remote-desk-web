@@ -55,7 +55,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
         }
     };
     if matches!(&payload, EdgeExecRequestPayload::Agentic { .. })
-        && !ctx.settings.read().await.device_assistant.enabled
+        && !ctx.settings.read().await.ai_assistant.enabled
     {
         send_edge_execution_completed(
             &ctx.outbound_tx,
@@ -63,7 +63,7 @@ pub(super) async fn handle_edge_exec_request_inbound(
             EdgeExecDisposition::RejectedBeforeDispatch {
                 error: agent_error(
                     AgentErrorKind::UnsupportedCapability,
-                    "Device Assistant is disabled on this device",
+                    "AI Assistant is disabled on this device",
                     false,
                     true,
                 ),
@@ -737,13 +737,13 @@ pub(super) async fn handle_invoke_agent_capability_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    if !ctx.settings.read().await.device_assistant.enabled {
+    if !ctx.settings.read().await.ai_assistant.enabled {
         emit_agent_error(
             ctx,
             model,
             agent_error(
                 AgentErrorKind::UnsupportedCapability,
-                "Device Assistant is disabled on this device",
+                "AI Assistant is disabled on this device",
                 false,
                 true,
             ),
@@ -928,12 +928,8 @@ pub(super) async fn handle_computer_action_inbound(
     let reject = |ctx: &RouterContext, model: &SignalingModel, message: String| {
         emit_computer_action_rejected(ctx, model, &message);
     };
-    if !ctx.settings.read().await.device_assistant.enabled {
-        reject(
-            ctx,
-            model,
-            "Device Assistant is disabled on this device".into(),
-        );
+    if !ctx.settings.read().await.ai_assistant.enabled {
+        reject(ctx, model, "AI Assistant is disabled on this device".into());
         return Ok(());
     }
     let Some(authz) = ctx.inbound_authz.as_ref() else {

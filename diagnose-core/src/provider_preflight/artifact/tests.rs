@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
+    ai_assistant::ai_assistant_provider_registry,
     assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
-    device_assistant::device_assistant_provider_registry,
 };
 use serde_json::json;
 
@@ -17,7 +17,7 @@ fn directory_selector_is_in_exact_input_but_never_becomes_a_native_path() {
     let encoded = serde_json::to_string(&action).unwrap();
     assert!(!encoded.contains("approved-directory"));
     let preflight = ArtifactCallPreflight::build(
-        &device_assistant_provider_registry(),
+        &ai_assistant_provider_registry(),
         ProductSurface::OssPersonalOwner,
         &with_selector,
         &[directory()],
@@ -135,7 +135,7 @@ fn both_orchestrators_derive_closed_create_new_artifacts() {
             Capability::CommunicationLocalDraftCreateConfirmed,
         ),
     ];
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     for (call, expected_capability) in cases {
         for surface in [
             ProductSurface::OssPersonalOwner,
@@ -168,7 +168,7 @@ fn both_orchestrators_derive_closed_create_new_artifacts() {
 
 #[test]
 fn artifact_preflight_rejects_ambiguous_directory_and_unbounded_inputs() {
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     let valid = call(
         "create_text_file",
         json!({"file_name":"notes.txt","content_utf8":"hello"}),

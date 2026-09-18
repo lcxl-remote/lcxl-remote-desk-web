@@ -123,7 +123,7 @@ pub(crate) async fn reconcile_on(
             arguments_json: proposal.arguments_json.clone(),
         };
         let origin = ActionResultOrigin::capture(
-            &desk_diagnose_core::device_assistant::device_assistant_provider_registry(),
+            &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
             session,
             &call,
         )

@@ -22,7 +22,7 @@ describe('browser setup guide navigation', () => {
     });
 
     it.each(['https://example.com', '/desk/other-device/assistant', undefined])(
-        'falls back to this device assistant for an invalid or missing origin: %s', (origin) => {
+        'falls back to this AI assistant for an invalid or missing origin: %s', (origin) => {
             renderGuide(origin);
             expect(screen.getAllByRole('link', { name: /browserSetup.back/ })[0])
                 .toHaveAttribute('href', '/desk/device-a/assistant');

@@ -63,15 +63,15 @@ export function AssistantFileResult({ receipt, text, onExportBackup }: { receipt
         catch (error) { setExportFailed(recoveryErrorKey(error)); }
         finally { busyRef.current = false; setExporting(false); }
     };
-    return <Disclosure className="min-w-0" title={<>{t('pages.deviceAssistant.fileReceipt.title')} · {t(`pages.deviceAssistant.fileReceipt.${receipt.operation}`)} · {t(`pages.deviceAssistant.fileReceipt.${receipt.verified ? 'verified' : 'unknown'}`)}</>} summaryClassName="cursor-pointer font-medium">
+    return <Disclosure className="min-w-0" title={<>{t('pages.aiAssistant.fileReceipt.title')} · {t(`pages.aiAssistant.fileReceipt.${receipt.operation}`)} · {t(`pages.aiAssistant.fileReceipt.${receipt.verified ? 'verified' : 'unknown'}`)}</>} summaryClassName="cursor-pointer font-medium">
 
         <dl className="mt-3 space-y-2 break-words">
-            {receipt.fileName && <div><dt>{t('pages.deviceAssistant.fileReceipt.name')}</dt><dd>{receipt.fileName}</dd></div>}
-            {receipt.bytes !== undefined && <div><dt>{t('pages.deviceAssistant.fileReceipt.bytes')}</dt><dd>{receipt.bytes}</dd></div>}
+            {receipt.fileName && <div><dt>{t('pages.aiAssistant.fileReceipt.name')}</dt><dd>{receipt.fileName}</dd></div>}
+            {receipt.bytes !== undefined && <div><dt>{t('pages.aiAssistant.fileReceipt.bytes')}</dt><dd>{receipt.bytes}</dd></div>}
             {receipt.digest && <div><dt>SHA-256</dt><dd className="break-all font-mono text-xs">{receipt.digest}</dd></div>}
-            {receipt.referenceUnavailable && <p>{t('pages.deviceAssistant.fileReceipt.referenceUnavailable')}</p>}
-            {receipt.recovery && <div><dt>{t('pages.deviceAssistant.fileReceipt.recovery')}</dt><dd>{t('pages.deviceAssistant.fileReceipt.backupUntil', { time: formatLocalTime(new Date(receipt.recovery.expiresAt).toISOString()) })}</dd><p className="mt-1 text-xs text-muted-foreground">{t('pages.deviceAssistant.fileReceipt.recoveryHint')}</p>{receipt.recovery.cleanupPending && <p className="text-amber-700 dark:text-amber-300">{t('pages.deviceAssistant.fileReceipt.cleanupPending')}</p>}</div>}
-            {!receipt.verified && <p className="text-amber-700 dark:text-amber-300">{t('pages.deviceAssistant.fileReceipt.unknownHint')}</p>}
+            {receipt.referenceUnavailable && <p>{t('pages.aiAssistant.fileReceipt.referenceUnavailable')}</p>}
+            {receipt.recovery && <div><dt>{t('pages.aiAssistant.fileReceipt.recovery')}</dt><dd>{t('pages.aiAssistant.fileReceipt.backupUntil', { time: formatLocalTime(new Date(receipt.recovery.expiresAt).toISOString()) })}</dd><p className="mt-1 text-xs text-muted-foreground">{t('pages.aiAssistant.fileReceipt.recoveryHint')}</p>{receipt.recovery.cleanupPending && <p className="text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.fileReceipt.cleanupPending')}</p>}</div>}
+            {!receipt.verified && <p className="text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.fileReceipt.unknownHint')}</p>}
         </dl>
         {receipt.recovery && onExportBackup && <div className="mt-3 space-y-2">
             <Button type="button" size="sm" variant="outline" disabled={exporting} onClick={() => void download()}>
@@ -79,6 +79,6 @@ export function AssistantFileResult({ receipt, text, onExportBackup }: { receipt
             </Button>
             {exportFailed && <p role="alert" className="text-sm text-destructive">{t(`pages.fileRecovery.${exportFailed}`)}</p>}
         </div>}
-        <Disclosure className="mt-3" title={<>{t('pages.deviceAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs"><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{text}</pre></Disclosure>
+        <Disclosure className="mt-3" title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs"><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{text}</pre></Disclosure>
     </Disclosure>;
 }

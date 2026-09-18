@@ -13,7 +13,7 @@ describe('assistant connection icon', () => {
     ] as const)('renders connected=%s enabled=%s with accessible status', (connected, enabled, color, key) => {
         render(<AssistantConnectionIcon connected={connected} enabled={enabled} />);
         const status = screen.getByRole('status');
-        expect(status.title).toBe(`pages.deviceAssistant.${key}`);
+        expect(status.title).toBe(`pages.aiAssistant.${key}`);
         expect(status.textContent).toBe(status.title);
         expect(status.tabIndex).toBe(0);
         expect(status.querySelector('svg')?.classList.contains(color)).toBe(true);
@@ -24,7 +24,7 @@ describe('assistant connection icon', () => {
     it('updates color and explanation when connectivity changes', () => {
         const { rerender } = render(<AssistantConnectionIcon connected enabled />);
         rerender(<AssistantConnectionIcon connected={false} enabled />);
-        expect(screen.getByRole('status').title).toBe('pages.deviceAssistant.signalConnecting');
+        expect(screen.getByRole('status').title).toBe('pages.aiAssistant.signalConnecting');
         expect(screen.getByRole('status').querySelector('svg')?.classList.contains('text-amber-500')).toBe(true);
     });
 });

@@ -50,13 +50,13 @@ export function AssistantSchedules({ open, onOpenChange, deviceId, sessionId }: 
     }, [open, isConnected, deviceId, sessionId, client, refresh]);
     return <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden sm:max-w-xl">
-            <DialogHeader><DialogTitle>{t('pages.deviceAssistant.schedules.title')}</DialogTitle>
-                <DialogDescription>{t('pages.deviceAssistant.schedules.hint')}</DialogDescription></DialogHeader>
+            <DialogHeader><DialogTitle>{t('pages.aiAssistant.schedules.title')}</DialogTitle>
+                <DialogDescription>{t('pages.aiAssistant.schedules.hint')}</DialogDescription></DialogHeader>
             <div className="min-h-0 space-y-3 overflow-y-auto">
                 {!isConnected && <p role="status">{t('schedules.connecting')}</p>}
-                {error && <p role="alert">{t('pages.deviceAssistant.schedules.loadError')}</p>}
+                {error && <p role="alert">{t('pages.aiAssistant.schedules.loadError')}</p>}
                 {busy && tasks.length === 0 && <p role="status">{t('schedules.loading')}</p>}
-                {!busy && !error && isConnected && tasks.length === 0 && <p>{t('pages.deviceAssistant.schedules.empty')}</p>}
+                {!busy && !error && isConnected && tasks.length === 0 && <p>{t('pages.aiAssistant.schedules.empty')}</p>}
                 {tasks.map(task => <article key={task.schedule_id} className="space-y-2 rounded-lg border p-3">
                     <div className="flex flex-wrap justify-between gap-2"><h3 className="break-words font-medium">{task.title}</h3>
                         <span className="text-sm text-muted-foreground">{t(`schedules.status.${task.status}`)}</span></div>

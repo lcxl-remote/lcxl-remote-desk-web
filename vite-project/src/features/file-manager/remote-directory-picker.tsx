@@ -33,7 +33,7 @@ export function RemoteDirectoryPicker({ deskId, sessionTargetId, disabled, onSel
             try {
                 if (path === undefined) {
                     const info = await querySystemInfo();
-                    if (!info.name) throw new Error(t('pages.deviceAssistant.directories.platformUnavailable'));
+                    if (!info.name) throw new Error(t('pages.aiAssistant.directories.platformUnavailable'));
                     if (active) setPaths([/windows/i.test(info.name) ? '' : '/']);
                     return;
                 }
@@ -49,12 +49,12 @@ export function RemoteDirectoryPicker({ deskId, sessionTargetId, disabled, onSel
     const navigate = (next: string[]) => { setLoading(true); setData(null); setPaths(next); setPage(1); };
     const changePage = (next: number) => { setLoading(true); setData(null); setPage(next); };
     return <div className="space-y-2 rounded-md border p-3" aria-busy={loading}>
-        <p className="break-all text-sm font-mono">{path || t('pages.deviceAssistant.directories.root')}</p>
+        <p className="break-all text-sm font-mono">{path || t('pages.aiAssistant.directories.root')}</p>
         <div className="flex flex-wrap gap-2">
             <Button type="button" size="sm" variant="outline" disabled={busy || !paths || paths.length < 2}
-                onClick={() => navigate(paths!.slice(0, 1))}>{t('pages.deviceAssistant.directories.root')}</Button>
+                onClick={() => navigate(paths!.slice(0, 1))}>{t('pages.aiAssistant.directories.root')}</Button>
             <Button type="button" size="sm" variant="outline" disabled={busy || !paths || paths.length < 2}
-                onClick={() => navigate(paths!.slice(0, -1))}>{t('pages.deviceAssistant.directories.up')}</Button>
+                onClick={() => navigate(paths!.slice(0, -1))}>{t('pages.aiAssistant.directories.up')}</Button>
             <Button type="button" size="sm" variant="outline" disabled={disabled || loading}
                 onClick={() => setReload(n => n + 1)}>{t('common.refresh')}</Button>
         </div>
@@ -67,16 +67,16 @@ export function RemoteDirectoryPicker({ deskId, sessionTargetId, disabled, onSel
                     onClick={() => navigate([...(paths ?? []), directory.path])}>
                     <Folder className="mr-2 h-4 w-4 shrink-0" /><span className="truncate">{directory.name}</span>
                 </Button>)}
-                {!data.file_info_list.length && <p className="text-sm text-muted-foreground">{t('pages.deviceAssistant.directories.noChildren')}</p>}
+                {!data.file_info_list.length && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.directories.noChildren')}</p>}
             </div>
             <div className="flex items-center gap-2">
-                <Button type="button" size="sm" variant="outline" disabled={busy || page <= 1} onClick={() => changePage(page - 1)}>{t('pages.deviceAssistant.directories.previous')}</Button>
+                <Button type="button" size="sm" variant="outline" disabled={busy || page <= 1} onClick={() => changePage(page - 1)}>{t('pages.aiAssistant.directories.previous')}</Button>
                 <span className="text-xs">{page} / {Math.max(1, Math.ceil(data.total_count / pageSize))}</span>
-                <Button type="button" size="sm" variant="outline" disabled={busy || page * pageSize >= data.total_count} onClick={() => changePage(page + 1)}>{t('pages.deviceAssistant.directories.next')}</Button>
+                <Button type="button" size="sm" variant="outline" disabled={busy || page * pageSize >= data.total_count} onClick={() => changePage(page + 1)}>{t('pages.aiAssistant.directories.next')}</Button>
             </div>
         </>}
         <div className="flex gap-2">
-            <Button type="button" disabled={busy || !path || !data || !!error} onClick={() => onSelect(path!)}>{t('pages.deviceAssistant.directories.select')}</Button>
+            <Button type="button" disabled={busy || !path || !data || !!error} onClick={() => onSelect(path!)}>{t('pages.aiAssistant.directories.select')}</Button>
             <Button type="button" variant="outline" onClick={onCancel}>{t('common.cancel')}</Button>
         </div>
     </div>;

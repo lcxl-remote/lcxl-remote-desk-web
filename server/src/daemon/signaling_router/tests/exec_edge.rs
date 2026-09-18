@@ -753,7 +753,7 @@ pub(super) async fn fleet_exec_valid_plan_without_worker_reports_dispatch_failed
 #[tokio::test]
 pub(super) async fn assistant_switch_rejects_agentic_exec_without_blocking_fleet_exec() {
     let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
-    ctx.settings.write().await.device_assistant.enabled = false;
+    ctx.settings.write().await.ai_assistant.enabled = false;
     ctx.inbound_authz = Some(authz_block(
         vec![Capability::ShellExecConfirmed],
         vec![],
@@ -770,7 +770,7 @@ pub(super) async fn assistant_switch_rejects_agentic_exec_without_blocking_fleet
     match read_fleet_result(&mut rx).disposition {
         EdgeExecDisposition::RejectedBeforeDispatch { error } => {
             assert_eq!(error.kind, AgentErrorKind::UnsupportedCapability);
-            assert!(error.message.contains("Device Assistant is disabled"));
+            assert!(error.message.contains("AI Assistant is disabled"));
         }
         other => panic!("expected assistant switch rejection, got {other:?}"),
     }

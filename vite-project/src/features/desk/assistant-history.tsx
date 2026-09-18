@@ -49,7 +49,7 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
         setError(false);
         const refresh = async () => {
             try {
-                const response = await fetch(`/api/my/device-assistant-sessions?connection=${encodeURIComponent(deskId)}&limit=100`, {
+                const response = await fetch(`/api/my/ai-assistant-sessions?connection=${encodeURIComponent(deskId)}&limit=100`, {
                     credentials: 'include', headers: { Accept: 'application/json' }, signal: abort.signal,
                 });
                 const body = response.ok ? await response.json() : null;
@@ -69,36 +69,36 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
         return () => { abort.abort(); window.clearInterval(timer); };
     }, [open, deskId, revision]);
     return <>
-        <Button type="button" variant="outline" size="sm" className="assistant-action" aria-label={t('pages.deviceAssistant.history.title')} title={t('pages.deviceAssistant.history.title')} onClick={() => setOpen(true)}>
-            <History className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('pages.deviceAssistant.history.title')}</span>
+        <Button type="button" variant="outline" size="sm" className="assistant-action" aria-label={t('pages.aiAssistant.history.title')} title={t('pages.aiAssistant.history.title')} onClick={() => setOpen(true)}>
+            <History className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('pages.aiAssistant.history.title')}</span>
         </Button>
         <Sheet open={open} onOpenChange={setOpen}>
             <SheetContent className="flex flex-col sm:max-w-md">
                 <SheetHeader>
-                    <SheetTitle>{t('pages.deviceAssistant.history.title')}</SheetTitle>
-                    <SheetDescription>{t('pages.deviceAssistant.history.hint')}</SheetDescription>
+                    <SheetTitle>{t('pages.aiAssistant.history.title')}</SheetTitle>
+                    <SheetDescription>{t('pages.aiAssistant.history.hint')}</SheetDescription>
                 </SheetHeader>
-                {disabled && <p className="text-sm text-muted-foreground">{t('pages.deviceAssistant.history.busy')}</p>}
+                {disabled && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.history.busy')}</p>}
                 {cleanupPending && <p role="status" className="text-sm text-muted-foreground">{t('pages.fileRecovery.deletionPending')}</p>}
                 <div className="min-h-0 flex-1 space-y-2 overflow-y-auto py-4">
                     <AssistantBackupCleanup />
-                    {loading && <p role="status">{t('pages.deviceAssistant.history.loading')}</p>}
+                    {loading && <p role="status">{t('pages.aiAssistant.history.loading')}</p>}
                     {error && <div role="alert">
-                        <p>{t('pages.deviceAssistant.history.error')}</p>
-                        <Button variant="outline" onClick={() => setRevision((value) => value + 1)}>{t('pages.deviceAssistant.history.retry')}</Button>
+                        <p>{t('pages.aiAssistant.history.error')}</p>
+                        <Button variant="outline" onClick={() => setRevision((value) => value + 1)}>{t('pages.aiAssistant.history.retry')}</Button>
                     </div>}
-                    {!loading && !error && sessions.length === 0 && <p>{t('pages.deviceAssistant.history.empty')}</p>}
+                    {!loading && !error && sessions.length === 0 && <p>{t('pages.aiAssistant.history.empty')}</p>}
                     {sessions.map((session) => <div key={session.sessionId} className="flex items-start gap-2 rounded-lg border p-3">
                         <Button variant="unstyled" type="button" disabled={disabled || busy || !session.conversationId}
                             onClick={() => { if (session.conversationId && onSelect(session.conversationId)) setOpen(false); }}
                             className="min-w-0 flex-1 text-left hover:text-primary disabled:opacity-50">
-                            <span className="block whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{session.firstQuestion || t('pages.deviceAssistant.history.untitled')}</span>
+                            <span className="block whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{session.firstQuestion || t('pages.aiAssistant.history.untitled')}</span>
                             <span className="mt-1 block text-xs text-muted-foreground">{formatLocalTime(session.updatedAt)}</span>
-                            {!session.conversationId && <span className="block text-xs">{t('pages.deviceAssistant.history.unavailable')}</span>}
+                            {!session.conversationId && <span className="block text-xs">{t('pages.aiAssistant.history.unavailable')}</span>}
                         </Button>
-                        {session.active && <Loader2 className="mt-2 size-4 shrink-0 animate-spin" role="status" aria-label={t('pages.deviceAssistant.history.running')} />}
+                        {session.active && <Loader2 className="mt-2 size-4 shrink-0 animate-spin" role="status" aria-label={t('pages.aiAssistant.history.running')} />}
                         <Button type="button" variant="ghost" size="icon" disabled={disabled || busy}
-                            aria-label={t('pages.deviceAssistant.history.delete')}
+                            aria-label={t('pages.aiAssistant.history.delete')}
                             onClick={() => { setDeleting(session); setDeleteError(false); }}><Trash2 className="size-4" /></Button>
                     </div>)}
                 </div>
@@ -106,20 +106,20 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
         </Sheet>
         <Dialog open={!!deleting} onOpenChange={value => { if (!value && !busy) setDeleting(null); }}>
             <DialogContent>
-                <DialogHeader><DialogTitle>{t('pages.deviceAssistant.history.deleteTitle')}</DialogTitle>
-                    <DialogDescription>{t('pages.deviceAssistant.history.deleteHint')}</DialogDescription></DialogHeader>
-                <p className="break-words text-sm">{deleting?.firstQuestion || t('pages.deviceAssistant.history.untitled')}</p>
+                <DialogHeader><DialogTitle>{t('pages.aiAssistant.history.deleteTitle')}</DialogTitle>
+                    <DialogDescription>{t('pages.aiAssistant.history.deleteHint')}</DialogDescription></DialogHeader>
+                <p className="break-words text-sm">{deleting?.firstQuestion || t('pages.aiAssistant.history.untitled')}</p>
                 <p className="text-sm text-amber-700 dark:text-amber-300">{t(`pages.fileRecovery.deleteBackup.${backupSummary}`, { count: backupCount })}</p>
-                {(deleting?.active || sessions.some(value => value.sessionId === deleting?.sessionId && value.active)) && <p className="text-sm text-destructive">{t('pages.deviceAssistant.history.deleteRunning')}</p>}
-                {deleteError && <p role="alert" className="text-sm text-destructive">{t('pages.deviceAssistant.history.deleteError')}</p>}
+                {(deleting?.active || sessions.some(value => value.sessionId === deleting?.sessionId && value.active)) && <p className="text-sm text-destructive">{t('pages.aiAssistant.history.deleteRunning')}</p>}
+                {deleteError && <p role="alert" className="text-sm text-destructive">{t('pages.aiAssistant.history.deleteError')}</p>}
                 <DialogFooter>
-                    <Button variant="outline" disabled={busy} onClick={() => setDeleting(null)}>{t('pages.deviceAssistant.history.keep')}</Button>
+                    <Button variant="outline" disabled={busy} onClick={() => setDeleting(null)}>{t('pages.aiAssistant.history.keep')}</Button>
                     <Button variant="destructive" disabled={busy || !deleting} onClick={() => void (async () => {
                         if (!deleting || busy) return;
                         const selected = deleting;
                         setBusy(true); setDeleteError(false);
                         try {
-                            const response = await fetch('/api/my/device-assistant-session/delete', { method: 'POST', credentials: 'include',
+                            const response = await fetch('/api/my/ai-assistant-session/delete', { method: 'POST', credentials: 'include',
                                 headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connection: deskId, session: selected.sessionId }) });
                             const body = response.ok ? await response.json() : null;
                             if (body?.data?.deleted !== true) throw new Error('Deletion failed');
@@ -127,7 +127,7 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
                             setSessions(current => current.filter(value => value.sessionId !== selected.sessionId));
                             onDeleted?.(selected.conversationId); setDeleting(null); setRevision(value => value + 1);
                         } catch { setDeleteError(true); } finally { setBusy(false); }
-                    })()}>{busy && <Loader2 className="mr-2 size-4 animate-spin" />}{t('pages.deviceAssistant.history.delete')}</Button>
+                    })()}>{busy && <Loader2 className="mr-2 size-4 animate-spin" />}{t('pages.aiAssistant.history.delete')}</Button>
                 </DialogFooter>
             </DialogContent>
         </Dialog>

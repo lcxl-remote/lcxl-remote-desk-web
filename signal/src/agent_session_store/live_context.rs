@@ -1,7 +1,7 @@
 //! Single-instance SQLite live metadata and immutable first-selection receipts.
 
 use super::*;
-use desk_agent_protocol::{ExecutionMode, device_assistant::DeviceAssistantContextUpdate};
+use desk_agent_protocol::{ExecutionMode, ai_assistant::AiAssistantContextUpdate};
 use desk_diagnose_core::{
     dynamic_run::{AgentRunEvent, AgentRunEventKind},
     live_context::{ContextSelectionClaim, reconcile_live_context, validate_durable_update},
@@ -12,7 +12,7 @@ pub struct UpdateLiveContext {
     pub run_id: String,
     pub actor_id: String,
     pub device_id: String,
-    pub update: DeviceAssistantContextUpdate,
+    pub update: AiAssistantContextUpdate,
     pub selection: Option<ContextSelectionClaim>,
     pub created_at: String,
 }
@@ -23,18 +23,18 @@ struct Receipt {
     event: AgentRunEvent,
     actor_id: String,
     device_id: String,
-    update: DeviceAssistantContextUpdate,
+    update: AiAssistantContextUpdate,
     changed: bool,
 }
 
 fn error() -> AgentError {
-    internal("Device Assistant live context receipt or subject is inconsistent")
+    internal("AI Assistant live context receipt or subject is inconsistent")
 }
 
 fn storage_error(_: sea_orm::DbErr) -> AgentError {
     AgentError {
         retryable: true,
-        ..internal("Device Assistant live context storage is unavailable; retry the same request")
+        ..internal("AI Assistant live context storage is unavailable; retry the same request")
     }
 }
 
@@ -80,7 +80,7 @@ impl SignalAgentSessionStore {
             || params.run_id.len() > 128
             || params.actor_id.trim().is_empty()
             || params.device_id.trim().is_empty()
-            || self.surface != AgentSessionSurface::DeviceAssistant
+            || self.surface != AgentSessionSurface::AiAssistant
             || self.client_conversation_id.as_deref()
                 != Some(params.update.conversation_id.as_str())
         {
@@ -201,7 +201,7 @@ impl SignalAgentSessionStore {
             if session.turn_state.is_active() {
                 return Err(AgentError {
                     retryable: true,
-                    ..transport("Device Assistant context is busy")
+                    ..transport("AI Assistant context is busy")
                 });
             }
             let selection = params.selection.as_ref().ok_or_else(error)?;
@@ -297,7 +297,7 @@ impl SignalAgentSessionStore {
             txn.commit().await.map_err(storage_error)?;
             return Ok(changed);
         }
-        Err(transport("Device Assistant live context update conflicted"))
+        Err(transport("AI Assistant live context update conflicted"))
     }
 }
 

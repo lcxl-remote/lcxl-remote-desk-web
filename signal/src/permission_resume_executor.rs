@@ -1,7 +1,7 @@
 //! Durable OSS permission resumes; connection hints never grant device authority.
 use crate::agent_session_store::SignalAgentSessionStore;
 use actix_web::web;
-use desk_agent_protocol::{AgentError, device_assistant::DeviceAssistantAsk};
+use desk_agent_protocol::{AgentError, ai_assistant::AiAssistantAsk};
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
@@ -24,19 +24,19 @@ pub struct ResumeScanReport {
 pub struct SignalPermissionResumeExecutor {
     db: DatabaseConnection,
     connections: web::Data<SharedConnectionMap>,
-    device_assistant_gate: std::sync::Arc<crate::device_assistant_gate::DeviceAssistantGate>,
+    ai_assistant_gate: std::sync::Arc<crate::ai_assistant_gate::AiAssistantGate>,
 }
 
 impl SignalPermissionResumeExecutor {
     pub fn new(
         db: DatabaseConnection,
         connections: web::Data<SharedConnectionMap>,
-        device_assistant_gate: std::sync::Arc<crate::device_assistant_gate::DeviceAssistantGate>,
+        ai_assistant_gate: std::sync::Arc<crate::ai_assistant_gate::AiAssistantGate>,
     ) -> Self {
         Self {
             db,
             connections,
-            device_assistant_gate,
+            ai_assistant_gate,
         }
     }
 
@@ -69,7 +69,7 @@ impl SignalPermissionResumeExecutor {
         &self,
         candidate: crate::entity::agent_permission_resume::Model,
     ) -> Result<bool, AgentError> {
-        if !self.device_assistant_gate.is_enabled() {
+        if !self.ai_assistant_gate.is_enabled() {
             return Ok(false);
         }
         // OSS has one owner identity. No public or code-session principal can
@@ -112,7 +112,7 @@ impl SignalPermissionResumeExecutor {
         else {
             return Ok(false);
         };
-        crate::device_assistant_orchestrator::resume_after_permission_decision(
+        crate::ai_assistant_orchestrator::resume_after_permission_decision(
             self.connections.clone(),
             self.db.clone(),
             candidate.permission_id.clone(),
@@ -121,7 +121,7 @@ impl SignalPermissionResumeExecutor {
             session.device_id,
             session.conversation_id,
             candidate.request_id.clone(),
-            DeviceAssistantAsk {
+            AiAssistantAsk {
                 question,
                 client_message_id: candidate.permission_id.clone(),
                 conversation_id: session.client_conversation_id,

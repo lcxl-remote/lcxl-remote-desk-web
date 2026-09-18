@@ -1,5 +1,5 @@
 use super::*;
-use crate::device_assistant::*;
+use crate::ai_assistant::*;
 use desk_agent_protocol::computer_use::{
     RawInputKey, RawInputMouseButton, RawInputScreenContext, RawInputStep,
 };
@@ -47,7 +47,7 @@ fn call(action: RawInputAction) -> ToolCall {
 
 #[test]
 fn both_orchestrators_derive_one_exact_r3_raw_input_authority() {
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     for action in [
         action(),
         RawInputAction {
@@ -126,7 +126,7 @@ fn raw_input_decoder_rejects_changed_authority_and_unbounded_inputs() {
 
 #[test]
 fn raw_input_reference_deadline_and_subject_facts_are_not_renewed() {
-    let registry = device_assistant_provider_registry();
+    let registry = ai_assistant_provider_registry();
     let call = call(action());
     let input = RawInputCallPreflight::build(
         &registry,

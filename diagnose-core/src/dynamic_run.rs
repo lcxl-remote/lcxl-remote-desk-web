@@ -1,4 +1,4 @@
-//! Provider-neutral contracts for the dynamic Device Assistant run ledger.
+//! Provider-neutral contracts for the dynamic AI Assistant run ledger.
 //!
 //! These types describe durable facts and the model-maintained task projection;
 //! they are deliberately not an execution graph. Authorization and dispatch

@@ -18,7 +18,7 @@ import {
 // ExecPreview / ResolveExec / ExecResult signaling types as `signaling_data`;
 // These signaling types are not part of the REST OpenAPI surface.
 //
-// This hook is feature-neutral: Device Assistant and the terminal copilot
+// This hook is feature-neutral: AI Assistant and the Terminal AI Assistant
 // drive the same sealed confirm-exec lifecycle through it. It does not depend on
 // any feature's suggestion shape — callers map their own suggestion into the
 // neutral `ExecRequestInput`.
@@ -169,7 +169,7 @@ export type ExecEntry = {
 /**
  * A command to ask the host to classify and (on approval) run. Feature-neutral:
  * callers map a `SuggestedCommand` here (with `cwd: null` when a
- * diagnosis carries no working directory), and the terminal copilot maps a
+ * diagnosis carries no working directory), and the Terminal AI Assistant maps a
  * `CommandSuggestion` here, preserving the suggestion's own `cwd`.
  */
 export type ExecRequestInput = {
@@ -207,7 +207,7 @@ type UseConfirmExecProps = {
     /** Stable manager device handle used only to route the short-lived carrier. */
     deviceId?: string;
     /** Accept server-originated previews that were not initiated by requestPreview.
-     * Device Assistant uses this for model-selected confirmed execution. */
+     * AI Assistant uses this for model-selected confirmed execution. */
     acceptUnsolicitedPreviews?: boolean;
 };
 

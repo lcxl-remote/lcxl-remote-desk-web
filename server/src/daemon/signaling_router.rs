@@ -39,7 +39,7 @@ use desk_agent_protocol::exec::{
 };
 use desk_agent_protocol::exec_policy::DEFAULT_OUTPUT_BYTES;
 
-use crate::terminal_copilot::copilot_signaling_sink;
+use crate::terminal_ai_assistant::assistant_signaling_sink;
 use desk_agent_protocol::exec_lifecycle::{ExecControlAction, ExecControlPayload};
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
@@ -66,9 +66,9 @@ use desk_signal_facade::model::remote_session::{
 };
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_signal_facade::model::signal::{
-    DeviceAssistantSessionSelectedData, OfferModel, RemoteSessionPurpose, RequestRemoteModel,
-    SelectDeviceAssistantSessionData, SessionTargetListData, SignalingModel,
-    SignalingResponseState, SignalingType,
+    AiAssistantSessionSelectedData, OfferModel, RemoteSessionPurpose, RequestRemoteModel,
+    SelectAiAssistantSessionData, SessionTargetListData, SignalingModel, SignalingResponseState,
+    SignalingType,
 };
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalResizeData,
@@ -207,7 +207,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::TerminalStarted
         | SignalingType::TerminalClosed
         | SignalingType::AgentCapabilityCompleted
-        | SignalingType::TerminalCopilotUpdated
+        | SignalingType::TerminalAiAssistantUpdated
         | SignalingType::TerminalCompletionsGenerated
         | SignalingType::ExecutionPreviewGenerated
         | SignalingType::ExecutionCompleted
@@ -236,17 +236,17 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // DiagnoseCancel stops a run the control end abandoned by starting over;
         // handle it inline against the daemon's orchestrator, like `Diagnose`.
 
-        // In-terminal AI copilot: control end → daemon. Like `Diagnose`, the
-        // copilot orchestrator runs daemon-side (model call + redaction +
+        // In-Terminal AI Assistant: control end → daemon. Like `Diagnose`, the
+        // assistant orchestrator runs daemon-side (model call + redaction +
         // streaming) in Default / DeskServer, so this is handled inline rather
-        // than forwarded over IPC. `TerminalCopilotCancel` dismisses an in-flight
+        // than forwarded over IPC. `TerminalAiAssistantCancel` dismisses an in-flight
         // turn, handled inline like `DiagnoseCancel`.
-        SignalingType::AskTerminalCopilot | SignalingType::CancelTerminalCopilot => {
+        SignalingType::AskTerminalAiAssistant | SignalingType::CancelTerminalAiAssistant => {
             RouteOwnership::Daemon
         }
 
         // In-terminal AI command completion: control end → daemon. Like the
-        // copilot, the completion turn runs daemon-side (a single tool-free model
+        // assistant, the completion turn runs daemon-side (a single tool-free model
         // call + redaction) in Default / DeskServer, so it is handled inline
         // rather than forwarded over IPC.
         SignalingType::GenerateTerminalCompletions => RouteOwnership::Daemon,
@@ -336,23 +336,23 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
             RouteOwnership::Daemon
         }
 
-        // Device Assistant orchestration belongs to the central brain. These
+        // AI Assistant orchestration belongs to the central brain. These
         // frames must never reach a host in the normal path; classify them as
         // daemon-owned so a legacy/plain relay cannot forward them to a worker.
-        SignalingType::AskDeviceAssistant
-        | SignalingType::DeviceAssistantUpdated
+        SignalingType::AskAiAssistant
+        | SignalingType::AiAssistantUpdated
         | SignalingType::ManageScheduledTasks
         | SignalingType::ScheduledTasksManaged
-        | SignalingType::CancelDeviceAssistant
-        | SignalingType::GetDeviceAssistantCapabilities
-        | SignalingType::DeviceAssistantCapabilitiesUpdated
-        | SignalingType::UpdateDeviceAssistantContext
-        | SignalingType::UpdateDeviceAssistantObjectContext
-        | SignalingType::DeviceAssistantContextUpdated
-        | SignalingType::DeviceAssistantObjectContextUpdated
-        | SignalingType::UpdateDeviceAssistantSettings
-        | SignalingType::SelectDeviceAssistantSession
-        | SignalingType::DeviceAssistantSessionSelected => RouteOwnership::Daemon,
+        | SignalingType::CancelAiAssistant
+        | SignalingType::GetAiAssistantCapabilities
+        | SignalingType::AiAssistantCapabilitiesUpdated
+        | SignalingType::UpdateAiAssistantContext
+        | SignalingType::UpdateAiAssistantObjectContext
+        | SignalingType::AiAssistantContextUpdated
+        | SignalingType::AiAssistantObjectContextUpdated
+        | SignalingType::UpdateAiAssistantSettings
+        | SignalingType::SelectAiAssistantSession
+        | SignalingType::AiAssistantSessionSelected => RouteOwnership::Daemon,
 
         // Connection-list bookkeeping is daemon state too — the
         // daemon knows about every active PC, the worker only knows
@@ -1167,9 +1167,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::AgentCapabilityCompleted
         // DiagnoseEvent only flows host → control end (streamed); an
         // inbound copy is a protocol error — swallow it.
-        // TerminalCopilotEvent only flows host → control end (streamed); an
+        // TerminalAiAssistantEvent only flows host → control end (streamed); an
         // inbound copy is a protocol error — swallow it.
-        | SignalingType::TerminalCopilotUpdated
+        | SignalingType::TerminalAiAssistantUpdated
         // TerminalCompleteResult only flows host → control end; an inbound copy
         // is a protocol error — swallow it.
         | SignalingType::TerminalCompletionsGenerated
@@ -1226,14 +1226,14 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // is not injected). Streams `DiagnoseEvent` frames back to the browser.
         // AI Diagnose cancellation: stop the run abandoned by a UI start-over and
         // record an `ai.task.cancelled` audit; no `DiagnoseEvent` is streamed back.
-        // In-terminal AI copilot: run the daemon-side orchestrator (Default /
+        // In-Terminal AI Assistant: run the daemon-side orchestrator (Default /
         // DeskServer) or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the
-        // orchestrator is not injected). Streams `TerminalCopilotEvent` frames
+        // orchestrator is not injected). Streams `TerminalAiAssistantEvent` frames
         // back to the control end.
-        SignalingType::AskTerminalCopilot => handle_terminal_copilot_inbound(ctx, model).await,
-        // Copilot dismissal: a UI-side action with no orchestrator state branch
+        SignalingType::AskTerminalAiAssistant => handle_terminal_ai_assistant_inbound(ctx, model).await,
+        // Assistant dismissal: a UI-side action with no orchestrator state branch
         // yet; recorded as a no-op cancellation, like `DiagnoseCancel`.
-        SignalingType::CancelTerminalCopilot => Ok(()),
+        SignalingType::CancelTerminalAiAssistant => Ok(()),
         // In-terminal AI command completion: run the daemon-side single-shot
         // completion (Default / DeskServer) or reply with an error result
         // (ServiceDaemon, where the runtime is not injected). Answers with one
@@ -1315,33 +1315,33 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // RemoteToolResponse is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own stream).
         SignalingType::RemoteToolOutputUpdated => Ok(()),
-        SignalingType::UpdateDeviceAssistantSettings => {
-            handle_device_assistant_settings_update_inbound(ctx, model).await
+        SignalingType::UpdateAiAssistantSettings => {
+            handle_ai_assistant_settings_update_inbound(ctx, model).await
         }
-        SignalingType::SelectDeviceAssistantSession => {
-            handle_select_device_assistant_session(ctx, model)
+        SignalingType::SelectAiAssistantSession => {
+            handle_select_ai_assistant_session(ctx, model)
         }
-        SignalingType::DeviceAssistantSessionSelected => Ok(()),
-        // Central-orchestrator-only Device Assistant frames are never executed
+        SignalingType::AiAssistantSessionSelected => Ok(()),
+        // Central-orchestrator-only AI Assistant frames are never executed
         // by the edge. Swallow a stray/legacy-relayed copy fail closed.
-        SignalingType::AskDeviceAssistant
+        SignalingType::AskAiAssistant
         | SignalingType::ManageScheduledTasks
         | SignalingType::ScheduledTasksManaged
-        | SignalingType::DeviceAssistantUpdated
-        | SignalingType::CancelDeviceAssistant
-        | SignalingType::GetDeviceAssistantCapabilities
-        | SignalingType::DeviceAssistantCapabilitiesUpdated
-        | SignalingType::UpdateDeviceAssistantContext
-        | SignalingType::UpdateDeviceAssistantObjectContext
-        | SignalingType::DeviceAssistantContextUpdated
-        | SignalingType::DeviceAssistantObjectContextUpdated => {
-            log::warn!("[router] dropped central-only Device Assistant frame at edge");
+        | SignalingType::AiAssistantUpdated
+        | SignalingType::CancelAiAssistant
+        | SignalingType::GetAiAssistantCapabilities
+        | SignalingType::AiAssistantCapabilitiesUpdated
+        | SignalingType::UpdateAiAssistantContext
+        | SignalingType::UpdateAiAssistantObjectContext
+        | SignalingType::AiAssistantContextUpdated
+        | SignalingType::AiAssistantObjectContextUpdated => {
+            log::warn!("[router] dropped central-only AI Assistant frame at edge");
             Ok(())
         }
     }
 }
 
-fn handle_select_device_assistant_session(
+fn handle_select_ai_assistant_session(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
@@ -1349,7 +1349,7 @@ fn handle_select_device_assistant_session(
         .check_and_get_from_connection_id()
         .map_err(DeskError::from)?;
     let selection = model
-        .get_data::<SelectDeviceAssistantSessionData>()
+        .get_data::<SelectAiAssistantSessionData>()
         .map_err(DeskError::from)?;
     let capability = crate::daemon::session_target::SessionCapability::Assistant;
     let selected = match ctx
@@ -1410,14 +1410,14 @@ fn handle_select_device_assistant_session(
             );
             return Ok(());
         };
-        DeviceAssistantSessionSelectedData {
+        AiAssistantSessionSelectedData {
             revision,
             target: Some(target),
         }
     } else {
         // Portable/DeskServer uses one anonymous in-process worker and therefore
         // has no user-visible target identity to freeze.
-        DeviceAssistantSessionSelectedData {
+        AiAssistantSessionSelectedData {
             revision: 0,
             target: None,
         }
@@ -1425,7 +1425,7 @@ fn handle_select_device_assistant_session(
 
     if let Ok(reply) = SignalingModel::success_response(
         &model.request_id,
-        SignalingType::DeviceAssistantSessionSelected,
+        SignalingType::AiAssistantSessionSelected,
         None,
         model.from_connection_id.clone(),
         Some(&data),
@@ -1436,47 +1436,48 @@ fn handle_select_device_assistant_session(
     Ok(())
 }
 
-async fn handle_device_assistant_settings_update_inbound(
+async fn handle_ai_assistant_settings_update_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
     use crate::model::settings::{
-        DeviceAssistantSettingsUpdate, DeviceAssistantSettingsUpdateError,
-        apply_device_assistant_settings_update,
+        AiAssistantSettingsUpdate, AiAssistantSettingsUpdateError,
+        apply_ai_assistant_settings_update,
     };
 
     let update = model
-        .get_data::<DeviceAssistantSettingsUpdate>()
+        .get_data::<AiAssistantSettingsUpdate>()
         .map_err(DeskError::from)?;
-    let gate = desk_signal::device_assistant_gate::global_device_assistant_gate();
+    let gate = desk_signal::ai_assistant_gate::global_ai_assistant_gate();
     let gate_after_commit = gate.clone();
     ctx.settings_coordinator
         .commit_with_effect(
             move |settings| {
-                settings.device_assistant =
-                    apply_device_assistant_settings_update(settings.device_assistant, update)
-                        .map_err(|error| match error {
-                            DeviceAssistantSettingsUpdateError::RevisionConflict(_) => {
+                settings.ai_assistant =
+                    apply_ai_assistant_settings_update(settings.ai_assistant, update).map_err(
+                        |error| match error {
+                            AiAssistantSettingsUpdateError::RevisionConflict(_) => {
                                 DeskError::new_custom_error(
                                     DeskErrorCode::REVISION_CONFLICT,
-                                    "Device Assistant settings were modified concurrently",
+                                    "AI Assistant settings were modified concurrently",
                                 )
                             }
-                            DeviceAssistantSettingsUpdateError::RevisionExhausted => {
+                            AiAssistantSettingsUpdateError::RevisionExhausted => {
                                 DeskError::new_custom_error(
                                     DeskErrorCode::PRECONDITION_FAILED,
-                                    "Device Assistant settings revision is exhausted",
+                                    "AI Assistant settings revision is exhausted",
                                 )
                             }
-                        })?;
+                        },
+                    )?;
                 Ok(())
             },
-            move |settings| gate_after_commit.replace(settings.device_assistant),
+            move |settings| gate_after_commit.replace(settings.ai_assistant),
         )
         .await?;
     let current = gate.snapshot();
     log::info!(
-        "[device-assistant] applied trusted central settings update: revision={}, enabled={}",
+        "[ai-assistant] applied trusted central settings update: revision={}, enabled={}",
         current.revision,
         current.enabled
     );

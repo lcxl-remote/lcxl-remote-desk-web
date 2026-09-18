@@ -171,7 +171,7 @@ impl IworkCallPreflight {
         target: &ObjectRef,
         action: &ComputerActionKind,
     ) -> Result<Vec<String>, AgentError> {
-        if call.name == crate::device_assistant::windows_excel::PATCH_TOOL {
+        if call.name == crate::ai_assistant::windows_excel::PATCH_TOOL {
             let args: SpreadsheetBatchActionArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
             let expected =
@@ -191,7 +191,7 @@ impl IworkCallPreflight {
                 args.output.destination_parent,
             ]));
         }
-        if call.name == crate::device_assistant::windows_word::PATCH_TOOL {
+        if call.name == crate::ai_assistant::windows_word::PATCH_TOOL {
             let args: DocumentBatchActionArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
             let expected = ComputerActionKind::DocumentLiveBatch(DocumentLiveBatchPatchAction {
@@ -280,7 +280,7 @@ impl IworkCallPreflight {
         } else {
             None
         };
-        let word = if call.name == crate::device_assistant::windows_word::PATCH_TOOL {
+        let word = if call.name == crate::ai_assistant::windows_word::PATCH_TOOL {
             original.validate()?;
             let args: DocumentBatchActionArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
@@ -289,7 +289,7 @@ impl IworkCallPreflight {
                 .ok_or_else(unavailable)?;
             let files = super::text_file::batch_source_files(
                 session,
-                &[crate::device_assistant::windows_word::INSPECT_TOOL],
+                &[crate::ai_assistant::windows_word::INSPECT_TOOL],
                 now_unix_ms,
             );
             let mut bindings = files.iter().filter_map(|file| {
@@ -310,7 +310,7 @@ impl IworkCallPreflight {
         } else {
             None
         };
-        let excel = if call.name == crate::device_assistant::windows_excel::PATCH_TOOL {
+        let excel = if call.name == crate::ai_assistant::windows_excel::PATCH_TOOL {
             original.validate()?;
             let args: SpreadsheetBatchActionArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
@@ -319,7 +319,7 @@ impl IworkCallPreflight {
                 .ok_or_else(unavailable)?;
             let files = super::text_file::batch_source_files(
                 session,
-                &[crate::device_assistant::windows_excel::INSPECT_TOOL],
+                &[crate::ai_assistant::windows_excel::INSPECT_TOOL],
                 now_unix_ms,
             );
             let mut bindings = files.iter().filter_map(|file| {
