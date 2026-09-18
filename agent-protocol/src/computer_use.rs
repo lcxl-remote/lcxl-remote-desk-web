@@ -182,7 +182,7 @@ pub struct DesktopSessionInspectOutput {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct ScreenCaptureDisplay {
-    /// Copy this exact value into read_current_screen.display.
+    /// Opaque reference; copy this exact value into read_current_screen.display.
     pub display: String,
     pub name: String,
     pub width: u32,

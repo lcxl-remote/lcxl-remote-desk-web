@@ -213,6 +213,29 @@ pub fn match_capability_grant(
     match_capability_grant_inner(grant, call, true, None)
 }
 
+/// Explain a rejected selection without granting authority or exposing inputs.
+pub fn unavailable_grant_message(
+    grants: &[CapabilityGrant],
+    call: &CapabilityGrantCall<'_>,
+) -> &'static str {
+    let differs_only_in_input = grants.iter().any(|grant| {
+        let Some(approved) = grant.canonical_input_digest_sha256.as_deref() else {
+            return false;
+        };
+        if approved == call.canonical_input_digest_sha256 {
+            return false;
+        }
+        let mut approved_call = call.clone();
+        approved_call.canonical_input_digest_sha256 = approved;
+        is_capability_grant_candidate(grant, &approved_call)
+    });
+    if differs_only_in_input {
+        "approved_input_mismatch: an active grant exists, but these arguments differ from the approved exact input. No operation was performed. Copy approved_exact_input from the current authorization snapshot without changing fields; do not request duplicate permission. If its target reference is stale, inspect again and obtain authorization for the new target."
+    } else {
+        "authorization_unavailable: no active capability grant matches this call's scope, limits and current authority. Check the current authorization snapshot; a denied request is a user refusal, not an approval propagation failure. Do not retry or widen the target to bypass a refusal."
+    }
+}
+
 /// Filter a stored candidate before the runtime opens its admission transaction.
 /// This checks scope only: a task's provenance is not current authority here.
 /// Every selected candidate still requires current parent/session validation at
@@ -508,6 +531,41 @@ mod tests {
             readiness_revision: 9,
             now_unix_ms: 150,
         }
+    }
+
+    #[test]
+    fn input_mismatch_guidance_requires_otherwise_live_authority() {
+        let resources = vec!["root:selected".into()];
+        let operations = vec!["create_new".into()];
+        let envelopes = vec!["envelope-1".into()];
+        let digests = vec![digest('b')];
+        let canonical = digest('c');
+        let current = call(&resources, &operations, &envelopes, &digests, &canonical);
+        let mut approved = grant();
+        assert!(
+            unavailable_grant_message(&[approved.clone()], &current)
+                .starts_with("approved_input_mismatch:")
+        );
+        assert_eq!(
+            match_capability_grant(&approved, &current),
+            Err(GrantMismatch::CanonicalInput)
+        );
+        approved.remaining_uses = 0;
+        assert!(
+            unavailable_grant_message(&[approved], &current)
+                .starts_with("authorization_unavailable:")
+        );
+        let mut expired = grant();
+        expired.expires_at_unix_ms = current.now_unix_ms;
+        assert!(
+            unavailable_grant_message(&[expired], &current)
+                .starts_with("authorization_unavailable:")
+        );
+        let mut other = grant();
+        other.resource_scope = vec!["root:other".into()];
+        assert!(
+            unavailable_grant_message(&[other], &current).starts_with("authorization_unavailable:")
+        );
     }
 
     #[test]

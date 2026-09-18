@@ -4,6 +4,7 @@ use desk_agent_protocol::computer_use::ScreenCaptureDisplay;
 use desk_agent_protocol::{AgentError, AgentErrorKind, ScreenCaptureParams};
 use desk_capture_engine::image_capture::image_capture_factory::list_effective_image_output;
 use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
+use sha2::{Digest, Sha256};
 
 const MAX_DISPLAYS: usize = 32;
 
@@ -18,6 +19,20 @@ fn invalid(message: &str) -> AgentError {
 }
 
 pub(crate) fn list(settings: &DeskSettings) -> Result<Vec<ScreenCaptureDisplay>, AgentError> {
+    let mut displays = native_displays(settings)?;
+    for display in &mut displays {
+        display.display = reference(&display.display);
+    }
+    Ok(displays)
+}
+
+// This is an address, not authority. Every use still requires a matching grant
+// and a fresh enumeration; native device names never need model-side escaping.
+pub(crate) fn reference(native: &str) -> String {
+    format!("display-{:x}", Sha256::digest(native.as_bytes()))
+}
+
+fn native_displays(settings: &DeskSettings) -> Result<Vec<ScreenCaptureDisplay>, AgentError> {
     let outputs = list_effective_image_output(settings).map_err(super::capture_err)?;
     project(outputs)
 }
@@ -54,7 +69,8 @@ fn project(outputs: Vec<DisplayInfo>) -> Result<Vec<ScreenCaptureDisplay>, Agent
             display: d.device_name.clone(),
             name: d
                 .display_device_name
-                .unwrap_or(d.device_name)
+                .filter(|name| name != &d.device_name)
+                .unwrap_or_else(|| format!("Display {}", displays.len() + 1))
                 .chars()
                 .take(128)
                 .collect(),
@@ -76,7 +92,7 @@ fn select<'a>(
     requested: Option<&str>,
 ) -> Result<&'a str, AgentError> {
     if let Some(requested) = requested {
-        return displays.iter().find(|d| d.display == requested).map(|d| d.display.as_str())
+        return displays.iter().find(|d| reference(&d.display) == requested).map(|d| d.display.as_str())
             .ok_or_else(|| invalid("requested display is no longer available; refresh inspect_desktop_session, select a current displays[].display, and request screenshot permission again"));
     }
     match displays {
@@ -95,7 +111,7 @@ pub(crate) fn resolve(
     if params.window.is_some() {
         return Ok(settings.clone());
     }
-    let displays = list(settings)?;
+    let displays = native_displays(settings)?;
     let target = select(&displays, params.display.as_deref())?;
     let mut resolved = settings.clone();
     resolved.video_device_name = target.to_string();
@@ -109,7 +125,7 @@ mod tests {
     #[ignore = "requires a real interactive desktop; enumerates metadata only"]
     fn live_display_discovery_and_selection_without_capture() {
         let settings = DeskSettings::default();
-        let displays = list(&settings).unwrap();
+        let displays = native_displays(&settings).unwrap();
         assert!(!displays.is_empty());
         for display in &displays {
             println!(
@@ -117,7 +133,7 @@ mod tests {
                 display.display, display.width, display.height, display.x, display.y
             );
             assert_eq!(
-                select(&displays, Some(&display.display)).unwrap(),
+                select(&displays, Some(&reference(&display.display))).unwrap(),
                 display.display
             );
         }
@@ -139,7 +155,7 @@ mod tests {
         assert_eq!(select(&[screen("one")], None).unwrap(), "one");
         assert!(select(&[screen("one"), screen("two")], None).is_err());
         assert_eq!(
-            select(&[screen("one"), screen("two")], Some("two")).unwrap(),
+            select(&[screen("one"), screen("two")], Some(&reference("two"))).unwrap(),
             "two"
         );
     }
@@ -148,6 +164,19 @@ mod tests {
         assert!(select(&[], None).is_err());
         assert!(select(&[screen("other")], Some("removed")).is_err());
         assert!(select(&[screen("one")], Some("")).is_err());
+    }
+    #[test]
+    fn native_windows_names_are_resolved_only_through_opaque_references() {
+        let native = r"\\.\DISPLAY1";
+        let id = reference(native);
+        assert!(id.starts_with("display-"));
+        assert!(!id.contains('\\'));
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: String = serde_json::from_str(&encoded).unwrap();
+        let displays = [screen(native), screen(r"\\.\DISPLAY2")];
+        assert_eq!(select(&displays, Some(&decoded)).unwrap(), native);
+        assert!(select(&displays, Some(native)).is_err());
+        assert!(select(&displays, Some(&reference("removed"))).is_err());
     }
     #[test]
     fn enumeration_is_complete_and_excludes_detached_outputs() {

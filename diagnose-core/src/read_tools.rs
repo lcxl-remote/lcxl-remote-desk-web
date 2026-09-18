@@ -164,7 +164,7 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_current_screen",
             Capability::ScreenCaptureCurrent,
-            "Capture one display: inspect_desktop_session lists displays; use the sole entry automatically or choose a target if multiple exist, then request screenshot permission with the same display identifier. Missing display auto-selects only when one screen is attached. Alternatively pass an exact Window object_ref returned by inspect_desktop_ui to capture that Windows/macOS window independently even when covered. Do not combine display and window. Discover the application through the desktop session catalog, then inspect that Application reference with queries=[窗口, window] to obtain owner_selectable_windows. The application catalog itself does not query windows. Requires screen capture permission; do not activate a background window just for capture. Minimized windows must be restored with separate action approval.",
+            "Capture one display: inspect_desktop_session lists displays; use the sole entry automatically or choose a target if multiple exist, then request screenshot permission with the same opaque display reference from the list, never a native OS device name. Missing display auto-selects only when one screen is attached. Alternatively pass an exact Window object_ref returned by inspect_desktop_ui to capture that Windows/macOS window independently even when covered. Do not combine display and window. Discover the application through the desktop session catalog, then inspect that Application reference with queries=[窗口, window] to obtain owner_selectable_windows. The application catalog itself does not query windows. Requires screen capture permission; do not activate a background window just for capture. Minimized windows must be restored with separate action approval.",
             json!({
                 "type": "object",
                 "properties": {
@@ -378,7 +378,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_current_screen",
             Capability::ScreenCaptureCurrent,
-            "Capture one display once: first inspect_desktop_session for displays, automatically use the only entry or choose a target if multiple exist, then request capture permission with its exact display identifier. Missing display only works with a single attached screen. Alternatively pass an exact Window object_ref from inspect_desktop_ui for independent Windows/macOS window capture. Never combine display and window. Requires capture permission. A minimized window must first be restored with separate action approval. The image is sensitive, sent only to the selected visual model, and not stored in conversation history.",
+            "Capture one display once: first inspect_desktop_session for displays, automatically use the only entry or choose a target if multiple exist, then request capture permission with its exact opaque display reference, never a native OS device name. Missing display only works with a single attached screen. Alternatively pass an exact Window object_ref from inspect_desktop_ui for independent Windows/macOS window capture. Never combine display and window. Requires capture permission. A minimized window must first be restored with separate action approval. The image is sensitive, sent only to the selected visual model, and not stored in conversation history.",
             json!({
                 "type": "object",
                 "properties": {

@@ -28,6 +28,8 @@ const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 
 pub(crate) mod display;
 mod window;
+#[cfg(windows)]
+mod windows_display;
 pub(crate) use window::WindowCaptureTarget;
 
 /// Capture one fresh frame of the configured display or selected window as PNG.
@@ -49,13 +51,10 @@ pub(crate) fn collect(
         let captured = window::capture(target)?;
         (captured.frame, captured.geometry, captured.dpi)
     } else {
-        let mut capture = create_image_capture(desk_settings).map_err(capture_err)?;
-        let frame = capture
-            .capture(CaptureRequest {
-                cursor_mode: CursorCaptureMode::RenderInFrame,
-            })
-            .map_err(capture_err)?
-            .image;
+        #[cfg(windows)]
+        let frame = windows_display::capture(desk_settings).map_err(capture_err)?;
+        #[cfg(not(windows))]
+        let frame = capture_display_once(desk_settings).map_err(capture_err)?;
         (frame, None, capture_dpi())
     };
     let (png, width, height) = encode_png_with_dimensions(frame.as_ref())?;
@@ -67,7 +66,7 @@ pub(crate) fn collect(
     });
 
     Ok(ScreenCaptureOutput {
-        display: desk_settings.video_device_name.clone(),
+        display: display::reference(&desk_settings.video_device_name),
         format: ImageFormat::Png,
         width,
         height,
@@ -80,6 +79,17 @@ pub(crate) fn collect(
         // would have errored above rather than shipping a partial image.
         truncated: false,
     })
+}
+
+fn capture_display_once(
+    settings: &DeskSettings,
+) -> Result<Box<dyn ImageInfo + Send + Sync>, CaptureError> {
+    let mut capture = create_image_capture(settings)?;
+    Ok(capture
+        .capture(CaptureRequest {
+            cursor_mode: CursorCaptureMode::RenderInFrame,
+        })?
+        .image)
 }
 
 #[cfg(windows)]
@@ -355,11 +365,31 @@ mod tests {
             // interactive desktop is available. GDI is the production
             // capture-engine fallback that exercises the same owner-selected
             // display contract without depending on that virtual GPU path.
-            image_capture: Some("GDI".to_string()),
+            image_capture: Some(
+                std::env::var("LRD_SCREEN_CAPTURE_TEST_BACKEND")
+                    .unwrap_or_else(|_| "GDI".to_string()),
+            ),
             ..Default::default()
         };
-        let out = collect(&ScreenCaptureParams::default(), &settings, None)
-            .expect("Windows screen capture");
+        let id = display::reference(&settings.video_device_name);
+        assert!(
+            display::list(&settings)
+                .unwrap()
+                .iter()
+                .any(|item| item.display == id)
+        );
+        let params = ScreenCaptureParams {
+            display: Some(id.clone()),
+            window: None,
+        };
+        let mut unselected = settings.clone();
+        unselected.video_device_name.clear();
+        let resolved =
+            display::resolve(&unselected, &params).expect("resolve opaque screen reference");
+        assert_eq!(resolved.video_device_name, settings.video_device_name);
+        assert!(unselected.video_device_name.is_empty());
+        let out = collect(&params, &resolved, None).expect("Windows screen capture");
+        assert_eq!(out.display, id);
         assert_eq!(out.format, ImageFormat::Png);
         assert!(out.width > 0 && out.height > 0);
         assert_eq!(&out.image[..4], &[0x89, b'P', b'N', b'G']);

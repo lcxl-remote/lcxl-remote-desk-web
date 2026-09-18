@@ -41,7 +41,9 @@ pub(super) fn preflight(
     selected_display: &str,
     action: &RawInputAction,
 ) -> Result<RawInputPreflight, AgentError> {
-    if selected_display.is_empty() || !selected_display.eq_ignore_ascii_case(&action.screen.display)
+    if selected_display.is_empty()
+        || super::collectors::screen_capture::display::reference(selected_display)
+            != action.screen.display
     {
         return Err(failure(
             AgentErrorKind::PermissionDenied,
@@ -365,7 +367,7 @@ mod tests {
             .expect("numeric DPI");
         let action = RawInputAction {
             screen: desk_agent_protocol::computer_use::RawInputScreenContext {
-                display: display.clone(),
+                display: super::super::collectors::screen_capture::display::reference(&display),
                 width,
                 height,
                 dpi_x: dpi,

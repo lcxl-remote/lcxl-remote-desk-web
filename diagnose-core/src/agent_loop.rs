@@ -2836,10 +2836,21 @@ async fn run_inner_impl(
                             turn.provider_meta.data_envelope.as_ref(),
                             mint(),
                             &call.id,
-                            format!(
-                                "tool `{}` is not available in the current scope. Load its details and directly request permission by tool_name if needed; do not ask for a separate chat confirmation before creating the approval card.",
-                                call.name
-                            ),
+                            if crate::permission_tools::latest_tool_request_denied(
+                                &session.permission_requests,
+                                &call.name,
+                                session.input_revision,
+                            ) {
+                                format!(
+                                    "permission_denied: the latest permission request for `{}` was explicitly denied. Stop that operation and report the refusal; do not retry, resubmit, or widen its target unless the user changes the request.",
+                                    call.name
+                                )
+                            } else {
+                                format!(
+                                    "tool `{}` is not available in the current scope. Load its details and directly request permission by tool_name if needed; do not ask for a separate chat confirmation before creating the approval card.",
+                                    call.name
+                                )
+                            },
                             "unavailable_tool_call",
                         )?;
                         continue;

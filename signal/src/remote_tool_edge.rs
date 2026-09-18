@@ -1458,6 +1458,17 @@ impl SignalDeviceAssistantTools {
             now_unix_ms,
         };
         let store = SignalCapabilityGrantStore::new(self.db.clone());
+        let available_grants = store
+            .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to load Provider grants: {db_error}"),
+                    false,
+                    false,
+                )
+            })?;
         let grant_id = if let Some(existing) = store
             .prepared_grant_id(&server_call_id)
             .await
@@ -1474,21 +1485,11 @@ impl SignalDeviceAssistantTools {
             == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
         {
             crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
-        } else if let Some(grant) = store
-            .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to load Provider grants: {db_error}"),
-                    false,
-                    false,
-                )
-            })?
-            .into_iter()
+        } else if let Some(grant) = available_grants
+            .iter()
             .find(|grant| is_capability_grant_candidate(grant, &call_authority))
         {
-            grant.grant_id
+            grant.grant_id.clone()
         } else if risk_tier == CapabilityRiskTier::R0 {
             let grant_id = format!(
                 "policy-auto-{:x}",
@@ -1546,7 +1547,10 @@ impl SignalDeviceAssistantTools {
         } else {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
-                "this Provider call requires an approved capability grant",
+                desk_diagnose_core::capability_grant::unavailable_grant_message(
+                    &available_grants,
+                    &call_authority,
+                ),
                 false,
                 true,
             ));

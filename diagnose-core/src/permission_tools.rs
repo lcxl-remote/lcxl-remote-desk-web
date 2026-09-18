@@ -61,11 +61,26 @@ pub struct CapabilityAuthorizationPrompt {
     pub approved_exact_input_expires_at_unix_ms: Option<u64>,
 }
 
+pub(crate) fn latest_tool_request_denied(
+    requests: &[PermissionRequest],
+    tool: &str,
+    revision: u64,
+) -> bool {
+    requests
+        .iter()
+        .rev()
+        .find(|request| {
+            request.input_revision == revision
+                && request.items.iter().any(|item| item.tool_name == tool)
+        })
+        .is_some_and(|request| request.state == PermissionRequestState::Denied)
+}
+
 pub fn capability_authorization_prompt(
     grants: &[CapabilityGrant],
     permission_requests: &[PermissionRequest],
     now_unix_ms: u64,
-    _current_input_revision: u64,
+    current_input_revision: u64,
     current_readiness_revision: u64,
 ) -> CapabilityAuthorizationPrompt {
     let mut approved_exact_input_expires_at_unix_ms: Option<u64> = None;
@@ -173,9 +188,21 @@ pub fn capability_authorization_prompt(
         }
         entries.push(entry);
     }
+    let tools: BTreeSet<_> = permission_requests
+        .iter()
+        .flat_map(|request| &request.items)
+        .map(|item| item.tool_name.as_str())
+        .collect();
+    for tool in tools {
+        if latest_tool_request_denied(permission_requests, tool, current_input_revision) {
+            entries.push(
+                json!({"tool_name":tool,"state":"denied","input_revision":current_input_revision}),
+            );
+        }
+    }
     CapabilityAuthorizationPrompt {
         text: format!(
-            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, use its application_id in the approved UI or background-input tool, use current observed target IDs and an approved action; do not request another exact permission for each control within that scope. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
+            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, use its application_id in the approved UI or background-input tool, use current observed target IDs and an approved action; do not request another exact permission for each control within that scope. A state=denied entry means the latest request for that tool in this user input was explicitly refused, not pending or ineffective. Stop that denied operation and report the refusal. Do not resubmit it or switch from a denied window capture to a broader display capture unless the user changes the request. Other previously approved scopes remain independently valid. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
             serde_json::to_string(&entries).expect("authorization projection is serializable")
         ),
         approved_exact_input_expires_at_unix_ms,
@@ -1247,6 +1274,43 @@ mod tests {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
             arguments_json: arguments_json.into(),
         }
+    }
+
+    #[test]
+    fn denial_projection_is_current_explicit_and_contains_no_rejected_content() {
+        let registry = crate::device_assistant::device_assistant_provider_registry();
+        let mut request = build_permission_request(
+            &call(r#"{"items":[{"item_id":"capture","tool_name":"read_current_screen","exact_input":{"display":"private-display"},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"private-reason"}]}"#),
+            &registry, "permission-denied".into(), 3, "2026-09-17T00:00:00Z".into(),
+        ).unwrap();
+        request.state = PermissionRequestState::Denied;
+        let prompt = capability_authorization_prompt(&[], &[request.clone()], 500, 3, 1);
+        assert!(prompt.text.contains("\"state\":\"denied\""));
+        assert!(!prompt.text.contains("private-display"));
+        assert!(!prompt.text.contains("private-reason"));
+        assert!(!latest_tool_request_denied(
+            &[request.clone()],
+            "read_current_screen",
+            4
+        ));
+        let mut newer = request.clone();
+        newer.state = PermissionRequestState::Approved;
+        assert!(!latest_tool_request_denied(
+            &[request.clone(), newer.clone()],
+            "read_current_screen",
+            3
+        ));
+        newer.state = PermissionRequestState::PartiallyApproved;
+        assert!(!latest_tool_request_denied(
+            &[newer],
+            "read_current_screen",
+            3
+        ));
+        assert!(latest_tool_request_denied(
+            &[request],
+            "read_current_screen",
+            3
+        ));
     }
 
     #[test]

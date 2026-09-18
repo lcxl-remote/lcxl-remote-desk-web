@@ -3598,7 +3598,7 @@ impl ComputerUseBroker {
             );
             return Err(error(
                 AgentErrorKind::InvalidInput,
-                "Computer Use object is no longer available in this worker. Read the desktop/UI again and use the returned ID.",
+                "Computer Use object is no longer available in this worker. Read the desktop/UI again and use the returned ID. An old exact-input approval does not authorize a replacement ID; request authorization for the new target.",
                 false,
             ));
         };
@@ -3698,7 +3698,9 @@ fn validate_screen_selection(
     }
     if let Some(requested) = params.display.as_deref() {
         let requested = requested.trim();
-        if requested.is_empty() || !screen_target_eq(requested, selected_display) {
+        if requested.is_empty()
+            || requested != super::collectors::screen_capture::display::reference(selected_display)
+        {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
                 "the requested display does not match the resolved capture target",
@@ -3733,16 +3735,6 @@ fn admit_screen_capture(
     gate.in_flight = true;
     gate.last_started = Some(now);
     Ok(())
-}
-
-#[cfg(windows)]
-fn screen_target_eq(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
-}
-
-#[cfg(not(windows))]
-fn screen_target_eq(left: &str, right: &str) -> bool {
-    left == right
 }
 
 // Window capture contains only the selected window, so unrelated foreground
@@ -5529,7 +5521,9 @@ mod tests {
         .unwrap();
         validate_screen_selection(
             &ScreenCaptureParams {
-                display: Some(selected.into()),
+                display: Some(
+                    super::super::collectors::screen_capture::display::reference(selected),
+                ),
                 window: None,
             },
             selected,

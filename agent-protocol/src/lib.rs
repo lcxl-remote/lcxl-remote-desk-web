@@ -829,7 +829,7 @@ pub struct ContainerLogsParams {
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct ScreenCaptureParams {
-    /// Display name to capture; `None` captures the primary / current target.
+    /// Opaque ID from desktop inspection; `None` selects only a sole attached display.
     pub display: Option<String>,
     /// Exact edge-issued window reference selected under capture authorization. Model-authored
     /// window handles, titles, process ids and coordinates are never accepted.
@@ -999,9 +999,8 @@ pub struct ContainerLogsOutput {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct ScreenCaptureOutput {
-    /// Exact owner-selected display identifier used by the edge capture
-    /// backend. Raw-input fallback may bind to this value but cannot replace
-    /// it with a model-selected target.
+    /// Opaque display reference returned by the edge capture backend.
+    /// Raw-input fallback must also match the current owner-selected display.
     pub display: String,
     pub format: ImageFormat,
     pub width: u32,

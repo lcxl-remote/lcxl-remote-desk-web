@@ -446,3 +446,7 @@ The model reads with `read_conversation_attachment`. Text supports line ranges a
 ### Troubleshooting incomplete responses
 
 An output-token-limit error means the provider explicitly reported `length` or `max_tokens`. Check the output budget in model settings and gateway limits; the model's advertised maximum is not the request budget. Malformed responses or abnormal completion statuses are reported separately and their tool calls are never executed. Server model-call logs include the completion reason, actual request output limit and token usage. Missing reasons appear as `missing`, unknown values as `unrecognized`; response bodies and credentials are not logged.
+
+Screen IDs returned by desktop inspection are opaque references. Copy the ID unchanged into both screenshot permission and execution; native OS display names are resolved on the device. A denied request is a refusal, not a delayed approval. A mismatched exact input must be corrected to the current approved arguments; stale window references require fresh inspection and authorization for the replacement target.
+
+On Windows, a one-shot display screenshot retries the same authorized display once using GDI when DXGI reports a removed GPU device. Permission errors do not trigger this fallback; window capture and saved desktop-streaming settings are unaffected.
