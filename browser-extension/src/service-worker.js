@@ -100,6 +100,8 @@ async function sendToTab(tabId, action, messageTimeoutMs = null) {
     try {
         reply = await sendTabMessage(tabId, action, messageTimeoutMs);
     } catch (error) {
+        // A lost response does not prove a mutation was not executed.
+        if (!["describe_page", "take_snapshot", "wait_for"].includes(action.action)) throw error;
         const tab = await chrome.tabs.get(tabId);
         if (!tab.url) {
             throw error;
@@ -310,11 +312,16 @@ async function executeOnce(action) {
     }
     const tabId = tabIdFromPage(action.page);
     await assertTabHostPermission(chrome, tabId, action.page.origin);
-    // Every non-open action is authorized against one exact page observation,
-    // not merely an origin. Re-read the descriptor immediately before the
-    // action so a same-origin navigation between approval and execution fails
-    // closed instead of applying the old grant to a different document.
+    // Writes and element waits require an exact observation. Snapshot reads
+    // may refresh the same tab/origin/account after navigation; validate both
+    // before and after reading so a raced navigation cannot widen the scope.
     const current = await sendToTab(tabId, { action: "describe_page" });
+    if (action.action === "take_snapshot") {
+        if (!sameReadScope(action.page, current.page)) throw new Error("page_scope_changed");
+        const result = await sendToTab(tabId, { ...action, page: current.page });
+        if (!sameReadScope(action.page, result.snapshot?.page)) throw new Error("page_scope_changed");
+        return result;
+    }
     if (!samePageObservation(action.page, current.page)) {
         throw new Error("stale_page_ref");
     }
@@ -325,6 +332,16 @@ async function executeOnce(action) {
         return describeTabWithRetry(tabId);
     }
     return sendToTab(tabId, action);
+}
+
+// A read may refresh a document, but never switch tab, origin or account.
+export function sameReadScope(expected, current) {
+    return Boolean(expected && current)
+        && expected.page_id === current.page_id
+        && (expected.account_id ?? null) === (current.account_id ?? null)
+        && expected.origin?.kind === current.origin?.kind
+        && expected.origin?.host_ascii === current.origin?.host_ascii
+        && expected.origin?.port === current.origin?.port;
 }
 
 export async function execute(action) {

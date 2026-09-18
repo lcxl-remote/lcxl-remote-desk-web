@@ -559,7 +559,7 @@ test("same-origin user navigation becomes stale before a typed navigate action",
     delete globalThis.chrome;
 });
 
-test("same-origin user navigation becomes stale before a snapshot read", async () => {
+test("snapshot rejects a missing observation after refreshing same-origin navigation", async () => {
     let snapshotReads = 0;
     globalThis.chrome = extensionChrome({
         tabs: {
@@ -600,8 +600,8 @@ test("same-origin user navigation becomes stale before a snapshot read", async (
         max_elements: 16
     };
 
-    await assert.rejects(() => execute(action), /stale_page_ref/u);
-    assert.equal(snapshotReads, 0);
+    await assert.rejects(() => execute(action), /page_scope_changed/u);
+    assert.equal(snapshotReads, 1);
     delete globalThis.chrome;
 });
 
@@ -684,4 +684,59 @@ test("HTTP targets support LAN hosts while preserving origin boundaries", () => 
     }
     command.action.target.url = "file:///tmp/file";
     assert.throws(() => parseHostCommand(command), /invalid_navigation_target/u);
+});
+
+function recoveryPage(overrides = {}) {
+    return { page_id: 'tab-7', page_incarnation: 'old-document', document_revision: 1,
+        origin: { kind: 'https', host_ascii: 'example.com', port: 443 },
+        url_sha256: 'a'.repeat(64), account_id: null, ...overrides };
+}
+
+test('snapshot refreshes navigation within the approved tab origin and account', async () => {
+    const old = recoveryPage();
+    const current = recoveryPage({ page_incarnation: 'new-document', document_revision: 2, url_sha256: 'b'.repeat(64) });
+    const actions = [];
+    globalThis.chrome = extensionChrome({ tabs: { ...extensionChrome().tabs,
+        sendMessage: async (_id, { action }) => {
+            actions.push(action);
+            return { ok: true, result: action.action === 'describe_page' ? { page: current } : { snapshot: { page: current, elements: [] } } };
+        }
+    }});
+    try {
+        const { execute } = await import('../src/service-worker.js?refresh-snapshot');
+        const result = await execute({ action: 'take_snapshot', page: old, max_elements: 60 });
+        assert.equal(result.snapshot.page.page_incarnation, 'new-document');
+        assert.equal(actions[1].page.page_incarnation, 'new-document');
+        await assert.rejects(() => execute({ action: 'activate_element', page: old }), /stale_page_ref/);
+        assert.equal(actions.filter(a => a.action === 'activate_element').length, 0);
+    } finally { delete globalThis.chrome; }
+});
+
+test('snapshot refuses cross-origin and cross-account refresh', async () => {
+    for (const current of [recoveryPage({origin:{kind:'https', host_ascii:'private.example',port:443}}), recoveryPage({account_id:'other-account'})]) {
+        let snapshots = 0;
+        globalThis.chrome = extensionChrome({tabs:{...extensionChrome().tabs,
+            sendMessage: async (_id,{action}) => { if(action.action === 'take_snapshot') snapshots++; return {ok:true,result:{page:current}}; }
+        }});
+        const { execute } = await import('../src/service-worker.js?scope-refresh');
+        await assert.rejects(() => execute({action:'take_snapshot',page:recoveryPage(),max_elements:60}), /page_scope_changed/);
+        assert.equal(snapshots,0);
+    }
+    delete globalThis.chrome;
+});
+
+test('lost click response never injects and replays the mutation', async () => {
+    let clicks=0, injections=0;
+    globalThis.chrome = extensionChrome({
+        scripting:{executeScript:async()=>{injections++;}},
+        tabs:{...extensionChrome().tabs, sendMessage:async(_id,{action})=>{
+            if(action.action==='describe_page') return {ok:true,result:{page:recoveryPage()}};
+            clicks++; throw new Error('message port closed after navigation');
+        }}
+    });
+    try {
+        const {execute}=await import('../src/service-worker.js?no-mutation-replay');
+        await assert.rejects(()=>execute({action:'activate_element',page:recoveryPage()}),/message port closed/);
+        assert.equal(clicks,1); assert.equal(injections,0);
+    } finally {delete globalThis.chrome;}
 });

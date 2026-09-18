@@ -802,6 +802,8 @@ mod inbound_reader {
         let reader = spawn_inbound_reader(worker_rx, mirror, settings.clone(), ack_tx, main_tx);
         let lease = settings.read().await;
         let update = ComputerUseLocalPolicyPayload {
+            allow_screen: false,
+            allow_logs: true,
             enabled: true,
             browser_semantic: true,
             communication_handoff: true,
@@ -830,6 +832,8 @@ mod inbound_reader {
         assert!(
             matches!(tokio::time::timeout(Duration::from_secs(1), ack_rx.recv()).await.unwrap(), Some(WorkerToService::ComputerUseLocalPolicyApplied(applied)) if applied == update)
         );
+        assert!(!settings.read().await.collection_policy.allow_screen);
+        assert!(settings.read().await.collection_policy.allow_logs);
         assert!(
             settings
                 .read()
@@ -840,6 +844,8 @@ mod inbound_reader {
         daemon_tx
             .send(ServiceToWorker::UpdateComputerUseLocalPolicy(
                 ComputerUseLocalPolicyPayload {
+                    allow_screen: true,
+                    allow_logs: false,
                     enabled: false,
                     browser_semantic: false,
                     communication_handoff: false,
@@ -861,6 +867,8 @@ mod inbound_reader {
                 .computer_use
                 .communication_send_enabled()
         );
+        assert!(!settings.read().await.collection_policy.allow_screen);
+        assert!(settings.read().await.collection_policy.allow_logs);
         drop(daemon_tx);
         reader.await.unwrap();
     }

@@ -1,12 +1,9 @@
 //! The host's single durable commit path for the security policy and the
 //! locale.
 //!
-//! Everything else about the settings — encoder knobs, TURN, telemetry consent —
-//! stays with whichever handler owns it: those values are read where they are
-//! written and never have to agree with a second process. The two settled here
-//! do: a session worker enforces the security policy and renders text in the
-//! host locale, so both have to reach it, and both have a process-wide effect
-//! that must not happen before the value is durable.
+//! Worker-enforced security, application and collection policies and the host
+//! locale must reach every worker after persistence. Other local settings stay
+//! with their owning handler when no second process consumes them.
 //!
 //! A commit runs as one transaction — build a candidate, persist it, and only
 //! then let anything observe the change. A caller that sees an error can treat
@@ -273,6 +270,19 @@ impl SettingsCoordinator {
             let mut live = self.settings.write().await;
             let mut candidate = live.clone();
             change(&mut candidate)?;
+            if candidate.collection_policy != live.collection_policy {
+                candidate.computer_use.revision = candidate
+                    .computer_use
+                    .revision
+                    .max(live.computer_use.revision)
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        DeskError::new_custom_error(
+                            DeskErrorCode::PRECONDITION_FAILED,
+                            "local policy revision exhausted",
+                        )
+                    })?;
+            }
 
             // Normalize before persisting so the file never carries a locale
             // spelling or an approval timeout that would reload as something
@@ -302,9 +312,15 @@ impl SettingsCoordinator {
                 .clone()
                 .unwrap_or_else(|| crate::locale::DEFAULT_LOCALE.to_string());
             let security = candidate.security.clone();
-            let application_policy = (candidate.computer_use.local_policy()
-                != live.computer_use.local_policy())
-            .then(|| candidate.computer_use.local_policy());
+            let application_policy = (candidate
+                .computer_use
+                .local_policy(candidate.collection_policy)
+                != live.computer_use.local_policy(live.collection_policy))
+            .then(|| {
+                candidate
+                    .computer_use
+                    .local_policy(candidate.collection_policy)
+            });
             *live = candidate;
 
             let (policy_changed, seq, snapshot) = {
@@ -749,6 +765,40 @@ mod tests {
         worker_manager.install_active_for_test(ipc_tx).await;
         coordinator.bind_worker_manager(worker_manager);
         (coordinator, ipc_rx)
+    }
+
+    #[tokio::test]
+    async fn collection_policy_enable_and_revoke_wait_for_worker_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coordinator, mut receiver) = coordinator_with_worker(&dir.path().join("config")).await;
+        let manager = coordinator.worker_manager().unwrap();
+        for (index, enabled) in [false, true, false].into_iter().enumerate() {
+            let commit = coordinator.commit(|settings| {
+                settings.collection_policy.allow_screen = enabled;
+                settings.collection_policy.allow_logs = enabled;
+                Ok(())
+            });
+            let worker = async {
+                match receiver.recv().await.unwrap() {
+                    ServiceToWorker::UpdateComputerUseLocalPolicy(payload) => {
+                        assert_eq!(payload.allow_screen, enabled);
+                        assert_eq!(payload.allow_logs, enabled);
+                        assert_eq!(payload.revision, index as u64 + 1);
+                        manager.note_local_policy_applied(payload);
+                    }
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            };
+            let (result, ()) = tokio::join!(commit, worker);
+            result.unwrap();
+            let live = coordinator.settings.read().await;
+            assert_eq!(
+                Settings::load_readonly(&live.args)
+                    .unwrap()
+                    .collection_policy,
+                live.collection_policy
+            );
+        }
     }
 
     #[tokio::test]

@@ -152,8 +152,13 @@ impl ComputerUseSettings {
 }
 
 impl ComputerUseSettings {
-    pub fn local_policy(&self) -> desk_ipc_protocol::message::ComputerUseLocalPolicyPayload {
+    pub fn local_policy(
+        &self,
+        collection: super::CollectionPolicySettings,
+    ) -> desk_ipc_protocol::message::ComputerUseLocalPolicyPayload {
         desk_ipc_protocol::message::ComputerUseLocalPolicyPayload {
+            allow_screen: collection.allow_screen,
+            allow_logs: collection.allow_logs,
             operation_id: String::new(),
             revision: self.revision,
             enabled: self.enabled,

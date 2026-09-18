@@ -66,7 +66,7 @@ pub fn conversation_history_tool_registry() -> Vec<RegisteredTool> {
             parameters_schema: json!({"type":"object", "required":["attachment_id"], "properties":{
                 "attachment_id":{"type":"string","minLength":1,"maxLength":256},
                 "cursor":{"type":"string"},
-                "queries":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8},
+                "queries":{"description":"Text attachments only. Omit for JSON and images. JSON must be read with attachment_id and optional cursor/max_bytes, never queries.","type":"array","items":{"type":"string"},"minItems":1,"maxItems":8},
                 "start_line":{"type":"integer","minimum":1},
                 "end_line":{"type":"integer","minimum":1},
                 "ignore_case":{"type":"boolean","default":false},
@@ -209,6 +209,22 @@ fn invalid(message: &str) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attachment_query_field_discloses_json_restriction() {
+        let tools = conversation_history_tool_registry();
+        let read = &tools[0].spec;
+        assert!(
+            read.description
+                .contains("JSON supports original ordered pages, never search")
+        );
+        assert!(
+            read.parameters_schema["properties"]["queries"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Text attachments only")
+        );
+    }
+
     use desk_agent_protocol::data_lineage::DestinationIdentity;
 
     #[test]

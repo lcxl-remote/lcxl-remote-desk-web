@@ -1129,6 +1129,53 @@ pub(crate) enum BrowserExtensionBridgeError {
     Clock,
 }
 
+impl BrowserExtensionBridgeError {
+    /// Closed host-authored messages only: extension errors may contain page text.
+    pub(crate) fn model_message(&self) -> &'static str {
+        match self {
+            Self::StaleSurface => {
+                "browser_reference_stale: refresh the known page with browser_take_snapshot; if the profile reconnected obtain a newly authorized page. Do not repeat a mutation."
+            }
+            Self::ExtensionRejected(code) => match code.as_str() {
+                "stale_page_ref" | "stale_element_ref" => {
+                    "browser_reference_stale: read browser_take_snapshot with page and max_elements, then use its new page/element references. Do not repeat a mutation."
+                }
+                "page_scope_changed" | "origin_mismatch" => {
+                    "browser_scope_changed: the tab changed origin or account. Obtain fresh authorization; do not reuse the old grant or repeat a mutation."
+                }
+                "host_permission_required"
+                | "missing_host_permission"
+                | "host_permission_revoked" => {
+                    "browser_host_permission_missing: enable extension access to this site before continuing."
+                }
+                "content_script_timeout" => {
+                    "browser_observation_timeout: use a fresh read to check the page. The previous mutation must not be repeated."
+                }
+                _ => {
+                    "browser_extension_error: the extension could not verify the result. Read current page state; do not repeat a mutation."
+                }
+            },
+            Self::Disconnected => {
+                "browser_disconnected: reconnect the browser extension and obtain a current page reference."
+            }
+            Self::Timeout => {
+                "browser_timeout: result unknown; perform an independent read, never repeat a mutation automatically."
+            }
+            Self::InvalidHello
+            | Self::InvalidRequestId
+            | Self::InvalidBrowserAction
+            | Self::MissingUploadBytes
+            | Self::UnexpectedUploadBytes
+            | Self::UploadIdentityMismatch
+            | Self::InvalidExtensionResult
+            | Self::DuplicateRequest
+            | Self::Clock => {
+                "browser_result_unverified: the browser request or result could not be verified. Read current state before choosing another action; do not repeat a mutation."
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for BrowserExtensionBridgeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1156,6 +1203,25 @@ impl std::error::Error for BrowserExtensionBridgeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_browser_errors_are_actionable_without_echoing_extension_text() {
+        assert!(
+            BrowserExtensionBridgeError::ExtensionRejected("stale_page_ref".into())
+                .model_message()
+                .contains("browser_take_snapshot")
+        );
+        assert!(
+            BrowserExtensionBridgeError::ExtensionRejected("page_scope_changed".into())
+                .model_message()
+                .contains("fresh authorization")
+        );
+        assert!(
+            !BrowserExtensionBridgeError::ExtensionRejected("private-page-secret".into())
+                .model_message()
+                .contains("private-page-secret")
+        );
+    }
+
     use desk_agent_protocol::browser_control::{
         BrowserActionRequest, BrowserAdapterRef, BrowserElementRole, BrowserEngineKind,
         BrowserNavigationTarget, BrowserOrigin, BrowserOriginKind,

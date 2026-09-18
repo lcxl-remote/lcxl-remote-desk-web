@@ -98,6 +98,79 @@ use crate::web_research::{
 
 pub(crate) mod completion;
 
+fn browser_read_outcome(outcome: ExecOutcome) -> Result<ReadOutcome, AgentError> {
+    match outcome {
+        ExecOutcome::Executed {
+            output,
+            event_id,
+            data_envelope,
+        } => Ok(ReadOutcome::Completed {
+            output,
+            ok: true,
+            event_id,
+            data_envelope,
+            background_task: None,
+        }),
+        ExecOutcome::Failed {
+            output,
+            event_id,
+            data_envelope,
+        } => Ok(ReadOutcome::Completed {
+            output,
+            ok: false,
+            event_id,
+            data_envelope,
+            background_task: None,
+        }),
+        ExecOutcome::Dispatched(action) => Ok(ReadOutcome::Completed {
+            output: ToolRunOutput {
+                format: desk_diagnose_core::seam::ToolOutputFormat::Text,
+                content: desk_diagnose_core::chat::background_task_running_result(
+                    &action.action_request_id,
+                ),
+                image_data_url: None,
+            },
+            ok: true,
+            event_id: None,
+            data_envelope: None,
+            background_task: Some(action),
+        }),
+        ExecOutcome::PermissionRequired { request } => {
+            Ok(ReadOutcome::PermissionRequired { request })
+        }
+        ExecOutcome::Rejected { reason } => Err(error(
+            AgentErrorKind::PermissionDenied,
+            reason.unwrap_or_else(|| "browser observation was rejected".into()),
+            false,
+            true,
+        )),
+        ExecOutcome::NotExecuted { reason } => Err(error(
+            AgentErrorKind::SessionUnavailable,
+            reason,
+            true,
+            true,
+        )),
+        ExecOutcome::Cancelled { reason } => Err(error(
+            AgentErrorKind::Cancelled,
+            reason.unwrap_or_else(|| "browser observation was cancelled".into()),
+            false,
+            true,
+        )),
+        ExecOutcome::ApprovalTimeout => Err(error(
+            AgentErrorKind::Timeout,
+            "browser observation permission expired",
+            false,
+            true,
+        )),
+        ExecOutcome::Unknown(_) => Err(error(
+            AgentErrorKind::SessionUnavailable,
+            "browser observation outcome is not available yet",
+            false,
+            true,
+        )),
+    }
+}
+
 fn error(
     kind: AgentErrorKind,
     message: impl Into<String>,
@@ -1196,46 +1269,7 @@ impl SignalDeviceAssistantTools {
             "browser_take_snapshot" | "browser_wait_for"
         );
         let result = if browser_read {
-            match self.authorize_and_execute_browser(call).await? {
-                ExecOutcome::Executed {
-                    output,
-                    event_id,
-                    data_envelope,
-                } => Ok(ReadOutcome::Completed {
-                    output,
-                    ok: true,
-                    event_id,
-                    data_envelope,
-                    background_task: None,
-                }),
-                ExecOutcome::Unknown(_) => Err(error(
-                    AgentErrorKind::PermissionDenied,
-                    "browser observation outcome is unknown and cannot be retried automatically",
-                    false,
-                    true,
-                )),
-                ExecOutcome::PermissionRequired { request } => {
-                    Ok(ReadOutcome::PermissionRequired { request })
-                }
-                ExecOutcome::Rejected { reason } => Err(error(
-                    AgentErrorKind::PermissionDenied,
-                    reason.unwrap_or_else(|| "browser observation was rejected".into()),
-                    false,
-                    true,
-                )),
-                ExecOutcome::Dispatched(_) => Err(error(
-                    AgentErrorKind::SessionUnavailable,
-                    "browser observation continues as a background task",
-                    false,
-                    true,
-                )),
-                _ => Err(error(
-                    AgentErrorKind::Internal,
-                    "browser observation returned an invalid execution state",
-                    false,
-                    false,
-                )),
-            }
+            browser_read_outcome(self.authorize_and_execute_browser(call).await?)
         } else {
             self.authorize_and_invoke(call).await
         };
@@ -5566,76 +5600,7 @@ impl ToolSeam for SignalDeviceAssistantTools {
                 false,
             )),
         }
-        .and_then(|outcome| match outcome {
-            ExecOutcome::Executed {
-                output,
-                event_id,
-                data_envelope,
-            } => Ok(ReadOutcome::Completed {
-                output,
-                ok: true,
-                event_id,
-                data_envelope,
-                background_task: None,
-            }),
-            ExecOutcome::Failed {
-                output,
-                event_id,
-                data_envelope,
-            } => Ok(ReadOutcome::Completed {
-                output,
-                ok: false,
-                event_id,
-                data_envelope,
-                background_task: None,
-            }),
-            ExecOutcome::Dispatched(action) => Ok(ReadOutcome::Completed {
-                output: ToolRunOutput {
-                    format: desk_diagnose_core::seam::ToolOutputFormat::Text,
-                    content: desk_diagnose_core::chat::background_task_running_result(
-                        &action.action_request_id,
-                    ),
-                    image_data_url: None,
-                },
-                ok: true,
-                event_id: None,
-                data_envelope: None,
-                background_task: Some(action),
-            }),
-            ExecOutcome::PermissionRequired { request } => {
-                Ok(ReadOutcome::PermissionRequired { request })
-            }
-            ExecOutcome::Rejected { reason } => Err(error(
-                AgentErrorKind::PermissionDenied,
-                reason.unwrap_or_else(|| "browser observation was rejected".into()),
-                false,
-                true,
-            )),
-            ExecOutcome::NotExecuted { reason } => Err(error(
-                AgentErrorKind::SessionUnavailable,
-                reason,
-                true,
-                true,
-            )),
-            ExecOutcome::Cancelled { reason } => Err(error(
-                AgentErrorKind::Cancelled,
-                reason.unwrap_or_else(|| "browser observation was cancelled".into()),
-                false,
-                true,
-            )),
-            ExecOutcome::ApprovalTimeout => Err(error(
-                AgentErrorKind::Timeout,
-                "browser observation permission expired",
-                false,
-                true,
-            )),
-            ExecOutcome::Unknown(_) => Err(error(
-                AgentErrorKind::SessionUnavailable,
-                "browser observation outcome is not available yet",
-                false,
-                true,
-            )),
-        });
+        .and_then(browser_read_outcome);
         ReadCompletion {
             outcome,
             version_advance: None,
@@ -6046,6 +6011,32 @@ async fn record_computer_action_pre_send_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn browser_read_failure_preserves_result_and_delivery_identity() {
+        let outcome = browser_read_outcome(ExecOutcome::Failed {
+            output: ToolRunOutput {
+                format: desk_diagnose_core::seam::ToolOutputFormat::Text,
+                content: "browser_reference_stale: read browser_take_snapshot".into(),
+                image_data_url: None,
+            },
+            event_id: Some("failed-read-event".into()),
+            data_envelope: None,
+        })
+        .unwrap();
+        match outcome {
+            ReadOutcome::Completed {
+                output,
+                ok,
+                event_id,
+                ..
+            } => {
+                assert!(!ok);
+                assert!(output.content.contains("browser_reference_stale"));
+                assert_eq!(event_id.as_deref(), Some("failed-read-event"));
+            }
+            other => panic!("expected completed failure, got {other:?}"),
+        }
+    }
 
     fn object_ref(token: &str, object_kind: ObjectKind) -> ObjectRef {
         ObjectRef {

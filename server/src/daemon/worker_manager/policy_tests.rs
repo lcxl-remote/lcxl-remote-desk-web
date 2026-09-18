@@ -19,6 +19,8 @@ async fn application_policy_timeout_or_inexact_ack_retires_the_worker() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         manager.install_active_for_test(tx).await;
         let policy = desk_ipc_protocol::message::ComputerUseLocalPolicyPayload {
+            allow_screen: false,
+            allow_logs: true,
             enabled: false,
             browser_semantic: false,
             communication_handoff: false,

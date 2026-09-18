@@ -58,6 +58,8 @@ fn local_recovery_stays_in_user_worker_ipc_and_redacts_export_debug() {
 #[test]
 fn application_policy_publication_and_exact_ack_round_trip() {
     let policy = ComputerUseLocalPolicyPayload {
+        allow_screen: false,
+        allow_logs: true,
         enabled: true,
         browser_semantic: true,
         communication_handoff: false,

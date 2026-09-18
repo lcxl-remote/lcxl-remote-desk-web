@@ -388,7 +388,7 @@ pub async fn externalize_with(
             "read_with": READ_ATTACHMENT_TOOL}).to_string()
     } else {
         let mut value = json!({"result_externalized":true,"parts":delivery.parts,"read_with":READ_ATTACHMENT_TOOL,
-            "notice":"Read the attachment before interpreting its content or taking dependent actions. Do not repeat an already executed action."});
+            "notice":"Read the attachment before interpreting its content or taking dependent actions. For JSON, omit queries: use attachment_id with optional max_bytes/cursor. Search queries are only supported for text. Do not repeat an already executed action."});
         if let Some(tool) = source
             .data_envelope
             .as_ref()

@@ -1846,12 +1846,12 @@ fn browser_snapshot_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "browser_take_snapshot".into(),
-            description: "Read a bounded semantic accessibility projection from one provider-owned page. Static page text, arbitrary DOM, credentials, cookies, storage and non-task tab inventory are excluded.".into(),
+            description: "Read a bounded semantic accessibility projection from one provider-owned page. Both page and max_elements (1-512) are required, including in request_permissions.exact_input. This is semantic JSON, not a screenshot. After navigation, this read can refresh the known tab within the same origin and account; use the returned page and element references for subsequent actions. Static page text, arbitrary DOM, credentials, cookies, storage and non-task tab inventory are excluded.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
                     "page": browser_page_schema(),
-                    "max_elements": {"type": "integer", "minimum": 1, "maximum": 512}
+                    "max_elements": {"type": "integer", "minimum": 1, "maximum": 512, "description": "Required result count bound; specify explicitly, for example 60."}
                 },
                 "required": ["page", "max_elements"],
                 "additionalProperties": false
@@ -1866,7 +1866,7 @@ fn browser_wait_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "browser_wait_for".into(),
-            description: "Wait for one exact semantic element reference to remain present. The first slice deliberately rejects absent/enabled/disabled predicates that the pinned upstream tool cannot prove.".into(),
+            description: "Wait for one exact semantic element reference to remain present. All four parameters are required, including in request_permissions.exact_input: page, element, state=present, timeout_ms (1-30000). To recover after navigation, use browser_take_snapshot instead of waiting on an old element. The first slice deliberately rejects absent/enabled/disabled predicates that the pinned upstream tool cannot prove.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -4162,6 +4162,33 @@ mod tests {
                 crate::capability_risk::CapabilityRiskSignals::default(),
             ),
             desk_agent_protocol::capability_grant::CapabilityRiskTier::R3
+        );
+    }
+
+    #[test]
+    fn browser_read_permission_inputs_remain_explicit_and_required() {
+        let snapshot = browser_snapshot_tool().spec;
+        assert_eq!(
+            snapshot.parameters_schema["required"],
+            serde_json::json!(["page", "max_elements"])
+        );
+        assert!(
+            snapshot
+                .description
+                .contains("request_permissions.exact_input")
+        );
+        let wait = browser_wait_tool().spec;
+        assert_eq!(
+            wait.parameters_schema["required"],
+            serde_json::json!(["page", "element", "state", "timeout_ms"])
+        );
+        assert_eq!(
+            wait.parameters_schema["properties"]["state"]["const"],
+            "present"
+        );
+        assert!(
+            wait.description
+                .contains("All four parameters are required")
         );
     }
 

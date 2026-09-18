@@ -2225,10 +2225,7 @@ impl WorkerSession {
                                                 Ok(_) => match action_broker
                                                     .execute_browser_action(&step.target, request)
                                                     .await
-                                                    .map_err(|_| {
-                                                        "browser action did not return a verified semantic result"
-                                                            .to_string()
-                                                    }) {
+                                                    .map_err(|error| error.model_message().to_string()) {
                                                     Ok(result) => action_broker
                                                         .require_writer_lease(&generation)
                                                         .map(|_| result)
@@ -3272,6 +3269,8 @@ pub(super) fn spawn_inbound_reader(
                         let mut settings = settings.write().await;
                         if payload.revision > settings.computer_use.revision {
                             settings.computer_use.revision = payload.revision;
+                            settings.collection_policy.allow_screen = payload.allow_screen;
+                            settings.collection_policy.allow_logs = payload.allow_logs;
                             settings.computer_use.enabled = payload.enabled;
                             settings.computer_use.browser_semantic = payload.browser_semantic;
                             settings.computer_use.communication_handoff =
@@ -3281,6 +3280,8 @@ pub(super) fn spawn_inbound_reader(
                                 payload.allowed_application_paths.clone();
                         }
                         payload.revision = settings.computer_use.revision;
+                        payload.allow_screen = settings.collection_policy.allow_screen;
+                        payload.allow_logs = settings.collection_policy.allow_logs;
                         payload.enabled = settings.computer_use.enabled;
                         payload.browser_semantic = settings.computer_use.browser_semantic;
                         payload.communication_handoff = settings.computer_use.communication_handoff;

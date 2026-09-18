@@ -749,6 +749,8 @@ pub struct UpdateSecurityPolicyPayload {
 /// Trusted daemon publication; never accepted from a signaling peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ComputerUseLocalPolicyPayload {
+    pub allow_screen: bool,
+    pub allow_logs: bool,
     pub enabled: bool,
     pub browser_semantic: bool,
     pub communication_handoff: bool,

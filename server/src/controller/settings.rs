@@ -221,16 +221,15 @@ pub async fn query_collection_policy_settings(
 #[post("/settings/collection-policy")]
 pub async fn update_collection_policy_settings(
     request_json: web::Json<CollectionPolicySettingsUpdate>,
-    settings: web::Data<SharedSettings>,
+    coordinator: web::Data<SettingsCoordinator>,
 ) -> Result<HttpResponse, AWError> {
     let params = request_json.into_inner();
-    let mut settings = settings.write().await;
-    settings.collection_policy.apply_update(params);
-    settings.save()?;
-    info!(
-        "Update collection policy successfully: {:?}",
-        settings.collection_policy
-    );
+    coordinator
+        .commit(move |settings| {
+            settings.collection_policy.apply_update(params);
+            Ok(())
+        })
+        .await?;
     Ok(HttpResponse::Ok().finish())
 }
 
