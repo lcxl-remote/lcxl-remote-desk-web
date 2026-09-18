@@ -5,6 +5,7 @@
 //! mutations are limited to typed UIA patterns; callers inspect their effects separately.
 
 mod application;
+mod protection;
 mod scroll;
 mod window_capture;
 pub(super) use window_capture::resolve_window_capture_target;
@@ -417,14 +418,7 @@ pub(super) fn foreground_contains_protected_control(
     expected_process_id: u32,
     expected_image_path: &str,
 ) -> Result<bool, AgentError> {
-    collect_foreground(
-        expected_process_id,
-        expected_image_path,
-        ACTION_MAX_DEPTH,
-        ACTION_MAX_NODES as u32,
-        ACTION_OBSERVATION_MAX_BYTES,
-    )
-    .map(|tree| tree.truncated || tree.nodes.iter().any(|node| node.is_protected))
+    protection::foreground(expected_process_id, expected_image_path)
 }
 
 pub(super) fn preflight_action(

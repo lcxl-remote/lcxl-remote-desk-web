@@ -45,22 +45,10 @@ pub(crate) fn resolve_window_capture_target(
                 false,
             ));
         }
-        let tree = collect_foreground_selection_inner(
-            Some(&application),
-            process_id,
-            &image_path,
-            ACTION_MAX_DEPTH,
-            ACTION_MAX_NODES as u32,
-            ACTION_OBSERVATION_MAX_BYTES,
-            UiInspectScope::All,
-            Some(&fingerprint),
-            None,
-            false,
-        )?;
-        if tree.truncated || tree.nodes.iter().any(|node| node.is_protected) {
+        if protection::scan(&automation, root)? {
             return Err(failure_with_kind(
                 AgentErrorKind::PermissionDenied,
-                "the selected window contains protected controls or could not be fully checked",
+                "the selected window contains a visible protected UI control",
                 false,
             ));
         }

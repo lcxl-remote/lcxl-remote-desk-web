@@ -267,7 +267,7 @@ fn broker_capture(password: bool) {
             Err(AgentError {
                 kind: AgentErrorKind::PermissionDenied,
                 message, ..
-            }) if message.contains("protected controls")
+            }) if message.contains("visible protected UI control")
         ));
         return;
     }

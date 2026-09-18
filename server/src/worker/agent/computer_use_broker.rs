@@ -3767,15 +3767,12 @@ fn ensure_screen_capture_safe() -> Result<(), AgentError> {
         ));
     }
     #[cfg(windows)]
-    // UIA is an additional sensitive-control detector, not a prerequisite for
-    // vision fallback: apps without a UIA tree still remain eligible after the
-    // secure-desktop and executable denylist checks above.
+    // Incomplete UIA scans remain blocked, but must not be reported as confirmed
+    // sensitive content. Only a complete negative scan permits capture.
     if super::windows_uia_observer::foreground_contains_protected_control(
         application.process_id,
         &application.image_path,
-    )
-    .unwrap_or(false)
-    {
+    )? {
         return Err(error(
             AgentErrorKind::PermissionDenied,
             "the foreground application contains a protected UI control",
@@ -5795,6 +5792,43 @@ mod tests {
     #[ignore = "requires a non-sensitive foreground application on an interactive desktop"]
     fn live_screen_safety_accepts_a_non_sensitive_foreground_application() {
         ensure_screen_capture_safe().expect("foreground screen safety gate");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the requested non-sensitive application in the foreground"]
+    fn live_windows_foreground_safety_and_screen_capture() {
+        let expected = std::env::var("LRD_SCREEN_SAFETY_TEST_PROCESS_ID")
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        let observed = observe_interactive_desktop()
+            .unwrap()
+            .foreground_application
+            .unwrap();
+        assert_eq!(
+            observed.process_id, expected,
+            "unexpected foreground fixture"
+        );
+        let params = ScreenCaptureParams::default();
+        let settings = super::super::collectors::screen_capture::display::resolve(
+            &desk_signal_facade::model::desk_settings::DeskSettings::default(),
+            &params,
+        )
+        .unwrap();
+        let broker = Arc::new(ComputerUseBroker::new());
+        let permit = broker
+            .acquire_screen_capture_permit(&params, &settings.video_device_name)
+            .expect("complete screenshot safety gate");
+        let output = super::super::collectors::screen_capture::collect(
+            &params,
+            &settings,
+            permit.window_target(),
+        )
+        .unwrap();
+        permit.validate_window_after_capture().unwrap();
+        assert!(output.width > 0 && output.height > 0);
+        assert_eq!(&output.image[..4], &[0x89, b'P', b'N', b'G']);
     }
 
     #[cfg(target_os = "macos")]
