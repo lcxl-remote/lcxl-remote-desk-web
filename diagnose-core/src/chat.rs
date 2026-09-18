@@ -480,9 +480,29 @@ pub enum StopReason {
     /// The provider rejected/stopped the turn because the input context exceeded
     /// its context window. This is an input-size failure, not output truncation.
     ContextWindowExceeded,
-    /// Anything else / unknown (treated like a truncated turn: do not act on it).
+    /// Anything else / missing (a protocol failure, not evidence of output truncation).
     #[default]
     Other,
+}
+
+/// Closed diagnostic labels: never log arbitrary provider strings which may
+/// reflect prompt content or credentials. Missing and unknown remain distinct.
+pub fn completion_reason_label(reason: Option<&str>) -> &'static str {
+    match reason {
+        None => "missing",
+        Some("stop") => "stop",
+        Some("tool_calls") => "tool_calls",
+        Some("length") => "length",
+        Some("end_turn") => "end_turn",
+        Some("stop_sequence") => "stop_sequence",
+        Some("tool_use") => "tool_use",
+        Some("max_tokens") => "max_tokens",
+        Some("model_context_window_exceeded") => "model_context_window_exceeded",
+        Some("content_filter") => "content_filter",
+        Some("refusal") => "refusal",
+        Some("pause_turn") => "pause_turn",
+        Some(_) => "unrecognized",
+    }
 }
 
 /// Token accounting reported by the gateway.
@@ -523,6 +543,8 @@ pub struct ModelTurn {
 /// provider protocol error, not a model answer. The loop must not act on the turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelTurnError {
+    /// The provider did not supply a recognized completion reason.
+    UnknownStopReason,
     /// `stop_reason` and the presence/absence of tool calls disagree (e.g.
     /// `EndTurn` carrying tool calls, or `ToolUse` with none).
     InconsistentStopReason {
@@ -542,6 +564,12 @@ pub enum ModelTurnError {
 impl std::fmt::Display for ModelTurnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ModelTurnError::UnknownStopReason => {
+                write!(
+                    f,
+                    "model protocol error: missing or unsupported completion reason"
+                )
+            }
             ModelTurnError::InconsistentStopReason {
                 stop_reason,
                 tool_calls,
@@ -575,7 +603,7 @@ pub enum TurnDisposition {
     Answer,
     /// `ToolUse` with at least one well-formed call: execute the tool calls.
     InvokeTools,
-    /// `MaxTokens` / `Other`: the turn is half-produced — discard it (and its
+    /// `MaxTokens`: the turn is half-produced — discard it (and its
     /// provisional streamed text) and do not execute anything.
     Discard,
     /// The provider reported that the input exceeded its context window. Discard
@@ -589,8 +617,9 @@ pub enum TurnDisposition {
 /// - `EndTurn` ⇒ must have **no** tool calls → [`TurnDisposition::Answer`].
 /// - `ToolUse` ⇒ must have **≥1** tool call, each with parseable JSON arguments →
 ///   [`TurnDisposition::InvokeTools`].
-/// - `MaxTokens` / `Other` ⇒ the turn is truncated → [`TurnDisposition::Discard`]
+/// - `MaxTokens` ⇒ the turn is truncated → [`TurnDisposition::Discard`]
 ///   (never execute a half-produced tool call).
+/// - `Other` ⇒ protocol failure; never infer an output limit from an unknown stop.
 /// - `ContextWindowExceeded` ⇒ discard the turn but preserve the distinct input
 ///   context failure → [`TurnDisposition::ContextWindowExceeded`].
 ///
@@ -636,9 +665,8 @@ pub fn classify_model_turn(turn: &ModelTurn) -> Result<TurnDisposition, ModelTur
             }
             Ok(TurnDisposition::InvokeTools)
         }
-        // A truncated or unknown stop: discard the half-produced turn regardless
-        // of whether partial tool calls were assembled.
-        StopReason::MaxTokens | StopReason::Other => Ok(TurnDisposition::Discard),
+        StopReason::MaxTokens => Ok(TurnDisposition::Discard),
+        StopReason::Other => Err(ModelTurnError::UnknownStopReason),
         StopReason::ContextWindowExceeded => Ok(TurnDisposition::ContextWindowExceeded),
     }
 }
@@ -648,6 +676,20 @@ mod tests {
     use super::*;
     use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
     use serde_json::json;
+
+    #[test]
+    fn completion_diagnostics_distinguish_missing_and_redact_unknown_values() {
+        assert_eq!(completion_reason_label(None), "missing");
+        assert_eq!(completion_reason_label(Some("length")), "length");
+        assert_eq!(
+            completion_reason_label(Some("content_filter")),
+            "content_filter"
+        );
+        assert_eq!(
+            completion_reason_label(Some("secret\nuser content")),
+            "unrecognized"
+        );
+    }
 
     fn meta(stop_reason: StopReason, has_tool_calls: bool) -> ProviderResponseMeta {
         ProviderResponseMeta {
@@ -874,8 +916,7 @@ mod tests {
         }
     }
 
-    /// Output truncation/unknown stops discard the turn, while a provider context
-    /// window stop remains distinguishable so callers can reduce input context.
+    /// Output truncation, unknown termination, and context overflow stay distinct.
     #[test]
     fn classify_truncated_turns_discard() {
         for stop in [StopReason::MaxTokens, StopReason::Other] {
@@ -890,7 +931,12 @@ mod tests {
                 provider_meta: meta(stop, true),
                 ..Default::default()
             };
-            assert_eq!(classify_model_turn(&turn), Ok(TurnDisposition::Discard));
+            let expected = if stop == StopReason::MaxTokens {
+                Ok(TurnDisposition::Discard)
+            } else {
+                Err(ModelTurnError::UnknownStopReason)
+            };
+            assert_eq!(classify_model_turn(&turn), expected);
         }
 
         let context = ModelTurn {

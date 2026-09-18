@@ -2564,6 +2564,8 @@ async fn run_inner_impl(
             Err(error) => {
                 if deps.content_safety.is_enforced() {
                     sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
+                } else {
+                    sink.on_turn_discarded();
                 }
                 // A provider may transiently normalize an otherwise complete
                 // exact-action response with inconsistent stop metadata. Before
@@ -2572,6 +2574,7 @@ async fn run_inner_impl(
                 // permission continuation whose exposed exact tool set is already
                 // server-frozen; ordinary protocol violations still fail closed.
                 if permission_continuation_pending
+                    && !matches!(error, crate::chat::ModelTurnError::UnknownStopReason)
                     && !deps.permission_continuation_exact_tools.is_empty()
                     && permission_protocol_retries < 1
                 {

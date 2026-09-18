@@ -428,14 +428,19 @@ impl SignalModelSeam {
                 return Err(transport_error(err));
             }
         }
+        let completion_reason = state.completion_reason();
         let turn = state.into_turn();
         if request.use_case == desk_diagnose_core::model_profile::ModelUseCase::ContextCompression {
             *self.compression_call_key.borrow_mut() = Some(uuid::Uuid::new_v4().to_string());
         }
         log::info!(
-            "[model-dial] completed model turn: stop_reason={:?}, tool_call_count={}",
+            "[model-dial] completed model turn: completion_reason={}, stop_reason={:?}, tool_call_count={}, output_limit={:?}, usage={:?}",
+            completion_reason,
             turn.stop_reason,
-            turn.tool_calls.len()
+            turn.tool_calls.len(),
+            body.get("max_tokens")
+                .or_else(|| body.get("max_completion_tokens")),
+            turn.usage
         );
         Ok(turn)
     }
@@ -717,6 +722,13 @@ impl StreamState {
             StreamState::OpenAi(s) => s.error.take(),
             StreamState::Anthropic(s) => s.error.take(),
         }
+    }
+
+    fn completion_reason(&self) -> &'static str {
+        desk_diagnose_core::chat::completion_reason_label(match self {
+            Self::OpenAi(s) => s.finish_reason.as_deref(),
+            Self::Anthropic(s) => s.stop_reason.as_deref(),
+        })
     }
 
     fn into_turn(self) -> ModelTurn {

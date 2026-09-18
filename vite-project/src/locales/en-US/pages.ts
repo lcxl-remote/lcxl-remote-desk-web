@@ -1622,9 +1622,9 @@ export default {
   'pages.agentError.copilotStepLimit':
     'The copilot ran out of reasoning steps before it could answer. Try a simpler question, or ask an administrator to raise the step limit.',
   'pages.agentError.copilotTruncated':
-    'The copilot response was cut off before it finished. Please try again.',
+    'The AI model reached its output token limit. Increase the output budget in model settings, or ask for a shorter response and retry.',
   'pages.agentError.copilotProtocolViolation':
-    'The AI model returned a malformed response. Please try again; if it persists, contact an administrator.',
+    'The AI model returned a malformed response or an abnormal completion status. Retry; if it persists, check the completion reason in gateway logs.',
   'pages.agentError.copilotTurnBusy':
     'Another copilot request is still running for this session. Wait for it to finish and try again.',
   'pages.agentError.copilotSubjectMismatch':

@@ -6059,6 +6059,53 @@ async fn context_window_stop_is_not_reported_as_output_truncation() {
 
 // ---------------------------- Content safety ----------------------------
 
+#[tokio::test]
+async fn unknown_stop_is_protocol_error_without_retry_or_tool_execution() {
+    let sess = MemSession::default();
+    let calls = Rc::new(RefCell::new(vec![]));
+    let requests = Rc::new(RefCell::new(vec![]));
+    let stopped = ModelTurn {
+        stop_reason: StopReason::Other,
+        tool_calls: vec![ToolCall {
+            id: "c".into(),
+            name: "sysinfo".into(),
+            arguments_json: "{}".into(),
+        }],
+        provider_meta: ProviderResponseMeta {
+            stop_reason: StopReason::Other,
+            replay: Some(ReplayDisposition::legacy_unknown()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new([stopped].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: calls.clone(),
+        reply: "x".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "t".to_string();
+    let log = Rc::new(RefCell::new(vec![]));
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &reg, &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "q"),
+        &mut EventLog(log.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        LoopOutcome::ProtocolError(crate::chat::ModelTurnError::UnknownStopReason)
+    );
+    assert_eq!(requests.borrow().len(), 1);
+    assert!(calls.borrow().is_empty());
+    assert_eq!(*log.borrow(), vec!["discarded".to_string()]);
+}
+
 #[derive(Default)]
 struct SafetyScript {
     model_turn_results: RefCell<

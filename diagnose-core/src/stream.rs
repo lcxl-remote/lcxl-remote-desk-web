@@ -346,7 +346,7 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
         LoopOutcome::ContentSafetyUnavailable(error) => error.clone(),
         LoopOutcome::Truncated => AgentError {
             kind: AgentErrorKind::OutputLimitExceeded,
-            message: "the model response was truncated before it finished; please retry".into(),
+            message: "the model reached its output token limit; increase the model output budget or request a shorter response".into(),
             retryable: true,
             safe_for_model: true,
             error_code: Some(DeskErrorCode::COPILOT_RESPONSE_TRUNCATED.code()),

@@ -1617,9 +1617,9 @@ export default {
     '服务器尚未配置 AI 模型，请联系管理员在「AI 模型设置」中填写模型服务、模型名称、基础 URL 和 API 密钥。',
   'pages.agentError.copilotStepLimit':
     'Copilot 在给出答案前用尽了推理步数。请尝试更简单的问题，或联系管理员调高步数上限。',
-  'pages.agentError.copilotTruncated': 'Copilot 的回复在完成前被截断，请重试。',
+  'pages.agentError.copilotTruncated': 'AI 模型已达到单次输出 token 上限。请在模型设置中调高输出预算，或让 AI 缩短回答后重试。',
   'pages.agentError.copilotProtocolViolation':
-    'AI 模型返回了格式错误的响应。请重试；若持续出现请联系管理员。',
+    'AI 模型返回的响应格式或结束状态异常。请重试；若持续出现，请检查网关日志中的结束原因。',
   'pages.agentError.copilotTurnBusy': '当前会话已有一个 Copilot 请求正在进行，请等待其完成后再试。',
   'pages.agentError.copilotSubjectMismatch': '该 Copilot 会话属于另一个会话，请重新发起提问。',
   'pages.agentError.sameToolRepeatLimit':
