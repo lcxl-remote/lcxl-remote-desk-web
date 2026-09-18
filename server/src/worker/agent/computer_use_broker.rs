@@ -77,15 +77,14 @@ fn screen_capture_readiness(
     session_ready: bool,
     session_reason: Option<ComputerUseReadinessReason>,
     allow_screen: bool,
-    display_selected: bool,
 ) -> (bool, Option<ComputerUseReadinessReason>) {
-    let ready = session_ready && allow_screen && display_selected;
+    // Independent window capture does not use the configured display. Validate
+    // a display selection only when admitting an actual full-display request.
+    let ready = observation_enabled && platform_supported && session_ready && allow_screen;
     let reason = (!ready).then_some(if !observation_enabled || !allow_screen {
         ComputerUseReadinessReason::DisabledByLocalCeiling
     } else if !platform_supported {
         ComputerUseReadinessReason::UnsupportedPlatform
-    } else if !display_selected {
-        ComputerUseReadinessReason::NoDisplaySelected
     } else {
         session_reason.unwrap_or(ComputerUseReadinessReason::NoInteractiveSession)
     });
@@ -953,6 +952,8 @@ impl ComputerUseBroker {
             interactive_session_incarnation: incarnation,
             active_application,
             active_application_name,
+            displays: Vec::new(),
+            display_list_error: None,
         })
     }
 
@@ -1275,7 +1276,6 @@ impl ComputerUseBroker {
             session_ready,
             session_reason,
             allow_screen,
-            display_selected,
         );
         #[cfg(target_os = "macos")]
         let (screen_ready, screen_reason) = if screen_ready && !macos_permissions.screen_recording {
@@ -3677,11 +3677,22 @@ fn validate_screen_selection(
     params: &ScreenCaptureParams,
     selected_display: &str,
 ) -> Result<(), AgentError> {
+    if params.window.is_some() {
+        return if params.display.is_some() {
+            Err(error(
+                AgentErrorKind::InvalidInput,
+                "choose either a window or a display capture target, not both",
+                false,
+            ))
+        } else {
+            Ok(())
+        };
+    }
     let selected_display = selected_display.trim();
     if selected_display.is_empty() {
         return Err(error(
             AgentErrorKind::PermissionDenied,
-            "screen capture requires an owner-selected display",
+            "screen capture requires a resolved display target",
             false,
         ));
     }
@@ -3690,7 +3701,7 @@ fn validate_screen_selection(
         if requested.is_empty() || !screen_target_eq(requested, selected_display) {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
-                "the requested display does not match the owner-selected display",
+                "the requested display does not match the resolved capture target",
                 false,
             ));
         }
@@ -5506,7 +5517,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_capture_is_bound_to_the_owner_selected_display() {
+    fn screen_capture_is_bound_to_the_resolved_display() {
         let selected = r"\\.\DISPLAY2";
         validate_screen_selection(
             &ScreenCaptureParams {
@@ -5595,14 +5606,72 @@ mod tests {
     }
 
     #[test]
-    fn current_screen_requires_an_explicit_display_selection() {
-        let (ready, reason) = screen_capture_readiness(true, true, true, None, true, false);
-        assert!(!ready);
-        assert_eq!(reason, Some(ComputerUseReadinessReason::NoDisplaySelected));
-
-        let (ready, reason) = screen_capture_readiness(true, true, true, None, true, true);
+    fn screen_capture_readiness_is_independent_of_display_selection() {
+        let (ready, reason) = screen_capture_readiness(true, true, true, None, true);
         assert!(ready);
         assert_eq!(reason, None);
+        for (observe, supported, session, allow, expected) in [
+            (
+                false,
+                true,
+                true,
+                true,
+                ComputerUseReadinessReason::DisabledByLocalCeiling,
+            ),
+            (
+                true,
+                true,
+                true,
+                false,
+                ComputerUseReadinessReason::DisabledByLocalCeiling,
+            ),
+            (
+                true,
+                false,
+                true,
+                true,
+                ComputerUseReadinessReason::UnsupportedPlatform,
+            ),
+            (
+                true,
+                true,
+                false,
+                true,
+                ComputerUseReadinessReason::NoInteractiveSession,
+            ),
+        ] {
+            assert_eq!(
+                screen_capture_readiness(observe, supported, session, None, allow),
+                (false, Some(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn screen_capture_window_does_not_require_display_but_rejects_mixed_targets() {
+        let mut params = ScreenCaptureParams {
+            display: None,
+            window: Some(ObjectRef {
+                token: "window".into(),
+                snapshot_id: "snapshot".into(),
+                object_kind: ObjectKind::Window,
+                expires_at: String::new(),
+            }),
+        };
+        validate_screen_selection(&params, "").unwrap();
+        validate_screen_selection(&params, r"\\.\DISPLAY1").unwrap();
+        let broker = Arc::new(ComputerUseBroker::new());
+        assert!(
+            broker.acquire_screen_capture_permit(&params, "").is_err(),
+            "an invented window reference must still be rejected"
+        );
+        params.display = Some(r"\\.\DISPLAY1".into());
+        assert_eq!(
+            validate_screen_selection(&params, r"\\.\DISPLAY1")
+                .unwrap_err()
+                .kind,
+            AgentErrorKind::InvalidInput
+        );
     }
 
     #[cfg(target_os = "macos")]

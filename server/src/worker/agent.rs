@@ -369,14 +369,20 @@ async fn dispatch_read_context(
                 return Err(unsupported("screen capture requires a session context"));
             };
             let desk_settings = settings.read().await.desk.clone();
-            let capture_permit = computer_use_broker
-                .acquire_screen_capture_permit(&params, &desk_settings.video_device_name)?;
-            let window_target = capture_permit.window_target();
             let output = run_blocking(move || {
-                collectors::screen_capture::collect(&params, &desk_settings, window_target)
+                let resolved =
+                    collectors::screen_capture::display::resolve(&desk_settings, &params)?;
+                let capture_permit = computer_use_broker
+                    .acquire_screen_capture_permit(&params, &resolved.video_device_name)?;
+                let output = collectors::screen_capture::collect(
+                    &params,
+                    &resolved,
+                    capture_permit.window_target(),
+                )?;
+                capture_permit.validate_window_after_capture()?;
+                Ok::<_, AgentError>(output)
             })
             .await??;
-            capture_permit.validate_window_after_capture()?;
             Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ScreenCaptureCurrent(output),
             ))
@@ -390,7 +396,12 @@ async fn dispatch_read_context(
             let settings = settings.clone();
             let output = run_blocking(move || {
                 let settings = settings.blocking_read();
-                computer_use_broker.inspect_desktop_session(&params, &settings.computer_use)
+                let mut output = computer_use_broker.inspect_desktop_session(&params, &settings.computer_use)?;
+                match collectors::screen_capture::display::list(&settings.desk) {
+                    Ok(displays) => output.displays = displays,
+                    Err(_) => output.display_list_error = Some("display enumeration failed; no screen selection is available, refresh desktop inspection before full-display capture".into()),
+                }
+                Ok::<_, AgentError>(output)
             })
             .await??;
             Ok(OperationOutput::ReadContext(

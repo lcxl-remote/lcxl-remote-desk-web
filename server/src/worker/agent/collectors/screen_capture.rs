@@ -1,6 +1,6 @@
 //! Worker-side full-display and independent window screenshots.
 //!
-//! Display capture uses the owner-selected configured output. Window capture
+//! Display capture uses the freshly resolved per-request output. Window capture
 //! uses a broker-validated native target and never falls back to desktop pixels.
 //! Both paths encode bounded PNG output and require capture authorization.
 
@@ -26,6 +26,7 @@ use desk_signal_facade::model::desk_settings::DeskSettings;
 /// hard error later.
 const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 
+pub(crate) mod display;
 mod window;
 pub(crate) use window::WindowCaptureTarget;
 
@@ -35,8 +36,13 @@ pub(crate) fn collect(
     desk_settings: &DeskSettings,
     window_target: Option<WindowCaptureTarget>,
 ) -> Result<ScreenCaptureOutput, AgentError> {
-    // The broker already proved this optional value equals the configured
-    // owner-selected display. Capture-engine consumes the configured target.
+    if params.window.is_some() != window_target.is_some() {
+        return Err(internal(
+            "window capture request and resolved target do not match; desktop fallback is forbidden",
+        ));
+    }
+    // The worker resolved this per-call target against current attached displays,
+    // and the broker checked it against the request. Saved settings are untouched.
     let _ = &params.display;
 
     let (frame, window_geometry, (dpi_x, dpi_y)) = if let Some(target) = window_target {
@@ -192,6 +198,21 @@ fn encode_png_with_dimensions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_request_without_resolved_target_never_falls_back_to_display() {
+        let params = ScreenCaptureParams {
+            display: None,
+            window: Some(desk_agent_protocol::computer_use::ObjectRef {
+                token: "missing-window".into(),
+                snapshot_id: "snapshot".into(),
+                object_kind: desk_agent_protocol::computer_use::ObjectKind::Window,
+                expires_at: String::new(),
+            }),
+        };
+        let err = collect(&params, &DeskSettings::default(), None).unwrap_err();
+        assert!(err.message.contains("desktop fallback is forbidden"));
+    }
 
     /// Minimal `ImageInfo` over an in-memory buffer for encoder tests.
     struct FakeFrame {

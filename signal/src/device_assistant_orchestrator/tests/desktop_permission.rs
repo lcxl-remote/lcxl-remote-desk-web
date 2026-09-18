@@ -363,6 +363,8 @@ async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup
                         interactive_session_incarnation: "synthetic-original-marker".into(),
                         active_application: None,
                         active_application_name: None,
+                        displays: Vec::new(),
+                        display_list_error: None,
                     },
                 ),
             )),

@@ -170,6 +170,25 @@ pub struct DesktopSessionInspectOutput {
     pub active_application: Option<ObjectRef>,
     #[serde(default)]
     pub active_application_name: Option<String>,
+    /// Complete list of currently attached screenshot targets. No pixels.
+    #[serde(default)]
+    pub displays: Vec<ScreenCaptureDisplay>,
+    /// Enumeration failure is distinct from a successfully observed empty list.
+    #[serde(default)]
+    pub display_list_error: Option<String>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct ScreenCaptureDisplay {
+    /// Copy this exact value into read_current_screen.display.
+    pub display: String,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub x: i32,
+    pub y: i32,
 }
 
 /// UI reading scope; menus are opt-in and can be requested independently.

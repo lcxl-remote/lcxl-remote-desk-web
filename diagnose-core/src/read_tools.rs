@@ -164,7 +164,7 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_current_screen",
             Capability::ScreenCaptureCurrent,
-            "Capture the current display, or pass an exact Window object_ref returned by inspect_desktop_ui to capture that macOS window independently even when covered. Discover the application through the desktop session catalog, then inspect that Application reference with queries=[窗口, window] to obtain owner_selectable_windows. The application catalog itself does not query windows. Requires screen capture permission; do not activate a background window just for capture. Minimized windows must be restored with separate action approval.",
+            "Capture one display: inspect_desktop_session lists displays; use the sole entry automatically or choose a target if multiple exist, then request screenshot permission with the same display identifier. Missing display auto-selects only when one screen is attached. Alternatively pass an exact Window object_ref returned by inspect_desktop_ui to capture that Windows/macOS window independently even when covered. Do not combine display and window. Discover the application through the desktop session catalog, then inspect that Application reference with queries=[窗口, window] to obtain owner_selectable_windows. The application catalog itself does not query windows. Requires screen capture permission; do not activate a background window just for capture. Minimized windows must be restored with separate action approval.",
             json!({
                 "type": "object",
                 "properties": {
@@ -197,7 +197,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_desktop_session",
             Capability::DesktopSessionInspect,
-            "Inspect the current interactive desktop session and optionally return a reference to the foreground application, not a list of running applications. For macOS application discovery, use the returned session reference as inspect_desktop_ui root and queries with localized and English application names; then inspect the matching application reference.",
+            "Inspect the current interactive desktop session, list attached screenshot displays (identifier, name, dimensions and position), and optionally return a reference to the foreground application, not a list of running applications. For full-display screenshots use the only display automatically; when multiple displays exist, choose a displays[].display before requesting read_current_screen permission. A display_list_error means enumeration failed, not that there are zero screens. For macOS application discovery, use the returned session reference as inspect_desktop_ui root and queries with localized and English application names; then inspect the matching application reference.",
             json!({
                 "type": "object",
                 "properties": {
@@ -378,7 +378,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_current_screen",
             Capability::ScreenCaptureCurrent,
-            "Capture the current display once, or pass an exact Window object_ref returned by inspect_desktop_ui to capture a macOS window independently even when covered. Requires capture permission. A minimized window must first be restored with separate action approval. The image is sensitive, sent only to the selected visual model, and not stored in conversation history.",
+            "Capture one display once: first inspect_desktop_session for displays, automatically use the only entry or choose a target if multiple exist, then request capture permission with its exact display identifier. Missing display only works with a single attached screen. Alternatively pass an exact Window object_ref from inspect_desktop_ui for independent Windows/macOS window capture. Never combine display and window. Requires capture permission. A minimized window must first be restored with separate action approval. The image is sensitive, sent only to the selected visual model, and not stored in conversation history.",
             json!({
                 "type": "object",
                 "properties": {

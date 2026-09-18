@@ -584,7 +584,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
     match tool.name.as_str() {
         "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. Queries are substring OR matches, up to 16 alternatives. First locate the target window and, when available, its dialog/popover/editor; search inside that observed root using task-specific localized/English labels or native_id (e.g. 标题, title-field, 完成, Done). Group needed controls together. If no separate container exists, use the window root. Only after targeted misses add control types such as AXTextField/input. Broad text/date/time queries are fallbacks: text can match every AXStaticText date and weekday. Use element_only=true only for a known result control itself, without queries; it never searches descendants. To find descendants use root_id for the smallest relevant observed region with targeted queries. When truncated=true, narrow the root first when possible; increase depth/node/byte bounds only as needed to complete that search. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in original window screenshot pixels relative to the top-left (0,0) of location.window.id (the same pixel space as background input, not percentages or normalized coordinates). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
         "send_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
-        "read_current_screen" => tool.description = "Capture the current display, or use window_id to capture a background macOS window. To obtain window_id: inspect_desktop_session -> inspect_desktop_ui(root_id=session ID, queries=[localized app name, English app name]) -> inspect_desktop_ui(root_id=returned application ID, queries=[窗口, window]) -> read_current_screen(window_id=owner_selectable_windows[].object_ref.id). The application catalog does not query windows; never infer capture is unsupported from missing window entries there. Do not pass an application ID as window_id. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture. Returned width/height are original image pixel dimensions. For window screenshots, background position and UI bounds use these pixel coordinates with top-left origin (0,0); do not convert to percentages.".into(),
+        "read_current_screen" => tool.description = "Capture one whole display, or use window_id for an independent Windows/macOS window. For full-display capture first call inspect_desktop_session to read displays: if there is one entry, use it automatically without asking the user to select a screen; if there are multiple entries, choose the one matching the task before requesting screenshot permission. Copy its exact displays[].display into both the permission request and this call. If no display was specified, execution only auto-selects when exactly one display is currently attached; multiple displays return a selection-required error. Do not use saved remote-desktop settings as the choice. Window capture needs no display discovery; never combine window_id and display. To obtain window_id: inspect_desktop_session -> inspect_desktop_ui(root_id=session ID, queries=[localized app name, English app name]) -> inspect_desktop_ui(root_id=returned application ID, queries=[窗口, window]) -> read_current_screen(window_id=owner_selectable_windows[].object_ref.id). The application catalog does not query windows; never infer capture is unsupported from missing window entries there. Do not pass an application ID as window_id. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture. Returned width/height are original image pixel dimensions. For window screenshots, background position and UI bounds use these pixel coordinates with top-left origin (0,0); do not convert to percentages.".into(),
         _ => {}
     }
     crate::application_batch::project_schema(tool);
@@ -859,6 +859,39 @@ mod tests {
             serde_json::to_string(&project_request(&projected).messages).unwrap(),
             text
         );
+    }
+
+    #[test]
+    fn screen_list_survives_model_projection_and_capture_binds_the_display() {
+        let mut messages = history();
+        let mut value: Value = serde_json::from_str(&messages[1].text).unwrap();
+        let displays = json!([
+            {"display":"screen-a","name":"Left","width":1920,"height":1080,"x":-1920,"y":0},
+            {"display":"screen-b","name":"Right","width":2560,"height":1440,"x":0,"y":0}
+        ]);
+        value["ReadContext"]["DesktopSessionInspect"]["displays"] = displays.clone();
+        messages[1].text = value.to_string();
+        let request =
+            crate::seam::ModelRequest::text_only(messages, crate::prompt::ResponseFormatSpec::None);
+        let projected = project_request(&request);
+        let result: Value = serde_json::from_str(&projected.messages[1].text).unwrap();
+        assert_eq!(
+            result["ReadContext"]["DesktopSessionInspect"]["displays"],
+            displays
+        );
+        let input = call("read_current_screen", json!({"display":"screen-b"}));
+        let resolved = resolve_call(&input, &request.messages, 1).unwrap();
+        assert!(same_call_input(
+            &input.name,
+            &input.arguments_json,
+            &resolved.arguments_json
+        ));
+        assert!(!same_call_input(
+            &input.name,
+            &input.arguments_json,
+            r#"{"display":"screen-a"}"#
+        ));
+        assert!(!same_call_input(&input.name, &input.arguments_json, "{}"));
     }
 
     #[test]
