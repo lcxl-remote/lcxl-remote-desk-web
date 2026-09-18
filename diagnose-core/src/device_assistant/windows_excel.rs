@@ -29,7 +29,7 @@ pub struct InspectArgs {
 pub(super) fn inspect_tool() -> RegisteredTool {
     let mut tool = batch_inspect_tool(
         INSPECT_TOOL,
-        "Read one explicitly named worksheet and canonical A1 cell from exactly one owner-selected XLSX file. Use inspect_spreadsheets first if the worksheet name is unknown. No native path, source token, active document or Live session is accepted. Value is JSON stored evidence (presence, type, literal text/value); formula caches are omitted and formulas are not calculated. Use the returned fresh range for a copy mutation.",
+        "Read one explicitly named worksheet and canonical A1 cell from exactly one conversation-directory XLSX file. Use inspect_spreadsheets first if the worksheet name is unknown. No native path, source token, active document or Live session is accepted. Value is JSON stored evidence (presence, type, literal text/value); formula caches are omitted and formulas are not calculated. Use the returned fresh range for a copy mutation.",
         Capability::SpreadsheetLiveInspect,
     );
     tool.spec.parameters_schema = serde_json::json!({
@@ -70,7 +70,7 @@ pub(super) fn patch_tool() -> RegisteredTool {
 }
 pub(super) fn provider() -> ProviderDescriptor {
     let read = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         INSPECT_CAPABILITY_ID,
         "assistant.capability.excelBatchInspect",
@@ -84,7 +84,7 @@ pub(super) fn provider() -> ProviderDescriptor {
         inspect_tool(),
     );
     let write = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         PATCH_CAPABILITY_ID,
         "assistant.capability.excelBatchPatch",

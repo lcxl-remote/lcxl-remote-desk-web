@@ -162,7 +162,17 @@ pub fn resolve_excel_read(
         if calls.next().is_some() || call.name != windows_excel::INSPECT_TOOL {
             continue;
         }
-        let Ok(args) = serde_json::from_str::<windows_excel::InspectArgs>(&call.arguments_json)
+        let Ok(normalized) =
+            super::text_file::selection::without_selectors(&crate::chat::ToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments_json: call.arguments_json.clone(),
+            })
+        else {
+            continue;
+        };
+        let Ok(args) =
+            serde_json::from_str::<windows_excel::InspectArgs>(&normalized.arguments_json)
         else {
             continue;
         };

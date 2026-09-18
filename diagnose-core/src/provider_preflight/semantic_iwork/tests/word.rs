@@ -114,6 +114,7 @@ fn word_approval_requires_authenticated_read_selected_source_and_current_directo
     };
     receipt.data_envelope = Some(envelope);
     session.conversation = vec![proposal, receipt];
+    add_directory_source(&mut session, &directory, &file);
     for surface in [
         ProductSurface::OssPersonalOwner,
         ProductSurface::ManagerPersonalOwner,
@@ -127,6 +128,9 @@ fn word_approval_requires_authenticated_read_selected_source_and_current_directo
             )
         };
         let approved = build(&session, &original, "501:worker-1:7", NOW).unwrap();
+        let mut directories_only = original.clone();
+        directories_only.object_attachments.clear();
+        assert!(build(&session, &directories_only, "501:worker-1:7", NOW).is_ok());
         assert_eq!(approved.adapter_kind(), ComputerUseAdapterKind::OfficeWord);
         assert_eq!(approved.target(), &document);
         assert_eq!(

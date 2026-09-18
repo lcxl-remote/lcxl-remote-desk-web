@@ -59,11 +59,11 @@ fn selected_object_lineage_keeps_explicit_sources_without_later_context_expansio
         let update = DeviceAssistantObjectContextUpdate {
             conversation_id: "client".into(),
             client_request_id: id.into(),
-            operation: DeviceAssistantObjectContextOperation::AttachFile {
+            operation: DeviceAssistantObjectContextOperation::AttachTerminalOutput {
                 object_ref: ObjectRef {
                     token: id.into(),
                     snapshot_id: "snapshot".into(),
-                    object_kind: ObjectKind::File,
+                    object_kind: ObjectKind::TerminalOutput,
                     expires_at: "2030-01-01T00:00:00Z".into(),
                 },
                 display_summary: "file".into(),

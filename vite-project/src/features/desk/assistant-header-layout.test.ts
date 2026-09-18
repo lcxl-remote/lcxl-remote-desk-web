@@ -28,3 +28,17 @@ it('gives all header actions icons, responsive labels and accessible names', () 
         expect(source).toContain(`aria-label={t('${key}')}`);
     }
 });
+
+it('keeps standalone back navigation beside the conversation heading without the outer title or width cap', () => {
+    const page = readFileSync('src/features/desk/device-assistant-page.tsx', 'utf8');
+    const standalone = page.slice(page.indexOf('export default function DeviceAssistantPage'));
+    expect(standalone).not.toContain("t('pages.deviceAssistant.title')");
+    expect(standalone).not.toContain("t('pages.deviceAssistant.subtitle')");
+    expect(page).not.toContain('max-w-4xl');
+    expect(standalone).toContain('absolute inset-0 flex min-w-0 flex-col gap-2 overflow-hidden');
+    expect(standalone.match(/backTo=\{/g)).toHaveLength(2);
+    const header = page.slice(page.indexOf('data-testid="assistant-title-row"'), page.indexOf('</CardHeader>', page.indexOf('data-testid="assistant-title-row"')));
+    expect(header).toContain('{backTo && (');
+    expect(header).toContain("aria-label={t('pages.deviceAssistant.backToDevice')}");
+    expect(header.indexOf('<Link to={backTo}')).toBeLessThan(header.indexOf('<CardTitle'));
+});

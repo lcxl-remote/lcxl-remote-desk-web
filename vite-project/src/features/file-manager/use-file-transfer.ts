@@ -239,7 +239,7 @@ interface DownloadMeta {
 }
 
 
-export function useFileTransfer(deskId: string | undefined, orgId?: number) {
+export function useFileTransfer(deskId: string | undefined, orgId?: number, fixedSessionTargetId?: string) {
     const wsRef = useRef<WebSocket | null>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const dcRef = useRef<RTCDataChannel | null>(null);
@@ -735,8 +735,8 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
             if (!grant?.grantSessionId && orgId != null) {
                 signaling_data.org_id = orgId;
             }
-            if (sessionTargetIdRef.current) {
-                signaling_data.session_target_id = sessionTargetIdRef.current;
+            if (fixedSessionTargetId || sessionTargetIdRef.current) {
+                signaling_data.session_target_id = fixedSessionTargetId || sessionTargetIdRef.current;
             }
             ws.send(JSON.stringify({
                 request_id: uuidv4(),
@@ -797,6 +797,10 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
                     errorCode === deskErrorCodeEnum.SESSION_SELECTION_REQUIRED
                     || errorCode === deskErrorCodeEnum.SESSION_TARGET_STALE
                 ) {
+                    if (fixedSessionTargetId) {
+                        teardownSession(new SignalingError(message || "Session target is unavailable", errorCode));
+                        return;
+                    }
                     const list = parseSessionTargetList(signaling.signaling_data);
                     sessionTargetIdRef.current = undefined;
                     if (attempt.timeout) {
@@ -911,7 +915,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number) {
         };
 
         return attempt.promise;
-    }, [deskId, orgId, closeDataPlane, teardownSession, failChannelAttempt]);
+    }, [deskId, orgId, fixedSessionTargetId, closeDataPlane, teardownSession, failChannelAttempt]);
 
     /** Send a signaling frame over an established session. */
     const sendSignaling = useCallback((

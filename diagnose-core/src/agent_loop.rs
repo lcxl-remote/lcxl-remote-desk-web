@@ -4821,6 +4821,14 @@ pub(crate) fn bind_tool_input_envelopes(
         source_ids.push(source_id);
     }
 
+    if crate::provider_preflight::text_file::selection::supports(&call.name) {
+        for selector in crate::provider_preflight::text_file::selection::selectors(call)? {
+            source_ids.push(
+                crate::provider_preflight::text_file::read_source_envelope_id(session, &selector)?,
+            );
+        }
+    }
+
     // A Word report may opt into an exact subset of one prior Web Search
     // result. The lookup below has already been enforced before dispatch; bind
     // the server-owned result envelope directly so the artifact lineage does

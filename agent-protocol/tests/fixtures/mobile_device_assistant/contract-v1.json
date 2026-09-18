@@ -119,9 +119,9 @@
     "conversation_id": "conversation-1",
     "client_request_id": "object-request-1",
     "operation": {
-      "kind": "attach_file",
-      "object_ref": {"token":"opaque-edge-token","snapshot_id":"snapshot-1","object_kind":"file","expires_at":"2026-08-30T01:00:00Z"},
-      "display_summary": "report.txt"
+      "kind": "attach_terminal_output",
+      "object_ref": {"token":"opaque-edge-token","snapshot_id":"snapshot-1","object_kind":"terminal_output","expires_at":"2026-08-30T01:00:00Z"},
+      "display_summary": "Terminal output"
     }
   },
   "snapshot": {

@@ -49,10 +49,12 @@ pub fn get_logical_driver_list() -> Result<Vec<FileInfo>, DeskError> {
 }
 
 pub async fn list_files(query_list: FileListParams) -> Result<FileListResponse, DeskError> {
+    if query_list.directories_only {
+        return directory_listing::list_directories(&query_list).await;
+    }
     #[cfg(target_os = "windows")]
     if query_list.path.is_empty() {
-        let mut file_info_list = get_logical_driver_list()?;
-        attach_assistant_refs(&mut file_info_list);
+        let file_info_list = get_logical_driver_list()?;
         let total_count = file_info_list.len() as i64;
         return Ok(FileListResponse {
             file_info_list,
@@ -93,7 +95,6 @@ pub async fn list_files(query_list: FileListParams) -> Result<FileListResponse, 
                         created: Local.timestamp_opt(0, 0).unwrap(),
                         modified: Local.timestamp_opt(0, 0).unwrap(),
                         err_msg: None,
-                        assistant_object_ref: None,
                     };
                     file_info_list.push(fake_root_dir);
                 }
@@ -115,28 +116,13 @@ pub async fn list_files(query_list: FileListParams) -> Result<FileListResponse, 
         }
     }
     info!("List path: {}, total count: {}", path_str, total_count);
-    attach_assistant_refs(&mut file_info_list);
     Ok(FileListResponse {
         file_info_list,
         total_count,
     })
 }
 
-fn attach_assistant_refs(files: &mut [FileInfo]) {
-    for file in files {
-        if file.path.is_empty() || file.err_msg.is_some() || (!file.is_file && !file.is_dir) {
-            continue;
-        }
-        match crate::worker::agent::file_reference_store::issue(PathBuf::from(&file.path).as_path())
-        {
-            Ok(object_ref) => file.assistant_object_ref = Some(object_ref),
-            Err(error) => debug!(
-                "Assistant file reference unavailable for {:?}: {}",
-                file.path, error.message
-            ),
-        }
-    }
-}
+mod directory_listing;
 
 pub async fn delete_file(delete_file_request: DeleteFileRequest) -> Result<(), DeskError> {
     let file_path = PathBuf::from(delete_file_request.file_path.as_str());

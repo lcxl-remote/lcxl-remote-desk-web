@@ -1,5 +1,3 @@
-import { AiAssistantIcon } from '@/components/ai-assistant-icon';
-
 import { useState, useRef, useEffect, useCallback } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
@@ -41,9 +39,7 @@ import { CONNECTION_FAILURE_KEYS, TransferUnavailableAlert } from "./transfer-un
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import { useToast } from "@/hooks/use-toast"
 import { deskErrorCodeEnum, startupModeEnum, type StartupMode } from "@/services/types"
-import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { deskErrorMessage, errorCodeOf, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
-import { useDeviceAssistantFileContext } from "./use-device-assistant-file-context"
 import { SessionTargetDialog } from "@/features/desk/session-target-selection"
 
 // File browse / delete rejections the host phrases as raw English. Only the
@@ -84,30 +80,6 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
     const pageSize = 100
     const fileInputRef = useRef<HTMLInputElement>(null)
     const { toast } = useToast()
-    const { data: connections } = useListConnections()
-    const connection = connections?.find((item: any) => item.connection_id === connectionId)
-    const stableDeviceId = connection?.version_info?.client_id ?? connection?.device_id ?? connectionId
-    const assistantFile = useDeviceAssistantFileContext(connectionId, stableDeviceId)
-
-    useEffect(() => {
-        if (assistantFile.lastAddedPath) {
-            toast({
-                title: t('pages.fileManager.assistantAdded'),
-                description: assistantFile.lastAddedPath,
-            })
-        }
-    }, [assistantFile.lastAddedPath, t, toast])
-
-    useEffect(() => {
-        if (assistantFile.error) {
-            toast({
-                title: t('pages.fileManager.assistantAddFailed'),
-                description: assistantFile.error,
-                variant: 'destructive',
-            })
-        }
-    }, [assistantFile.error, t, toast])
-
     // The host's startup mode, asked of the host itself rather than of the
     // server this browser is connected to: that server may be a manager or a
     // signaling server, and its own mode says nothing about the machine whose
@@ -540,29 +512,6 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
                                     <TableCell>{file.is_dir ? '-' : formatBytes(file.size)}</TableCell>
                                     <TableCell>{new Date(file.modified).toLocaleString()}</TableCell>
                                     <TableCell>
-                                        {file.name !== ".." && file.assistant_object_ref && (
-                                            <Button
-                                                variant="ghost"
-                                                size="icon"
-                                                className="h-7 w-7"
-                                                onClick={(event) => {
-                                                    event.stopPropagation()
-                                                    assistantFile.attach(
-                                                        file.path,
-                                                        file.name,
-                                                        file.assistant_object_ref,
-                                                    )
-                                                }}
-                                                disabled={!assistantFile.isConnected || assistantFile.pendingPath !== null}
-                                                title={t('pages.fileManager.addToAssistant')}
-                                            >
-                                                {assistantFile.pendingPath === file.path ? (
-                                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                                ) : (
-                                                    <AiAssistantIcon className="h-3.5 w-3.5" />
-                                                )}
-                                            </Button>
-                                        )}
                                         {!file.is_dir && (
                                             <Button
                                                 variant="ghost"

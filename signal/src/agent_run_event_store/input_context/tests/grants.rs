@@ -29,15 +29,8 @@ async fn all_object_read_grants_ignore_later_objects_display_names_and_ambient_r
         for (name, selected) in [
             ("inspect_files", &file),
             ("read_text_file", &file),
-            ("inspect_spreadsheets", &file),
-            ("preview_spreadsheet_merge", &file),
             ("read_terminal_output", &terminal),
-            ("inspect_numbers_file", &file),
-            ("inspect_pages_file", &file),
-            ("inspect_keynote_file", &file),
             ("inspect_files", &directory),
-            ("inspect_spreadsheets", &directory),
-            ("preview_spreadsheet_merge", &directory),
         ] {
             let capability = registry.capability_for_tool(name).unwrap();
             let provider = registry

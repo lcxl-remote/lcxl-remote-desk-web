@@ -2174,6 +2174,7 @@ fn provider_for_tool(
     authorization_resources: Vec<AuthorizationResourceKind>,
     mut tool: RegisteredTool,
 ) -> ProviderDescriptor {
+    crate::provider_preflight::text_file::selection::add_schema(&mut tool);
     if crate::provider_preflight::ArtifactCallPreflight::supports(tool.name()) {
         if let Some(properties) = tool
             .spec
@@ -2616,7 +2617,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
                     ),
                 ),
                 provider_for_tool(
-                    crate::tool_exposure::ExposureRequirement::SelectedContext,
+                    crate::tool_exposure::ExposureRequirement::NoAttachment,
                     SPREADSHEET_LIVE_PROVIDER_ID,
                     SPREADSHEET_BATCH_INSPECT_CAPABILITY_ID,
                     "assistant.capability.spreadsheetBatchInspect",
@@ -2629,7 +2630,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
                     vec![AuthorizationResourceKind::FreshObjectReference],
                     batch_inspect_tool(
                         "inspect_numbers_file",
-                        "Open exactly one owner-selected .numbers file through Numbers, return a bounded semantic projection with fresh document, sheet, and cell references, then close it without saving. The model cannot nominate a path or source reference.",
+                        "Open exactly one conversation-directory .numbers file through Numbers, return a bounded semantic projection with fresh document, sheet, and cell references, then close it without saving. The model cannot nominate a path or source reference.",
                         Capability::SpreadsheetLiveInspect,
                     ),
                 ),
@@ -2650,7 +2651,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
             ),
         ),
         provider_for_tool(
-            crate::tool_exposure::ExposureRequirement::SelectedContext,
+            crate::tool_exposure::ExposureRequirement::NoAttachment,
             SPREADSHEET_LIVE_PROVIDER_ID,
             SPREADSHEET_BATCH_PATCH_CAPABILITY_ID,
             "assistant.capability.spreadsheetBatchPatch",
@@ -2688,7 +2689,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
                     ),
                 ),
                 provider_for_tool(
-                    crate::tool_exposure::ExposureRequirement::SelectedContext,
+                    crate::tool_exposure::ExposureRequirement::NoAttachment,
                     DOCUMENT_LIVE_PROVIDER_ID,
                     DOCUMENT_BATCH_INSPECT_CAPABILITY_ID,
                     "assistant.capability.documentBatchInspect",
@@ -2701,7 +2702,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
                     vec![AuthorizationResourceKind::FreshObjectReference],
                     batch_inspect_tool(
                         "inspect_pages_file",
-                        "Open exactly one owner-selected .pages file through Pages, return a bounded semantic projection with a fresh document reference, then close it without saving. The model cannot nominate a path or source reference.",
+                        "Open exactly one conversation-directory .pages file through Pages, return a bounded semantic projection with a fresh document reference, then close it without saving. The model cannot nominate a path or source reference.",
                         Capability::DocumentLiveInspect,
                     ),
                 ),
@@ -2722,7 +2723,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
             ),
         ),
         provider_for_tool(
-            crate::tool_exposure::ExposureRequirement::SelectedContext,
+            crate::tool_exposure::ExposureRequirement::NoAttachment,
             DOCUMENT_LIVE_PROVIDER_ID,
             DOCUMENT_BATCH_PATCH_CAPABILITY_ID,
             "assistant.capability.documentBatchPatch",
@@ -2760,7 +2761,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
                     ),
                 ),
                 provider_for_tool(
-                    crate::tool_exposure::ExposureRequirement::SelectedContext,
+                    crate::tool_exposure::ExposureRequirement::NoAttachment,
                     PRESENTATION_LIVE_PROVIDER_ID,
                     PRESENTATION_BATCH_INSPECT_CAPABILITY_ID,
                     "assistant.capability.presentationBatchInspect",
@@ -2773,7 +2774,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
                     vec![AuthorizationResourceKind::FreshObjectReference],
                     batch_inspect_tool(
                         "inspect_keynote_file",
-                        "Open exactly one owner-selected .key file through Keynote, return a bounded semantic projection with fresh presentation and slide references, then close it without saving. The model cannot nominate a path or source reference.",
+                        "Open exactly one conversation-directory .key file through Keynote, return a bounded semantic projection with fresh presentation and slide references, then close it without saving. The model cannot nominate a path or source reference.",
                         Capability::PresentationLiveInspect,
                     ),
                 ),
@@ -2794,7 +2795,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
             ),
         ),
         provider_for_tool(
-            crate::tool_exposure::ExposureRequirement::SelectedContext,
+            crate::tool_exposure::ExposureRequirement::NoAttachment,
             PRESENTATION_LIVE_PROVIDER_ID,
             PRESENTATION_BATCH_PATCH_CAPABILITY_ID,
             "assistant.capability.presentationBatchPatch",
@@ -2842,7 +2843,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
             .expect("static selected text file tool exists"),
     );
     let spreadsheet_file = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_FILE_PROVIDER_ID,
         SPREADSHEET_FILE_CAPABILITY_ID,
         "assistant.capability.spreadsheetFileInspect",
@@ -2858,7 +2859,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
             .expect("static selected spreadsheet tool exists"),
     );
     let spreadsheet_merge = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_MERGE_PROVIDER_ID,
         SPREADSHEET_MERGE_CAPABILITY_ID,
         "assistant.capability.spreadsheetMergePreview",
@@ -2874,7 +2875,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
             .expect("static spreadsheet merge preview tool exists"),
     );
     let spreadsheet_artifact = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_ARTIFACT_PROVIDER_ID,
         SPREADSHEET_WORKBOOK_CREATE_CAPABILITY_ID,
         "assistant.capability.spreadsheetWorkbookCreate",
@@ -2888,7 +2889,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
         create_spreadsheet_artifact_tool(),
     );
     let spreadsheet_formula_artifact = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_FORMULA_ARTIFACT_PROVIDER_ID,
         SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID,
         "assistant.capability.spreadsheetFormulaWorkbookCreate",
@@ -2902,7 +2903,7 @@ pub fn device_assistant_provider_registry() -> ProviderRegistry {
         create_spreadsheet_formula_artifact_tool(),
     );
     let word_document = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         WORD_DOCUMENT_PROVIDER_ID,
         WORD_DOCUMENT_CREATE_CAPABILITY_ID,
         "assistant.capability.wordDocumentCreate",
@@ -4073,7 +4074,7 @@ mod tests {
         legacy.push(spreadsheet_live_patch_tool());
         legacy.push(batch_inspect_tool(
             "inspect_numbers_file",
-            "Open exactly one owner-selected .numbers file through Numbers, return a bounded semantic projection with fresh document, sheet, and cell references, then close it without saving. The model cannot nominate a path or source reference.",
+            "Open exactly one conversation-directory .numbers file through Numbers, return a bounded semantic projection with fresh document, sheet, and cell references, then close it without saving. The model cannot nominate a path or source reference.",
             Capability::SpreadsheetLiveInspect,
         ));
         legacy.push(spreadsheet_batch_patch_tool());
@@ -4086,7 +4087,7 @@ mod tests {
         legacy.push(document_live_patch_tool());
         legacy.push(batch_inspect_tool(
             "inspect_pages_file",
-            "Open exactly one owner-selected .pages file through Pages, return a bounded semantic projection with a fresh document reference, then close it without saving. The model cannot nominate a path or source reference.",
+            "Open exactly one conversation-directory .pages file through Pages, return a bounded semantic projection with a fresh document reference, then close it without saving. The model cannot nominate a path or source reference.",
             Capability::DocumentLiveInspect,
         ));
         legacy.push(document_batch_patch_tool());
@@ -4099,7 +4100,7 @@ mod tests {
         legacy.push(presentation_live_patch_tool());
         legacy.push(batch_inspect_tool(
             "inspect_keynote_file",
-            "Open exactly one owner-selected .key file through Keynote, return a bounded semantic projection with fresh presentation and slide references, then close it without saving. The model cannot nominate a path or source reference.",
+            "Open exactly one conversation-directory .key file through Keynote, return a bounded semantic projection with fresh presentation and slide references, then close it without saving. The model cannot nominate a path or source reference.",
             Capability::PresentationLiveInspect,
         ));
         legacy.push(presentation_batch_patch_tool());
@@ -4110,9 +4111,12 @@ mod tests {
         legacy.push(windows_excel::patch_tool());
         legacy.push(batch_inspect_tool(
             "inspect_powerpoint_file",
-            "Read a bounded title and presenter-notes projection from exactly one owner-selected PPTX file snapshot. No Office application or Live session is opened. The model cannot nominate a path, source token, or interactive target.",
+            "Read a bounded title and presenter-notes projection from exactly one conversation-directory PPTX file snapshot. No Office application or Live session is opened. The model cannot nominate a path, source token, or interactive target.",
             Capability::PresentationLiveInspect,
         ));
+        for tool in &mut legacy {
+            crate::provider_preflight::text_file::selection::add_schema(tool);
+        }
         legacy.sort_by(|left, right| left.name().cmp(right.name()));
         let projected = device_assistant_tool_registry();
         assert_eq!(projected.len(), legacy.len());
@@ -4278,6 +4282,23 @@ mod tests {
         assert_eq!(empty.iter().map(|tool| tool.name()).collect::<Vec<_>>(), {
             let mut expected = vec![
                 "create_local_message_draft",
+                "create_workbook",
+                "create_formula_workbook",
+                "create_word_report",
+                "inspect_spreadsheets",
+                "preview_spreadsheet_merge",
+                "inspect_numbers_file",
+                "inspect_pages_file",
+                "inspect_keynote_file",
+                "inspect_word_file",
+                "inspect_excel_cell",
+                "inspect_powerpoint_file",
+                "patch_numbers_copy",
+                "replace_pages_copy_body",
+                "patch_keynote_copy",
+                "replace_word_copy_body",
+                "patch_excel_copy",
+                "patch_powerpoint_copy",
                 "create_text_file",
                 "delete_text_file",
                 EXECUTE_BACKGROUND_INPUT_TOOL,
@@ -4312,6 +4333,23 @@ mod tests {
         assert_eq!(tools.iter().map(|tool| tool.name()).collect::<Vec<_>>(), {
             let mut expected = vec![
                 "create_local_message_draft",
+                "create_workbook",
+                "create_formula_workbook",
+                "create_word_report",
+                "inspect_spreadsheets",
+                "preview_spreadsheet_merge",
+                "inspect_numbers_file",
+                "inspect_pages_file",
+                "inspect_keynote_file",
+                "inspect_word_file",
+                "inspect_excel_cell",
+                "inspect_powerpoint_file",
+                "patch_numbers_copy",
+                "replace_pages_copy_body",
+                "patch_keynote_copy",
+                "replace_word_copy_body",
+                "patch_excel_copy",
+                "patch_powerpoint_copy",
                 "create_text_file",
                 "delete_text_file",
                 EXECUTE_BACKGROUND_INPUT_TOOL,

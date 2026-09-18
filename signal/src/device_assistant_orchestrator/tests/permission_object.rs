@@ -332,7 +332,7 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
         &DeviceAssistantObjectContextUpdate {
             conversation_id: client_id.into(),
             client_request_id: "attach-original".into(),
-            operation: DeviceAssistantObjectContextOperation::AttachFile {
+            operation: DeviceAssistantObjectContextOperation::AttachTerminalOutput {
                 object_ref: reference.clone(),
                 display_summary: "selected".into(),
             },
@@ -407,7 +407,7 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
         &DeviceAssistantObjectContextUpdate {
             conversation_id: client_id.into(),
             client_request_id: "attach-later".into(),
-            operation: DeviceAssistantObjectContextOperation::AttachFile {
+            operation: DeviceAssistantObjectContextOperation::AttachTerminalOutput {
                 object_ref: later_reference,
                 display_summary: "not selected for the original input".into(),
             },
@@ -1166,4 +1166,34 @@ fn permission_scanner_fits_production_thread_stack() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+// Seed pre-existing internal read metadata; no file attachment wire operation.
+async fn apply_object_context_update(
+    db: DatabaseConnection,
+    actor_user_id: i32,
+    device: String,
+    update: &DeviceAssistantObjectContextUpdate,
+) -> Result<(), AgentError> {
+    let actor = actor_user_id.to_string();
+    let run = derive_conversation_key(&actor, &device, Some(&update.conversation_id), "");
+    let destination = crate::model_provider::load(&db)
+        .await
+        .unwrap()
+        .destination_identity()
+        .unwrap();
+    crate::agent_session_store::SignalAgentSessionStore::new(db)
+        .with_client_metadata(
+            Some(update.conversation_id.clone()),
+            AgentSessionSurface::DeviceAssistant,
+        )
+        .seed_read_context(&crate::agent_session_store::UpdateObjectContext {
+            run_id: run,
+            actor_id: actor,
+            device_id: device,
+            update: update.clone(),
+            destination: Some(destination),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await
 }

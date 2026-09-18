@@ -194,7 +194,7 @@ pub fn build_permission_grants(
                 destination,
                 context.now_unix_ms,
             )?;
-            Some((vec![read.reference().clone()], read.valid_until_unix_ms))
+            Some((read.files(), read.valid_until_unix_ms))
         } else if crate::input_read_context::live_read::target_kind(&requested.tool_name).is_some()
         {
             let original = original_reads

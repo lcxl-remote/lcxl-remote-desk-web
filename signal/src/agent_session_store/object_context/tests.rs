@@ -17,11 +17,11 @@ fn params() -> UpdateObjectContext {
     let update = DeviceAssistantObjectContextUpdate {
         conversation_id: "client-conversation".into(),
         client_request_id: "attach".into(),
-        operation: DeviceAssistantObjectContextOperation::AttachFile {
+        operation: DeviceAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref: ObjectRef {
                 token: "opaque-file".into(),
                 snapshot_id: "snapshot".into(),
-                object_kind: ObjectKind::File,
+                object_kind: ObjectKind::TerminalOutput,
                 expires_at: (Utc::now() + Duration::minutes(3)).to_rfc3339(),
             },
             display_summary: "selected file".into(),
@@ -208,16 +208,19 @@ async fn conflicting_object_request_identity_or_subject_cannot_replay_or_mutate(
             1 => changed.device_id = "other-device".into(),
             2 => changed.update.conversation_id = "other-client".into(),
             3 => {
-                if let DeviceAssistantObjectContextOperation::AttachFile {
-                    display_summary, ..
+                if let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+                    display_summary,
+                    ..
                 } = &mut changed.update.operation
                 {
                     *display_summary = "different request".into();
                 }
             }
             4 => {
-                if let DeviceAssistantObjectContextOperation::AttachFile { object_ref, .. } =
-                    &mut changed.update.operation
+                if let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+                    object_ref,
+                    ..
+                } = &mut changed.update.operation
                 {
                     object_ref.token = "different-file".into();
                 }
@@ -238,93 +241,6 @@ async fn conflicting_object_request_identity_or_subject_cannot_replay_or_mutate(
         );
         assert_eq!(row(&store).await, saved);
     }
-}
-
-#[tokio::test]
-async fn directory_refresh_and_terminal_receipts_preserve_original_sources() {
-    let store = memory().await;
-    let mut first = params();
-    let DeviceAssistantObjectContextOperation::AttachFile { object_ref, .. } =
-        &mut first.update.operation
-    else {
-        unreachable!()
-    };
-    object_ref.object_kind = ObjectKind::Directory;
-    let directory_ref = object_ref.clone();
-    assert!(store.update_object_context(&first).await.unwrap());
-    let directory = state(&store).await.context_attachments[0].clone();
-    let mut refresh = params();
-    refresh.update.client_request_id = "refresh".into();
-    refresh.update.operation = DeviceAssistantObjectContextOperation::RefreshFile {
-        stale_attachment_id: directory.attachment_id.clone(),
-        object_ref: ObjectRef {
-            token: "new-directory-ref".into(),
-            ..directory_ref.clone()
-        },
-        display_summary: "refreshed directory".into(),
-    };
-    assert!(store.update_object_context(&refresh).await.unwrap());
-    let mut terminal = params();
-    terminal.update.client_request_id = "terminal".into();
-    terminal.update.operation = DeviceAssistantObjectContextOperation::AttachTerminalOutput {
-        object_ref: ObjectRef {
-            token: "terminal-ref".into(),
-            object_kind: ObjectKind::TerminalOutput,
-            ..directory_ref
-        },
-        display_summary: "selected terminal output".into(),
-    };
-    assert!(store.update_object_context(&terminal).await.unwrap());
-    let saved = row(&store).await;
-    for mut request in [first, refresh, terminal] {
-        request.created_at = (Utc::now() + Duration::minutes(5)).to_rfc3339();
-        request.destination = None;
-        assert!(store.update_object_context(&request).await.unwrap());
-        assert_eq!(row(&store).await, saved);
-    }
-    let session = state(&store).await;
-    assert_eq!(session.context_attachments.len(), 3);
-    assert!(!session.context_attachments[0].is_active_at(Utc::now().timestamp_millis() as u64));
-    assert_eq!(session.context_attachments[0].envelope, directory.envelope);
-    assert_eq!(events(&store).await.len(), 3);
-}
-
-#[tokio::test]
-async fn expired_new_selection_and_missing_refresh_target_never_create_state_or_receipts() {
-    let store = memory().await;
-    let mut request = params();
-    request.created_at = (Utc::now() + Duration::minutes(5)).to_rfc3339();
-    assert!(store.update_object_context(&request).await.is_err());
-    assert!(
-        agent_session::Entity::find()
-            .all(&store.db)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(events(&store).await.is_empty());
-    let mut request = params();
-    let DeviceAssistantObjectContextOperation::AttachFile {
-        object_ref,
-        display_summary,
-    } = request.update.operation
-    else {
-        unreachable!()
-    };
-    request.update.operation = DeviceAssistantObjectContextOperation::RefreshFile {
-        stale_attachment_id: "missing".into(),
-        object_ref,
-        display_summary,
-    };
-    assert!(store.update_object_context(&request).await.is_err());
-    assert!(
-        agent_session::Entity::find()
-            .all(&store.db)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(events(&store).await.is_empty());
 }
 
 #[tokio::test]

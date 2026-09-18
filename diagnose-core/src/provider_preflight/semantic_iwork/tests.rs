@@ -1,5 +1,71 @@
 use super::*;
 mod word;
+
+fn add_directory_source(
+    session: &mut crate::session::PersistedAgentSession,
+    directory: &ObjectRef,
+    file: &ObjectRef,
+) {
+    use crate::chat::{ChatMessage, ToolCallRef};
+    use desk_agent_protocol::computer_use::{
+        DirectoryEntryProjection, FileMetadataInspectOutput, FileMetadataProjection,
+    };
+    for message in &mut session.conversation {
+        for call in &mut message.tool_calls {
+            if call.id == "read" {
+                call.arguments_json =
+                    serde_json::json!({"file_result_call_id":"listing","entry_name":"source"})
+                        .to_string();
+            }
+        }
+    }
+    let text = serde_json::to_string(&desk_agent_protocol::OperationOutput::ReadContext(
+        desk_agent_protocol::ReadContextOutput::FileMetadataInspect(FileMetadataInspectOutput {
+            snapshot_id: directory.snapshot_id.clone(),
+            entries: vec![FileMetadataProjection {
+                object_ref: directory.clone(),
+                display_name: "directory".into(),
+                is_directory: true,
+                byte_len: None,
+                modified_at: None,
+            }],
+            directory_entries: vec![DirectoryEntryProjection {
+                object_ref: Some(file.clone()),
+                parent_snapshot_id: directory.snapshot_id.clone(),
+                display_name: "source".into(),
+                is_directory: false,
+                byte_len: Some(100),
+                modified_at: None,
+            }],
+            truncated: false,
+        }),
+    ))
+    .unwrap();
+    let mut envelope = attachment(
+        "metadata",
+        ContextAttachmentKind::DirectorySelection,
+        directory,
+    )
+    .envelope;
+    envelope.provenance.source_provider_id =
+        crate::device_assistant::FILE_WORKSPACE_PROVIDER_ID.into();
+    envelope.provenance.source_tool_name = "inspect_files".into();
+    envelope.digest_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let mut result = ChatMessage::tool_result("listing-result", "listing", text);
+    result.data_envelope = Some(envelope);
+    session.conversation.extend([
+        ChatMessage::assistant_tool_calls(
+            "listing-call",
+            "",
+            vec![ToolCallRef {
+                id: "listing".into(),
+                name: "inspect_files".into(),
+                arguments_json: r#"{"directory_request_id":"output"}"#.into(),
+            }],
+        ),
+        result,
+    ]);
+}
 use crate::{
     context_attachment::{
         AttachmentBounds, AttachmentObjectRef, AttachmentState, CONTEXT_ATTACHMENT_SCHEMA_VERSION,
@@ -541,6 +607,7 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             };
             receipt.data_envelope = Some(envelope);
             session.conversation = vec![proposal, receipt];
+            add_directory_source(&mut session, &directory, &file);
             for surface in [
                 ProductSurface::OssPersonalOwner,
                 ProductSurface::ManagerPersonalOwner,

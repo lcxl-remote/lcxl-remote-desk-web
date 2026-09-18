@@ -22,7 +22,7 @@ pub(super) const PATCH_READINESS_IDENTITIES: [(&str, &str, &str, &str); 1] = [(
 pub(super) fn inspect_tool() -> RegisteredTool {
     batch_inspect_tool(
         INSPECT_TOOL,
-        "Read the bounded stored body text of exactly one owner-selected DOCX file. No Word application or Live session is opened. Fields are not evaluated. The model cannot nominate a path, source token, or interactive target.",
+        "Read the bounded stored body text of exactly one conversation-directory DOCX file. No Word application or Live session is opened. Fields are not evaluated. The model cannot nominate a path, source token, or interactive target.",
         Capability::DocumentLiveInspect,
     )
 }
@@ -35,7 +35,7 @@ pub(super) fn patch_tool() -> RegisteredTool {
 }
 pub(super) fn provider() -> ProviderDescriptor {
     let read = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         INSPECT_CAPABILITY_ID,
         "assistant.capability.wordBatchInspect",
@@ -49,7 +49,7 @@ pub(super) fn provider() -> ProviderDescriptor {
         inspect_tool(),
     );
     let write = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         PATCH_CAPABILITY_ID,
         "assistant.capability.wordBatchPatch",

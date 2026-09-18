@@ -20,13 +20,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum ObjectContextMutation {
     Attach(ContextAttachment),
-    Detach {
-        attachment_id: String,
-    },
-    Refresh {
-        stale_attachment_id: String,
-        replacement: ContextAttachment,
-    },
+    Detach { attachment_id: String },
 }
 
 /// Generated identifiers and model destination are supplied by the central host.
@@ -51,36 +45,26 @@ pub fn build_object_context_mutation(
         Detach { attachment_id } => Ok(ObjectContextMutation::Detach {
             attachment_id: attachment_id.clone(),
         }),
-        AttachFile {
-            object_ref,
-            display_summary,
-        }
-        | AttachTerminalOutput {
+        AttachTerminalOutput {
             object_ref,
             display_summary,
         }
         | AttachWindow {
             object_ref,
             display_summary,
-        } => Ok(ObjectContextMutation::Attach(build_attachment(
-            update,
+        } => Ok(ObjectContextMutation::Attach(build_read_attachment(
+            &update.client_request_id,
             object_ref,
             display_summary,
             context,
         )?)),
-        RefreshFile {
-            stale_attachment_id,
-            object_ref,
-            display_summary,
-        } => Ok(ObjectContextMutation::Refresh {
-            stale_attachment_id: stale_attachment_id.clone(),
-            replacement: build_attachment(update, object_ref, display_summary, context)?,
-        }),
     }
 }
 
-fn build_attachment(
-    update: &DeviceAssistantObjectContextUpdate,
+/// Construct internal read metadata. This does not expose a user attachment
+/// operation and never grants access to the referenced object.
+pub fn build_read_attachment(
+    client_request_id: &str,
     object_ref: &ObjectRef,
     display_summary: &str,
     context: ObjectContextBuild<'_>,
@@ -137,7 +121,7 @@ fn build_attachment(
     let attachment = ContextAttachment {
         schema_version: CONTEXT_ATTACHMENT_SCHEMA_VERSION,
         attachment_id: context.attachment_id.into(),
-        client_request_id: update.client_request_id.clone(),
+        client_request_id: client_request_id.into(),
         actor_id: context.actor_id.into(),
         device_id: context.device_id.into(),
         surface: AgentSessionSurface::DeviceAssistant,
@@ -249,37 +233,6 @@ pub fn apply_object_mutation(
                 return Err(invalid());
             }
             Ok(session.detach_context(attachment_id))
-        }
-        ObjectContextMutation::Refresh {
-            stale_attachment_id,
-            replacement,
-        } => {
-            validate_attachment_subject(
-                replacement,
-                &session.actor_id,
-                &session.device_id,
-                session.surface,
-            )
-            .map_err(|_| invalid())?;
-            let replacement = if let Some(old) = session
-                .context_attachments
-                .iter()
-                .find(|old| old.client_request_id == replacement.client_request_id)
-            {
-                if !same_selection(old, replacement) {
-                    return Err(invalid());
-                }
-                old.clone()
-            } else {
-                replacement.clone()
-            };
-            session
-                .refresh_context(
-                    stale_attachment_id,
-                    AttachmentStaleReason::ObjectChanged,
-                    replacement,
-                )
-                .map_err(|_| invalid())
         }
     }
 }

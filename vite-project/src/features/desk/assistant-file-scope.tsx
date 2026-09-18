@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { useReferenceClock } from '@/hooks/use-reference-clock';
-import { Input } from '@/components/ui/input';
+import { RemoteDirectoryPicker } from '@/features/file-manager/remote-directory-picker';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 
 export type AssistantFileScopeView = {
@@ -22,7 +22,9 @@ export type AssistantDirectoryOperation =
     | { kind: 'decide_directory'; directory_request_id: string; approve: boolean; expected_revision: number }
     | { kind: 'revoke_directory'; directory_request_id: string; expected_revision: number };
 
-export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpdate }: {
+export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpdate, deskId, sessionTargetId }: {
+    deskId?: string;
+    sessionTargetId?: string;
     scope: AssistantFileScopeView;
     open: boolean;
     onOpenChange: (open: boolean) => void;
@@ -30,7 +32,7 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
     onUpdate: (operation: AssistantDirectoryOperation, timeoutMessage: string) => boolean;
 }) {
     const { t } = useTranslation();
-    const [path, setPath] = useState('');
+    const [browsing, setBrowsing] = useState(false);
     const now = useReferenceClock(scope.directories);
     const submit = (operation: AssistantDirectoryOperation) => onUpdate(operation, t('pages.deviceAssistant.directories.timeout'));
     return <Sheet open={open} onOpenChange={onOpenChange}>
@@ -40,12 +42,14 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
                 <SheetDescription>{t('pages.deviceAssistant.directories.hint')}</SheetDescription>
             </SheetHeader>
             <div className="space-y-2 px-4">
-                <label htmlFor="assistant-directory-path" className="text-sm">{t('pages.deviceAssistant.directories.path')}</label>
-                <Input id="assistant-directory-path" value={path} onChange={event => setPath(event.target.value)}
-                    disabled={disabled} maxLength={4096} autoComplete="off" />
-                <Button type="button" disabled={disabled || !path.trim()} onClick={() => {
-                    if (submit({ kind: 'select_directory', path, purpose: t('pages.deviceAssistant.directories.manualPurpose'), expected_revision: scope.revision })) setPath('');
-                }}>{t('pages.deviceAssistant.directories.add')}</Button>
+                <Button type="button" disabled={disabled || !sessionTargetId} onClick={() => setBrowsing(value => !value)}>
+                    {t('pages.deviceAssistant.directories.add')}
+                </Button>
+                {open && browsing && deskId && sessionTargetId && <RemoteDirectoryPicker
+                    key={`${deskId}:${sessionTargetId}`} deskId={deskId} sessionTargetId={sessionTargetId}
+                    disabled={disabled} onSelect={path => submit({ kind: 'select_directory', path,
+                        purpose: t('pages.deviceAssistant.directories.manualPurpose'), expected_revision: scope.revision })}
+                    onCancel={() => setBrowsing(false)} />}
             </div>
             <div className="space-y-3 px-4 pb-4">
                 {!scope.directories.length && <p className="text-sm text-muted-foreground">{t('pages.deviceAssistant.directories.empty')}</p>}

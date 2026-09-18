@@ -260,7 +260,7 @@ fn central_web_authority_is_exact_and_fixes_the_search_destination() {
 }
 
 #[test]
-fn file_terminal_and_iwork_batch_authority_uses_only_original_attachment_refs() {
+fn terminal_authority_uses_only_original_attachment_refs() {
     use crate::object_context::{
         ObjectContextBuild, ObjectContextMutation, build_object_context_mutation,
     };
@@ -269,25 +269,14 @@ fn file_terminal_and_iwork_batch_authority_uses_only_original_attachment_refs() 
     };
     let registry = device_assistant_provider_registry();
     let destination = destination();
-    for name in [
-        "inspect_files",
-        "read_text_file",
-        "inspect_spreadsheets",
-        "preview_spreadsheet_merge",
-        "read_terminal_output",
-        "inspect_numbers_file",
-        "inspect_pages_file",
-        "inspect_keynote_file",
-        "inspect_powerpoint_file",
-        "inspect_word_file",
-    ] {
+    for name in ["read_terminal_output"] {
         let reference = ObjectRef {
             token: format!("original-{name}"),
             snapshot_id: "snapshot".into(),
             object_kind: if name == "read_terminal_output" {
                 ObjectKind::TerminalOutput
             } else {
-                ObjectKind::File
+                ObjectKind::TerminalOutput
             },
             expires_at: "2030-01-01T00:00:00Z".into(),
         };
@@ -297,7 +286,7 @@ fn file_terminal_and_iwork_batch_authority_uses_only_original_attachment_refs() 
                 display_summary: "fixture".into(),
             }
         } else {
-            Op::AttachFile {
+            Op::AttachTerminalOutput {
                 object_ref: reference.clone(),
                 display_summary: "fixture".into(),
             }

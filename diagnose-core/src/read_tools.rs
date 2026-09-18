@@ -275,7 +275,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_files",
             Capability::FileMetadataRead,
-            "Read bounded metadata for owner-selected objects, or supply directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_text_file using this result call id and exact entry_name; content reading still requires a separate grant. Reduce max_entries or use the supported file filters to narrow large results; max_bytes is at most 32768 and does not expand your permission.",
+            "Read bounded metadata by supplying directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_text_file using this result call id and exact entry_name; content reading still requires a separate grant. Reduce max_entries or use the supported file filters to narrow large results; max_bytes is at most 32768 and does not expand your permission.",
             json!({
                 "type": "object",
                 "properties": {
@@ -300,7 +300,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_text_file",
             Capability::FileContentRead,
-            "Read one owner-selected regular file, or a verified text file result from this conversation, as bounded UTF-8. For a creation/read/update result, provide only file_result_call_id (omit entry_name). For a child from inspect_files, provide file_result_call_id plus entry_name. Request read_text_file permission with these exact arguments; metadata permission is insufficient. Do not read just to prepare an update when verified creation/update content and SHA-256 are already known. A creation grant never authorizes reading or model egress. Never provide a path or object reference.",
+            "Read one file from a verified result in this conversation as bounded UTF-8. For a creation/read/update result, provide only file_result_call_id (omit entry_name). For a child from inspect_files, provide file_result_call_id plus entry_name. Request read_text_file permission with these exact arguments; metadata permission is insufficient. Do not read just to prepare an update when verified creation/update content and SHA-256 are already known. A creation grant never authorizes reading or model egress. Never provide a path or object reference.",
             json!({
                 "type": "object",
                 "properties": {"file_result_call_id": {"type":"string", "minLength":1, "maxLength":256}, "entry_name": {"type":"string", "minLength":1, "maxLength":512, "description":"Exact immediate regular-file name from the identified metadata result; omit for a creation/read/update result."}},
@@ -310,7 +310,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_spreadsheets",
             Capability::SpreadsheetFileInspect,
-            "Read bounded cell, formula, and value projections from explicitly owner-selected inert .xlsx, .csv, or .tsv files, or from supported direct children of an explicitly selected directory. Directory expansion is non-recursive and bounded; macros, external links, data connections, and model-provided paths are rejected. Reduce max_workbooks, max_sheets, max_rows, max_columns or max_bytes to narrow an oversized result. Returned truncated projections do not contain the omitted cells.",
+            "Read bounded cell, formula, and value projections from inert .xlsx, .csv, or .tsv files discovered in approved conversation directories. Select 1–8 exact files using file_sources; macros, external links, data connections, and model-provided paths are rejected. Reduce max_workbooks, max_sheets, max_rows, max_columns or max_bytes to narrow an oversized result. Returned truncated projections do not contain the omitted cells.",
             json!({
                 "type": "object",
                 "properties": {
@@ -326,7 +326,7 @@ pub fn device_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "preview_spreadsheet_merge",
             Capability::SpreadsheetMergePreview,
-            "Preview a bounded multi-workbook merge, dedupe, and statistics operation over explicitly selected inert spreadsheets. Rules are typed data only; no script or formula is executed and no file is written. Narrow source_sheet, columns, statistics or max_rows to reduce output; max_bytes is at most 32768. A truncated merge preview cannot be materialized as a complete workbook or report.",
+            "Preview a bounded multi-workbook merge, dedupe, and statistics operation over inert spreadsheets selected from recorded directory results with file_sources. Rules are typed data only; no script or formula is executed and no file is written. Narrow source_sheet, columns, statistics or max_rows to reduce output; max_bytes is at most 32768. A truncated merge preview cannot be materialized as a complete workbook or report.",
             json!({
                 "type": "object",
                 "properties": {
@@ -580,6 +580,13 @@ fn parse_params<T: DeserializeOwned + Default>(arguments_json: &str) -> Result<T
 /// Map a read tool call (name + arguments) to a server-side read operation and
 /// the capability it requires (derived from the built input — one source).
 pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInput), AgentError> {
+    let normalized;
+    let call = if crate::provider_preflight::text_file::selection::supports(&call.name) {
+        normalized = crate::provider_preflight::text_file::selection::without_selectors(call)?;
+        &normalized
+    } else {
+        call
+    };
     let kind = match call.name.as_str() {
         "read_system_info" => {
             ContextKind::SystemInfo(parse_params::<SystemInfoParams>(&call.arguments_json)?)

@@ -69,7 +69,7 @@ impl ReadCallPreflight {
             provider_id: provider.wire.provider_id.clone(),
             surface,
             canonical_input_digest_sha256: format!("{:x}", Sha256::digest(canonical.as_bytes())),
-            root_count: 1,
+            root_count: result.files().len() as u32,
             resource_scope: result.resource_scope(),
             operation_scope: compiled.operations,
             export_destinations: vec![],

@@ -1,6 +1,7 @@
 //! Exact text mutation input compilation. Hosts supply authenticated device
 //! evidence from their durable receipt store, never model-supplied file refs.
 use super::*;
+pub mod selection;
 use desk_agent_protocol::computer_use::{
     CreatedFileArtifactOutput, FileContentReadOutput, FilePatchAction, TextFileChange,
 };
@@ -430,6 +431,10 @@ pub fn read_result_id(call: &ToolCall) -> Result<Option<String>, AgentError> {
 }
 
 pub fn uses_session_file_read(call: &ToolCall) -> Result<bool, AgentError> {
+    if selection::supports(&call.name) {
+        selection::selectors(call)?;
+        return Ok(true);
+    }
     if read_result_id(call)?.is_some() {
         return Ok(true);
     }
@@ -487,13 +492,13 @@ pub fn validate_read_permission_input(
     exact_input: Option<&str>,
     now: u64,
 ) -> Result<(), AgentError> {
-    if !matches!(tool_name, "inspect_files" | "read_text_file") {
+    if !matches!(tool_name, "inspect_files" | "read_text_file") && !selection::supports(tool_name) {
         return Ok(());
     }
     let invalid = || {
         error(
             AgentErrorKind::InvalidInput,
-            r#"File read permission needs an exact source. For metadata use exact_input={"directory_request_id":"<approved directory ID>"}. For a creation/read/update receipt use exact_input={"file_result_call_id":"<receipt tool call ID>"}, without entry_name. For a directory child use exact_input={"file_result_call_id":"<metadata tool call ID>","entry_name":"<exact child name>"}. An owner-selected attachment is another supported source. This validation failure does not establish expiry. Directory metadata grants do not authorize file-content reading; request read_text_file separately when needed."#,
+            r#"File read permission needs an exact source. For metadata use exact_input={"directory_request_id":"<approved directory ID>"}. For a creation/read/update receipt use exact_input={"file_result_call_id":"<receipt tool call ID>"}, without entry_name. For a directory child use exact_input={"file_result_call_id":"<metadata tool call ID>","entry_name":"<exact child name>"}. This validation failure does not establish expiry. Directory metadata grants do not authorize file-content reading; request read_text_file separately when needed."#,
             false,
             true,
         )
@@ -678,8 +683,95 @@ pub(crate) fn read_source_envelope_id(
 
 pub struct ResultFileRead {
     file: ObjectRef,
+    additional: Vec<ResultFileRead>,
+    tool_name: String,
     pub source_envelope_id: String,
     pub valid_until_unix_ms: u64,
+}
+
+/// Recover a source identity from a completed read's original arguments while
+/// revalidating its source result and current conversation directory consent.
+pub(super) fn batch_source_file(
+    session: &crate::session::PersistedAgentSession,
+    call: &ToolCall,
+    now: u64,
+) -> Result<ObjectRef, AgentError> {
+    let selectors = if call.name == "read_text_file" {
+        vec![call.clone()]
+    } else {
+        selection::selectors(call)?
+    };
+    if selectors.len() != 1 {
+        return Err(unavailable());
+    }
+    Ok(read_evidence(session, &selectors[0], now)?
+        .reference
+        .clone())
+}
+
+pub(super) fn batch_source_files(
+    session: &crate::session::PersistedAgentSession,
+    tools: &[&str],
+    now: u64,
+) -> Vec<ObjectRef> {
+    let mut files = Vec::new();
+    for source in session
+        .conversation
+        .iter()
+        .filter(|message| message.role == crate::chat::ChatRole::Assistant)
+        .flat_map(|message| &message.tool_calls)
+        .filter(|source| tools.contains(&source.name.as_str()))
+    {
+        let call = ToolCall {
+            id: source.id.clone(),
+            name: source.name.clone(),
+            arguments_json: source.arguments_json.clone(),
+        };
+        if let Ok(file) = batch_source_file(session, &call, now) {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// Resolve a file target from authenticated directory observations, never from
+/// an owner attachment or a model-supplied native path.
+pub(super) fn directory_file_target(
+    session: &crate::session::PersistedAgentSession,
+    target: &ObjectRef,
+    now: u64,
+) -> Result<ObjectRef, AgentError> {
+    for message in &session.conversation {
+        let Some(id) = &message.tool_call_id else {
+            continue;
+        };
+        let Ok(desk_agent_protocol::OperationOutput::ReadContext(
+            desk_agent_protocol::ReadContextOutput::FileMetadataInspect(output),
+        )) = serde_json::from_str(&message.trusted_tool_result().text)
+        else {
+            continue;
+        };
+        for entry in &output.directory_entries {
+            if entry.object_ref.as_ref() != Some(target) {
+                continue;
+            }
+            let read = ToolCall {
+                id: "source-resolution".into(),
+                name: "read_text_file".into(),
+                arguments_json:
+                    serde_json::json!({"file_result_call_id":id,"entry_name":entry.display_name})
+                        .to_string(),
+            };
+            if let Ok(file) = batch_source_file(session, &read, now) {
+                if &file == target {
+                    return Ok(file);
+                }
+            }
+        }
+    }
+    Err(unavailable())
 }
 
 impl ResultFileRead {
@@ -689,6 +781,30 @@ impl ResultFileRead {
         destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
         now: u64,
     ) -> Result<Self, AgentError> {
+        if selection::supports(&call.name) {
+            let selectors = selection::selectors(call)?;
+            let mut files = selectors
+                .iter()
+                .map(|selector| Self::build(session, selector, destination, now))
+                .collect::<Result<Vec<_>, _>>()?;
+            for (index, file) in files.iter().enumerate() {
+                if files[..index]
+                    .iter()
+                    .any(|previous| previous.file == file.file)
+                {
+                    return Err(unavailable());
+                }
+            }
+            let mut first = files.remove(0);
+            first.valid_until_unix_ms = files
+                .iter()
+                .fold(first.valid_until_unix_ms, |expiry, file| {
+                    expiry.min(file.valid_until_unix_ms)
+                });
+            first.additional = files;
+            first.tool_name = call.name.clone();
+            return Ok(first);
+        }
         if call.name == "inspect_files" {
             let owner = crate::permission_resume::latest_user_requirement(&session.conversation)
                 .and_then(|m| m.data_envelope.as_ref())
@@ -708,6 +824,8 @@ impl ResultFileRead {
                 .ok_or_else(unavailable)?;
             return Ok(Self {
                 file,
+                additional: vec![],
+                tool_name: call.name.clone(),
                 source_envelope_id: owner.envelope_id.clone(),
                 valid_until_unix_ms: expiry.min(now.saturating_add(120_000)),
             });
@@ -749,17 +867,53 @@ impl ResultFileRead {
         }
         Ok(Self {
             file: evidence.reference.clone(),
+            additional: vec![],
+            tool_name: call.name.clone(),
             source_envelope_id: source_id.into(),
             valid_until_unix_ms,
         })
     }
     pub fn resource_scope(&self) -> Vec<String> {
-        fresh_object_resource_scope(std::slice::from_ref(&self.file))
+        fresh_object_resource_scope(&self.files())
+    }
+    pub fn files(&self) -> Vec<ObjectRef> {
+        std::iter::once(self.file.clone())
+            .chain(self.additional.iter().map(|file| file.file.clone()))
+            .collect()
     }
     pub fn reference(&self) -> &ObjectRef {
         &self.file
     }
     pub fn bind(&self, input: &mut OperationInput) -> Result<(), AgentError> {
+        if selection::supports(&self.tool_name) {
+            let OperationInput::ReadContext(ReadContextInput { kind }) = input else {
+                return Err(unavailable());
+            };
+            match kind {
+                ContextKind::SpreadsheetFileInspect(params) => {
+                    params.files = self.files();
+                    params.max_workbooks = params.max_workbooks.min(32);
+                    params.max_bytes = params.max_bytes.min(32 * 1024);
+                }
+                ContextKind::SpreadsheetMergePreview(params) => {
+                    params.files = self.files();
+                    params.max_bytes = params.max_bytes.min(32 * 1024);
+                }
+                ContextKind::SpreadsheetBatchInspect(params) => {
+                    params.file = Some(self.file.clone());
+                    params.max_bytes = params.max_bytes.min(32 * 1024);
+                }
+                ContextKind::SpreadsheetLiveInspect(params)
+                | ContextKind::DocumentLiveInspect(params)
+                | ContextKind::PresentationLiveInspect(params) => {
+                    params.target = None;
+                    params.batch_file = Some(self.file.clone());
+                    params.max_bytes = params.max_bytes.min(32 * 1024);
+                }
+                _ => return Err(unavailable()),
+            }
+            return Ok(());
+        }
         if let OperationInput::ReadContext(ReadContextInput {
             kind: ContextKind::FileMetadataInspect(params),
         }) = input
@@ -784,6 +938,42 @@ impl ResultFileRead {
         Ok(())
     }
     pub fn validate_output(&self, output: &crate::seam::ToolRunOutput) -> Result<(), AgentError> {
+        if selection::supports(&self.tool_name) {
+            if output.image_data_url.is_some() || output.content.len() > 32 * 1024 {
+                return Err(unavailable());
+            }
+            let desk_agent_protocol::OperationOutput::ReadContext(result) =
+                serde_json::from_str(&output.content).map_err(|_| unavailable())?
+            else {
+                return Err(unavailable());
+            };
+            use desk_agent_protocol::ReadContextOutput::*;
+            match (self.tool_name.as_str(), result) {
+                ("inspect_spreadsheets", SpreadsheetFileInspect(result))
+                    if result.workbooks.len() <= self.files().len() =>
+                {
+                    return Ok(());
+                }
+                ("preview_spreadsheet_merge", SpreadsheetMergePreview(result))
+                    if result.input_digests_sha256.len() <= self.files().len() =>
+                {
+                    return Ok(());
+                }
+                ("inspect_numbers_file" | "inspect_excel_cell", SpreadsheetLiveInspect(result))
+                | ("inspect_pages_file" | "inspect_word_file", DocumentLiveInspect(result))
+                | (
+                    "inspect_keynote_file" | "inspect_powerpoint_file",
+                    PresentationLiveInspect(result),
+                ) if result
+                    .batch_source
+                    .as_ref()
+                    .is_some_and(|source| source.file == self.file) =>
+                {
+                    return Ok(());
+                }
+                _ => return Err(unavailable()),
+            }
+        }
         if output.image_data_url.is_some() {
             return Err(unavailable());
         }
@@ -1463,6 +1653,7 @@ mod tests {
         );
         let resolved = ResultFileRead::build(&session, &call, &destination, 1000).unwrap();
         assert_eq!(resolved.reference(), &evidence.reference);
+        assert_document_sources(&session, &destination, &evidence.reference);
         assert!(
             validate_read_permission_input(&session, &call.name, Some(&call.arguments_json), 1000)
                 .is_ok()
@@ -1525,6 +1716,101 @@ mod tests {
             .unwrap();
         session.file_scope.revoke(&subject, 2, "directory").unwrap();
         assert!(ResultFileRead::build(&session, &call, &destination, 1000).is_err());
+    }
+
+    fn assert_document_sources(
+        session: &PersistedAgentSession,
+        destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+        file: &ObjectRef,
+    ) {
+        for name in [
+            "inspect_numbers_file",
+            "inspect_pages_file",
+            "inspect_keynote_file",
+            "inspect_powerpoint_file",
+            "inspect_word_file",
+            "inspect_excel_cell",
+            "inspect_spreadsheets",
+            "preview_spreadsheet_merge",
+        ] {
+            let mut args = serde_json::json!({"max_bytes":4096});
+            let selector =
+                serde_json::json!({"file_result_call_id":"metadata", "entry_name":"notes.txt"});
+            if selection::multiple(name) {
+                args["file_sources"] = serde_json::json!([selector]);
+            } else {
+                args["file_result_call_id"] = selector["file_result_call_id"].clone();
+                args["entry_name"] = selector["entry_name"].clone();
+            }
+            if name == "inspect_excel_cell" {
+                args["sheet_name"] = "Sheet1".into();
+                args["address"] = "A1".into();
+            }
+            if name == "preview_spreadsheet_merge" {
+                args["columns"] =
+                    serde_json::json!([{"output_header":"name", "source_headers":["name"]}]);
+            }
+            let call = ToolCall {
+                id: "batch-read".into(),
+                name: name.into(),
+                arguments_json: args.to_string(),
+            };
+            let read = ResultFileRead::build(session, &call, destination, 1000).unwrap();
+            assert_eq!(read.files(), vec![file.clone()]);
+            assert!(
+                validate_read_permission_input(session, name, Some(&call.arguments_json), 1000)
+                    .is_ok()
+            );
+            let original = crate::input_read_context::ReadContextSelection {
+                tool_names: vec![name.into()],
+                expires_at: None,
+                object_attachments: vec![],
+                live_targets: vec![],
+            };
+            let binding = crate::input_read_context::object_read::ObjectReadBinding {
+                original: &original,
+                destination,
+                now_unix_ms: 1000,
+            };
+            for surface in [
+                ProductSurface::OssPersonalOwner,
+                ProductSurface::ManagerPersonalOwner,
+            ] {
+                assert!(
+                    super::super::read::ReadCallPreflight::build_file_result(
+                        &crate::device_assistant::device_assistant_provider_registry(),
+                        surface,
+                        &call,
+                        &binding,
+                        session
+                    )
+                    .is_ok(),
+                    "{name}/{surface:?}"
+                );
+            }
+            let (_, mut input) = crate::read_tools::build_read_operation(&call).unwrap();
+            read.bind(&mut input).unwrap();
+            let input_json = serde_json::to_value(&input).unwrap();
+            assert!(input_json.to_string().contains(&file.token));
+            assert!(input_json.to_string().contains("4096"));
+            let mut revoked = session.clone();
+            let subject = revoked
+                .file_scope_subject("owner", "device", "conversation")
+                .unwrap();
+            revoked.file_scope.revoke(&subject, 2, "directory").unwrap();
+            assert!(
+                ResultFileRead::build(&revoked, &call, destination, 1000).is_err(),
+                "{name}"
+            );
+            if selection::multiple(name) {
+                args["file_sources"] = serde_json::json!([selector.clone(), selector]);
+                let duplicate = ToolCall {
+                    arguments_json: args.to_string(),
+                    ..call
+                };
+                assert!(ResultFileRead::build(session, &duplicate, destination, 1000).is_err());
+            }
+        }
     }
 
     #[test]

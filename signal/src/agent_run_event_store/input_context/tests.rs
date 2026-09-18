@@ -159,13 +159,13 @@ async fn attach(store: &SignalAgentRunEventStore, id: &str, kind: ObjectKind) ->
             display_summary: "selected output".into(),
         }
     } else {
-        DeviceAssistantObjectContextOperation::AttachFile {
+        DeviceAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref: reference,
             display_summary: "arbitrary metadata, not a file type".into(),
         }
     };
     sessions(store)
-        .update_object_context(&UpdateObjectContext {
+        .seed_read_context(&UpdateObjectContext {
             run_id: "run".into(),
             actor_id: "7".into(),
             device_id: "device".into(),

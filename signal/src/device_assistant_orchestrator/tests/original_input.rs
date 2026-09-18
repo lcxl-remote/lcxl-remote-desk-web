@@ -26,11 +26,11 @@ async fn production_input_entry_freezes_objects_and_rejects_changed_retry_withou
     let update = DeviceAssistantObjectContextUpdate {
         conversation_id: client_id.into(),
         client_request_id: "original-object".into(),
-        operation: DeviceAssistantObjectContextOperation::AttachFile {
+        operation: DeviceAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref: ObjectRef {
                 token: "opaque-original-file".into(),
                 snapshot_id: "worker".into(),
-                object_kind: ObjectKind::File,
+                object_kind: ObjectKind::TerminalOutput,
                 expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
             },
             display_summary: "not-file-type-authority".into(),

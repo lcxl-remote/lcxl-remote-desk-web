@@ -4,14 +4,17 @@ import { AssistantFileScope, type AssistantFileScopeView } from './assistant-fil
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 
+vi.mock('@/features/file-manager/remote-directory-picker', () => ({ RemoteDirectoryPicker: ({ onSelect }: { onSelect: (path: string) => void }) => <button onClick={() => onSelect('/private/tmp/a directory ')}>choose</button> }));
+
 describe('conversation directories', () => {
     it('adds the exact path with the observed scope revision and never submits a form', () => {
         const update = vi.fn((..._args: unknown[]) => true);
-        render(<AssistantFileScope scope={{ revision: 7, directories: [] }} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);
-        fireEvent.change(screen.getByLabelText('pages.deviceAssistant.directories.path'), { target: { value: '/private/tmp/a directory ' } });
+        render(<AssistantFileScope deskId="device" sessionTargetId="target" scope={{ revision: 7, directories: [] }} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);
+        expect(screen.queryByRole('textbox')).toBeNull();
         const button = screen.getByRole('button', { name: 'pages.deviceAssistant.directories.add' });
         expect(button.getAttribute('type')).toBe('button');
         fireEvent.click(button);
+        fireEvent.click(screen.getByText("choose"));
         expect(update).toHaveBeenCalledWith({ kind: 'select_directory', path: '/private/tmp/a directory ', purpose: 'pages.deviceAssistant.directories.manualPurpose', expected_revision: 7 }, 'pages.deviceAssistant.directories.timeout');
     });
 

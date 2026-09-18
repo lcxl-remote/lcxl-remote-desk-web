@@ -210,7 +210,7 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
     assert_eq!(row(&store).await, saved);
 
     let mut conflicting = original.update.clone();
-    if let DeviceAssistantObjectContextOperation::AttachFile {
+    if let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
         display_summary, ..
     } = &mut conflicting.operation
     {

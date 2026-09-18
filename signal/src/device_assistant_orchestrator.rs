@@ -1550,6 +1550,12 @@ async fn compose_turn_inner(
         registry.retain(|tool| {
             tool.effect != desk_diagnose_core::registry::ToolEffect::ReadOnly
                 || desk_diagnose_core::device_assistant::is_requestable_desktop_read(tool.name())
+                || provider_registry
+                    .capability_for_tool(tool.name())
+                    .is_some_and(|capability| {
+                        capability.exposure
+                            == desk_diagnose_core::tool_exposure::ExposureRequirement::NoAttachment
+                    })
                 || original.tool_names.iter().any(|name| name == tool.name())
         });
     }

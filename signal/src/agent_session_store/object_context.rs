@@ -15,6 +15,7 @@ use desk_diagnose_core::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone)]
 pub struct UpdateObjectContext {
     pub run_id: String,
     pub actor_id: String,
@@ -170,8 +171,7 @@ impl SignalAgentSessionStore {
                 None => {
                     if !matches!(
                         params.update.operation,
-                        DeviceAssistantObjectContextOperation::AttachFile { .. }
-                            | DeviceAssistantObjectContextOperation::AttachTerminalOutput { .. }
+                        DeviceAssistantObjectContextOperation::AttachTerminalOutput { .. }
                             | DeviceAssistantObjectContextOperation::AttachWindow { .. }
                     ) {
                         return Err(transport("Device Assistant attachment does not exist"));
@@ -365,3 +365,67 @@ fn replay(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+impl SignalAgentSessionStore {
+    /// Seed internal file-read metadata for authority/replay tests without a
+    /// user-facing file attachment operation.
+    pub(crate) async fn seed_read_context(
+        &self,
+        params: &UpdateObjectContext,
+    ) -> Result<(), AgentError> {
+        use desk_agent_protocol::computer_use::ObjectKind;
+        let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
+            object_ref,
+            display_summary,
+        } = &params.update.operation
+        else {
+            return self.update_object_context(params).await.map(|_| ());
+        };
+        let mut seed = params.clone();
+        if let DeviceAssistantObjectContextOperation::AttachTerminalOutput { object_ref, .. } =
+            &mut seed.update.operation
+        {
+            object_ref.object_kind = ObjectKind::TerminalOutput;
+        }
+        self.update_object_context(&seed).await?;
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(&params.run_id))
+            .one(&self.db)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+        let attachment = session
+            .context_attachments
+            .iter_mut()
+            .find(|a| a.client_request_id == params.update.client_request_id)
+            .unwrap();
+        *attachment = desk_diagnose_core::object_context::build_read_attachment(
+            &params.update.client_request_id,
+            object_ref,
+            display_summary,
+            ObjectContextBuild {
+                actor_id: &params.actor_id,
+                device_id: &params.device_id,
+                destination: params.destination.as_ref().unwrap(),
+                now_unix_ms: chrono::DateTime::parse_from_rfc3339(&params.created_at)
+                    .unwrap()
+                    .timestamp_millis() as u64,
+                attachment_id: &attachment.attachment_id,
+                observation_id: &attachment.attachment_id,
+            },
+        )
+        .unwrap();
+        agent_session::Entity::update_many()
+            .col_expr(
+                agent_session::Column::StateJson,
+                Expr::value(session.encode_json_for_storage().unwrap()),
+            )
+            .filter(agent_session::Column::ConversationId.eq(&params.run_id))
+            .exec(&self.db)
+            .await
+            .unwrap();
+        Ok(())
+    }
+}

@@ -21,7 +21,7 @@ pub(super) const READINESS_IDENTITIES: [(&str, &str, &str, &str); 1] = [(
 
 pub(super) fn provider() -> ProviderDescriptor {
     let mut descriptor = provider_for_tool(
-        crate::tool_exposure::ExposureRequirement::SelectedContext,
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         INSPECT_CAPABILITY_ID,
         "assistant.capability.powerpointBatchInspect",
@@ -34,14 +34,14 @@ pub(super) fn provider() -> ProviderDescriptor {
         vec![AuthorizationResourceKind::FreshObjectReference],
         batch_inspect_tool(
             INSPECT_TOOL,
-            "Read a bounded title and presenter-notes projection from exactly one owner-selected PPTX file snapshot. No Office application or Live session is opened. The model cannot nominate a path, source token, or interactive target.",
+            "Read a bounded title and presenter-notes projection from exactly one conversation-directory PPTX file snapshot. No Office application or Live session is opened. The model cannot nominate a path, source token, or interactive target.",
             Capability::PresentationLiveInspect,
         ),
     );
     descriptor = merge_provider_capabilities(
         descriptor,
         provider_for_tool(
-            crate::tool_exposure::ExposureRequirement::SelectedContext,
+            crate::tool_exposure::ExposureRequirement::NoAttachment,
             PROVIDER_ID,
             PATCH_CAPABILITY_ID,
             "assistant.capability.powerpointBatchPatch",

@@ -121,11 +121,9 @@ pub fn from_owner_decision(
             },
         ),
         SelectDirectory { .. }
-        | AttachFile { .. }
         | AttachTerminalOutput { .. }
         | AttachWindow { .. }
-        | Detach { .. }
-        | RefreshFile { .. } => return None,
+        | Detach { .. } => return None,
     };
     Some(FileScopeUpdate {
         subject,

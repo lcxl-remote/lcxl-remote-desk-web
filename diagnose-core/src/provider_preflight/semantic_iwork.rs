@@ -254,31 +254,29 @@ impl IworkCallPreflight {
             original.validate()?;
             let args: PresentationBatchActionArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-            let refs = original
-                .object_attachments
-                .iter()
-                .map(|attachment| {
-                    serde_json::from_str::<ObjectRef>(&attachment.object_ref.opaque_token)
-                        .map_err(|_| unavailable())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut files = refs
-                .iter()
-                .filter(|reference| reference.object_kind == ObjectKind::File);
-            let file = files.next().ok_or_else(unavailable)?;
-            if files.next().is_some() {
-                return Err(unavailable());
-            }
             let (_, worker) = interactive_session_incarnation
                 .split_once(':')
                 .ok_or_else(unavailable)?;
-            Some(super::batch_document::resolve_presentation_read(
+            let files = super::text_file::batch_source_files(
                 session,
-                file,
-                worker,
-                &args.target,
+                &["inspect_keynote_file", "inspect_powerpoint_file"],
                 now_unix_ms,
-            )?)
+            );
+            let mut bindings = files.iter().filter_map(|file| {
+                super::batch_document::resolve_presentation_read(
+                    session,
+                    &file,
+                    worker,
+                    &args.target,
+                    now_unix_ms,
+                )
+                .ok()
+            });
+            let binding = bindings.next().ok_or_else(unavailable)?;
+            if bindings.next().is_some() {
+                return Err(unavailable());
+            }
+            Some(binding)
         } else {
             None
         };
@@ -286,31 +284,29 @@ impl IworkCallPreflight {
             original.validate()?;
             let args: DocumentBatchActionArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-            let refs = original
-                .object_attachments
-                .iter()
-                .map(|attachment| {
-                    serde_json::from_str::<ObjectRef>(&attachment.object_ref.opaque_token)
-                        .map_err(|_| unavailable())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut files = refs
-                .iter()
-                .filter(|reference| reference.object_kind == ObjectKind::File);
-            let file = files.next().ok_or_else(unavailable)?;
-            if files.next().is_some() {
-                return Err(unavailable());
-            }
             let (_, worker) = interactive_session_incarnation
                 .split_once(':')
                 .ok_or_else(unavailable)?;
-            Some(super::word_read_binding::resolve_word_read(
+            let files = super::text_file::batch_source_files(
                 session,
-                file,
-                worker,
-                &args.target,
+                &[crate::device_assistant::windows_word::INSPECT_TOOL],
                 now_unix_ms,
-            )?)
+            );
+            let mut bindings = files.iter().filter_map(|file| {
+                super::word_read_binding::resolve_word_read(
+                    session,
+                    &file,
+                    worker,
+                    &args.target,
+                    now_unix_ms,
+                )
+                .ok()
+            });
+            let binding = bindings.next().ok_or_else(unavailable)?;
+            if bindings.next().is_some() {
+                return Err(unavailable());
+            }
+            Some(binding)
         } else {
             None
         };
@@ -318,27 +314,43 @@ impl IworkCallPreflight {
             original.validate()?;
             let args: SpreadsheetBatchActionArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-            let refs = original
-                .object_attachments
-                .iter()
-                .map(|attachment| {
-                    serde_json::from_str::<ObjectRef>(&attachment.object_ref.opaque_token)
-                        .map_err(|_| unavailable())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut files = refs.iter().filter(|r| r.object_kind == ObjectKind::File);
-            let file = files.next().ok_or_else(unavailable)?;
-            if files.next().is_some() {
-                return Err(unavailable());
-            }
             let (_, worker) = interactive_session_incarnation
                 .split_once(':')
                 .ok_or_else(unavailable)?;
-            Some(super::excel_read_binding::resolve_excel_read(
+            let files = super::text_file::batch_source_files(
                 session,
-                file,
-                worker,
-                &args.target,
+                &[crate::device_assistant::windows_excel::INSPECT_TOOL],
+                now_unix_ms,
+            );
+            let mut bindings = files.iter().filter_map(|file| {
+                super::excel_read_binding::resolve_excel_read(
+                    session,
+                    &file,
+                    worker,
+                    &args.target,
+                    now_unix_ms,
+                )
+                .ok()
+            });
+            let binding = bindings.next().ok_or_else(unavailable)?;
+            if bindings.next().is_some() {
+                return Err(unavailable());
+            }
+            Some(binding)
+        } else {
+            None
+        };
+        let source_file = if matches!(
+            call.name.as_str(),
+            "patch_numbers_copy" | "replace_pages_copy_body"
+        ) {
+            let args: serde_json::Value =
+                serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+            let target: ObjectRef =
+                serde_json::from_value(args["target"].clone()).map_err(|_| unavailable())?;
+            Some(super::text_file::directory_file_target(
+                session,
+                &target,
                 now_unix_ms,
             )?)
         } else {
@@ -356,6 +368,7 @@ impl IworkCallPreflight {
             binding.as_ref(),
             word.as_ref(),
             excel.as_ref(),
+            source_file.as_ref(),
         )
     }
 
@@ -380,6 +393,7 @@ impl IworkCallPreflight {
             presentation,
             None,
             None,
+            None,
         )
     }
 
@@ -393,6 +407,7 @@ impl IworkCallPreflight {
         presentation: Option<&super::batch_document::PresentationReadBinding>,
         word: Option<&super::word_read_binding::WordReadBinding>,
         excel: Option<&super::excel_read_binding::ExcelReadBinding>,
+        source_file: Option<&ObjectRef>,
     ) -> Result<Self, AgentError> {
         original.validate()?;
         let capability = registry
@@ -427,12 +442,16 @@ impl IworkCallPreflight {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let exact_batch_file = || {
+            if let Some(file) = source_file {
+                return Ok(Some(file.clone()));
+            }
             let files = selected_refs
                 .iter()
                 .filter(|reference| reference.object_kind == ObjectKind::File)
                 .collect::<Vec<_>>();
             match files.as_slice() {
-                [file] => Ok((*file).clone()),
+                [] => Ok(None),
+                [file] => Ok(Some((*file).clone())),
                 _ => Err(unavailable()),
             }
         };
@@ -511,7 +530,7 @@ impl IworkCallPreflight {
             "patch_numbers_copy" => {
                 let args: SpreadsheetBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                if exact_batch_file()? != args.target {
+                if exact_batch_file()?.as_ref() != Some(&args.target) {
                     return Err(unavailable());
                 }
                 validate_destination(&args.output.destination_parent)?;
@@ -530,7 +549,7 @@ impl IworkCallPreflight {
             "replace_pages_copy_body" => {
                 let args: DocumentBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                if exact_batch_file()? != args.target {
+                if exact_batch_file()?.as_ref() != Some(&args.target) {
                     return Err(unavailable());
                 }
                 validate_destination(&args.output.destination_parent)?;
@@ -550,7 +569,7 @@ impl IworkCallPreflight {
                 let args: SpreadsheetBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
                 let binding = excel.ok_or_else(unavailable)?;
-                if exact_batch_file()? != binding.source().file
+                if exact_batch_file()?.is_some_and(|file| file != binding.source().file)
                     || !desk_agent_protocol::computer_use::office_batch::is_xlsx(binding.adapter())
                 {
                     return Err(unavailable());
@@ -579,7 +598,7 @@ impl IworkCallPreflight {
                 let args: DocumentBatchActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
                 let binding = word.ok_or_else(unavailable)?;
-                if exact_batch_file()? != binding.source().file
+                if exact_batch_file()?.is_some_and(|file| file != binding.source().file)
                     || !desk_agent_protocol::computer_use::office_batch::is_docx(binding.adapter())
                 {
                     return Err(unavailable());
@@ -607,7 +626,8 @@ impl IworkCallPreflight {
                 } else {
                     ComputerUseAdapterKind::IworkKeynote
                 };
-                if exact_batch_file()? != binding.source().file || binding.adapter().kind != adapter
+                if exact_batch_file()?.is_some_and(|file| file != binding.source().file)
+                    || binding.adapter().kind != adapter
                 {
                     return Err(unavailable());
                 }

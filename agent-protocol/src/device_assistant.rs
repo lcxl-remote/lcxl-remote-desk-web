@@ -137,10 +137,6 @@ pub struct DeviceAssistantObjectContextUpdate {
 )]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeviceAssistantObjectContextOperation {
-    AttachFile {
-        object_ref: ObjectRef,
-        display_summary: String,
-    },
     AttachTerminalOutput {
         object_ref: ObjectRef,
         display_summary: String,
@@ -151,11 +147,6 @@ pub enum DeviceAssistantObjectContextOperation {
     },
     Detach {
         attachment_id: String,
-    },
-    RefreshFile {
-        stale_attachment_id: String,
-        object_ref: ObjectRef,
-        display_summary: String,
     },
     DecideDirectory {
         directory_request_id: String,
@@ -208,10 +199,6 @@ impl DeviceAssistantObjectContextUpdate {
                 directory_request_id,
                 "invalid Device Assistant directory request id",
             ),
-            DeviceAssistantObjectContextOperation::AttachFile {
-                object_ref,
-                display_summary,
-            } => validate_file_selection(object_ref, display_summary),
             DeviceAssistantObjectContextOperation::AttachTerminalOutput {
                 object_ref,
                 display_summary,
@@ -222,17 +209,6 @@ impl DeviceAssistantObjectContextUpdate {
             } => validate_window_selection(object_ref, display_summary),
             DeviceAssistantObjectContextOperation::Detach { attachment_id } => {
                 validate_wire_id(attachment_id, "invalid Device Assistant attachment id")
-            }
-            DeviceAssistantObjectContextOperation::RefreshFile {
-                stale_attachment_id,
-                object_ref,
-                display_summary,
-            } => {
-                validate_wire_id(
-                    stale_attachment_id,
-                    "invalid stale Device Assistant attachment id",
-                )?;
-                validate_file_selection(object_ref, display_summary)
             }
         }
     }
@@ -284,34 +260,6 @@ fn validate_terminal_selection(
     )?;
     if display_summary.trim().is_empty() || display_summary.len() > 512 {
         return Err("invalid Device Assistant terminal display summary");
-    }
-    Ok(())
-}
-
-fn validate_file_selection(
-    object_ref: &ObjectRef,
-    display_summary: &str,
-) -> Result<(), &'static str> {
-    if !matches!(
-        object_ref.object_kind,
-        ObjectKind::File | ObjectKind::Directory
-    ) {
-        return Err("Device Assistant file selection requires a file or directory reference");
-    }
-    validate_wire_id(
-        &object_ref.token,
-        "invalid Device Assistant file reference token",
-    )?;
-    validate_wire_id(
-        &object_ref.snapshot_id,
-        "invalid Device Assistant file snapshot id",
-    )?;
-    validate_wire_id(
-        &object_ref.expires_at,
-        "invalid Device Assistant file reference expiry",
-    )?;
-    if display_summary.trim().is_empty() || display_summary.len() > 512 {
-        return Err("invalid Device Assistant file display summary");
     }
     Ok(())
 }
@@ -424,48 +372,13 @@ mod tests {
     }
 
     #[test]
-    fn file_attachment_update_is_typed_and_model_selection_is_bounded() {
-        let object_ref = ObjectRef {
-            token: "edge-file-token".into(),
-            snapshot_id: "worker-1:7".into(),
-            object_kind: ObjectKind::File,
-            expires_at: "2026-08-25T20:00:00Z".into(),
-        };
-        let update = DeviceAssistantObjectContextUpdate {
-            conversation_id: "assistant-1".into(),
-            client_request_id: "file-change-1".into(),
-            operation: DeviceAssistantObjectContextOperation::AttachFile {
-                object_ref: object_ref.clone(),
-                display_summary: "selected.txt".into(),
-            },
-        };
-        update.validate().unwrap();
-        let value = serde_json::to_value(&update).unwrap();
-        assert_eq!(value["operation"]["kind"], "attach_file");
-        assert!(value["operation"].get("path").is_none());
-
-        let ask = DeviceAssistantAsk {
-            question: "Read the selected file metadata.".into(),
-            client_message_id: "message-2".into(),
-            selected_attachment_ids: vec!["context-file-1".into()],
-            ..Default::default()
-        };
-        ask.validate().unwrap();
-        let mut duplicate = ask.clone();
-        duplicate
-            .selected_attachment_ids
-            .push("context-file-1".into());
-        assert!(duplicate.validate().is_err());
-
-        let mut invalid_kind = update;
-        invalid_kind.operation = DeviceAssistantObjectContextOperation::AttachFile {
-            object_ref: ObjectRef {
-                object_kind: ObjectKind::UiElement,
-                ..object_ref
-            },
-            display_summary: "not a file".into(),
-        };
-        assert!(invalid_kind.validate().is_err());
+    fn removed_file_context_operations_are_rejected() {
+        for kind in ["attach_file", "refresh_file"] {
+            let value = serde_json::json!({"kind":kind,"object_ref":{"token":"file","snapshot_id":"snapshot","object_kind":"file","expires_at":"2030-01-01T00:00:00Z"},"display_summary":"file","stale_attachment_id":"old"});
+            assert!(
+                serde_json::from_value::<DeviceAssistantObjectContextOperation>(value).is_err()
+            );
+        }
     }
 
     #[test]

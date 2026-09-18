@@ -308,6 +308,14 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             assert!(u64::from(read.max_bytes) <= object.bounds.max_bytes);
             assert!(u64::from(read.max_bytes) <= output_limit);
             assert!(read.max_entries <= object.bounds.max_objects);
+            // The grant bounds execution admission, not how long a completed
+            // observation may remain as historical evidence.
+            let execution_expiry = chrono::DateTime::parse_from_rfc3339(
+                request.envelope.scope.expires_at.as_deref().unwrap(),
+            )
+            .unwrap()
+            .timestamp_millis() as u64;
+            assert!(execution_expiry <= grant_expires_at);
             assert!(
                 !serde_json::to_string(&request)
                     .unwrap()
@@ -396,7 +404,6 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             );
             assert_eq!(label.allowed_destinations, [destination()]);
             assert!(label.retention.expires_at_unix_ms.unwrap() <= object.expires_at_unix_ms);
-            assert!(label.retention.expires_at_unix_ms.unwrap() <= grant_expires_at);
         }
         let outbox = crate::entity::agent_capability_dispatch_outbox::Entity::find()
             .one(&store.db)

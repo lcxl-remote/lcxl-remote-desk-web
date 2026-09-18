@@ -4,6 +4,15 @@ pub use desk_agent_protocol::device_assistant::{
     DeviceAssistantSettings, DeviceAssistantSettingsUpdate,
 };
 
+// Device initialization is separate from an unknown remote authority snapshot.
+// Missing wire fields and unknown frontend projections must still fail closed.
+pub(super) fn default_device_assistant_settings() -> DeviceAssistantSettings {
+    DeviceAssistantSettings {
+        revision: 0,
+        enabled: true,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceAssistantSettingsUpdateError {
     RevisionConflict(DeviceAssistantSettings),
@@ -31,6 +40,21 @@ pub fn apply_device_assistant_settings_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_configuration_enables_assistant_by_default_and_preserves_explicit_off() {
+        use crate::model::settings::Settings;
+        assert!(Settings::default().device_assistant.enabled);
+        let absent: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.device_assistant, default_device_assistant_settings());
+        let disabled: Settings =
+            serde_json::from_str(r#"{"device_assistant":{"revision":7,"enabled":false}}"#).unwrap();
+        assert!(!disabled.device_assistant.enabled);
+        assert_eq!(disabled.device_assistant.revision, 7);
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&disabled).unwrap()).unwrap();
+        assert_eq!(restored.device_assistant, disabled.device_assistant);
+    }
 
     #[test]
     fn default_is_revision_zero_and_disabled() {

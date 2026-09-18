@@ -26,7 +26,7 @@ fn update(kind: ObjectKind) -> DeviceAssistantObjectContextUpdate {
             object_ref,
             display_summary: "Selected window".into(),
         },
-        _ => DeviceAssistantObjectContextOperation::AttachFile {
+        _ => DeviceAssistantObjectContextOperation::AttachTerminalOutput {
             object_ref,
             display_summary: "Selected file".into(),
         },
@@ -89,13 +89,6 @@ fn session() -> PersistedAgentSession {
 #[test]
 fn selections_keep_original_refs_bounds_destination_and_metadata_digest() {
     for (kind, expected_kind, max_bytes, max_objects) in [
-        (ObjectKind::File, ContextAttachmentKind::File, 65536, 32),
-        (
-            ObjectKind::Directory,
-            ContextAttachmentKind::DirectorySelection,
-            65536,
-            32,
-        ),
         (
             ObjectKind::TerminalOutput,
             ContextAttachmentKind::TerminalSessionRef,
@@ -149,11 +142,11 @@ fn selections_keep_original_refs_bounds_destination_and_metadata_digest() {
 
 #[test]
 fn invalid_selection_never_builds_authority() {
-    assert!(build(&update(ObjectKind::File), "id", 1893456000000).is_err());
-    assert!(build(&update(ObjectKind::File), "id", 0).is_err());
+    assert!(build(&update(ObjectKind::TerminalOutput), "id", 1893456000000).is_err());
+    assert!(build(&update(ObjectKind::TerminalOutput), "id", 0).is_err());
     assert!(build(&update(ObjectKind::TerminalOutput), "", 1).is_err());
-    let mut request = update(ObjectKind::File);
-    let DeviceAssistantObjectContextOperation::AttachFile {
+    let mut request = update(ObjectKind::TerminalOutput);
+    let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
         display_summary, ..
     } = &mut request.operation
     else {
@@ -161,7 +154,7 @@ fn invalid_selection_never_builds_authority() {
     };
     *display_summary = "x".repeat(513);
     assert!(build(&request, "id", 1).is_err());
-    let DeviceAssistantObjectContextOperation::AttachFile {
+    let DeviceAssistantObjectContextOperation::AttachTerminalOutput {
         object_ref,
         display_summary,
     } = &mut request.operation
@@ -169,9 +162,9 @@ fn invalid_selection_never_builds_authority() {
         unreachable!()
     };
     *display_summary = "file".into();
-    object_ref.object_kind = ObjectKind::TerminalOutput;
+    object_ref.object_kind = ObjectKind::File;
     assert!(build(&request, "id", 1).is_err());
-    let request = update(ObjectKind::File);
+    let request = update(ObjectKind::TerminalOutput);
     assert!(
         build_object_context_mutation(
             &request,
@@ -193,7 +186,7 @@ fn invalid_selection_never_builds_authority() {
 #[test]
 fn replay_preserves_original_identity_and_never_reactivates_detached_selection() {
     let mut session = session();
-    let request = update(ObjectKind::File);
+    let request = update(ObjectKind::TerminalOutput);
     assert!(apply_object_mutation(&mut session, &build(&request, "first", 1).unwrap()).unwrap());
     let original = session.context_attachments.clone();
     assert!(!apply_object_mutation(&mut session, &build(&request, "second", 2).unwrap()).unwrap());
@@ -215,7 +208,7 @@ fn replay_preserves_original_identity_and_never_reactivates_detached_selection()
 #[test]
 fn duplicate_object_does_not_bypass_subject_or_request_conflict_checks() {
     let mut session = session();
-    let original = attachment(ObjectKind::File);
+    let original = attachment(ObjectKind::TerminalOutput);
     apply_object_mutation(
         &mut session,
         &ObjectContextMutation::Attach(original.clone()),
@@ -285,47 +278,4 @@ fn selecting_another_window_atomically_replaces_the_previous_focus() {
         session.focus_epoch.selected_attachment_ids,
         vec![second.attachment_id]
     );
-}
-
-#[test]
-fn refresh_is_atomic_and_replays_original_replacement() {
-    let mut session = session();
-    apply_object_mutation(
-        &mut session,
-        &ObjectContextMutation::Attach(attachment(ObjectKind::File)),
-    )
-    .unwrap();
-    let mut request = update(ObjectKind::File);
-    request.client_request_id = "refresh-1".into();
-    let DeviceAssistantObjectContextOperation::AttachFile {
-        mut object_ref,
-        display_summary,
-    } = request.operation
-    else {
-        unreachable!()
-    };
-    object_ref.token = "new-ref".into();
-    request.operation = DeviceAssistantObjectContextOperation::RefreshFile {
-        stale_attachment_id: "attachment-1".into(),
-        object_ref,
-        display_summary,
-    };
-    assert!(
-        apply_object_mutation(&mut session, &build(&request, "replacement", 2).unwrap()).unwrap()
-    );
-    let refreshed = session.context_attachments.clone();
-    assert!(
-        !apply_object_mutation(&mut session, &build(&request, "replayed", 3).unwrap()).unwrap()
-    );
-    assert_eq!(session.context_attachments, refreshed);
-    request.client_request_id = "refresh-2".into();
-    if let DeviceAssistantObjectContextOperation::RefreshFile {
-        stale_attachment_id,
-        ..
-    } = &mut request.operation
-    {
-        *stale_attachment_id = "missing".into();
-    }
-    assert!(apply_object_mutation(&mut session, &build(&request, "invalid", 4).unwrap()).is_err());
-    assert_eq!(session.context_attachments, refreshed);
 }

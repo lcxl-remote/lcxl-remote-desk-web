@@ -61,7 +61,7 @@ impl SettingsStore {
 }
 
 /// Desk Settings
-#[derive(Clone, Debug, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
     /// System settings
@@ -105,8 +105,8 @@ pub struct Settings {
 
     /// Device-owned product-level gate for the complete Device Assistant.
     /// This is intentionally separate from the narrower Computer Use safety
-    /// ceilings above and defaults disabled.
-    #[serde(default)]
+    /// ceilings above and defaults enabled for a new device configuration.
+    #[serde(default = "default_device_assistant_settings")]
     pub device_assistant: DeviceAssistantSettings,
 
     /// Command line arguments, come from clap and do not load from or save to config file
@@ -115,6 +115,28 @@ pub struct Settings {
 
     #[serde(skip)]
     store: Option<SettingsStore>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            system: Default::default(),
+            log: Default::default(),
+            user: Default::default(),
+            turn: Default::default(),
+            turn_client: Default::default(),
+            desk: Default::default(),
+            terminal: Default::default(),
+            security: Default::default(),
+            virtual_display: Default::default(),
+            ai_policy: Default::default(),
+            collection_policy: Default::default(),
+            computer_use: Default::default(),
+            device_assistant: default_device_assistant_settings(),
+            args: Default::default(),
+            store: None,
+        }
+    }
 }
 
 impl Settings {

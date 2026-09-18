@@ -1,7 +1,6 @@
 use std::{fs::Metadata, path::PathBuf};
 
 use chrono::{DateTime, Local, TimeZone};
-use desk_agent_protocol::computer_use::ObjectRef;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -23,6 +22,10 @@ pub struct FileListParams {
     pub path: String,
     pub page_no: i64,
     pub page_count: i64,
+
+    /// Return only directories, filtered and sorted before pagination.
+    #[serde(default)]
+    pub directories_only: bool,
 
     /// Minimum file size
     pub min_file_size: Option<i64>,
@@ -64,10 +67,6 @@ pub struct FileInfo {
     #[wincode(with = "DateTimeLocalWincode")]
     pub modified: DateTime<Local>,
     pub err_msg: Option<String>,
-    /// Short-lived edge-issued reference for an explicit Device Assistant
-    /// selection. Native paths remain non-authoritative model inputs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assistant_object_ref: Option<ObjectRef>,
 }
 
 impl FileInfo {
@@ -120,7 +119,6 @@ impl FileInfo {
             created: Local.timestamp_opt(0, 0).unwrap(),
             modified: Local.timestamp_opt(0, 0).unwrap(),
             err_msg: None,
-            assistant_object_ref: None,
         };
         match metadata {
             Ok(metadata) => {
@@ -199,11 +197,23 @@ mod wincode_tests {
     /// adapter wiring (e.g. all four routed to the same instant)
     /// would surface as a value mismatch on decode.
     #[test]
+    fn directory_filter_defaults_off_and_round_trips_json() {
+        let value = serde_json::json!({"path":"/","page_no":1,"page_count":100});
+        let mut params: FileListParams = serde_json::from_value(value).unwrap();
+        assert!(!params.directories_only);
+        params.directories_only = true;
+        let restored: FileListParams =
+            serde_json::from_str(&serde_json::to_string(&params).unwrap()).unwrap();
+        assert!(restored.directories_only);
+    }
+
+    #[test]
     fn file_list_params_round_trips_wincode_with_mixed_datetime_fields() {
         let original = FileListParams {
             path: r"C:\Users".to_string(),
             page_no: 2,
             page_count: 50,
+            directories_only: true,
             min_file_size: Some(1024),
             max_file_size: None,
             file_name: Some("readme".to_string()),
@@ -235,6 +245,7 @@ mod wincode_tests {
         assert_eq!(back.path, original.path);
         assert_eq!(back.page_no, original.page_no);
         assert_eq!(back.page_count, original.page_count);
+        assert_eq!(back.directories_only, original.directories_only);
         assert_eq!(back.min_file_size, original.min_file_size);
         assert_eq!(back.max_file_size, original.max_file_size);
         assert_eq!(back.file_name, original.file_name);
@@ -269,7 +280,6 @@ mod wincode_tests {
                 .single()
                 .expect("valid local time"),
             err_msg: None,
-            assistant_object_ref: None,
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -305,7 +315,6 @@ mod wincode_tests {
                 .single()
                 .expect("valid local time"),
             err_msg: None,
-            assistant_object_ref: None,
         };
         let original = FileListResponse {
             file_info_list: vec![make_info("a.txt", 100), make_info("b.txt", 200)],

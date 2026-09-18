@@ -4988,7 +4988,9 @@ impl SignalDeviceAssistantTools {
             call.name.as_str(),
             "inspect_numbers_file" | "inspect_pages_file" | "inspect_keynote_file"
         );
-        if is_iwork_batch_inspect {
+        if is_iwork_batch_inspect
+            && !desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)?
+        {
             let file = exact_selected_batch_file(&self.selected_file_roots)?;
             let requested_max_bytes = match &input {
                 OperationInput::ReadContext(ReadContextInput {
@@ -5141,7 +5143,9 @@ impl SignalDeviceAssistantTools {
                 }),
             });
         }
-        if capability == desk_agent_protocol::Capability::SpreadsheetFileInspect {
+        if capability == desk_agent_protocol::Capability::SpreadsheetFileInspect
+            && !desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)?
+        {
             let files = self.selected_spreadsheet_roots.clone();
             if files.is_empty() {
                 return Err(error(
@@ -5163,7 +5167,9 @@ impl SignalDeviceAssistantTools {
                 }),
             });
         }
-        if capability == desk_agent_protocol::Capability::SpreadsheetMergePreview {
+        if capability == desk_agent_protocol::Capability::SpreadsheetMergePreview
+            && !desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)?
+        {
             if self.selected_spreadsheet_roots.is_empty() {
                 return Err(error(
                     AgentErrorKind::PermissionDenied,
@@ -5222,7 +5228,9 @@ impl SignalDeviceAssistantTools {
                         binding.destination,
                         binding.now_unix_ms,
                     )?;
-                result.bind(&mut input)?;
+                let (_, mut bounded) = build_read_operation(call)?;
+                result.bind(&mut bounded)?;
+                input = bounded;
                 Some(
                     chrono::DateTime::from_timestamp_millis(result.valid_until_unix_ms as i64)
                         .ok_or_else(desk_diagnose_core::directory_tools::unavailable)?
@@ -6100,22 +6108,24 @@ mod tests {
                 arguments_json: arguments.into(),
             };
             let (capability, _) = build_read_operation(&call).unwrap();
-            let file = object_ref("source", ObjectKind::File);
-            tools_for(vec![file.clone()])
+            assert!(
+                tools_for(vec![object_ref("source", ObjectKind::File)])
+                    .preflight_selected_context(&call, capability)
+                    .is_err()
+            );
+            let mut arguments: serde_json::Value =
+                serde_json::from_str(&call.arguments_json).unwrap();
+            arguments["file_result_call_id"] = "listing".into();
+            arguments["entry_name"] = "source".into();
+            let call = ToolCall {
+                arguments_json: arguments.to_string(),
+                ..call
+            };
+            // Candidate preflight accepts a result selector without user attachments.
+            // Dispatch separately verifies its saved receipt, directory consent and grant.
+            tools_for(vec![])
                 .preflight_selected_context(&call, capability)
                 .unwrap();
-            assert!(
-                tools_for(vec![])
-                    .preflight_selected_context(&call, capability)
-                    .is_err(),
-                "{name}"
-            );
-            assert!(
-                tools_for(vec![file, object_ref("other", ObjectKind::File)])
-                    .preflight_selected_context(&call, capability)
-                    .is_err(),
-                "{name}"
-            );
         }
         for name in [
             "inspect_live_spreadsheet",

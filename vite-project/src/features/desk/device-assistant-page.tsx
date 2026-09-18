@@ -11,7 +11,6 @@ import { AssistantImages } from './assistant-images';
 import { AssistantReasoning } from './assistant-reasoning';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
-import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 import { AssistantContextMeter } from './assistant-context-meter';
 import { AssistantComposerTools } from './assistant-composer-tools';
 import { AssistantFileScope } from './assistant-file-scope';
@@ -210,6 +209,7 @@ export function DeviceAssistantWorkspace({
     localPairingAvailable,
     featureProfile,
     assistantEnabled,
+    backTo,
 }: {
     rehearsal?: RehearsalConversation;
     deskId: string;
@@ -217,6 +217,7 @@ export function DeviceAssistantWorkspace({
     localPairingAvailable: boolean;
     featureProfile: DeviceAssistantFeatureProfile;
     assistantEnabled: boolean;
+    backTo?: string;
 }) {
     const { t } = useTranslation();
     const { i18n } = useTranslation();
@@ -715,16 +716,23 @@ export function DeviceAssistantWorkspace({
             {browserTakeoverRequired && (
                 <Link to={`/desk/${encodeURIComponent(deskId)}/browser-setup`}
                     state={{ returnTo: setupOrigin.pathname + setupOrigin.search }} data-testid="browser-remote-takeover"
-                    className="mx-auto flex w-full max-w-4xl shrink-0 items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    className="flex w-full shrink-0 items-center gap-2 border bg-muted/40 px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                     <Monitor className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                     <span className="min-w-0 flex-1">{t('pages.deviceAssistant.browserTakeoverTitle')}</span>
                     <span className="shrink-0 text-xs text-primary">{t('pages.deviceAssistant.browserSetup.open')}</span>
                 </Link>
             )}
-            <Card className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col border-0 shadow-none">
-                <CardHeader className="assistant-header shrink-0 px-0 py-3">
+            <Card className="flex min-h-0 w-full flex-1 flex-col rounded-none border-0 shadow-none">
+                <CardHeader className="assistant-header shrink-0 px-3 py-2">
                     <div data-testid="assistant-title-row" className="flex items-center justify-between gap-2">
-                        <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                            {backTo && (
+                                <Button asChild variant="ghost" size="icon" className="h-8 w-8 shrink-0">
+                                    <Link to={backTo} aria-label={t('pages.deviceAssistant.backToDevice')} title={t('pages.deviceAssistant.backToDevice')}>
+                                        <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+                                    </Link>
+                                </Button>
+                            )}
                             <CardTitle className="flex min-w-0 items-center gap-2 text-base">
                                 <AssistantConnectionIcon connected={isConnected} enabled={assistantEnabled} />
                                 <span title={chat.sessionTarget?.display_name} className="truncate">{t('pages.deviceAssistant.chatTitle')}</span>
@@ -754,7 +762,7 @@ export function DeviceAssistantWorkspace({
                         })}
                     </CardDescription>
                 </CardHeader>
-                <CardContent className="flex min-h-0 flex-1 flex-col gap-3 p-0">
+                <CardContent className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3 pt-0">
                     <div className="relative min-h-0 flex-1">
                     <div ref={scrollRef} onScroll={onScroll} data-testid="assistant-scroll-area"
                         className="assistant-scrollbar h-full overflow-y-auto overscroll-contain [overflow-wrap:anywhere]">
@@ -837,6 +845,7 @@ export function DeviceAssistantWorkspace({
                         connected={isConnected} canCancelProvider={featureProfile.background_task_cancel}
                         cancelling={chat.taskCancelling} onCancel={chat.cancelTask} />
                     <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope}
+                        deskId={deskId} sessionTargetId={chat.sessionTargetReady ? chat.sessionTarget?.target_id : undefined}
                         open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory} />
                     <AssistantPermissionRecords key={permissionHistoryKey} requests={chat.permissionRequests}
@@ -946,7 +955,6 @@ export default function DeviceAssistantPage({
     featureProfile?: DeviceAssistantFeatureProfile | null;
 }) {
     const { id: deskId } = useParams<{ id: string }>();
-    const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const { t } = useTranslation();
     const restricted = useRestrictedSession(deskId);
@@ -993,19 +1001,7 @@ export default function DeviceAssistantPage({
     }
 
     return (
-        <div className="absolute inset-0 mx-auto flex max-w-6xl flex-col gap-3 overflow-hidden p-3 sm:p-6">
-            <div className="flex shrink-0 items-center gap-4">
-                <Button variant="outline" size="icon" onClick={() => navigate(`/desk/${deskId}`)}>
-                    <ArrowLeft className="h-4 w-4" />
-                </Button>
-                <div>
-                    <h1 className="flex items-center gap-2 text-2xl font-bold">
-                        <AiAssistantIcon className="h-6 w-6 text-violet-500" />
-                        {t('pages.deviceAssistant.title')}
-                    </h1>
-                    <p className="text-muted-foreground">{t('pages.deviceAssistant.subtitle')}</p>
-                </div>
-            </div>
+        <div className="absolute inset-0 flex min-w-0 flex-col gap-2 overflow-hidden">
             {searchParams.has('rehearsal') ? <DeviceAssistantRehearsalGate
                 rehearsalId={searchParams.get('rehearsal') ?? ''}
                 deviceId={String(connection.device_id ?? connection.version_info.client_id ?? '')}
@@ -1013,6 +1009,7 @@ export default function DeviceAssistantPage({
                 {row => <DeviceAssistantWorkspace
                     key={row.rehearsal_id}
                     rehearsal={row}
+                    backTo={`/desk/${encodeURIComponent(deskId)}`}
                     deskId={deskId}
                     stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
                     localPairingAvailable={!connection.device_id}
@@ -1021,6 +1018,7 @@ export default function DeviceAssistantPage({
                 />}
             </DeviceAssistantRehearsalGate> : (
                 <DeviceAssistantWorkspace
+                    backTo={`/desk/${encodeURIComponent(deskId)}`}
                     deskId={deskId}
                     stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
                     localPairingAvailable={!connection.device_id}
