@@ -18,7 +18,7 @@ fn proposal() -> DirectoryProposal {
             token: "device-reference".into(),
             snapshot_id: "device-generation".into(),
             object_kind: ObjectKind::Directory,
-            expires_at: "2030-01-01T00:00:00Z".into(),
+            expires_at: String::new(),
         },
         purpose: "Create the requested text document".into(),
         source: DirectoryConsentSource::ModelProposal,
@@ -83,7 +83,7 @@ fn artifact_boundary_requires_exact_current_directory_without_granting_tools() {
     assert!(
         validate_artifact_scope(&session, tool, &["selected:server_resolved".into()], 1).is_err()
     );
-    assert!(validate_artifact_scope(&session, tool, &resources, u64::MAX).is_err());
+    assert!(validate_artifact_scope(&session, tool, &resources, u64::MAX).is_ok());
     session
         .file_scope
         .revoke(&subject(), 2, "directory-request")
@@ -267,28 +267,30 @@ fn revoke_fences_old_dispatch_and_cannot_be_undone_by_delayed_approval() {
 }
 
 #[test]
-fn stale_revision_and_expired_reference_fail_without_changing_state() {
+fn directory_consent_has_no_time_limit_but_still_checks_revision_and_revocation() {
     let mut scope = SessionFileScope::default();
-    scope.propose(&subject(), 0, proposal(), 1).unwrap();
+    let mut selected = proposal();
+    selected.directory.expires_at.clear();
+    scope.propose(&subject(), 0, selected, 1).unwrap();
     let before = scope.clone();
     assert_eq!(
         scope.decide(&subject(), 0, "directory-request", true, 1),
         Err(FileScopeError::StaleRevision)
     );
-    assert_eq!(
-        scope.decide(&subject(), 1, "directory-request", true, u64::MAX),
-        Err(FileScopeError::ExpiredReference)
-    );
     assert_eq!(scope, before);
     scope
-        .decide(&subject(), 1, "directory-request", true, 1)
+        .decide(&subject(), 1, "directory-request", true, u64::MAX)
         .unwrap();
-    assert_eq!(
-        scope.approved_directory(&subject(), 2, "directory-request", u64::MAX),
-        Err(FileScopeError::ExpiredReference)
+    assert!(
+        scope
+            .approved_directory(&subject(), 2, "directory-request", u64::MAX)
+            .is_ok()
     );
-    // Expiry must never prevent revocation.
     scope.revoke(&subject(), 2, "directory-request").unwrap();
+    assert_eq!(
+        scope.approved_directory(&subject(), 3, "directory-request", u64::MAX),
+        Err(FileScopeError::NotApproved)
+    );
 }
 
 #[test]
@@ -327,12 +329,6 @@ fn rejects_bad_metadata_and_bounds_directory_records() {
     }
     let mut bad = proposal();
     bad.canonical_path.push('\n');
-    assert_eq!(
-        scope.propose(&subject(), 0, bad, 1),
-        Err(FileScopeError::InvalidProposal)
-    );
-    let mut bad = proposal();
-    bad.directory.expires_at = "not a timestamp".into();
     assert_eq!(
         scope.propose(&subject(), 0, bad, 1),
         Err(FileScopeError::InvalidProposal)

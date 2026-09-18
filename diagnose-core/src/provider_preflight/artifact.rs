@@ -272,11 +272,7 @@ impl ArtifactCallPreflight {
             return Err(unavailable());
         }
         let target = directories[0].clone();
-        let expiry = chrono::DateTime::parse_from_rfc3339(&target.expires_at)
-            .ok()
-            .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
-            .filter(|expiry| *expiry > now_unix_ms)
-            .ok_or_else(unavailable)?;
+        let expiry = u64::MAX;
         let action = artifact_action_from_call(call)?;
         let action = ComputerActionKind::File(action);
         if action.required_capability() != capability.required_capability {

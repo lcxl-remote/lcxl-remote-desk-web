@@ -89,7 +89,7 @@ fn saved_directory_requires_current_approval_and_exact_device_object() {
         assert!(!artifact::permits_directory_resolution(
             &contract, &scheduled, &changed, 1
         ));
-        assert!(!artifact::permits_directory_resolution(
+        assert!(artifact::permits_directory_resolution(
             &contract,
             &scheduled,
             &proposal,
@@ -145,7 +145,7 @@ fn saved_directory_requires_current_approval_and_exact_device_object() {
         let restored: PersistedAgentSession =
             serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
         assert!(bind(&restored, &resources, 1).is_ok());
-        assert!(bind(&restored, &resources, u64::MAX).is_err());
+        assert!(bind(&restored, &resources, u64::MAX).is_ok());
         let mut other_device = restored.clone();
         other_device.device_id = "other-device".into();
         assert!(bind(&other_device, &resources, 1).is_err());

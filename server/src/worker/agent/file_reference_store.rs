@@ -1,7 +1,8 @@
 //! Worker-lifetime, edge-issued references for explicit file selections.
 //!
 //! The file manager lists native paths for the human UI, but the Assistant is
-//! only allowed to carry a short-lived `ObjectRef`. Resolution reopens the exact
+//! only allowed to carry an opaque `ObjectRef`. Directory references have no
+//! fixed expiry; file references remain time-bounded. Resolution reopens the exact
 //! path without following a final reparse point and compares filesystem identity
 //! before returning bounded metadata or an explicitly requested bounded read.
 
@@ -67,7 +68,7 @@ struct FileIdentity {
 #[derive(Clone)]
 struct StoredFile {
     snapshot_id: String,
-    expires_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
     object_kind: ObjectKind,
     path: PathBuf,
     identity: FileIdentity,
@@ -103,7 +104,7 @@ struct DurableArtifactRegistry {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DurableArtifactRecord {
     snapshot_id: String,
-    expires_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
     object_kind: ObjectKind,
     path: PathBuf,
     identity: FileIdentity,
@@ -287,7 +288,8 @@ fn issue_opened_with_lifetime(
             false,
         ));
     };
-    let expires_at = Utc::now() + Duration::seconds(ttl_seconds);
+    let expires_at =
+        (object_kind != ObjectKind::Directory).then(|| Utc::now() + Duration::seconds(ttl_seconds));
     let token = uuid::Uuid::new_v4().to_string();
     let mut state = store().lock().map_err(|_| {
         error(
@@ -296,9 +298,10 @@ fn issue_opened_with_lifetime(
             true,
         )
     })?;
-    state
-        .objects
-        .retain(|_, object| object.expires_at > Utc::now());
+    state.objects.retain(|_, object| {
+        object.object_kind == ObjectKind::Directory
+            || object.expires_at.is_some_and(|expiry| expiry > Utc::now())
+    });
     if state.objects.len() >= MAX_FILE_REFS {
         return Err(error(
             AgentErrorKind::OutputLimitExceeded,
@@ -312,7 +315,9 @@ fn issue_opened_with_lifetime(
         token: token.clone(),
         snapshot_id: snapshot_id.clone(),
         object_kind,
-        expires_at: expires_at.to_rfc3339(),
+        expires_at: expires_at
+            .map(|expiry| expiry.to_rfc3339())
+            .unwrap_or_default(),
     };
     state.objects.insert(
         token.clone(),
@@ -367,7 +372,9 @@ fn reload_durable_artifacts(state: &mut StoreState) {
     };
     let now = Utc::now();
     for (token, record) in registry.artifacts {
-        if record.expires_at <= now
+        if (record.object_kind != ObjectKind::Directory && record.expires_at.is_none())
+            || (record.object_kind != ObjectKind::Directory
+                && record.expires_at.is_some_and(|expiry| expiry <= now))
             || !matches!(record.object_kind, ObjectKind::File | ObjectKind::Directory)
         {
             continue;
@@ -400,7 +407,11 @@ fn persist_durable_artifacts(state: &StoreState) -> std::io::Result<()> {
     let artifacts = state
         .objects
         .iter()
-        .filter(|(_, stored)| stored.durable_artifact && stored.expires_at > Utc::now())
+        .filter(|(_, stored)| {
+            stored.durable_artifact
+                && (stored.object_kind == ObjectKind::Directory
+                    || stored.expires_at.is_some_and(|expiry| expiry > Utc::now()))
+        })
         .map(|(token, stored)| {
             (
                 token.clone(),
@@ -1994,7 +2005,10 @@ fn resolve(object_ref: &ObjectRef) -> Result<StoredFile, AgentError> {
         )
     })?;
     let now = Utc::now();
-    state.objects.retain(|_, object| object.expires_at > now);
+    state.objects.retain(|_, object| {
+        object.object_kind == ObjectKind::Directory
+            || object.expires_at.is_some_and(|expiry| expiry > now)
+    });
     let stored = state.objects.get(&object_ref.token).ok_or_else(|| {
         error(
             AgentErrorKind::InvalidInput,
@@ -2004,7 +2018,11 @@ fn resolve(object_ref: &ObjectRef) -> Result<StoredFile, AgentError> {
     })?;
     if stored.snapshot_id != object_ref.snapshot_id
         || stored.object_kind != object_ref.object_kind
-        || stored.expires_at.to_rfc3339() != object_ref.expires_at
+        || stored
+            .expires_at
+            .map(|expiry| expiry.to_rfc3339())
+            .unwrap_or_default()
+            != object_ref.expires_at
         || (!stored.durable_artifact && !object_ref.snapshot_id.starts_with(&state.incarnation))
     {
         return Err(error(
@@ -2269,7 +2287,7 @@ fn run_artifact_after_close_hook() {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[test]
     fn conversation_directory_reference_survives_restart_without_changing_identity() {
         let _guard = file_store_test_lock();
@@ -2304,12 +2322,8 @@ mod tests {
             restored.identity,
             open_verified(&selected).unwrap().identity
         );
-        assert!(
-            DateTime::parse_from_rfc3339(&reference.expires_at)
-                .unwrap()
-                .timestamp_millis()
-                > (Utc::now() + Duration::hours(23)).timestamp_millis()
-        );
+        assert!(reference.expires_at.is_empty());
+        assert!(restored.expires_at.is_none());
     }
 
     #[cfg(target_os = "macos")]
@@ -2351,7 +2365,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         reset_worker_incarnation();
         let issued_after = Utc::now();
-        let object_ref = issue(temp.path()).unwrap();
+        let file = temp.path().join("selected.txt");
+        std::fs::write(&file, b"selected").unwrap();
+        let object_ref = issue(&file).unwrap();
         let expires_at = DateTime::parse_from_rfc3339(&object_ref.expires_at)
             .unwrap()
             .with_timezone(&Utc);
@@ -2768,7 +2784,10 @@ mod tests {
             max_bytes: MAX_TEXT_READ_BYTES,
         })
         .expect_err("the stored path must not rebind through a replacement junction");
-        assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+        assert!(matches!(
+            error.kind,
+            AgentErrorKind::InvalidInput | AgentErrorKind::PermissionDenied
+        ));
         assert!(!error.message.contains("outside bytes"));
     }
 

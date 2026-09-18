@@ -651,6 +651,9 @@ impl IworkCallPreflight {
             return Err(unavailable());
         }
         for reference in &authority_refs {
+            if reference.object_kind == ObjectKind::Directory {
+                continue;
+            }
             let expiry = chrono::DateTime::parse_from_rfc3339(&reference.expires_at)
                 .ok()
                 .and_then(|time| u64::try_from(time.timestamp_millis()).ok())

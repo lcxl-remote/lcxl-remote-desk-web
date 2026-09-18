@@ -184,12 +184,6 @@ fn close(
             "Scheduled task was cancelled while waiting for approval"
         } else if rejected(session, stored_reference) {
             "Scheduled task approval was denied by the owner"
-        } else if chrono::DateTime::parse_from_rfc3339(now)
-            .ok()
-            .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
-            .is_some_and(|time| directory_expired(session, stored_reference, time))
-        {
-            "Scheduled task directory reference expired while waiting for approval"
         } else {
             "Scheduled task approval exceeded the run time limit"
         }
@@ -469,30 +463,4 @@ pub fn approved(session: &PersistedAgentSession, stored_reference: &str, now_uni
         }
         _ => false,
     }
-}
-
-/// A directory reference cannot be refreshed from a saved owner decision. End
-/// its wait when the original device-issued reference reaches its expiry.
-pub fn directory_expired(
-    session: &PersistedAgentSession,
-    stored_reference: &str,
-    now_unix_ms: u64,
-) -> bool {
-    let Some(id) = stored_reference.strip_prefix("directory:") else {
-        return false;
-    };
-    if reference(session, id).as_deref() != Some(stored_reference) {
-        return false;
-    }
-    session
-        .file_scope
-        .records()
-        .iter()
-        .find(|record| record.proposal.request_id == id)
-        .is_some_and(|record| {
-            chrono::DateTime::parse_from_rfc3339(&record.proposal.directory.expires_at)
-                .ok()
-                .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
-                .is_none_or(|expiry| expiry <= now_unix_ms)
-        })
 }

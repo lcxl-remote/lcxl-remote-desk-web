@@ -115,9 +115,13 @@ fn derived_reference(kind: ObjectKind) -> ObjectRef {
 }
 
 fn attachment(id: &str, kind: ContextAttachmentKind, reference: &ObjectRef) -> ContextAttachment {
-    let expires_at_unix_ms = chrono::DateTime::parse_from_rfc3339(&reference.expires_at)
-        .unwrap()
-        .timestamp_millis() as u64;
+    let expires_at_unix_ms = if reference.object_kind.is_lifecycle_bound() {
+        u64::MAX
+    } else {
+        chrono::DateTime::parse_from_rfc3339(&reference.expires_at)
+            .unwrap()
+            .timestamp_millis() as u64
+    };
     let destination = DestinationIdentity::Model {
         connection_id: "gateway".into(),
         connection_revision: 1,

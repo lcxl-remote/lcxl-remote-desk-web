@@ -116,18 +116,12 @@ impl ScheduleStore {
                 .as_deref()
                 .ok_or(ScheduleStoreError::Invalid)?,
         );
-        let directory_expired = desk_diagnose_core::schedule::permission_wait::directory_expired(
-            &session,
-            work.result_ref
-                .as_deref()
-                .ok_or(ScheduleStoreError::Invalid)?,
-            u64::try_from(now).map_err(|_| ScheduleStoreError::Invalid)?,
-        );
+
         let cancelled = work.cancel_requested_at.is_some();
         let policy = crate::schedule_budget_policy::read(&txn).await?;
         let budget_rejected =
             !desk_diagnose_core::schedule::policy::permits(&policy, &contract.contract().budget);
-        if !cancelled && !denied && !directory_expired && !budget_rejected && now < deadline {
+        if !cancelled && !denied && !budget_rejected && now < deadline {
             return Ok(false);
         }
         // Approval entry required every original action to be complete. Recheck
@@ -208,8 +202,6 @@ impl ScheduleStore {
                     "budget_policy_exceeded"
                 } else if denied {
                     "approval_denied"
-                } else if directory_expired {
-                    "directory_expired"
                 } else {
                     "approval_timeout"
                 }

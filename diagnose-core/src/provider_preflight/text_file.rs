@@ -818,16 +818,12 @@ impl ResultFileRead {
             }
             let file = crate::file_scope::select_output_directory(session, call, now)
                 .map_err(|_| unavailable())?;
-            let expiry = chrono::DateTime::parse_from_rfc3339(&file.expires_at)
-                .ok()
-                .and_then(|t| u64::try_from(t.timestamp_millis()).ok())
-                .ok_or_else(unavailable)?;
             return Ok(Self {
                 file,
                 additional: vec![],
                 tool_name: call.name.clone(),
                 source_envelope_id: owner.envelope_id.clone(),
-                valid_until_unix_ms: expiry.min(now.saturating_add(120_000)),
+                valid_until_unix_ms: now.saturating_add(120_000),
             });
         }
         let evidence = read_evidence(session, call, now)?;
@@ -1181,6 +1177,9 @@ impl TextMutationPreflight {
         }
         action.validate_text_mutation().map_err(|_| unavailable())?;
         let expiry = |reference: &ObjectRef| {
+            if reference.object_kind == ObjectKind::Directory {
+                return Ok(u64::MAX);
+            }
             chrono::DateTime::parse_from_rfc3339(&reference.expires_at)
                 .ok()
                 .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
@@ -1257,7 +1256,7 @@ mod tests {
                         token: "root".into(),
                         snapshot_id: "root-snapshot".into(),
                         object_kind: ObjectKind::Directory,
-                        expires_at: "2099-01-01T00:00:00Z".into(),
+                        expires_at: String::new(),
                     },
                 },
                 1,

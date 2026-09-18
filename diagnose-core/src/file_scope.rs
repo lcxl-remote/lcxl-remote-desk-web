@@ -219,7 +219,6 @@ pub struct SessionFileScope {
 pub enum FileScopeError {
     WrongSubject,
     InvalidProposal,
-    ExpiredReference,
     StaleRevision,
     RequestConflict,
     InvalidTransition,
@@ -428,7 +427,7 @@ pub(crate) fn validate_resolved_proposal(
     validate_proposal(proposal, now)
 }
 
-fn validate_proposal(proposal: &DirectoryProposal, now: u64) -> Result<(), FileScopeError> {
+fn validate_proposal(proposal: &DirectoryProposal, _now: u64) -> Result<(), FileScopeError> {
     if !valid_id(&proposal.request_id)
         || !valid_id(&proposal.directory.token)
         || !valid_id(&proposal.directory.snapshot_id)
@@ -444,16 +443,6 @@ fn validate_proposal(proposal: &DirectoryProposal, now: u64) -> Result<(), FileS
         || proposal.purpose.chars().any(char::is_control)
     {
         return Err(FileScopeError::InvalidProposal);
-    }
-    // Native path canonicalization belongs to the device, not the central OS.
-    let expiry = chrono::DateTime::parse_from_rfc3339(&proposal.directory.expires_at)
-        .map_err(|_| FileScopeError::InvalidProposal)?
-        .timestamp_millis();
-    if u64::try_from(expiry)
-        .ok()
-        .is_none_or(|expiry| expiry <= now)
-    {
-        return Err(FileScopeError::ExpiredReference);
     }
     Ok(())
 }

@@ -22,30 +22,26 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(baseTime); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe.each(['C:\\用户资料\\季度 报告', '/Users/owner/季度 报告'])('directory approval: %s', path => {
-    it.each(['scheduled', 'conversation'])('%s expires while the page stays open, without disabling rejection', async surface => {
+    it.each(['scheduled', 'conversation'])('%s remains approvable without a directory time limit', async surface => {
         const input = props(path);
         const update = vi.fn(() => true);
         if (surface === 'scheduled') render(<RunDirectories {...input} />);
         else render(<AssistantFileScope scope={input.snapshot.fileScope} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);
         expect(approve()).toBeEnabled();
         await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-        expect(approve()).toBeDisabled();
-        expect(screen.getByText('pages.deviceAssistant.directories.expired')).toBeInTheDocument();
-        fireEvent.click(approve());
-        expect(input.client.request).not.toHaveBeenCalled();
-        expect(update).not.toHaveBeenCalled();
-        expect(reject()).toBeEnabled();
-        await act(async () => { fireEvent.click(reject()); });
-        if (surface === 'scheduled') expect(input.client.request).toHaveBeenCalledWith(expect.objectContaining({ approve: false, expected_scope_revision: 7 }));
-        else expect(update).toHaveBeenCalledWith(expect.objectContaining({ approve: false, expected_revision: 7 }), expect.any(String));
+        expect(approve()).toBeEnabled();
+        expect(screen.queryByText('pages.deviceAssistant.directories.expired')).toBeNull();
+        await act(async () => { fireEvent.click(approve()); });
+        if (surface === 'scheduled') expect(input.client.request).toHaveBeenCalledWith(expect.objectContaining({ approve: true, expected_scope_revision: 7 }));
+        else expect(update).toHaveBeenCalledWith(expect.objectContaining({ approve: true, expected_revision: 7 }), expect.any(String));
     });
 
-    it('refreshes expiry on focus after a suspended clock and accepts a renewed reference', () => {
+    it('does not expire a directory after resuming a suspended page', () => {
         const input = props(path);
         const view = render(<RunDirectories {...input} />);
         vi.setSystemTime(baseTime + 2000);
         fireEvent.focus(window);
-        expect(approve()).toBeDisabled();
+        expect(approve()).toBeEnabled();
         const renewed = props(path);
         renewed.snapshot.fileScope.directories[0].referenceExpiresAt = new Date(baseTime + 5000).toISOString();
         view.rerender(<RunDirectories {...renewed} />);
@@ -67,7 +63,7 @@ describe.each(['C:\\用户资料\\季度 报告', '/Users/owner/季度 报告'])
         expect(screen.queryByText('schedules.approval.recorded')).not.toBeInTheDocument();
     });
 
-    it('keeps revocation available when an approved reference has expired', async () => {
+    it('keeps revocation available after time passes', async () => {
         const input = props(path);
         input.snapshot.fileScope.directories[0].state = 'approved';
         render(<RunDirectories {...input} />);
@@ -79,12 +75,12 @@ describe.each(['C:\\用户资料\\季度 报告', '/Users/owner/季度 报告'])
         expect(input.client.request).toHaveBeenCalledWith(expect.objectContaining({ operation: 'revoke_run_directory', expected_scope_revision: 7 }));
     });
 
-    it('does not approve an invalid expiry and does not replay an uncertain rejection', async () => {
+    it('accepts a timeless directory and does not replay an uncertain rejection', async () => {
         const input = props(path);
-        input.snapshot.fileScope.directories[0].referenceExpiresAt = 'invalid';
+        input.snapshot.fileScope.directories[0].referenceExpiresAt = '';
         input.client.request = vi.fn().mockRejectedValue(new Error('lost response'));
         render(<RunDirectories {...input} />);
-        expect(approve()).toBeDisabled();
+        expect(approve()).toBeEnabled();
         await act(async () => { fireEvent.click(reject()); });
         expect(input.client.request).toHaveBeenCalledTimes(1);
         expect(input.onReload).toHaveBeenCalledTimes(1);

@@ -78,6 +78,7 @@ impl ObjectKind {
                 | Self::Window
                 | Self::UiElement
                 | Self::ApplicationLaunchTarget
+                | Self::Directory
         )
     }
 }
@@ -93,7 +94,7 @@ pub struct ObjectRef {
     pub token: String,
     pub snapshot_id: String,
     pub object_kind: ObjectKind,
-    /// Empty for lifecycle-bound desktop objects; RFC3339 for other object types.
+    /// Empty for lifecycle-bound objects; RFC3339 for other object types.
     /// This field never grants authority.
     pub expires_at: String,
 }
@@ -1330,7 +1331,6 @@ impl FilePatchAction {
         if directory.object_kind != ObjectKind::Directory
             || directory.token.is_empty()
             || directory.snapshot_id.is_empty()
-            || directory.expires_at.is_empty()
             || digest.len() != 64
             || !digest
                 .bytes()
@@ -1877,10 +1877,6 @@ fn validate_actions(
                 (
                     "batch_document.destination_parent.snapshot_id",
                     output.destination_parent.snapshot_id.as_str(),
-                ),
-                (
-                    "batch_document.destination_parent.expires_at",
-                    output.destination_parent.expires_at.as_str(),
                 ),
                 (
                     "batch_document.native_file_name",

@@ -2554,7 +2554,7 @@ export type ObjectKind = ObjectKindEnumKey;
 */
 export type ObjectRef = {
     /**
-     * @description Empty for lifecycle-bound desktop objects; RFC3339 for other object types.\nThis field never grants authority.
+     * @description Empty for lifecycle-bound objects; RFC3339 for other object types.\nThis field never grants authority.
      * @type string
     */
     expires_at: string;
