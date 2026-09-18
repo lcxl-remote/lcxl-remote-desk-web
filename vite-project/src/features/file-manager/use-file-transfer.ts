@@ -239,7 +239,8 @@ interface DownloadMeta {
 }
 
 
-export function useFileTransfer(deskId: string | undefined, orgId?: number, fixedSessionTargetId?: string) {
+// null pins the anonymous portable worker; undefined permits target selection.
+export function useFileTransfer(deskId: string | undefined, orgId?: number, fixedSessionTargetId?: string | null) {
     const wsRef = useRef<WebSocket | null>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const dcRef = useRef<RTCDataChannel | null>(null);
@@ -797,7 +798,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
                     errorCode === deskErrorCodeEnum.SESSION_SELECTION_REQUIRED
                     || errorCode === deskErrorCodeEnum.SESSION_TARGET_STALE
                 ) {
-                    if (fixedSessionTargetId) {
+                    if (fixedSessionTargetId !== undefined) {
                         teardownSession(new SignalingError(message || "Session target is unavailable", errorCode));
                         return;
                     }

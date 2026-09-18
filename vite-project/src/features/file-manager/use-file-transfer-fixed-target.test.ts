@@ -9,8 +9,8 @@ let saved: SignalingGlobals;
 beforeEach(() => { saved = installSignalingStubs(); });
 afterEach(() => { cleanup(); restoreSignalingStubs(saved); });
 
-it('refuses a stale fixed target without falling back to another user session', async () => {
-    const { result } = renderHook(() => useFileTransfer('desk-A', undefined, 'old-target'));
+it.each(['old-target', null])('refuses stale fixed target %s without switching sessions', async (target) => {
+    const { result } = renderHook(() => useFileTransfer('desk-A', undefined, target));
     let pending!: Promise<unknown>;
     act(() => { pending = result.current.listFiles({ path: '/', page_no: 1, page_count: 100, directories_only: true }).catch(error => error); });
     await flush();

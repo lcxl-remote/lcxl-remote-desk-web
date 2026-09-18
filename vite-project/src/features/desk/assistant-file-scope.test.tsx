@@ -7,15 +7,29 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => k
 vi.mock('@/features/file-manager/remote-directory-picker', () => ({ RemoteDirectoryPicker: ({ onSelect }: { onSelect: (path: string) => void }) => <button onClick={() => onSelect('/private/tmp/a directory ')}>choose</button> }));
 
 describe('conversation directories', () => {
-    it('adds the exact path with the observed scope revision and never submits a form', () => {
+    it.each(['target', null])('adds a directory for selected target %s with the observed revision', (target) => {
         const update = vi.fn((..._args: unknown[]) => true);
-        render(<AssistantFileScope deskId="device" sessionTargetId="target" scope={{ revision: 7, directories: [] }} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);
+        render(<AssistantFileScope deskId="device" sessionTargetId={target} scope={{ revision: 7, directories: [] }} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);
         expect(screen.queryByRole('textbox')).toBeNull();
         const button = screen.getByRole('button', { name: 'pages.deviceAssistant.directories.add' });
         expect(button.getAttribute('type')).toBe('button');
         fireEvent.click(button);
         fireEvent.click(screen.getByText("choose"));
         expect(update).toHaveBeenCalledWith({ kind: 'select_directory', path: '/private/tmp/a directory ', purpose: 'pages.deviceAssistant.directories.manualPurpose', expected_revision: 7 }, 'pages.deviceAssistant.directories.timeout');
+    });
+
+    it('blocks unresolved targets and closes the picker when target readiness is lost', () => {
+        const props = { deskId: 'device', scope: { revision: 0, directories: [] }, open: true, onOpenChange: vi.fn(), disabled: false, onUpdate: vi.fn() };
+        const view = render(<AssistantFileScope {...props} />);
+        const add = screen.getByRole('button', { name: 'pages.deviceAssistant.directories.add' });
+        expect(add).toBeDisabled();
+        view.rerender(<AssistantFileScope {...props} sessionTargetId={null} />);
+        expect(add).toBeEnabled();
+        fireEvent.click(add);
+        expect(screen.getByText('choose')).toBeInTheDocument();
+        view.rerender(<AssistantFileScope {...props} />);
+        expect(add).toBeDisabled();
+        expect(screen.queryByText('choose')).toBeNull();
     });
 
     it('binds approval and revocation to exact directory ids and current revision', () => {

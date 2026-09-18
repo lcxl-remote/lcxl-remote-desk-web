@@ -9,7 +9,7 @@ const pageSize = 100;
 
 export function RemoteDirectoryPicker({ deskId, sessionTargetId, disabled, onSelect, onCancel }: {
     deskId: string;
-    sessionTargetId: string;
+    sessionTargetId: string | null;
     disabled: boolean;
     onSelect: (path: string) => boolean;
     onCancel: () => void;

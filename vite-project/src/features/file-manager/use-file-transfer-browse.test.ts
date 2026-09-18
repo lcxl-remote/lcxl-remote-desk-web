@@ -8,15 +8,15 @@ let saved: SignalingGlobals;
 beforeEach(() => { saved = installSignalingStubs(); });
 afterEach(() => { cleanup(); restoreSignalingStubs(saved); });
 
-it('browses a fixed remote target and closes only its own socket without WebRTC', async () => {
+it.each(['target-A', null])('browses fixed target %s without WebRTC', async (target) => {
     const construct = vi.fn(function () { throw new Error('WebRTC must not be used'); });
     globalThis.RTCPeerConnection = construct as unknown as typeof RTCPeerConnection;
-    const { result } = renderHook(() => useFileTransfer('desk-A', undefined, 'target-A'));
+    const { result } = renderHook(() => useFileTransfer('desk-A', undefined, target));
     let pending!: Promise<unknown>;
     act(() => { pending = result.current.listFiles({ path: '/', page_no: 1, page_count: 100, directories_only: true }); });
     const ws = await openSession();
     await flush();
-    expect(sentSignalingOfType(ws, SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS)[0].signaling_data.session_target_id).toBe('target-A');
+    expect(sentSignalingOfType(ws, SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS)[0].signaling_data.session_target_id).toBe(target ?? undefined);
     const request = sentSignalingOfType(ws, SIGNALING_TYPE_CODE_LIST_FILES)[0];
     expect(request.signaling_data.directories_only).toBe(true);
     await deliverSignaling({ request_id: request.request_id, signaling_type: SIGNALING_TYPE_CODE_FILES_LISTED, signaling_data: { file_info_list: [], total_count: 0 } });

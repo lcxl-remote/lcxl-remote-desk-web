@@ -845,7 +845,7 @@ export function DeviceAssistantWorkspace({
                         connected={isConnected} canCancelProvider={featureProfile.background_task_cancel}
                         cancelling={chat.taskCancelling} onCancel={chat.cancelTask} />
                     <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope}
-                        deskId={deskId} sessionTargetId={chat.sessionTargetReady ? chat.sessionTarget?.target_id : undefined}
+                        deskId={deskId} sessionTargetId={chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
                         open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory} />
                     <AssistantPermissionRecords key={permissionHistoryKey} requests={chat.permissionRequests}

@@ -1,5 +1,7 @@
 # AI Diagnostics
 
+In portable mode, once the built-in desktop session is ready, **Add directory** works without selecting a separate desktop session. Service mode keeps directory browsing bound to the selected desktop session.
+
 The extension offers Allow current site and Allow all HTTP and HTTPS websites. The latter requests optional access only after a click and Chrome approval. It excludes local files, and browser internal pages, and does not replace AI action authorization. Manage or revoke site access in Chrome extension settings.
 
 

@@ -24,7 +24,8 @@ export type AssistantDirectoryOperation =
 
 export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpdate, deskId, sessionTargetId }: {
     deskId?: string;
-    sessionTargetId?: string;
+    // undefined: unresolved; null: selected anonymous in-process worker.
+    sessionTargetId?: string | null;
     scope: AssistantFileScopeView;
     open: boolean;
     onOpenChange: (open: boolean) => void;
@@ -42,10 +43,10 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
                 <SheetDescription>{t('pages.deviceAssistant.directories.hint')}</SheetDescription>
             </SheetHeader>
             <div className="space-y-2 px-4">
-                <Button type="button" disabled={disabled || !sessionTargetId} onClick={() => setBrowsing(value => !value)}>
+                <Button type="button" disabled={disabled || !deskId || sessionTargetId === undefined} onClick={() => setBrowsing(value => !value)}>
                     {t('pages.deviceAssistant.directories.add')}
                 </Button>
-                {open && browsing && deskId && sessionTargetId && <RemoteDirectoryPicker
+                {open && browsing && deskId && sessionTargetId !== undefined && <RemoteDirectoryPicker
                     key={`${deskId}:${sessionTargetId}`} deskId={deskId} sessionTargetId={sessionTargetId}
                     disabled={disabled} onSelect={path => submit({ kind: 'select_directory', path,
                         purpose: t('pages.deviceAssistant.directories.manualPurpose'), expected_revision: scope.revision })}

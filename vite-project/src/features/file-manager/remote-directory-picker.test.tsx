@@ -13,17 +13,17 @@ const key = (name: string) => `pages.deviceAssistant.directories.${name}`;
 describe('remote directory picker', () => {
     beforeEach(() => { vi.clearAllMocks(); h.info.mockResolvedValue({ name: 'Windows' }); });
     afterEach(cleanup);
-    it('cannot select the virtual root, selects a drive and uses server-side filtering', async () => {
+    it.each(['target', null])('selects a drive for target %s with server-side filtering', async (target) => {
         h.list.mockResolvedValueOnce({ file_info_list: [{ name: 'C:\\', path: 'C:\\' }], total_count: 1 })
             .mockResolvedValue({ file_info_list: [], total_count: 0 });
         const select = vi.fn();
-        const view = render(<RemoteDirectoryPicker deskId="device" sessionTargetId="target" disabled={false} onSelect={select} onCancel={() => {}} />);
+        const view = render(<RemoteDirectoryPicker deskId="device" sessionTargetId={target} disabled={false} onSelect={select} onCancel={() => {}} />);
         fireEvent.click(await screen.findByRole('button', { name: 'C:\\' }));
         await waitFor(() => expect(screen.getByRole('button', { name: key('select') })).toBeEnabled());
         fireEvent.click(screen.getByRole('button', { name: key('select') }));
         expect(select).toHaveBeenCalledWith('C:\\');
         expect(h.list).toHaveBeenLastCalledWith({ path: 'C:\\', page_no: 1, page_count: 100, directories_only: true });
-        expect(h.hook).toHaveBeenCalledWith('device', undefined, 'target');
+        expect(h.hook).toHaveBeenCalledWith('device', undefined, target);
         view.unmount();
         expect(h.close).toHaveBeenCalled();
     });
