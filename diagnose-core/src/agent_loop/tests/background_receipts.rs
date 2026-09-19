@@ -367,6 +367,7 @@ async fn background_receipt_keeps_original_call_and_label_separate_from_wait_sta
         .unwrap();
     assert_ne!(status.message_id, result.message_id);
     let label = status.data_envelope.as_ref().unwrap();
+    assert_eq!(label.provenance.source_tool_name, "wait_for_task");
     assert_eq!(
         label.provenance.source_provider_id,
         crate::dynamic_run::RUN_CONTROL_PROVIDER_ID

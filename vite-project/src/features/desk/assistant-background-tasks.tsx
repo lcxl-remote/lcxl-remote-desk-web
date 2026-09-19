@@ -1,3 +1,4 @@
+import { AssistantCodeBlock } from './assistant-code-block';
 import { Disclosure } from '@/components/ui/disclosure';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -65,7 +66,7 @@ export function AssistantBackgroundTasks({ open, onOpenChange, commands, provide
                     <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.backgroundUpdated', { time: formatLocalTime(task.updatedAt) })}</p>
                     {task.result != null ? <Disclosure title={<>{t('pages.aiAssistant.tasks.result')}</>} summaryClassName="cursor-pointer text-sm">
 
-                        <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">{task.result}</pre>
+                        <AssistantCodeBlock text={task.result} />
                         {task.truncated && <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.tasks.truncated')}</p>}
                     </Disclosure> : <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.tasks.noResult')}</p>}
                     {task.supportsCancel && ['running', 'outcome_unknown'].includes(task.state) && <Button type="button" size="sm" variant="outline"

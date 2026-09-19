@@ -27,7 +27,10 @@ describe('command receipt presentation', () => {
         expect(parseCommandReceipt(text)).toBeNull();
         const { container } = render(<AssistantCommandResult text={text} />);
         expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
-        expect(container.querySelector('pre')?.textContent).toBe(text);
+        const displayed = container.querySelector('pre')?.textContent;
+        if (text.startsWith('{') && text !== '{bad json') {
+            expect(JSON.parse(displayed!)).toEqual(JSON.parse(text));
+        } else expect(displayed).toBe(text);
     });
 
     it('is collapsed initially and expands into labeled fields with independently collapsed raw data', () => {
@@ -38,7 +41,7 @@ describe('command receipt presentation', () => {
         fireEvent.click(details.querySelector('button[aria-expanded]')!);
         expect(details.getAttribute('data-state') === 'open').toBe(true);
         expect(screen.getByText('pages.aiAssistant.commandReceipt.exitCode')).toBeTruthy();
-        expect(screen.getByText('1')).toBeTruthy();
+        expect(screen.getByText('1', { selector: 'dd' })).toBeTruthy();
         expect(screen.getByText('pages.aiAssistant.commandReceipt.milliseconds: 1,234')).toBeTruthy();
         expect(screen.getByText('Permission denied')).toBeTruthy();
         expect(screen.getByText('pages.aiAssistant.commandReceipt.truncated')).toBeTruthy();

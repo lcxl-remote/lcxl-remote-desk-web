@@ -1,14 +1,10 @@
+import { AssistantCodeBlock } from './assistant-code-block';
 import { Disclosure } from '@/components/ui/disclosure';
 import { useState } from 'react';
 import { CheckCircle2, CircleHelp, Loader2, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { AiAssistantToolActivity } from './use-ai-assistant-chat';
 import { hasUnknownActionResult } from './action-result-status';
-
-function formatPayload(value: string) {
-    try { return JSON.stringify(JSON.parse(value), null, 2); }
-    catch { return value; }
-}
 
 function batchResult(tool: AiAssistantToolActivity) {
     if (!['execute_ui_actions', 'send_background_input'].includes(tool.name) || !tool.output) return null;
@@ -57,12 +53,10 @@ export function AssistantToolCall({ tool, running }: { tool?: AiAssistantToolAct
 
         {open && <div className="mt-3 min-w-0 space-y-3 text-xs">
             {tool.permissionReason && <p className="whitespace-pre-wrap break-words">{t('pages.aiAssistant.permissionReasonLabel', { reason: tool.permissionReason })}</p>}
-            <div><p className="mb-1 font-medium">{t(`${prefix}input`)}</p>
-                <pre className="max-h-80 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere]">{tool.name === 'unknown' ? t(`${prefix}missingInput`) : formatPayload(tool.argumentsJson)}</pre></div>
-            <div><p className="mb-1 font-medium">{t(`${prefix}output`)}</p>
-                <pre className="max-h-80 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere]">{tool.output === null
-                    ? t(`${prefix}${running && tool.status === 'running' ? 'waiting' : 'missing'}`)
-                    : tool.output === '' ? t(`${prefix}empty`) : formatPayload(tool.output)}</pre></div>
+            <AssistantCodeBlock label={t(`${prefix}input`)} text={tool.name === 'unknown' ? t(`${prefix}missingInput`) : tool.argumentsJson} />
+            <AssistantCodeBlock label={t(`${prefix}output`)} text={tool.output === null
+                ? t(`${prefix}${running && tool.status === 'running' ? 'waiting' : 'missing'}`)
+                : tool.output === '' ? t(`${prefix}empty`) : tool.output} />
         </div>}
     </Disclosure>;
 }

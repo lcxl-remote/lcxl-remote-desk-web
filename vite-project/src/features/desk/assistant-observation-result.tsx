@@ -1,3 +1,4 @@
+import { AssistantCodeBlock } from './assistant-code-block';
 import { Disclosure } from '@/components/ui/disclosure';
 import { useTranslation } from 'react-i18next';
 
@@ -48,7 +49,7 @@ export function AssistantObservationResult({ data }: { data: unknown }) {
         </> : <p>{label('unrecognized')}</p>}
         <Disclosure className="rounded-md border p-3" title={<>{t('pages.aiAssistant.workspace.technicalDetails')}</>} summaryClassName="cursor-pointer text-muted-foreground">
 
-            <pre data-testid="observation-output" className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(data, null, 2)}</pre>
+            <AssistantCodeBlock testId="observation-output" text={JSON.stringify(data)} />
         </Disclosure>
     </div>;
 }

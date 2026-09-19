@@ -39,7 +39,7 @@ describe('native file receipts', () => {
         fireEvent.click(title);
         expect(title.getAttribute('aria-expanded')).toBe('true');
         expect(screen.getByText(fileName)).toBeVisible();
-        expect(screen.getByText('123')).toBeVisible();
+        expect(screen.getByText('123', { selector: 'dd' })).toBeVisible();
         expect(screen.getByText('a'.repeat(64))).toBeVisible();
         expect(container.querySelector('a')).toBeNull();
         expect(screen.queryByRole('button', { name: 'pages.fileRecovery.export' })).toBeNull();

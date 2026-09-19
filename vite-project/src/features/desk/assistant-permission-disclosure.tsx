@@ -1,3 +1,4 @@
+import { permissionToolLabel } from './assistant-permission-labels';
 import { Button } from '@/components/ui/button';
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -21,7 +22,7 @@ function PermissionDisclosure({ state, tools, children }: { state: string; tools
     const completed = completedStates.has(state);
     const visible = !completed || expanded;
     const summary = <>
-        <span className="min-w-0 flex-1 truncate text-sm" title={tools.join(', ')}>{tools.join(', ')}</span>
+        <span className="min-w-0 flex-1 truncate text-sm" title={tools.map((tool) => permissionToolLabel(t, tool)).join(', ')}>{tools.map((tool) => permissionToolLabel(t, tool)).join(', ')}</span>
         <Badge variant={completed ? 'outline' : 'default'}>{t(`pages.aiAssistant.permissionState.${state}`)}</Badge>
     </>;
     return <div className="space-y-3 rounded-md bg-muted/50 p-3">

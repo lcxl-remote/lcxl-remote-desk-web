@@ -535,8 +535,11 @@ impl ModelEgressError {
                 AgentErrorKind::OutputLimitExceeded,
                 "The AI model context exceeds the audit capacity limit.",
             ),
-            Self::ExportNotSelected { .. }
-            | Self::DerivedDestinationLost
+            Self::ExportNotSelected { .. } => (
+                AgentErrorKind::PermissionDenied,
+                "A context item's model-export authorization could not be established. This does not mean the device operation was denied or did not execute.",
+            ),
+            Self::DerivedDestinationLost
             | Self::Sink(
                 SinkAuthorizationError::DestinationNotAllowed
                 | SinkAuthorizationError::SecretExternalEgressDenied
@@ -1849,6 +1852,119 @@ mod tests {
         assert_eq!(authorized.request.messages.len(), 3);
         assert_eq!(authorized.request.messages[0].message_id, "current-user");
         assert_eq!(authorized.request.messages[2].message_id, "status-result");
+    }
+
+    #[test]
+    fn completed_wait_status_uses_exact_call_authority_without_authorizing_other_results() {
+        let mut call = ChatMessage::assistant_tool_calls(
+            "wait-proposal",
+            "",
+            vec![ToolCallRef {
+                id: "wait-id".into(),
+                name: "wait_for_task".into(),
+                arguments_json: "{}".into(),
+            }],
+        );
+        call.data_envelope = Some(envelope(
+            "wait-proposal-envelope",
+            "model-response",
+            &message_content_bytes(&call).unwrap(),
+            Sensitivity::Sensitive,
+            vec![destination()],
+        ));
+        // Native results have not yet received model-export authorization.
+        let original = envelope(
+            "original",
+            "exec_command",
+            b"native output",
+            Sensitivity::Sensitive,
+            vec![],
+        );
+        let text = "background task completed; its original result is recorded in the conversation";
+        let mut status = ChatMessage::tool_result("wait-status", "wait-id", text);
+        status.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            Some(&original),
+            "wait-id",
+            text,
+            "wait_for_task",
+        )
+        .unwrap();
+        let audit = |messages| {
+            policy(&[])
+                .authorize_request(ModelRequest::text_only(messages, ResponseFormatSpec::None))
+        };
+        for text in [
+            text,
+            "background task failed; its original result is recorded in the conversation",
+        ] {
+            let mut receipt = status.clone();
+            receipt.text = text.into();
+            receipt.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+                Some(&original),
+                "wait-id",
+                text,
+                "wait_for_task",
+            )
+            .unwrap();
+            assert!(
+                receipt
+                    .data_envelope
+                    .as_ref()
+                    .unwrap()
+                    .allowed_destinations
+                    .is_empty()
+            );
+            for resumed in [false, true] {
+                let mut current_policy = policy(&[]);
+                current_policy.permission_resume = resumed;
+                assert!(
+                    current_policy
+                        .authorize_request(ModelRequest::text_only(
+                            vec![call.clone(), receipt.clone()],
+                            ResponseFormatSpec::None,
+                        ))
+                        .is_ok()
+                );
+            }
+        }
+        // A mismatched name/id or changed gateway must still fail closed.
+        let mut old_label = status.clone();
+        old_label
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .provenance
+            .source_tool_name = "wait_for_task_status".into();
+        assert!(matches!(
+            audit(vec![call.clone(), old_label]),
+            Err(ModelEgressError::ExportNotSelected { .. })
+        ));
+        let mut wrong_call = status.clone();
+        wrong_call.tool_call_id = Some("another-call".into());
+        assert!(audit(vec![call.clone(), wrong_call]).is_err());
+        assert!(audit(vec![status.clone()]).is_err());
+        let mut other_gateway = policy(&[]);
+        if let DestinationIdentity::Model {
+            connection_revision,
+            ..
+        } = &mut other_gateway.destination
+        {
+            *connection_revision += 1;
+        }
+        assert!(
+            other_gateway
+                .authorize_request(ModelRequest::text_only(
+                    vec![call.clone(), status.clone()],
+                    ResponseFormatSpec::None,
+                ))
+                .is_err()
+        );
+        let mut unrelated = ChatMessage::tool_result("unrelated", "native-call", "native output");
+        unrelated.data_envelope = Some(original);
+        assert!(matches!(
+            audit(vec![call, status, unrelated]),
+            Err(ModelEgressError::ExportNotSelected { .. })
+        ));
     }
 
     #[test]

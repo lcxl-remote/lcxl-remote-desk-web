@@ -1,3 +1,4 @@
+import { AssistantCodeBlock } from './assistant-code-block';
 import { useTranslation } from 'react-i18next';
 import { Disclosure } from '@/components/ui/disclosure';
 
@@ -54,6 +55,6 @@ export function AssistantLaunchResult({ receipt, text }: { receipt: LaunchReceip
             {receipt.created_process_id != null && <p>{t('pages.aiAssistant.launchReceipt.pid', { pid: receipt.created_process_id })}</p>}
             {receipt.created_process_elevated != null && <p>{t(receipt.created_process_elevated ? 'pages.aiAssistant.launchReceipt.createdAdmin' : 'pages.aiAssistant.launchReceipt.createdUser')}</p>}
         </div>
-        <Disclosure className="mt-3" title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs"><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{text}</pre></Disclosure>
+        <Disclosure className="mt-3" title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs"><AssistantCodeBlock text={text} /></Disclosure>
     </Disclosure>;
 }

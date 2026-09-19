@@ -1,3 +1,4 @@
+import { permissionToolLabel, permissionEffectLabel, permissionResourceLabel, permissionOperationLabel } from './assistant-permission-labels';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Check, X } from 'lucide-react';
@@ -157,7 +158,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                             <div>
                                 <p className="text-sm font-medium">{reason}</p>
                                 <p className="mt-1 break-all text-xs text-muted-foreground">
-                                    {item.providerId} · {item.toolName} · {item.expectedEffect}
+                                    {permissionToolLabel(t, item.toolName)} · {permissionEffectLabel(t, item.expectedEffect)}
                                 </p>
                                 {item.applicationScope && (
                                     <div data-testid="application-ui-scope" className="mt-3 space-y-1 rounded-md border p-3 text-xs">
@@ -216,7 +217,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 )}
                                 {!item.applicationScope && (item.resourceScope.length > 0 || item.operationScope.length > 0) && (
                                     <p className="mt-1 break-all text-xs text-muted-foreground">
-                                        {[...item.resourceScope, ...item.operationScope].join(' · ')}
+                                        {[...item.resourceScope.map((scope) => permissionResourceLabel(t, scope)), ...item.operationScope.map((scope) => permissionOperationLabel(t, scope))].join(' · ')}
                                     </p>
                                 )}
                                 {canDecide
@@ -240,7 +241,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                                 item.resourceScope,
                                                             )}
                                                         />
-                                                        <span className="break-all">{item.applicationScope ? (/^(ui|background_input):/.test(scope) ? t(`pages.aiAssistant.uiAction_${scope.split(':')[1]}`) : item.applicationScope.application_name) : scope}</span>
+                                                        <span className="break-all">{permissionResourceLabel(t, scope, item.applicationScope?.application_name)}</span>
                                                     </label>
                                                 ))}
                                             </div>
@@ -263,7 +264,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                                 item.operationScope,
                                                             )}
                                                         />
-                                                        <span className="break-all">{item.applicationScope ? (/^(ui|background_input):/.test(scope) ? t(`pages.aiAssistant.uiAction_${scope.split(':')[1]}`) : item.applicationScope.application_name) : scope}</span>
+                                                        <span className="break-all">{permissionOperationLabel(t, scope)}</span>
                                                     </label>
                                                 ))}
                                             </div>

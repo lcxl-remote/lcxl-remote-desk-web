@@ -25,7 +25,7 @@ describe('shared permission review', () => {
             applicationScope: { application: { token: 'app', snapshot_id: 'apps', object_kind: 'application', expires_at: '2026-09-11T03:10:00Z' }, application_name: 'Test app', actions: ['scroll'] },
         })]);
         render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
-        expect(screen.getByRole('checkbox', { name: 'pages.aiAssistant.uiAction_scroll' })).toBeChecked();
+        expect(screen.getByRole('checkbox', { name: operation })).toBeChecked();
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', operation_scope: [operation] });
     });
@@ -38,7 +38,7 @@ describe('shared permission review', () => {
         render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
         expect(screen.getByTestId('application-ui-scope')).toBeInTheDocument();
         expect(screen.getByRole('checkbox', { name: 'Calendar' })).toBeChecked();
-        fireEvent.click(screen.getByRole('checkbox', { name: 'pages.aiAssistant.uiAction_invoke' }));
+        fireEvent.click(screen.getByRole('checkbox', { name: 'ui:invoke' }));
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', resource_scope: ['ui_application:sha256:opaque'], operation_scope: ['ui:set_value'], max_uses: 8 });
     });
@@ -51,7 +51,7 @@ describe('shared permission review', () => {
         render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
         expect(screen.getByTestId('application-ui-scope')).toBeInTheDocument();
         expect(screen.getByRole('checkbox', { name: 'Calendar' })).toBeChecked();
-        fireEvent.click(screen.getByRole('checkbox', { name: 'pages.aiAssistant.uiAction_click' }));
+        fireEvent.click(screen.getByRole('checkbox', { name: 'background_input:click' }));
         fireEvent.click(submit());
         expect(onDecide.mock.calls[0][1][0]).toMatchObject({ decision: 'approve', resource_scope: ['ui_application:sha256:opaque'], operation_scope: ['background_input:type_text'], max_uses: 8 });
     });

@@ -1,3 +1,4 @@
+import { AssistantCodeBlock } from './assistant-code-block';
 import { recoveryErrorKey } from '@/lib/file-recovery-error';
 import { formatLocalTime } from '@/lib/local-time';
 import { Disclosure } from '@/components/ui/disclosure';
@@ -79,6 +80,6 @@ export function AssistantFileResult({ receipt, text, onExportBackup }: { receipt
             </Button>
             {exportFailed && <p role="alert" className="text-sm text-destructive">{t(`pages.fileRecovery.${exportFailed}`)}</p>}
         </div>}
-        <Disclosure className="mt-3" title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs"><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{text}</pre></Disclosure>
+        <Disclosure className="mt-3" title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs"><AssistantCodeBlock text={text} /></Disclosure>
     </Disclosure>;
 }

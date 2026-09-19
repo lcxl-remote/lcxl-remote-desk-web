@@ -1,3 +1,4 @@
+import { AssistantCodeBlock } from './assistant-code-block';
 import { Disclosure } from '@/components/ui/disclosure';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -53,8 +54,7 @@ export function AssistantCommandResult({ text, onExportBackup }: { text: string;
     if (fileReceipt) return <AssistantFileResult receipt={fileReceipt} text={text} onExportBackup={onExportBackup} />;
     const output = (label: string, content: string, truncated: boolean) => (
         <div className="min-w-0 space-y-1">
-            <p className="font-medium">{label}</p>
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-xs">{content || t('pages.aiAssistant.commandReceipt.empty')}</pre>
+            <AssistantCodeBlock label={label} text={content || t('pages.aiAssistant.commandReceipt.empty')} format="text" />
             {truncated && <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.commandReceipt.truncated')}</p>}
         </div>
     );
@@ -78,9 +78,9 @@ export function AssistantCommandResult({ text, onExportBackup }: { text: string;
                     {!!receipt.redactions?.length && output(t('pages.aiAssistant.commandReceipt.redactions'), receipt.redactions.join('\n'), false)}
                     <Disclosure title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs text-muted-foreground">
 
-                        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{text}</pre>
+                        <AssistantCodeBlock text={text} />
                     </Disclosure>
-                </> : <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{text}</pre>}
+                </> : <AssistantCodeBlock text={text} />}
                 <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.commandResultHint')}</p>
             </div>
         </Disclosure>

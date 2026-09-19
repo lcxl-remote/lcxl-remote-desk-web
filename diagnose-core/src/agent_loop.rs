@@ -5494,7 +5494,10 @@ async fn run_wait<F: FnMut() -> String>(
                 Some(&data_envelope),
                 &call.id,
                 text,
-                "wait_for_task_status",
+                // Preserve the invoked tool name so history export can bind
+                // this closure to its model-authorized wait call. The original
+                // receipt retains its own call identity and independent audit.
+                &call.name,
             )?;
             let mut message = ChatMessage::tool_result(mint(), &call.id, text);
             message.data_envelope = envelope;

@@ -1,3 +1,4 @@
+import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel } from './assistant-permission-labels';
 import { AssistantAttachments, AssistantResultAttachments } from './assistant-attachments';
 import { requireRecoveryZip } from '@/lib/file-recovery-error';
 import { Textarea } from '@/components/ui/textarea';
@@ -416,7 +417,7 @@ export function AiAssistantWorkspace({
                                         <div className="flex flex-wrap items-start justify-between gap-2">
                                             <div>
                                                 <p className="break-all text-sm font-medium">
-                                                    {grant.toolName}
+                                                    {permissionToolLabel(t, grant.toolName)}
                                                 </p>
                                                 <p className="break-all text-xs text-muted-foreground">
                                                     {grant.providerId} · {grant.capabilityId} · {grant.riskTier}
@@ -433,7 +434,7 @@ export function AiAssistantWorkspace({
                                             })}</p>
                                             {[...grant.resourceScope, ...grant.operationScope].length > 0 && (
                                                 <p className="break-all">
-                                                    {[...grant.resourceScope, ...grant.operationScope].join(' · ')}
+                                                    {[...grant.resourceScope.map((scope) => permissionResourceLabel(t, scope)), ...grant.operationScope.map((scope) => permissionOperationLabel(t, scope))].join(' · ')}
                                                 </p>
                                             )}
                                             {grant.revokedReason && <p className="break-all">{grant.revokedReason}</p>}
