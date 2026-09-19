@@ -156,11 +156,18 @@ pub fn project_request(
     let requirement = crate::permission_resume::latest_user_requirement(&session.conversation)
         .filter(|message| message.data_envelope.is_some())
         .ok_or_else(denied)?;
+    let runtime = request
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_context::is_runtime(message))
+        .cloned()
+        .collect::<Vec<_>>();
     request
         .messages
         .retain(|message| message.role == ChatRole::System);
     request.messages.push(requirement.clone());
     request.messages.push(result.clone());
+    request.messages.extend(runtime);
     Ok(request)
 }
 

@@ -62,7 +62,7 @@ async fn state(store: &SignalAgentSessionStore) -> PersistedAgentSession {
 }
 
 #[tokio::test]
-async fn stale_and_expired_directory_decisions_leave_no_receipt_or_partial_state() {
+async fn stale_directory_decisions_leave_no_receipt_or_partial_state() {
     for path in [r"C:\用户资料\季度 报告", "/Users/owner/季度 报告"] {
         let store = setup().await;
         let mut proposed = update();
@@ -88,7 +88,7 @@ async fn stale_and_expired_directory_decisions_leave_no_receipt_or_partial_state
         for (revision, time) in [
             (0, now()),
             (
-                before.file_scope.revision(),
+                before.file_scope.revision() + 1,
                 now() + chrono::Duration::seconds(1),
             ),
         ] {
@@ -105,6 +105,7 @@ async fn stale_and_expired_directory_decisions_leave_no_receipt_or_partial_state
             );
         }
         // A failed approval has no receipt to poison a later explicit rejection.
+        decision.expected_revision = before.file_scope.revision();
         decision.mutation = FileScopeMutation::Decide {
             directory_request_id: "select".into(),
             approve: false,

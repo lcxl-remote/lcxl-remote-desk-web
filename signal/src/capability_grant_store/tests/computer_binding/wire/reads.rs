@@ -3,7 +3,7 @@ use crate::remote_tool_edge::{
     SignalAiAssistantTools, SignalRemoteToolPendingStore, global_computer_action_pending,
 };
 use desk_agent_protocol::{
-    AgentErrorKind, Capability,
+    Capability,
     authz::AuthorizedControlPayload,
     browser_control::{BrowserAction, BrowserActionResult},
     computer_use::{
@@ -368,12 +368,10 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                 if !background {
                     return tools.run_read(&call).await;
                 }
-                let error = tools.run_read(&call).await.unwrap_err();
-                assert_eq!(error.kind, AgentErrorKind::SessionUnavailable);
-                assert_eq!(
-                    error.message,
-                    "browser observation continues as a background task"
-                );
+                let output = tools.run_read(&call).await.unwrap();
+                let receipt: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+                assert_eq!(receipt["status"], "background_running");
+                assert_eq!(receipt["completion_delivery"], "automatic");
                 let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(
                     fixture.store.db.clone(),
                 )

@@ -40,6 +40,7 @@ pub struct ModelRequest {
     /// Optional business hard cap. This may only narrow the configured runtime
     /// limit; probe requests must leave it unset.
     pub caller_output_hard_cap: Option<i64>,
+    pub previous_cache_projection: Option<crate::prompt_cache::WireObservation>,
 }
 
 /// Content-free size and cardinality measurements captured immediately before
@@ -47,6 +48,9 @@ pub struct ModelRequest {
 /// errors are intentionally unrepresentable here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ModelRequestProjectionMetrics {
+    pub static_instruction_bytes: u64,
+    pub runtime_context_bytes: u64,
+    pub definition_revision: u64,
     pub message_count: u64,
     pub message_json_bytes: u64,
     pub advertised_tool_count: u64,
@@ -81,6 +85,7 @@ impl ModelRequest {
             tool_choice: ToolChoice::Auto,
             response_format,
             use_case: ModelUseCase::Agent,
+            previous_cache_projection: None,
             caller_output_hard_cap: None,
         }
     }
@@ -1109,6 +1114,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             response_format: ResponseFormatSpec::None,
             use_case: ModelUseCase::Agent,
+            previous_cache_projection: None,
             caller_output_hard_cap: None,
         };
 

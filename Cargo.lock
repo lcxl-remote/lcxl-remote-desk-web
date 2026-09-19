@@ -2600,6 +2600,7 @@ dependencies = [
  "chrono-tz",
  "desk-agent-protocol",
  "desk-utils",
+ "hmac",
  "regex",
  "serde",
  "serde_json",

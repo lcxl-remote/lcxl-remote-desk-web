@@ -1,3 +1,4 @@
+import { PromptCacheSettings } from '@/components/prompt-cache-settings';
 import { Textarea } from '@/components/ui/textarea';
 import { useEffect, useRef, useState } from "react"
 import { useForm } from "react-hook-form"
@@ -574,6 +575,10 @@ export function AiModelSettings() {
                                 />
                             </div>
 
+                            {form.watch('wire_protocol') === 'anthropic_messages' && <PromptCacheSettings
+                                value={form.watch('request_options_text')}
+                                onChange={value => { form.setValue('request_options_text', value); form.setValue('profile_preset', 'custom'); }}
+                            />}
                             <FormField
                                 control={form.control}
                                 name="request_options_text"
@@ -619,7 +624,7 @@ export function AiModelSettings() {
                                 <pre className="max-h-40 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify({
                                     model: form.watch("model"),
                                     [form.watch("output_limit_field")]: form.watch("runtime_max_output_tokens"),
-                                    ...(() => { try { return JSON.parse(form.watch("request_options_text") || "{}") } catch { return {} } })(),
+                                    ...(() => { try { const options = JSON.parse(form.watch("request_options_text") || "{}"); delete options.prompt_cache; return options } catch { return {} } })(),
                                 }, null, 2)}</pre>
                             </div>
 

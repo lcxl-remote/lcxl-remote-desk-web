@@ -115,7 +115,10 @@ impl ModelSeam for MeteredSignalModel {
         metrics: desk_diagnose_core::seam::ModelRequestProjectionMetrics,
     ) {
         log::debug!(
-            "[ai-assistant] completion projection messages={} message_json_bytes={} tools={} tool_json_bytes={} conversation_messages={} session_snapshot_bytes={}",
+            "[ai-assistant] completion projection static_bytes={} runtime_bytes={} definition_revision={} messages={} message_json_bytes={} tools={} tool_json_bytes={} conversation_messages={} session_snapshot_bytes={}",
+            metrics.static_instruction_bytes,
+            metrics.runtime_context_bytes,
+            metrics.definition_revision,
             metrics.message_count,
             metrics.message_json_bytes,
             metrics.advertised_tool_count,

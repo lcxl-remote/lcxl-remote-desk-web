@@ -14,6 +14,7 @@
 //! `stop_reason × tool_calls` combination before the loop acts on it.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::replay::{ProviderResponseMeta, ReplayDisposition};
 
@@ -238,6 +239,9 @@ pub struct ChatMessage {
     /// Internal, short-lived resolver cache. Never persisted or sent to a model.
     #[serde(skip)]
     pub resolved_result: Option<Box<ChatMessage>>,
+    /// Request-only server state. Extracted before history assembly, never persisted.
+    #[serde(skip)]
+    pub runtime_context: Option<Box<ChatMessage>>,
 }
 
 impl ChatMessage {
@@ -262,6 +266,7 @@ impl ChatMessage {
             raw_result: None,
             pending_delivery_format: None,
             resolved_result: None,
+            runtime_context: None,
             reasoning: None,
         }
     }
@@ -313,6 +318,7 @@ impl ChatMessage {
             raw_result: None,
             pending_delivery_format: None,
             resolved_result: None,
+            runtime_context: None,
             reasoning: None,
         }
     }
@@ -355,6 +361,7 @@ impl ChatMessage {
             raw_result: None,
             pending_delivery_format: None,
             resolved_result: None,
+            runtime_context: None,
             reasoning: None,
         }
     }
@@ -380,6 +387,7 @@ impl ChatMessage {
             raw_result: None,
             pending_delivery_format: None,
             resolved_result: None,
+            runtime_context: None,
             reasoning: None,
         }
     }
@@ -409,6 +417,7 @@ impl ChatMessage {
             raw_result: None,
             pending_delivery_format: None,
             resolved_result: None,
+            runtime_context: None,
             reasoning: None,
         }
     }
@@ -523,6 +532,57 @@ pub struct TokenUsage {
     /// Tokens written into the cache (Anthropic `cache_creation_input_tokens`);
     /// no OpenAI-compatible equivalent, so it stays `None` there.
     pub cache_write_tokens: Option<i64>,
+}
+
+/// Normalize cumulative OpenAI/DeepSeek usage without double-counting cache.
+/// Inconsistent accounting remains unknown instead of inventing a zero bill.
+pub fn openai_token_usage(usage: Option<&Value>) -> TokenUsage {
+    let Some(usage) = usage else {
+        return TokenUsage::default();
+    };
+    let nonnegative = |value: &Value| value.as_i64().filter(|value| *value >= 0);
+    let prompt = nonnegative(&usage["prompt_tokens"]);
+    let openai = nonnegative(&usage["prompt_tokens_details"]["cached_tokens"]);
+    let deepseek = nonnegative(&usage["prompt_cache_hit_tokens"]);
+    let miss = nonnegative(&usage["prompt_cache_miss_tokens"]);
+    let cached = openai.or(deepseek);
+    let invalid = matches!((openai, deepseek), (Some(a), Some(b)) if a != b)
+        || matches!((prompt, cached), (Some(p), Some(c)) if c > p)
+        || matches!((prompt, cached, miss), (Some(p), Some(c), Some(m)) if p.checked_sub(c) != Some(m))
+        || [
+            usage.get("prompt_tokens"),
+            usage.get("prompt_cache_hit_tokens"),
+            usage.get("prompt_cache_miss_tokens"),
+            usage.pointer("/prompt_tokens_details/cached_tokens"),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| nonnegative(value).is_none());
+    TokenUsage {
+        input_tokens: if invalid {
+            None
+        } else {
+            prompt.map(|p| p - cached.unwrap_or(0))
+        },
+        output_tokens: nonnegative(&usage["completion_tokens"]),
+        cache_read_tokens: if invalid { None } else { cached },
+        cache_write_tokens: None,
+    }
+}
+
+#[cfg(test)]
+mod cache_usage_tests {
+    use super::*;
+    #[test]
+    fn deepseek_cache_is_counted_once_and_bad_accounting_is_unknown() {
+        let mut value = serde_json::json!({"prompt_tokens":100,"prompt_cache_hit_tokens":30,"prompt_cache_miss_tokens":70,"completion_tokens":2});
+        assert_eq!(openai_token_usage(Some(&value)).input_tokens, Some(70));
+        value["prompt_tokens_details"] = serde_json::json!({"cached_tokens":30});
+        assert_eq!(openai_token_usage(Some(&value)).input_tokens, Some(70));
+        value["prompt_cache_miss_tokens"] = 80.into();
+        assert_eq!(openai_token_usage(Some(&value)).input_tokens, None);
+        assert_eq!(openai_token_usage(Some(&value)).cache_read_tokens, None);
+    }
 }
 
 /// The result of one model turn, normalized across providers: the assistant's
@@ -693,6 +753,7 @@ mod tests {
 
     fn meta(stop_reason: StopReason, has_tool_calls: bool) -> ProviderResponseMeta {
         ProviderResponseMeta {
+            cache_projection: None,
             stop_reason,
             replay: has_tool_calls.then_some(ReplayDisposition::Unavailable {
                 source_context_key: None,

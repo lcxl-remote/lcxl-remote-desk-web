@@ -48,7 +48,7 @@ pub fn replace_authorization_payload(
 }
 use desk_agent_protocol::{capability_grant::CapabilityGrant, capability_provider::ProductSurface};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GrantDisclosureSnapshot {
     pub grants: Vec<CapabilityGrant>,
     pub surface: ProductSurface,
@@ -115,6 +115,33 @@ impl GrantDisclosureSnapshot {
             })
             .cloned()
             .collect()
+    }
+}
+
+/// Closed status for a tool that has no currently active matching grant.
+pub fn inactive_grant_reason(
+    grants: &[CapabilityGrant],
+    name: &str,
+    now: u64,
+    revision: u64,
+) -> &'static str {
+    let Some(grant) = grants
+        .iter()
+        .filter(|grant| grant.tool_name == name)
+        .max_by_key(|grant| grant.issued_at_unix_ms)
+    else {
+        return "no_active_matching_grant";
+    };
+    if grant.revoked_at_unix_ms.is_some() {
+        "grant_revoked"
+    } else if grant.expires_at_unix_ms <= now {
+        "grant_expired"
+    } else if grant.remaining_uses == 0 {
+        "grant_exhausted"
+    } else if grant.readiness_revision != revision {
+        "grant_stale_readiness"
+    } else {
+        "no_active_matching_grant"
     }
 }
 

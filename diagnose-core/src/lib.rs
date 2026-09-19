@@ -144,3 +144,7 @@ pub mod ui_model_ids;
 pub mod model_input;
 
 pub mod tool_exposure;
+
+pub mod runtime_context;
+
+pub mod prompt_cache;

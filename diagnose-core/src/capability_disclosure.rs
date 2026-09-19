@@ -4,7 +4,7 @@
 //! from the current registry and readiness immediately before a model request;
 //! loading a name never grants authority or makes an unavailable tool callable.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,16 @@ pub struct CapabilityDisclosureState {
     pub focus_input_revision: u64,
     pub loaded_tool_names: Vec<String>,
     pub updated_input_revision: u64,
+    #[serde(default)]
+    pub advertised_tool_names: Vec<String>,
+    #[serde(default)]
+    pub definition_revision: u64,
+    #[serde(default)]
+    pub definition_fingerprint: String,
+    #[serde(default)]
+    pub event_sequence: u64,
+    #[serde(default)]
+    pub recent_events: BTreeMap<String, u64>,
 }
 
 impl Default for CapabilityDisclosureState {
@@ -42,11 +52,97 @@ impl Default for CapabilityDisclosureState {
             focus_input_revision: 0,
             loaded_tool_names: Vec::new(),
             updated_input_revision: 0,
+            advertised_tool_names: Vec::new(),
+            definition_revision: 0,
+            definition_fingerprint: String::new(),
+            event_sequence: 0,
+            recent_events: BTreeMap::new(),
         }
     }
 }
 
 impl CapabilityDisclosureState {
+    pub fn record_use(&mut self, names: &[String]) {
+        self.event_sequence = self.event_sequence.saturating_add(1);
+        for name in names {
+            self.recent_events.insert(name.clone(), self.event_sequence);
+        }
+    }
+
+    /// Preserve prior definitions without preserving their former authority.
+    pub fn select_definitions(
+        &mut self,
+        available: &[RegisteredTool],
+        required: &[String],
+        max_context_bytes: usize,
+    ) -> Result<Vec<String>, CapabilityDisclosureError> {
+        use sha2::{Digest, Sha256};
+        let mut schemas = available.iter().map(|tool| &tool.spec).collect::<Vec<_>>();
+        schemas.sort_by_key(|spec| &spec.name);
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(schemas, max_context_bytes))
+                    .expect("tool definitions serialize")
+            )
+        );
+        let mut pins = required.to_vec();
+        pins.extend(self.loaded_tool_names.iter().cloned());
+        pins.sort();
+        pins.dedup();
+        let mut candidates = available
+            .iter()
+            .filter(|tool| {
+                pins.iter().any(|name| name == tool.name())
+                    || self
+                        .advertised_tool_names
+                        .iter()
+                        .any(|name| name == tool.name())
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|tool| {
+            (
+                !pins.iter().any(|name| name == tool.name()),
+                std::cmp::Reverse(self.recent_events.get(tool.name()).copied().unwrap_or(0)),
+                tool.name(),
+            )
+        });
+        let maximum = MAX_ADVERTISED_PROVIDER_TOOL_BYTES
+            .min(max_context_bytes / DETAIL_CONTEXT_RATIO_DENOMINATOR);
+        let mut selected = candidates
+            .iter()
+            .filter(|tool| pins.iter().any(|name| name == tool.name()))
+            .copied()
+            .collect::<Vec<_>>();
+        validate_advertised_tool_bytes(selected.iter().copied(), maximum)?;
+        for tool in candidates {
+            if pins.iter().any(|name| name == tool.name()) {
+                continue;
+            }
+            selected.push(tool);
+            if validate_advertised_tool_bytes(selected.iter().copied(), maximum).is_err() {
+                selected.pop();
+            }
+        }
+        let mut names = selected
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        if fingerprint != self.definition_fingerprint {
+            self.definition_fingerprint = fingerprint;
+            self.definition_revision = self.definition_revision.saturating_add(1);
+        }
+        if names != self.advertised_tool_names {
+            self.definition_revision = self.definition_revision.saturating_add(1);
+            self.advertised_tool_names = names.clone();
+        }
+        self.recent_events
+            .retain(|name, _| available.iter().any(|tool| tool.name() == name));
+        Ok(names)
+    }
+
     pub fn reset_for_input(&mut self, input_revision: u64) {
         self.loaded_tool_names.clear();
         self.schema_version = CAPABILITY_DISCLOSURE_SCHEMA_VERSION;
@@ -68,6 +164,18 @@ impl CapabilityDisclosureState {
         names.dedup();
         if names != self.loaded_tool_names || names.iter().any(|name| name.trim().is_empty()) {
             return Err("capability disclosure names are not canonical");
+        }
+        let mut advertised = self.advertised_tool_names.clone();
+        advertised.sort();
+        advertised.dedup();
+        if advertised != self.advertised_tool_names
+            || advertised.iter().any(|name| name.is_empty())
+            || self
+                .recent_events
+                .values()
+                .any(|sequence| *sequence > self.event_sequence)
+        {
+            return Err("invalid advertised definition state");
         }
         Ok(())
     }
@@ -182,6 +290,7 @@ pub fn capability_name_index_prompt(
     let mut permission_requestable_when_loaded_now = Vec::new();
     let mut known_but_not_requestable_now = Vec::new();
     let mut unavailable_now = Vec::new();
+    let mut advertised_state = BTreeMap::new();
 
     for provider in registry.providers() {
         for capability in &provider.capabilities {
@@ -190,6 +299,18 @@ pub fn capability_name_index_prompt(
                 continue;
             };
             if advertised_tool_names.contains(name) {
+                advertised_state.insert(
+                    name,
+                    if !availability.callable() {
+                        "capability_not_ready"
+                    } else if callable.contains(name) {
+                        "eligible_subject_to_input_authorization"
+                    } else if requestable.contains(name) {
+                        "requires_matching_permission"
+                    } else {
+                        "not_eligible_in_current_state"
+                    },
+                );
                 continue;
             }
             if !availability.callable() {
@@ -208,13 +329,14 @@ pub fn capability_name_index_prompt(
     known_but_not_requestable_now.sort_unstable();
     unavailable_now.sort_unstable();
     let index = json!({
+        "advertised_state": advertised_state,
         "callable_when_loaded_now": callable_when_loaded_now,
         "permission_requestable_when_loaded_now": permission_requestable_when_loaded_now,
         "known_but_not_requestable_now": known_but_not_requestable_now,
         "unavailable_now": unavailable_now,
     });
     let prompt = format!(
-        "This server-authored capability index contains names only. Already advertised tools are omitted. Active authorized tools are provided automatically. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names only when you need missing parameter details or a budget-hidden tool. Application-scope approval does not require loading individual action schemas first. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
+        "This server-authored capability index contains names only. Advertised definitions are not execution authority; advertised_state describes current eligibility. Active authorized tools are provided automatically. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names only when you need missing parameter details or a budget-hidden tool. Application-scope approval does not require loading individual action schemas first. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
         serde_json::to_string(&index).expect("name index is serializable")
     );
     if prompt.len() > MAX_CAPABILITY_INDEX_BYTES {
@@ -412,7 +534,7 @@ pub fn capability_discovery_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-            description: "Get missing parameter details for exact Provider tool_names from the capability index, or focus an authorized tool hidden by the byte budget. Active granted tools are provided automatically without loading. Specify the tools needed now; the server retires older details automatically. Built-in conversation tools are used directly, never loaded. This reveals details on the next model step, grants no permission, creates no approval card and executes nothing.".into(),
+            description: "Get missing parameter details for exact Provider tool_names from the capability index, or focus an authorized tool hidden by the byte budget. Active granted tools are provided automatically without loading. Specify the tools needed now; definitions are retained in a bounded working set. Built-in conversation tools are used directly, never loaded. This reveals details on the next model step, grants no permission, creates no approval card and executes nothing.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -488,11 +610,12 @@ pub fn apply_load_call(
     }
     let names = canonical_names(input.tool_names, context.registry, context.inventory)
         .map_err(|error| load_error(error, state, input_revision))?;
-    let candidate = CapabilityDisclosureState {
+    let mut candidate = CapabilityDisclosureState {
         schema_version: CAPABILITY_DISCLOSURE_SCHEMA_VERSION,
         focus_input_revision: input_revision,
         loaded_tool_names: names.clone(),
         updated_input_revision: input_revision,
+        ..state.clone()
     };
     project_capability_disclosure(
         context.registry,
@@ -504,6 +627,7 @@ pub fn apply_load_call(
         context.max_context_bytes,
     )
     .map_err(|error| load_error(error, state, input_revision))?;
+    candidate.record_use(&names);
     *state = candidate;
     Ok(serde_json::to_string(&json!({"loaded": names})).expect("load receipt is serializable"))
 }
@@ -571,6 +695,31 @@ mod tests {
             .collect::<Vec<_>>();
         let callable = registry.registered_tools();
         (registry, inventory, callable)
+    }
+
+    #[test]
+    fn definitions_survive_input_and_grant_changes_but_required_overflow_is_atomic() {
+        let (_, _, tools) = every_capability_ready();
+        let names = tools
+            .iter()
+            .take(2)
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        let mut state = CapabilityDisclosureState::default();
+        let selected = state
+            .select_definitions(&tools, &names, 512 * 1024)
+            .unwrap();
+        state.reset_for_input(2);
+        assert_eq!(
+            state.select_definitions(&tools, &[], 512 * 1024).unwrap(),
+            selected
+        );
+        let restored: CapabilityDisclosureState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored, state);
+        let before = state.clone();
+        assert!(state.select_definitions(&tools, &names, 4).is_err());
+        assert_eq!(before, state);
     }
 
     #[test]

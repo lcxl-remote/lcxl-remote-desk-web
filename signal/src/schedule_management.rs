@@ -143,7 +143,18 @@ pub async fn handle(
     .await
 }
 
-pub(crate) async fn manage(
+// Keep the dispatch state out of callers' futures and construction frames.
+#[inline(never)]
+pub(crate) fn manage(
+    db: &DatabaseConnection,
+    owner: i32,
+    request: Request,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Response, ScheduleStoreError>> + '_>>
+{
+    Box::pin(manage_inner(db, owner, request))
+}
+
+async fn manage_inner(
     db: &DatabaseConnection,
     owner: i32,
     request: Request,

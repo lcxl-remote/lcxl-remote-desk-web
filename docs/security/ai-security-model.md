@@ -161,3 +161,18 @@ This covers every surface that shows model text: the diagnosis answer, the Termi
 ## Continuing after approval
 
 Resuming after approval keeps other actively authorized tools available so prerequisites, such as creating a file before executing it, can complete first. Exact-input grants still require the approved arguments; every dispatch still validates scope, expiry, and remaining uses.
+
+
+## AI Assistant prompt caching
+
+The assistant places fixed instructions and bounded tool definitions before history, followed by current authorization, directories, clock and capability state. Runtime snapshots do not accumulate in the conversation. Image replacement, attachment-read projection and context compression keep their existing rules. A tool definition may remain visible after its grant is exhausted; every invocation still checks current permissions, resource scope and readiness and reserves its own use. Visibility is not authorization.
+
+Anthropic Messages model settings offer **Prompt cache**. The default adds no cache parameters and leaves provider behavior unchanged. Enable explicit hints only after verifying content-block caching on the target gateway. History caching is off by default. The equivalent advanced option is below; `prompt_cache` is application configuration and is not forwarded as a request field:
+
+```json
+{"prompt_cache":{"mode":"anthropic_explicit","cache_history":false}}
+```
+
+Explicit hints mark static content. With history enabled, the additional breakpoint ends before runtime state. Cache writes can cost extra, providers may retain cached input, and hits are not guaranteed. Reverify and reenable history after changing the connection, model or thinking configuration. The assistant does not enable beta protocols, rewrite thinking replay or retry arbitrary HTTP 400 errors under another protocol.
+
+Only bounded keyed digests and boundary positions are retained locally, not another copy of request bodies. Missing or invalid metadata affects optimization only. Cached tokens still occupy the context budget. OpenAI / DeepSeek cache reads are subtracted once from total input; Anthropic cache reads and writes are separate. Inconsistent provider accounting is unknown rather than a fabricated zero charge. Locally observed common prefixes are not measurements of actual provider cache-hit tokens.

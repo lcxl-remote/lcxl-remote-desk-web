@@ -1,8 +1,28 @@
 use super::*;
 use desk_agent_protocol::{ai_assistant::AiAssistantAsk, schedule::management::RehearsalStatus};
 
-#[tokio::test]
-async fn rehearsal_management_reserves_public_intent_without_starting_or_granting() {
+#[test]
+fn rehearsal_management_reserves_public_intent_without_starting_or_granting() {
+    std::thread::Builder::new()
+        .name("rehearsal-management-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let future = rehearsal_management_scenario();
+            let bytes = std::mem::size_of_val(&future);
+            eprintln!("Signal rehearsal future: {bytes} bytes");
+            assert!(bytes <= 64 * 1024, "rehearsal future grew to {bytes} bytes");
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(future);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn rehearsal_management_scenario() {
     let db = fixture().await;
     let schema = Schema::new(db.get_database_backend());
     for table in [

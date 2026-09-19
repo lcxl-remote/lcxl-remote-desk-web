@@ -511,26 +511,24 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
                 call.arguments_json = value.to_string();
             }
         }
-        if message.role == ChatRole::System {
-            let (start_tag, end_tag) =
-                ("<capability_authorization>", "</capability_authorization>");
+        if message.role == ChatRole::System || crate::runtime_context::is_runtime(message) {
+            let start_tag = "<capability_authorization>";
             if let Some(start) = message.text.find(start_tag).map(|i| i + start_tag.len()) {
-                if let Some(end) = message.text[start..].find(end_tag).map(|i| i + start) {
-                    if let Ok(mut entries) =
-                        serde_json::from_str::<Vec<Value>>(&message.text[start..end])
-                    {
-                        for entry in &mut entries {
-                            project_scope(entry);
-                            if entry["tool_name"] == "send_raw_input" {
-                                if let Some(exact) = entry.get_mut("approved_exact_input") {
-                                    project_arguments("send_raw_input", exact);
-                                }
+                let mut stream = serde_json::Deserializer::from_str(&message.text[start..])
+                    .into_iter::<Vec<Value>>();
+                if let Some(Ok(mut entries)) = stream.next() {
+                    let end = start + stream.byte_offset();
+                    for entry in &mut entries {
+                        project_scope(entry);
+                        if entry["tool_name"] == "send_raw_input" {
+                            if let Some(exact) = entry.get_mut("approved_exact_input") {
+                                project_arguments("send_raw_input", exact);
                             }
                         }
-                        message
-                            .text
-                            .replace_range(start..end, &serde_json::to_string(&entries).unwrap());
                     }
+                    message
+                        .text
+                        .replace_range(start..end, &serde_json::to_string(&entries).unwrap());
                 }
             }
         }

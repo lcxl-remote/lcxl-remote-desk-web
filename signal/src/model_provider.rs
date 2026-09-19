@@ -269,6 +269,8 @@ impl ModelProviderConfig {
     /// `api_key` additionally treats `Some("")` as clear and `Some(non-empty)`
     /// as set. A not-yet-selectable execution mode is ignored.
     pub fn apply_update(&mut self, update: ModelProviderUpdate) {
+        let old_model = self.model.clone();
+        let old_options = desk_diagnose_core::prompt_cache::without_cache(&self.request_options);
         let connection_changed = update
             .wire_protocol
             .is_some_and(|value| Some(value) != self.wire_protocol)
@@ -280,7 +282,7 @@ impl ModelProviderConfig {
                 let next = (!value.is_empty()).then_some(value);
                 next != self.api_key.as_ref()
             });
-        let profile_changed = update
+        let mut profile_changed = update
             .model
             .as_ref()
             .is_some_and(|value| Some(value) != self.model.as_ref())
@@ -360,6 +362,15 @@ impl ModelProviderConfig {
             None => {}                                          // leave unchanged
             Some(key) if key.is_empty() => self.api_key = None, // clear
             Some(key) => self.api_key = Some(key),              // set
+        }
+        if connection_changed {
+            profile_changed |=
+                desk_diagnose_core::prompt_cache::reset_connection(&mut self.request_options);
+        } else if old_model != self.model
+            || old_options != desk_diagnose_core::prompt_cache::without_cache(&self.request_options)
+        {
+            profile_changed |=
+                desk_diagnose_core::prompt_cache::reset_history(&mut self.request_options);
         }
         if connection_changed {
             self.connection_revision = self.connection_revision.saturating_add(1).max(1);

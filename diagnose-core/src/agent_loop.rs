@@ -13,9 +13,9 @@
 //! the unknown-outcome closure (§6): a placeholder tool result keeps the model
 //! history well-formed and a late result replaces it in place. Mutating calls in
 //! one turn run serially; a rejection or failed dependent action halts the rest of that group.
-//! The same exposure matrix ([`registry::exposed_tools`] /
-//! [`registry::lookup_exposed`]) both advertises tools to the model and validates
-//! a returned call, so a model can never invoke a tool it was not shown.
+//! Bounded definitions remain visible independently of authority. Returned calls
+//! must be advertised and pass the current exposure matrix, readiness and grant
+//! checks; the execution seam atomically reserves each authorized invocation.
 //!
 //! Circuit breakers are turn-level (reset when the turn is claimed): a per-turn
 //! step budget ([`MAX_STEPS_PER_TURN`]) and a same-tool repeat cap
@@ -1384,6 +1384,7 @@ async fn prepare_model_context(
                     tool_choice: crate::chat::ToolChoice::None,
                     response_format: crate::prompt::ResponseFormatSpec::None,
                     use_case: crate::model_profile::ModelUseCase::ContextCompression,
+                    previous_cache_projection: None,
                     caller_output_hard_cap: Some(
                         crate::model_context::CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS,
                     ),
@@ -1688,6 +1689,7 @@ async fn run_inner_impl(
     };
     let mut same_tool: HashMap<String, u32> = HashMap::new();
     let mut compression_attempted = false;
+    let mut projection_rebuilds = 0u8;
     let mut completion_protocol_retries: u8 = 0;
     let mut empty_end_turn_retries: u8 = 0;
     let mut truncated_turn_retries: u8 = 0;
@@ -1899,22 +1901,63 @@ async fn run_inner_impl(
             ));
         let mut pinned_context = deps.model.context_policy(request_requirements).await?;
         pinned_context.preserve_history = session.surface == AgentSessionSurface::AiAssistant;
+        let mut definition_registry = deps.registry.to_vec();
+        if disclosure_enabled && let Some(providers) = deps.provider_registry {
+            for tool in providers.registered_tools() {
+                if session
+                    .capability_disclosure
+                    .advertised_tool_names
+                    .iter()
+                    .any(|name| name == tool.name())
+                    && !definition_registry
+                        .iter()
+                        .any(|candidate| candidate.name() == tool.name())
+                {
+                    definition_registry.push(tool);
+                }
+            }
+        }
         if disclosure_enabled {
-            let selected = crate::capability_disclosure::select_advertised_tools(
-                &raw_provider_exposed,
-                &session.capability_disclosure.loaded_tool_names,
-                if permission_continuation_pending { &continuation_tools } else { &[] },
-                pinned_context.max_context_bytes,
+            let candidates = definition_registry
+                .iter()
+                .filter(|tool| {
+                    deps.provider_registry
+                        .is_some_and(|r| r.capability_for_tool(tool.name()).is_some())
+                        && step_inventory.as_deref().is_some_and(|items| {
+                            items.iter().any(|item| {
+                                item.tool_name == tool.name() && item.compiled && item.enabled
+                                && item.reason != Some(desk_agent_protocol::capability_provider::CapabilityBlockedReason::ModelIncompatible)
+                            })
+                        })
+                        && (session.trigger_origin != crate::session::TriggerOrigin::ScheduledTask
+                            || exposed
+                                .iter()
+                                .any(|candidate| candidate.name() == tool.name()))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let required = raw_provider_exposed
+                .iter()
+                .map(|tool| tool.name().to_string())
+                .collect::<Vec<_>>();
+            let selected = session.capability_disclosure.select_definitions(
+                &candidates, &required, pinned_context.max_context_bytes,
             ).map_err(|error| AgentError {
                 kind: AgentErrorKind::InvalidInput,
-                message: format!("Provider definition byte budget exceeded: {error:?}; request fewer tools for the next step. Existing permissions are unchanged."),
+                message: format!("Provider definition byte budget exceeded: {error:?}; narrow the requested tools. Permissions are unchanged."),
                 retryable: false, safe_for_model: true, error_code: None,
             })?;
             exposed.retain(|tool| {
                 deps.provider_registry
                     .is_none_or(|r| r.capability_for_tool(tool.name()).is_none())
-                    || selected.iter().any(|name| name == tool.name())
             });
+            exposed.extend(
+                definition_registry
+                    .iter()
+                    .filter(|tool| selected.iter().any(|name| name == tool.name())),
+            );
+            // Definition state participates in the same fenced session contract.
+            deps.session_seam.save(session).await?;
         }
         // Approval cannot override execution-state or scope restrictions. Keep
         // recovery tools available if none of the approved tools can run.
@@ -1928,17 +1971,21 @@ async fn run_inner_impl(
         if permission_continuation_blocked {
             permission_continuation_pending = false;
         }
-        if permission_continuation_pending && !deps.permission_continuation_exact_tools.is_empty() {
-            exposed.retain(|tool| {
-                continuation_tools.iter().any(|name| name == tool.name())
-                    || tool.effect == ToolEffect::RunProjection
-            });
-        }
+        exposed.sort_by_key(|tool| tool.name());
+        let tool_requirements = crate::model_capability::ModelRequirements::for_registered_tools(
+            exposed.iter().copied(),
+        );
         let specs = exposed
             .iter()
             .map(|tool| tool.spec.clone())
             .collect::<Vec<_>>();
-        let mut system_prompt = deps.system_prompt.clone();
+        let mut stable_system = deps.system_prompt.clone();
+        let split_runtime = session.surface == AgentSessionSurface::AiAssistant;
+        let mut system_prompt = if split_runtime {
+            crate::runtime_context::take(&mut stable_system)
+        } else {
+            stable_system.clone()
+        };
         if let Some((snapshot, grants)) = authority.as_ref().zip(authority_grants.as_ref()) {
             let fresh = crate::permission_tools::capability_authorization_prompt(
                 grants,
@@ -2069,7 +2116,23 @@ async fn run_inner_impl(
                 error_code: None,
             })?;
             system_prompt.text.push_str("\n\n");
-            system_prompt.text.push_str(&projection.index_prompt);
+            let advertised = exposed.iter().map(|tool| tool.name()).collect();
+            system_prompt.text.push_str(
+                &crate::capability_disclosure::capability_name_index_prompt(
+                    providers,
+                    inventory,
+                    &raw_provider_exposed,
+                    permission_candidates,
+                    &advertised,
+                )
+                .map_err(|error| AgentError {
+                    kind: AgentErrorKind::InvalidInput,
+                    message: format!("capability state exceeds budget: {error:?}"),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                })?,
+            );
             if !projection.detail_prompt.is_empty() {
                 system_prompt.text.push_str("\n\n");
                 system_prompt.text.push_str(&projection.detail_prompt);
@@ -2087,56 +2150,18 @@ async fn run_inner_impl(
             system_prompt =
                 crate::permission_resume::rebind_exact_authorization_system_message(system_prompt)?;
         }
-        // Reserve the concrete per-step prompt and API tool bytes before the
-        // history window is selected. Runtime markers/projections use the fixed
-        // framing reserve below and the fully assembled request is rechecked.
-        const REQUEST_FRAMING_RESERVE_BYTES: usize = 1024;
-        let tool_spec_bytes = serde_json::to_vec(&specs)
-            .map_err(|_| {
-                model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
-            })?
-            .len();
-        let request_overhead_bytes = crate::trim::model_context_cost(&system_prompt)
-            .checked_add(tool_spec_bytes)
-            .and_then(|value| value.checked_add(REQUEST_FRAMING_RESERVE_BYTES))
-            .ok_or_else(|| {
-                model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
-            })?;
-        let history_policy = pinned_context
-            .clone()
-            .with_request_overhead_bytes(request_overhead_bytes)
-            .map_err(model_context_error)?;
         deliver_pending_results(deps, session).await?;
-        crate::conversation_attachment::model_read::validate_pending_reads(
-            deps.session_seam,
-            session,
-        )
-        .await?;
-        let mut context_view = prepare_model_context(
-            deps,
-            session,
-            turn_id,
-            &history_policy,
-            &mut compression_attempted,
-            sink,
-        )
-        .await?;
-        crate::schedule::review_result::project(&mut context_view.messages)?;
-        // Completion-only projections do not replace the regular conversation's
-        // occupancy baseline. New results/replies still count via usage().
-        if deps.model.command_completion_event_id().is_none() {
-            session.context_usage_basis = Some(crate::context_usage::ContextUsageBasis::observe(
-                &session.conversation,
-                &context_view.messages,
-                &history_policy,
-            ));
+        if split_runtime && system_prompt.data_envelope.is_none() {
+            let parent = crate::permission_resume::latest_user_requirement(&session.conversation)
+                .and_then(|message| message.data_envelope.as_ref());
+            system_prompt.data_envelope = derive_internal_tool_result_envelope(
+                parent,
+                crate::runtime_context::MESSAGE_ID,
+                &system_prompt.text,
+                "runtime_context",
+            )?;
         }
-        // Assemble the model request: a freshly built system prompt prepended to a
-        // trailing, budget-trimmed window of the stored conversation. The system
-        // prompt is never persisted, so it is added here on every call.
-        let mut messages = Vec::with_capacity(session.conversation.len() + 3);
-        messages.push(system_prompt);
-        messages.extend(context_view.messages);
+        let mut messages = vec![system_prompt];
         if session.surface == AgentSessionSurface::AiAssistant
             && deps.model.command_completion_event_id().is_none()
         {
@@ -2391,6 +2416,73 @@ async fn run_inner_impl(
             )?;
             messages.push(marker);
         }
+        // Reserve the concrete per-step prompt and API tool bytes before the
+        // history window is selected. All transient blocks are included; only
+        // protocol framing uses the reserve. Final wire encoding is rechecked.
+        const REQUEST_FRAMING_RESERVE_BYTES: usize = 1024;
+        let tool_spec_bytes = serde_json::to_vec(&specs)
+            .map_err(|_| {
+                model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
+            })?
+            .len();
+        let request_overhead_bytes = messages
+            .iter()
+            .map(crate::trim::model_context_cost)
+            .sum::<usize>()
+            .checked_add(if split_runtime {
+                crate::trim::model_context_cost(&stable_system)
+            } else {
+                0
+            })
+            .ok_or_else(|| {
+                model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
+            })?
+            .checked_add(tool_spec_bytes)
+            .and_then(|value| value.checked_add(REQUEST_FRAMING_RESERVE_BYTES))
+            .ok_or_else(|| {
+                model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
+            })?;
+        let history_policy = pinned_context
+            .clone()
+            .with_request_overhead_bytes(request_overhead_bytes)
+            .map_err(model_context_error)?;
+        crate::conversation_attachment::model_read::validate_pending_reads(
+            deps.session_seam,
+            session,
+        )
+        .await?;
+        let mut context_view = prepare_model_context(
+            deps,
+            session,
+            turn_id,
+            &history_policy,
+            &mut compression_attempted,
+            sink,
+        )
+        .await?;
+        crate::schedule::review_result::project(&mut context_view.messages)?;
+        // Completion-only projections do not replace the regular conversation's
+        // occupancy baseline. New results/replies still count via usage().
+        if deps.model.command_completion_event_id().is_none() {
+            session.context_usage_basis = Some(crate::context_usage::ContextUsageBasis::observe(
+                &session.conversation,
+                &context_view.messages,
+                &history_policy,
+            ));
+        }
+        let runtime_messages = messages;
+        let mut messages =
+            Vec::with_capacity(context_view.messages.len() + runtime_messages.len() + 1);
+        if split_runtime {
+            messages.push(stable_system);
+            messages.extend(context_view.messages);
+            messages.extend(runtime_messages);
+        } else {
+            let mut runtime_messages = runtime_messages.into_iter();
+            messages.extend(runtime_messages.next());
+            messages.extend(context_view.messages);
+            messages.extend(runtime_messages);
+        }
         // The ids the model is about to see. A pending auto-trigger whose completion
         // message is in this request is cleared once the model reacts to it (the
         // assistant answer / tool-call save below), so it never fires an automation
@@ -2402,6 +2494,7 @@ async fn run_inner_impl(
             tool_choice: crate::chat::ToolChoice::Auto,
             response_format: deps.response_format.clone(),
             use_case: crate::model_profile::ModelUseCase::Agent,
+            previous_cache_projection: session.cache_projection.clone(),
             caller_output_hard_cap: None,
         };
         let request = if let Some(event_id) = deps.model.command_completion_event_id() {
@@ -2433,6 +2526,21 @@ async fn run_inner_impl(
         let catalog_metrics = deps.capability_catalog_metrics.unwrap_or_default();
         deps.model
             .on_model_request_projected(crate::seam::ModelRequestProjectionMetrics {
+                static_instruction_bytes: request
+                    .messages
+                    .first()
+                    .map_or(0, |message| message.text.len() as u64),
+                runtime_context_bytes: request
+                    .messages
+                    .iter()
+                    .position(crate::runtime_context::is_runtime)
+                    .map_or(0, |start| {
+                        request.messages[start..]
+                            .iter()
+                            .map(|message| crate::trim::model_context_cost(message) as u64)
+                            .sum()
+                    }),
+                definition_revision: session.capability_disclosure.definition_revision,
                 message_count: u64::try_from(request.messages.len()).unwrap_or(u64::MAX),
                 message_json_bytes: u64::try_from(
                     serde_json::to_vec(&request.messages)
@@ -2501,6 +2609,25 @@ async fn run_inner_impl(
             });
         }
         ensure_lease_healthy(deps).await?;
+        if disclosure_enabled {
+            let latest = deps.tools.current_grant_disclosure().await?;
+            let now = current_unix_ms(deps.clock)?;
+            let expired_during_projection = authority_grants.as_ref().is_some_and(|grants| {
+                grants.iter().any(|grant| {
+                    grant.expires_at_unix_ms > projection_now && grant.expires_at_unix_ms <= now
+                })
+            });
+            if latest != authority || expired_during_projection {
+                if projection_rebuilds >= 2 {
+                    return Err(AgentError { kind: AgentErrorKind::PermissionDenied,
+                        message: "Authorization changed repeatedly while preparing model context; retry with current permissions.".into(),
+                        retryable: true, safe_for_model: true, error_code: None });
+                }
+                projection_rebuilds += 1;
+                continue;
+            }
+        }
+        projection_rebuilds = 0;
         // Interpretation is published only after protocol and safety validation.
         let completion_only = deps.model.command_completion_event_id().is_some();
         let turn = if completion_only {
@@ -2517,6 +2644,7 @@ async fn run_inner_impl(
             });
         }
         ensure_lease_healthy(deps).await?;
+        session.cache_projection = turn.provider_meta.cache_projection.clone();
         session.record_step(turn.usage);
         if completion_only
             && (!turn.tool_calls.is_empty()
@@ -2822,6 +2950,29 @@ async fn run_inner_impl(
                         continue;
                     }
 
+                    if !exposed
+                        .iter()
+                        .any(|advertised| advertised.name() == call.name)
+                    {
+                        append_internal_tool_result(
+                            session,
+                            turn.provider_meta.data_envelope.as_ref(),
+                            mint(),
+                            &call.id,
+                            format!(
+                                "tool_not_advertised: tool `{}` is not advertised in this request. This does not by itself mean permission was denied. Check CURRENT AUTHORIZED GRANTS and the capability index; request permission only if no matching active grant exists. Use describe_tools for a budget-hidden authorized tool only when describe_tools is advertised. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
+                                call.name,
+                                exposed
+                                    .iter()
+                                    .map(|tool| tool.name())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            "unloaded_tool_call",
+                        )?;
+                        continue;
+                    }
+
                     // A call naming a tool not exposed under the current scope/state
                     // becomes an error tool-result so the conversation stays
                     // well-formed and the model can adjust.
@@ -2847,8 +2998,21 @@ async fn run_inner_impl(
                                     call.name
                                 )
                             } else {
+                                let reason = deps
+                                    .registry
+                                    .iter()
+                                    .find(|tool| tool.name() == call.name)
+                                    .and_then(|tool| {
+                                        crate::registry::exposure_block_reason(
+                                            tool,
+                                            &session.scope_snapshot,
+                                            &session.execution_state,
+                                            session.trigger_origin,
+                                        )
+                                    })
+                                    .unwrap_or("tool_not_in_runtime_registry");
                                 format!(
-                                    "tool `{}` is not available in the current scope. Load its details and directly request permission by tool_name if needed; do not ask for a separate chat confirmation before creating the approval card.",
+                                    "{reason}: `{}` is not currently callable. Its visible definition does not grant permission. No action was dispatched; use the current authorization/readiness state to resolve the blocker.",
                                     call.name
                                 )
                             },
@@ -2856,29 +3020,9 @@ async fn run_inner_impl(
                         )?;
                         continue;
                     };
-                    if !exposed
-                        .iter()
-                        .any(|advertised| advertised.name() == call.name)
-                    {
-                        append_internal_tool_result(
-                            session,
-                            turn.provider_meta.data_envelope.as_ref(),
-                            mint(),
-                            &call.id,
-                            format!(
-                                "tool `{}` is not advertised in this request. This does not by itself mean permission was denied. Check CURRENT AUTHORIZED GRANTS and the capability index; request permission only if no matching active grant exists. Use describe_tools for a budget-hidden authorized tool only when describe_tools is advertised. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
-                                call.name,
-                                exposed
-                                    .iter()
-                                    .map(|tool| tool.name())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
-                            "unloaded_tool_call",
-                        )?;
-                        continue;
-                    }
-
+                    session
+                        .capability_disclosure
+                        .record_use(&[call.name.clone()]);
                     let resolved_call = match crate::ui_model_ids::resolve_call(
                         call,
                         &session.conversation,
@@ -2904,6 +3048,72 @@ async fn run_inner_impl(
                         }
                     };
                     let call = &resolved_call;
+
+                    if disclosure_enabled
+                        && let Some(providers) = deps.provider_registry
+                        && let Some(capability) = providers.capability_for_tool(&call.name)
+                        && let Some(snapshot) = deps.tools.current_grant_disclosure().await?
+                    {
+                        let grants = snapshot.subject_grants(session, providers);
+                        let active = crate::grant_disclosure::active_tool_names(
+                            &grants,
+                            session,
+                            current_unix_ms(deps.clock)?,
+                            snapshot.readiness_revision,
+                        );
+                        let ready = capability.wire.execution_locality
+                            == desk_agent_protocol::capability_provider::ExecutionLocality::Central
+                            || snapshot
+                                .ready_capabilities
+                                .contains(&tool.required_capability);
+                        let policy_read = tool.effect == ToolEffect::ReadOnly
+                            && (crate::capability_risk::classify_provider_descriptor_floor(
+                                capability.wire.effect,
+                                &capability.wire.data_policy,
+                            ) == desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
+                                || snapshot
+                                    .policy_read_capabilities
+                                    .contains(&tool.required_capability));
+                        let reason = if !ready {
+                            Some("capability_not_ready")
+                        } else if session.trigger_origin
+                            != crate::session::TriggerOrigin::ScheduledTask
+                            && !active.contains(&call.name)
+                            && !policy_read
+                        {
+                            Some(
+                                if crate::permission_tools::latest_tool_request_denied(
+                                    &session.permission_requests,
+                                    &call.name,
+                                    session.input_revision,
+                                ) {
+                                    "permission_denied"
+                                } else {
+                                    crate::grant_disclosure::inactive_grant_reason(
+                                        &grants,
+                                        &call.name,
+                                        current_unix_ms(deps.clock)?,
+                                        snapshot.readiness_revision,
+                                    )
+                                },
+                            )
+                        } else {
+                            None
+                        };
+                        if let Some(reason) = reason {
+                            append_internal_tool_result(
+                                session,
+                                turn.provider_meta.data_envelope.as_ref(),
+                                mint(),
+                                &call.id,
+                                format!(
+                                    "{reason}: the schema is visible but this invocation is not currently eligible. Read the latest authorization and readiness state; no action was dispatched. Do not retry a denied operation."
+                                ),
+                                reason,
+                            )?;
+                            continue;
+                        }
+                    }
 
                     // Some mutation inputs name evidence produced earlier in
                     // this durable run. Resolve those references before any

@@ -495,6 +495,12 @@ pub struct PersistedAgentSession {
     pub model_context_state: ModelContextState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage_basis: Option<crate::context_usage::ContextUsageBasis>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_cache::deserialize_observation"
+    )]
+    pub cache_projection: Option<crate::prompt_cache::WireObservation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_notices: Vec<ContextNotice>,
     /// User-selected context metadata and opaque ContentRefs. Raw file,
@@ -914,6 +920,7 @@ impl PersistedAgentSession {
             ),
             model_context_state: ModelContextState::default(),
             context_usage_basis: None,
+            cache_projection: None,
             context_notices: Vec::new(),
             context_attachments: Vec::new(),
             file_scope: crate::file_scope::SessionFileScope::default(),

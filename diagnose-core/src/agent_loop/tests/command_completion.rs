@@ -188,15 +188,17 @@ async fn check_completion_usage(with_usage: bool, invalid_count: usize) {
     let requests = model.0.requests.borrow();
     assert_eq!(requests.len(), invalid_count + 1);
     assert!(
-        requests[0].messages[0]
-            .text
-            .contains("No tools are available")
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("No tools are available"))
     );
     if invalid_count == 1 {
         assert!(
-            requests[1].messages[0]
-                .text
-                .contains("previous response was discarded")
+            requests[1]
+                .messages
+                .iter()
+                .any(|message| message.text.contains("previous response was discarded"))
         );
     }
     assert_eq!(
@@ -206,9 +208,14 @@ async fn check_completion_usage(with_usage: bool, invalid_count: usize) {
             .filter(|message| message.role != ChatRole::System)
             .map(|message| message.message_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["user", "completed-1"]
+        vec!["user", "completed-1", crate::runtime_context::MESSAGE_ID]
     );
-    assert!(requests[0].messages[0].text.contains("locale zh-CN"));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("locale zh-CN"))
+    );
     let stored = sess.inner.borrow();
     let stored = stored.as_ref().unwrap();
     assert_eq!(stored.model_context_state, original_context);

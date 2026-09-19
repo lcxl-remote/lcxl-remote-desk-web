@@ -1837,14 +1837,16 @@ async fn compose_turn_inner(
         .as_ref()
         .is_some_and(|resume| resume.fresh.is_some())
     {
-        system_prompt
-            .text
-            .push_str(desk_diagnose_core::schedule::task_prompt::FRESH_TASK_INSTRUCTIONS);
+        desk_diagnose_core::runtime_context::append_instruction(
+            &mut system_prompt,
+            desk_diagnose_core::schedule::task_prompt::FRESH_TASK_INSTRUCTIONS,
+        );
     }
     if permission_decision_resume {
-        system_prompt.text.push_str(
-        "\n\nPERMISSION DECISION RESUME (server authoritative): the owner has just decided the pending permission request. Re-read CURRENT AUTHORIZED GRANTS above. Do not request or ask for the same permission again. If a matching active grant exists, continue the existing user requirement now and call the authorized tool. If the item was denied or narrowed so the call no longer matches, adapt the plan or explain the remaining blocker. This trigger adds no new user requirement and does not change the original tool inputs.",
-    );
+        desk_diagnose_core::runtime_context::append_instruction(
+            &mut system_prompt,
+            "\n\nPERMISSION DECISION RESUME (server authoritative): the owner has just decided the pending permission request. Re-read CURRENT AUTHORIZED GRANTS above. Do not request or ask for the same permission again. If a matching active grant exists, continue the existing user requirement now and call the authorized tool. If the item was denied or narrowed so the call no longer matches, adapt the plan or explain the remaining blocker. This trigger adds no new user requirement and does not change the original tool inputs.",
+        );
     }
     if let Some(expires_at_unix_ms) =
         capability_authorization.approved_exact_input_expires_at_unix_ms

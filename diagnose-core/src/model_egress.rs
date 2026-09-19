@@ -1151,9 +1151,7 @@ mod tests {
                 vec![destination()],
             )),
         );
-        let system = |catalog| {
-            crate::ai_assistant::build_ai_assistant_system_message_with_catalog(None, catalog)
-        };
+        let system = |catalog| ChatMessage::text("system-catalog", ChatRole::System, catalog);
         let first = policy
             .authorize_request(ModelRequest::text_only(
                 vec![system("catalog A"), user.clone()],

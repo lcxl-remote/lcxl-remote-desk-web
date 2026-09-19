@@ -373,7 +373,13 @@ impl SignalModelSeam {
             self.dialect,
             request.tools.len()
         );
-        let body = self.build_body(&request)?;
+        let mut body = self.build_body(&request)?;
+        let mut cache_projection = desk_diagnose_core::prompt_cache::observe(
+            &mut body,
+            request.previous_cache_projection.as_ref(),
+            self.api_key.as_bytes(),
+            &self.source_context_key,
+        );
         let mut http = client
             .post(self.endpoint())
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
@@ -429,7 +435,22 @@ impl SignalModelSeam {
             }
         }
         let completion_reason = state.completion_reason();
-        let turn = state.into_turn();
+        let mut turn = state.into_turn();
+        desk_diagnose_core::prompt_cache::record_response(
+            &mut cache_projection,
+            &turn,
+            self.api_key.as_bytes(),
+        );
+        if let Some(observation) = &cache_projection {
+            log::info!(
+                "model cache projection: common_prefix_blocks={}, total_blocks={}, history_anchor={}, change_reason={:?}",
+                observation.common_prefix_blocks,
+                observation.blocks.len(),
+                observation.anchor.is_some(),
+                observation.change_reason
+            );
+        }
+        turn.provider_meta.cache_projection = cache_projection;
         if request.use_case == desk_diagnose_core::model_profile::ModelUseCase::ContextCompression {
             *self.compression_call_key.borrow_mut() = Some(uuid::Uuid::new_v4().to_string());
         }
@@ -467,7 +488,7 @@ impl SignalModelSeam {
             request.caller_output_hard_cap,
         )
         .map_err(|error| config_error(error.to_string()))?;
-        match self.dialect {
+        let mut body = match self.dialect {
             Dialect::OpenAiCompatible => build_openai_body_profiled(
                 &self.model,
                 request,
@@ -483,7 +504,21 @@ impl SignalModelSeam {
                 effective,
             ),
         }
-        .map_err(|error| config_error(error.to_string()))
+        .map_err(|error| config_error(error.to_string()))?;
+        desk_diagnose_core::prompt_cache::observe(
+            &mut body,
+            request.previous_cache_projection.as_ref(),
+            self.api_key.as_bytes(),
+            &self.source_context_key,
+        );
+        desk_diagnose_core::prompt_cache::validate_wire_budget(
+            &body,
+            self.profile
+                .max_context_bytes()
+                .map_err(|error| config_error(error.to_string()))?,
+        )
+        .map_err(|error| config_error(error.to_string()))?;
+        Ok(body)
     }
 
     /// Account the exact immutable body that `call_uncancelled` will send.
@@ -907,6 +942,7 @@ fn build_openai_body_profiled(
         effective_output_limit,
         &mut body,
     )?;
+    desk_diagnose_core::prompt_cache::validate_wire_budget(&body, profile.max_context_bytes()?)?;
     Ok(body)
 }
 
@@ -924,18 +960,7 @@ fn openai_stop_reason(finish: Option<&str>) -> StopReason {
 /// `prompt_tokens` includes the cached portion, so it is subtracted out to avoid
 /// double-counting the cache read against `input_tokens`.
 fn openai_usage(usage: Option<&Value>) -> TokenUsage {
-    let prompt = usage.and_then(|u| u["prompt_tokens"].as_i64());
-    let cached = usage.and_then(|u| u["prompt_tokens_details"]["cached_tokens"].as_i64());
-    let input_tokens = match (prompt, cached) {
-        (Some(p), Some(c)) => Some((p - c).max(0)),
-        (p, _) => p,
-    };
-    TokenUsage {
-        input_tokens,
-        output_tokens: usage.and_then(|u| u["completion_tokens"].as_i64()),
-        cache_read_tokens: cached,
-        cache_write_tokens: None,
-    }
+    desk_diagnose_core::chat::openai_token_usage(usage)
 }
 
 /// Accumulates an OpenAI `/chat/completions` SSE stream into a [`ModelTurn`].
@@ -1054,6 +1079,7 @@ impl OpenAiStreamState {
             text: self.text,
             tool_calls,
             provider_meta: ProviderResponseMeta {
+                cache_projection: None,
                 display_reasoning,
                 reasoning_observed: self.reasoning_observed,
                 reasoning_tokens,
@@ -1234,6 +1260,8 @@ fn build_anthropic_body_profiled(
         effective_output_limit,
         &mut body,
     )?;
+    desk_diagnose_core::prompt_cache::apply_anthropic(&mut body, request, &profile.request_options);
+    desk_diagnose_core::prompt_cache::validate_wire_budget(&body, profile.max_context_bytes()?)?;
     Ok(body)
 }
 
@@ -1420,6 +1448,7 @@ impl AnthropicStreamState {
             text: self.text,
             tool_calls,
             provider_meta: ProviderResponseMeta {
+                cache_projection: None,
                 display_reasoning,
                 reasoning_observed: self.reasoning_observed,
                 reasoning_tokens: None,
@@ -1800,6 +1829,7 @@ mod tests {
             tool_choice: choice,
             response_format: ResponseFormatSpec::None,
             use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
+            previous_cache_projection: None,
             caller_output_hard_cap: None,
         }
     }
@@ -2016,6 +2046,45 @@ mod tests {
         );
         assert_eq!(body["messages"][3]["role"], "tool");
         assert_eq!(body["messages"][3]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn explicit_cache_profile_marks_history_before_runtime_without_forwarding_internal_options() {
+        let request = ModelRequest::text_only(
+            vec![
+                ChatMessage::text("system", ChatRole::System, "stable"),
+                ChatMessage::text("user", ChatRole::User, "question"),
+                ChatMessage::system_event(
+                    desk_diagnose_core::runtime_context::MESSAGE_ID,
+                    "current permissions",
+                ),
+            ],
+            ResponseFormatSpec::None,
+        );
+        let mut profile = test_profile();
+        profile.request_options =
+            json!({"prompt_cache":{"mode":"anthropic_explicit","cache_history":true}});
+        let body = build_anthropic_body_profiled(
+            "test",
+            &request,
+            WireProtocol::AnthropicMessages,
+            &profile,
+            PositiveOutputLimit::new(4096).unwrap(),
+        )
+        .unwrap();
+        assert!(body.get("prompt_cache").is_none());
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(
+            body["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("current permissions")
+        );
+        assert!(body["messages"][1].get("cache_control").is_none());
     }
 
     #[test]
@@ -2487,6 +2556,7 @@ mod tests {
                 tool_choice: ToolChoice::Auto,
                 response_format: ResponseFormatSpec::None,
                 use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
+                previous_cache_projection: None,
                 caller_output_hard_cap: Some(1024),
             };
             let mut sink = desk_diagnose_core::seam::NullTurnSink;
@@ -2894,6 +2964,7 @@ mod tests {
                 tool_choice: ToolChoice::Auto,
                 response_format: ResponseFormatSpec::None,
                 use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
+                previous_cache_projection: None,
                 caller_output_hard_cap: Some(1024),
             };
             let mut sink = desk_diagnose_core::seam::NullTurnSink;

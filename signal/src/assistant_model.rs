@@ -77,7 +77,10 @@ impl ModelSeam for MeteredModel {
         metrics: desk_diagnose_core::seam::ModelRequestProjectionMetrics,
     ) {
         log::debug!(
-            "[ai-assistant] model projection messages={} message_json_bytes={} tools={} tool_json_bytes={} registry={} ready={} permission_candidates={} catalog_bytes={} index_bytes={} detail_bytes={} conversation_messages={} session_snapshot_bytes={} attachments={} permission_requests={} pending_work={}",
+            "[ai-assistant] model projection static_bytes={} runtime_bytes={} definition_revision={} messages={} message_json_bytes={} tools={} tool_json_bytes={} registry={} ready={} permission_candidates={} catalog_bytes={} index_bytes={} detail_bytes={} conversation_messages={} session_snapshot_bytes={} attachments={} permission_requests={} pending_work={}",
+            metrics.static_instruction_bytes,
+            metrics.runtime_context_bytes,
+            metrics.definition_revision,
             metrics.message_count,
             metrics.message_json_bytes,
             metrics.advertised_tool_count,

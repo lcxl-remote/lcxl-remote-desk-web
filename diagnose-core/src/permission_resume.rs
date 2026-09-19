@@ -184,6 +184,14 @@ pub fn bind_exact_authorization_system_message(
     destination: DestinationIdentity,
     expires_at_unix_ms: u64,
 ) -> Result<ChatMessage, AgentError> {
+    if let Some(runtime) = message.runtime_context.take() {
+        message.runtime_context = Some(Box::new(bind_exact_authorization_system_message(
+            *runtime,
+            destination,
+            expires_at_unix_ms,
+        )?));
+        return Ok(message);
+    }
     let bytes = message.text.as_bytes();
     let digest_sha256 = format!("{:x}", Sha256::digest(bytes));
     let short_digest = &digest_sha256[..16];
@@ -240,7 +248,7 @@ pub fn rebind_exact_authorization_system_message(
         error_code: None,
     };
     let envelope = message.data_envelope.as_ref().ok_or_else(denied)?;
-    if message.role != ChatRole::System
+    if (message.role != ChatRole::System && !crate::runtime_context::is_runtime(&message))
         || envelope.provenance.source_provider_id != "assistant-runtime-control"
         || envelope.provenance.source_tool_name != "capability-authorization"
         || envelope.allowed_destinations.len() != 1

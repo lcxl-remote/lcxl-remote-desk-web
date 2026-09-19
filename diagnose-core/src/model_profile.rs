@@ -388,6 +388,8 @@ enum OpenAiReasoningEffort {
 #[serde(deny_unknown_fields)]
 struct AnthropicRequestOptions {
     #[serde(default)]
+    prompt_cache: crate::prompt_cache::CacheOptions,
+    #[serde(default)]
     thinking: Option<AnthropicThinking>,
     #[serde(default)]
     output_config: Option<AnthropicOutputConfig>,
@@ -448,6 +450,15 @@ impl TypedRequestOptions {
                 }
             }
             Self::Anthropic(options) => {
+                if options.prompt_cache.cache_history
+                    && options.prompt_cache.mode
+                        != crate::prompt_cache::CacheMode::AnthropicExplicit
+                {
+                    return Err(ProfileError::InvalidRequestOption(
+                        "cache_history requires anthropic_explicit mode".into(),
+                    ));
+                }
+
                 if options.output_config.is_some()
                     && !matches!(options.thinking, Some(AnthropicThinking::Adaptive { .. }))
                 {

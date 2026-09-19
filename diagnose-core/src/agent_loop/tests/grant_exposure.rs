@@ -76,7 +76,29 @@ async fn approval_exposes_without_load_and_last_use_refreshes_next_request() {
     };
     let requests = Rc::new(RefCell::new(vec![]));
     let model = ScriptModel {
-        turns: RefCell::new([tool_use_args("read", target.name(), "{}"), answer("done")].into()),
+        turns: RefCell::new(
+            [
+                ModelTurn {
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "read".into(),
+                            name: target.name().into(),
+                            arguments_json: "{}".into(),
+                        },
+                        ToolCall {
+                            id: "duplicate".into(),
+                            name: target.name().into(),
+                            arguments_json: "{}".into(),
+                        },
+                    ],
+                    stop_reason: StopReason::ToolUse,
+                    provider_meta: tool_meta(),
+                    ..Default::default()
+                },
+                answer("done"),
+            ]
+            .into(),
+        ),
         requests: requests.clone(),
     };
     let tools = GrantTools {
@@ -102,7 +124,46 @@ async fn approval_exposes_without_load_and_last_use_refreshes_next_request() {
     .await
     .unwrap();
     assert_eq!(tools.reads.get(), 1);
+    assert!(
+        session
+            .inner
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .conversation
+            .iter()
+            .any(
+                |message| message.tool_call_id.as_deref() == Some("duplicate")
+                    && message.text.contains("grant_exhausted")
+            )
+    );
     let requests = requests.borrow();
+    assert_eq!(requests[0].messages[0].text, requests[1].messages[0].text);
+    for request in requests.iter() {
+        let runtime = request
+            .messages
+            .iter()
+            .position(crate::runtime_context::is_runtime)
+            .unwrap();
+        assert_eq!(
+            request
+                .messages
+                .iter()
+                .filter(|message| crate::runtime_context::is_runtime(message))
+                .count(),
+            1
+        );
+        assert!(
+            request.messages[..runtime]
+                .iter()
+                .any(|message| message.role != ChatRole::System)
+        );
+        assert!(
+            !request.messages[0]
+                .text
+                .contains("capability_authorization")
+        );
+    }
     assert!(
         requests[0]
             .tools
@@ -110,7 +171,7 @@ async fn approval_exposes_without_load_and_last_use_refreshes_next_request() {
             .any(|t| t.name == "inspect_desktop_session")
     );
     assert!(
-        !requests[1]
+        requests[1]
             .tools
             .iter()
             .any(|t| t.name == "inspect_desktop_session")
@@ -121,7 +182,12 @@ async fn approval_exposes_without_load_and_last_use_refreshes_next_request() {
             .iter()
             .any(|t| t.name == "request_permissions")
     );
-    assert!(requests[1].messages[0].text.contains("exhausted"));
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("exhausted"))
+    );
     assert!(
         requests[1]
             .messages
@@ -407,15 +473,15 @@ async fn permission_resume_keeps_scoped_prerequisites_and_validates_exact_grants
                     .any(|m| m.text.contains("dependency order"))
             );
             assert!(
-                !requests[1]
+                requests[1]
                     .tools
                     .iter()
                     .any(|t| t.name == "create_text_file")
             );
             assert!(requests[1].tools.iter().any(|t| t.name == action_name));
-            assert!(!requests[2].tools.iter().any(|t| t.name == action_name));
+            assert!(requests[2].tools.iter().any(|t| t.name == action_name));
         } else if blocked == "none" {
-            assert!(!requests[1].tools.iter().any(|t| t.name == action_name));
+            assert!(requests[1].tools.iter().any(|t| t.name == action_name));
         } else {
             let reason = match blocked {
                 "scope" => "missing_scope_capability",

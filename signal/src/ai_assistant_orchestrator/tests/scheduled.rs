@@ -491,7 +491,17 @@ async fn exercise_with_restart(
     .await
     .unwrap();
     if fail_model {
-        let error = result.unwrap_err();
+        assert!(matches!(result, Ok(Some(LoopOutcome::ProtocolError(_)))));
+        let row = crate::entity::agent_session::Entity::find()
+            .filter(crate::entity::agent_session::Column::ConversationId.eq(&conversation))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let error = PersistedAgentSession::decode_json(&row.state_json)
+            .unwrap()
+            .terminal_error
+            .unwrap();
         let held = || crate::schedule_store::ContinuationLease {
             owner: 1,
             run_id: &run.run_id,

@@ -275,6 +275,7 @@ fn tool_use(id: &str, name: &str) -> ModelTurn {
             .into(),
         }],
         provider_meta: ProviderResponseMeta {
+            cache_projection: None,
             stop_reason: StopReason::ToolUse,
             replay: Some(ReplayDisposition::NotRequired { source_context_key }),
             ..Default::default()
@@ -438,7 +439,7 @@ async fn acceptance_captured_model_cannot_call_unexposed_tool() {
         .iter()
         .find(|m| m.role == ChatRole::Tool)
         .expect("an error tool result");
-    assert!(err.text.contains("not available in the current scope"));
+    assert!(err.text.contains("tool_not_advertised"));
     // The exec tool was never even advertised to the model.
     let requests = model.requests.borrow();
     assert!(

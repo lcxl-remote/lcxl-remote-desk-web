@@ -693,6 +693,7 @@ fn tool_meta() -> ProviderResponseMeta {
     let source_context_key =
         SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
     ProviderResponseMeta {
+        cache_projection: None,
         stop_reason: StopReason::ToolUse,
         replay: Some(ReplayDisposition::NotRequired { source_context_key }),
         ..Default::default()
@@ -2453,11 +2454,17 @@ async fn checkpoint_compression_preserves_disclosure_selection_without_summarizi
     assert!(!compressed_request.contains("loaded_capability_details"));
     assert!(!compressed_request.contains("browser_open_page"));
     assert!(
-        requests[1].messages[0]
-            .text
-            .contains("loaded_capability_details")
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("loaded_capability_details"))
     );
-    assert!(requests[1].messages[0].text.contains("browser_open_page"));
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("browser_open_page"))
+    );
     assert_eq!(
         sess.inner
             .borrow()
@@ -3112,7 +3119,7 @@ async fn unexposed_tool_call_becomes_error_result() {
     let s = sess.inner.borrow();
     let s = s.as_ref().unwrap();
     assert_eq!(s.conversation[2].role, ChatRole::Tool);
-    assert!(s.conversation[2].text.contains("not available"));
+    assert!(s.conversation[2].text.contains("tool_not_advertised"));
 }
 
 /// The per-turn step budget stops a model that keeps calling tools forever.
@@ -4004,7 +4011,7 @@ async fn mutating_executes_then_answers() {
 /// After that mutation is proposed, normal read tools return so the model can
 /// verify the outcome in the same turn.
 #[tokio::test]
-async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed() {
+async fn exact_permission_resume_preserves_other_tool_definitions() {
     use crate::session::{AgentSessionSurface, TriggerOrigin};
 
     let sess = MemSession::default();
@@ -4093,7 +4100,7 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["exact_action"]
+        vec!["exact_action", "inspect"]
     );
     assert!(
         requests[1].tools.iter().any(|tool| tool.name == "inspect"),
@@ -4106,7 +4113,7 @@ async fn exact_permission_resume_hides_reobservation_until_mutation_is_proposed(
 /// authorization-boundary request. The exact approved Provider tool remains
 /// pinned even when the ordinary working set is rebuilt.
 #[tokio::test]
-async fn exact_provider_permission_resume_omits_capability_discovery() {
+async fn exact_provider_permission_resume_preserves_capability_discovery() {
     use crate::session::{AgentSessionSurface, TriggerOrigin};
 
     let providers = crate::ai_assistant::ai_assistant_provider_registry();
@@ -4192,11 +4199,11 @@ async fn exact_provider_permission_resume_omits_capability_discovery() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["read_system_info"]
+        vec!["describe_tools", "read_system_info"]
     );
     assert!(
-        requests.borrow()[0].tools.iter().all(
-            |tool| tool.name != crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME
+        requests.borrow()[0].tools.iter().any(
+            |tool| tool.name == crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME
         )
     );
 }
@@ -4215,6 +4222,7 @@ async fn exact_permission_resume_retries_one_precommit_protocol_error() {
             arguments_json: "{}".into(),
         }],
         provider_meta: ProviderResponseMeta {
+            cache_projection: None,
             stop_reason: StopReason::EndTurn,
             ..Default::default()
         },
@@ -4435,7 +4443,7 @@ async fn exact_permissioned_read_clears_the_continuation_checkpoint_after_the_ca
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["exact_read"]
+        vec!["exact_read", "inspect"]
     );
     assert!(requests[1].tools.iter().any(|tool| tool.name == "inspect"));
     assert!(
@@ -4657,7 +4665,7 @@ async fn automation_turn_cannot_start_a_new_command() {
         .iter()
         .find(|m| m.tool_call_id.as_deref() == Some("c1"))
         .unwrap();
-    assert!(rejected.text.contains("not available"));
+    assert!(rejected.text.contains("tool_not_advertised"));
     assert_eq!(s.execution_state, ExecutionState::None);
 }
 
@@ -5873,6 +5881,7 @@ async fn reasoning_only_max_tokens_reports_runtime_budget_configuration_error() 
     let truncated = ModelTurn {
         stop_reason: StopReason::MaxTokens,
         provider_meta: ProviderResponseMeta {
+            cache_projection: None,
             reasoning_observed: true,
             reasoning_tokens: Some(8192),
             ..ProviderResponseMeta::without_reasoning(StopReason::MaxTokens)
@@ -5912,6 +5921,7 @@ async fn reasoning_only_end_turn_retries_once_with_server_recovery_notice() {
     let reasoning_only = ModelTurn {
         stop_reason: StopReason::EndTurn,
         provider_meta: ProviderResponseMeta {
+            cache_projection: None,
             reasoning_observed: true,
             reasoning_tokens: Some(128),
             ..ProviderResponseMeta::without_reasoning(StopReason::EndTurn)
@@ -5960,6 +5970,7 @@ async fn repeated_reasoning_only_end_turn_fails_after_one_bounded_retry() {
     let reasoning_only = || ModelTurn {
         stop_reason: StopReason::EndTurn,
         provider_meta: ProviderResponseMeta {
+            cache_projection: None,
             reasoning_observed: true,
             reasoning_tokens: Some(128),
             ..ProviderResponseMeta::without_reasoning(StopReason::EndTurn)
@@ -6073,6 +6084,7 @@ async fn unknown_stop_is_protocol_error_without_retry_or_tool_execution() {
             arguments_json: "{}".into(),
         }],
         provider_meta: ProviderResponseMeta {
+            cache_projection: None,
             stop_reason: StopReason::Other,
             replay: Some(ReplayDisposition::legacy_unknown()),
             ..Default::default()
@@ -6263,6 +6275,7 @@ async fn enforced_model_turn_block_reviews_once_and_persists_only_fixed_placehol
                 ],
                 stop_reason: StopReason::ToolUse,
                 provider_meta: ProviderResponseMeta {
+                    cache_projection: None,
                     display_reasoning: Some("blocked thinking".into()),
                     ..tool_meta()
                 },
