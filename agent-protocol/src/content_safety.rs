@@ -86,6 +86,22 @@ pub enum ContentSafetyCategory {
     Politics,
 }
 
+impl ContentSafetyCategory {
+    pub const ALL: [Self; 11] = [
+        Self::Sexual,
+        Self::SexualMinors,
+        Self::Violence,
+        Self::GraphicViolence,
+        Self::ViolentWrongdoing,
+        Self::Hate,
+        Self::ThreateningHarassment,
+        Self::SelfHarm,
+        Self::SelfHarmInstructions,
+        Self::Illicit,
+        Self::Politics,
+    ];
+}
+
 /// Closed business decision returned by the safety layer.
 #[derive(
     Debug,

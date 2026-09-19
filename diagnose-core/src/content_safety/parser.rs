@@ -112,19 +112,19 @@ mod tests {
 
     #[test]
     fn accepts_consistent_allow_block_and_safe_redirect() {
-        let allow = r#"{"decision":"allow","categories":[],"stages":[],"policy_version":"content-safety-v1"}"#;
+        let allow = r#"{"decision":"allow","categories":[],"stages":[],"policy_version":"content-safety-v2"}"#;
         assert_eq!(
             parse(allow, &[ContentSafetyStage::Input]).unwrap().decision,
             ContentSafetyDecision::Allow
         );
 
-        let block = r#"{"decision":"block","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#;
+        let block = r#"{"decision":"block","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v2"}"#;
         assert_eq!(
             parse(block, &[ContentSafetyStage::Input]).unwrap().decision,
             ContentSafetyDecision::Block
         );
 
-        let redirect = r#"{"decision":"safe_redirect","categories":["self_harm"],"stages":["output"],"policy_version":"content-safety-v1"}"#;
+        let redirect = r#"{"decision":"safe_redirect","categories":["self_harm"],"stages":["output"],"policy_version":"content-safety-v2"}"#;
         assert_eq!(
             parse(redirect, &[ContentSafetyStage::Output])
                 .unwrap()
@@ -138,10 +138,10 @@ mod tests {
         let cases = [
             "",
             "{}",
-            r#"{"decision":"review","categories":[],"stages":[],"policy_version":"content-safety-v1"}"#,
-            r#"{"decision":"allow","categories":[],"stages":[],"policy_version":"content-safety-v1","reason":"x"}"#,
-            r#"{"decision":"allow","decision":"block","categories":[],"stages":[],"policy_version":"content-safety-v1"}"#,
-            r#"{"decision":"allow","categories":[],"stages":[],"policy_version":"content-safety-v1"} trailing"#,
+            r#"{"decision":"review","categories":[],"stages":[],"policy_version":"content-safety-v2"}"#,
+            r#"{"decision":"allow","categories":[],"stages":[],"policy_version":"content-safety-v2","reason":"x"}"#,
+            r#"{"decision":"allow","decision":"block","categories":[],"stages":[],"policy_version":"content-safety-v2"}"#,
+            r#"{"decision":"allow","categories":[],"stages":[],"policy_version":"content-safety-v2"} trailing"#,
             r#"{"decision":"allow","categories":[],"stages":[],"policy_version":"other"}"#,
         ];
         for raw in cases {
@@ -154,12 +154,12 @@ mod tests {
     #[test]
     fn inconsistent_decision_duplicates_and_wrong_stage_fail_closed() {
         let cases = [
-            r#"{"decision":"allow","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
-            r#"{"decision":"safe_redirect","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
-            r#"{"decision":"block","categories":["self_harm"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
-            r#"{"decision":"block","categories":["politics","politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
-            r#"{"decision":"block","categories":["politics"],"stages":["action","action"],"policy_version":"content-safety-v1"}"#,
-            r#"{"decision":"block","categories":["politics"],"stages":["image"],"policy_version":"content-safety-v1"}"#,
+            r#"{"decision":"allow","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v2"}"#,
+            r#"{"decision":"safe_redirect","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v2"}"#,
+            r#"{"decision":"block","categories":["self_harm"],"stages":["input"],"policy_version":"content-safety-v2"}"#,
+            r#"{"decision":"block","categories":["politics","politics"],"stages":["input"],"policy_version":"content-safety-v2"}"#,
+            r#"{"decision":"block","categories":["politics"],"stages":["action","action"],"policy_version":"content-safety-v2"}"#,
+            r#"{"decision":"block","categories":["politics"],"stages":["image"],"policy_version":"content-safety-v2"}"#,
         ];
         for raw in cases {
             assert!(
@@ -181,27 +181,27 @@ mod tests {
                 SafetyVerdictInvalidReason::PolicyVersion,
             ),
             (
-                r#"{"decision":"block","categories":["politics","politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
+                r#"{"decision":"block","categories":["politics","politics"],"stages":["input"],"policy_version":"content-safety-v2"}"#,
                 SafetyVerdictInvalidReason::DuplicateCategory,
             ),
             (
-                r#"{"decision":"block","categories":["politics"],"stages":["input","input"],"policy_version":"content-safety-v1"}"#,
+                r#"{"decision":"block","categories":["politics"],"stages":["input","input"],"policy_version":"content-safety-v2"}"#,
                 SafetyVerdictInvalidReason::DuplicateStage,
             ),
             (
-                r#"{"decision":"block","categories":["politics"],"stages":["image"],"policy_version":"content-safety-v1"}"#,
+                r#"{"decision":"block","categories":["politics"],"stages":["image"],"policy_version":"content-safety-v2"}"#,
                 SafetyVerdictInvalidReason::StageNotAllowed,
             ),
             (
-                r#"{"decision":"allow","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
+                r#"{"decision":"allow","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v2"}"#,
                 SafetyVerdictInvalidReason::AllowNonempty,
             ),
             (
-                r#"{"decision":"block","categories":[],"stages":[],"policy_version":"content-safety-v1"}"#,
+                r#"{"decision":"block","categories":[],"stages":[],"policy_version":"content-safety-v2"}"#,
                 SafetyVerdictInvalidReason::BlockedEmpty,
             ),
             (
-                r#"{"decision":"safe_redirect","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v1"}"#,
+                r#"{"decision":"safe_redirect","categories":["politics"],"stages":["input"],"policy_version":"content-safety-v2"}"#,
                 SafetyVerdictInvalidReason::DecisionMismatch,
             ),
         ];

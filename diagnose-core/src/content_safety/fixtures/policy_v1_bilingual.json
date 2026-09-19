@@ -1,6 +1,6 @@
 {
   "fixture_version": "policy-v1-bilingual",
-  "prompt_version": "content-safety-v1",
+  "prompt_version": "content-safety-v2",
   "category_groups": [
     {
       "id": "sexual",

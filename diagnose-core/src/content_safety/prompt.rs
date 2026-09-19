@@ -5,7 +5,7 @@ use serde::Serialize;
 use super::policy::POLITICS_POLICY;
 use super::seam::{SafetyImage, SafetyInput, SafetyModelTurn};
 
-pub const CONTENT_SAFETY_PROMPT_VERSION: &str = "content-safety-v1";
+pub const CONTENT_SAFETY_PROMPT_VERSION: &str = "content-safety-v2";
 
 /// Provider-neutral prompt pair. Image bytes are attached separately by the
 /// manager seam and therefore cannot accidentally enter text logs.
@@ -19,7 +19,7 @@ fn system_prompt(allowed_stages: &str) -> String {
     format!(
         "You are a deterministic content-safety classifier for a remote-device AI product.\n\
          Policy version: {CONTENT_SAFETY_PROMPT_VERSION}.\n\
-         Review sexual content (including minors), violence and graphic violence, \
+         Report ALL applicable categories, including overlapping categories; never stop at the first match. Review sexual content (including minors), violence and graphic violence, \
          violent wrongdoing, hate, threatening harassment, self-harm and self-harm \
          instructions, illicit operational guidance, and politics.\n\
          Self-harm or self-harm-instruction content uses safe_redirect unless another \
