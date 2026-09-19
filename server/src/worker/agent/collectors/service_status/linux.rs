@@ -1,121 +1,150 @@
-//! Linux backend for `service.status`: loaded systemd service units.
+//! Read installed and loaded systemd units without loading inactive units.
+use super::*;
+use std::collections::BTreeMap;
 
-use std::process::Command;
-
-use desk_agent_protocol::{AgentError, AgentErrorKind, ServiceEntry};
-
-const SHOW_PROPERTIES: &str = "Id,Description,LoadState,ActiveState,SubState,UnitFileState";
-
-pub(super) fn enumerate_all() -> Result<Vec<ServiceEntry>, AgentError> {
-    let output = Command::new("systemctl")
-        .args([
-            "show",
-            "--type=service",
-            "--all",
-            "--no-pager",
-            "--property",
-            SHOW_PROPERTIES,
-        ])
-        .output()
-        .map_err(|cause| backend_error(format!("failed to run systemctl: {cause}")))?;
-    if !output.status.success() {
-        return Err(backend_error(format!(
-            "systemctl show failed: {}",
-            bounded_stderr(&output.stderr)
-        )));
+pub(super) fn enumerate(params: &ServiceStatusParams, deadline: Instant) -> Enumeration {
+    let scope = params.scope.as_deref().unwrap_or("system");
+    let user_scope = format!("user:{}", unsafe { libc::geteuid() });
+    let resolved_scope = if scope == "user" {
+        user_scope.clone()
+    } else if scope == "all" {
+        format!("system+{user_scope}")
+    } else {
+        scope.into()
+    };
+    let mut result = Enumeration {
+        scope: resolved_scope,
+        ..Default::default()
+    };
+    for manager in if scope == "all" {
+        vec!["system", "user"]
+    } else {
+        vec![scope]
+    } {
+        if manager == "user" && unsafe { libc::geteuid() } == 0 {
+            result.errors.push(diagnostic(
+                DiagnosticStage::ServiceEnumeration,
+                "systemctl --user",
+                "The current non-root desktop user is unavailable; refusing to query the root user manager",
+            ));
+            continue;
+        }
+        let mut units = BTreeMap::new();
+        let manager_arg = if manager == "user" {
+            "--user"
+        } else {
+            "--system"
+        };
+        for operation in ["list-unit-files", "list-units"] {
+            match super::command::run(
+                "systemctl",
+                &[
+                    manager_arg,
+                    operation,
+                    "--type=service",
+                    "--all",
+                    "--no-pager",
+                    "--no-legend",
+                    "--output=json",
+                ],
+                deadline,
+            ) {
+                Ok(text) => match merge_json(
+                    &mut units,
+                    &text,
+                    operation == "list-unit-files",
+                    if manager == "user" {
+                        &user_scope
+                    } else {
+                        manager
+                    },
+                ) {
+                    Ok(()) => {}
+                    Err(e) => result.errors.push(diagnostic(
+                        DiagnosticStage::ServiceEnumeration,
+                        operation,
+                        &e,
+                    )),
+                },
+                Err(error) => result.errors.push(error),
+            }
+        }
+        result.services.extend(units.into_values());
     }
-    Ok(parse_systemctl_show(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
+    result
 }
-
-fn parse_systemctl_show(text: &str) -> Vec<ServiceEntry> {
-    text.split("\n\n").filter_map(parse_unit_block).collect()
-}
-
-fn parse_unit_block(block: &str) -> Option<ServiceEntry> {
-    let mut id = None;
-    let mut description = None;
-    let mut load_state = None;
-    let mut active_state = None;
-    let mut sub_state = None;
-    let mut unit_file_state = None;
-    for line in block.lines() {
-        let (key, value) = line.split_once('=')?;
-        match key {
-            "Id" => id = Some(value),
-            "Description" => description = Some(value),
-            "LoadState" => load_state = Some(value),
-            "ActiveState" => active_state = Some(value),
-            "SubState" => sub_state = Some(value),
-            "UnitFileState" => unit_file_state = Some(value),
-            _ => {}
+fn merge_json(
+    units: &mut BTreeMap<String, ServiceEntry>,
+    text: &str,
+    installed: bool,
+    scope: &str,
+) -> Result<(), String> {
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(text).map_err(|e| format!("Invalid systemd JSON: {e}"))?;
+    for row in rows {
+        let name = row
+            .get(if installed { "unit_file" } else { "unit" })
+            .and_then(|v| v.as_str())
+            .ok_or("systemd entry missing unit name")?;
+        let name = name.rsplit('/').next().unwrap_or(name);
+        if !name.ends_with(".service") {
+            continue;
+        }
+        let entry = units.entry(name.into()).or_insert_with(|| ServiceEntry {
+            name: name.into(),
+            scope: scope.into(),
+            state: "not_loaded".into(),
+            ..Default::default()
+        });
+        if installed {
+            entry.unit_file_state = row
+                .get("state")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+        } else {
+            entry.display_name = row
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let active = row
+                .get("active")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let sub = row.get("sub").and_then(|v| v.as_str()).unwrap_or("");
+            entry.state = match (active, sub) {
+                ("active", "running") => "running",
+                ("inactive", _) => "stopped",
+                _ => active,
+            }
+            .into();
         }
     }
-    let name = id.filter(|value| !value.is_empty())?;
-    let state = normalize_state(
-        load_state.unwrap_or_default(),
-        active_state.unwrap_or_default(),
-        sub_state.unwrap_or_default(),
-    );
-    Some(ServiceEntry {
-        name: name.to_string(),
-        display_name: description
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-        state,
-        start_type: unit_file_state
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-    })
+    Ok(())
 }
-
-fn normalize_state(load_state: &str, active_state: &str, sub_state: &str) -> String {
-    if load_state == "not-found" {
-        return "not_found".into();
-    }
-    match active_state {
-        "active" if sub_state == "running" => "running".into(),
-        "active" => "active".into(),
-        "inactive" => "stopped".into(),
-        "failed" => "failed".into(),
-        "activating" => "start_pending".into(),
-        "deactivating" => "stop_pending".into(),
-        value if !value.is_empty() => value.to_string(),
-        _ => "unknown".into(),
+pub(super) fn enrich(entry: &mut ServiceEntry, _deadline: Instant) {
+    if entry.unit_file_state.is_none() {
+        entry.metadata_error = Some(diagnostic(
+            DiagnosticStage::ServiceConfiguration,
+            "systemd unit file state",
+            "No installed unit file state was reported; may be a runtime-only service",
+        ));
     }
 }
-
-fn bounded_stderr(stderr: &[u8]) -> String {
-    String::from_utf8_lossy(stderr)
-        .trim()
-        .chars()
-        .take(512)
-        .collect()
-}
-
-fn backend_error(message: String) -> AgentError {
-    AgentError {
-        kind: AgentErrorKind::Internal,
-        message,
-        retryable: true,
-        safe_for_model: true,
-        error_code: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn parses_loaded_units_and_normalizes_states() {
-        let text = "Id=ssh.service\nDescription=OpenSSH server\nLoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\n\nId=timer.service\nDescription=One shot\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nUnitFileState=static\n";
-        let entries = parse_systemctl_show(text);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].name, "ssh.service");
-        assert_eq!(entries[0].state, "running");
-        assert_eq!(entries[0].start_type.as_deref(), Some("enabled"));
-        assert_eq!(entries[1].state, "stopped");
+    fn merges_installed_and_loaded_without_inventing_running_state() {
+        let mut units = BTreeMap::new();
+        merge_json(&mut units, r#"[{"unit_file":"disabled.service","state":"disabled"},{"unit_file":"running.service","state":"enabled"}]"#, true, "system").unwrap();
+        merge_json(&mut units, r#"[{"unit":"running.service","active":"active","sub":"running","description":"Daemon"},{"unit":"runtime.service","active":"inactive","sub":"dead"}]"#, false, "system").unwrap();
+        assert_eq!(units.len(), 3);
+        assert_eq!(units["disabled.service"].state, "not_loaded");
+        assert_eq!(units["running.service"].state, "running");
+        assert_eq!(
+            units["running.service"].unit_file_state.as_deref(),
+            Some("enabled")
+        );
+        assert!(units["runtime.service"].unit_file_state.is_none());
     }
 }

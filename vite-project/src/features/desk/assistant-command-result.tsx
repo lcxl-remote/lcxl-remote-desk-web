@@ -6,7 +6,9 @@ import { hasUnknownActionResult } from './action-result-status';
 import { AssistantLaunchResult, parseLaunchReceipt } from './assistant-launch-result';
 
 type CommandReceipt = {
-    exit_code: number;
+    exit_code: number | null;
+    failure?: { message: string; kind: string } | null;
+    termination_signal?: number | null;
     duration_ms: number;
     streams: { type: 'split'; stdout: string; stderr: string; stdout_truncated: boolean; stderr_truncated: boolean }
         | { type: 'pty_combined'; terminal: string; truncated: boolean };
@@ -23,8 +25,10 @@ export function parseCommandReceipt(text: string): CommandReceipt | null {
         if (!isRecord(envelope) || !isRecord(envelope.Exec)) return null;
         const value = envelope.Exec;
         const streams = value.streams;
-        if (!Number.isSafeInteger(value.exit_code) || !Number.isSafeInteger(value.duration_ms)
+        if ((value.exit_code !== null && !Number.isSafeInteger(value.exit_code)) || !Number.isSafeInteger(value.duration_ms)
             || (value.duration_ms as number) < 0 || !isRecord(streams)) return null;
+        if (value.failure != null && (!isRecord(value.failure) || typeof value.failure.message !== 'string' || typeof value.failure.kind !== 'string')) return null;
+        if (value.termination_signal != null && !Number.isSafeInteger(value.termination_signal)) return null;
         if (value.redactions !== undefined && (!Array.isArray(value.redactions)
             || !value.redactions.every(item => typeof item === 'string'))) return null;
         if (streams.type === 'split') {
@@ -63,9 +67,10 @@ export function AssistantCommandResult({ text, onExportBackup }: { text: string;
             <div className="mt-3 space-y-3">
                 {receipt ? <>
                     <dl className="flex flex-wrap gap-x-6 gap-y-2">
-                        <div><dt className="text-muted-foreground">{t('pages.aiAssistant.commandReceipt.exitCode')}</dt><dd>{receipt.exit_code}</dd></div>
+                        <div><dt className="text-muted-foreground">{t('pages.aiAssistant.commandReceipt.exitCode')}</dt><dd>{receipt.exit_code ?? '—'}</dd></div>
                         <div><dt className="text-muted-foreground">{t('pages.aiAssistant.commandReceipt.duration')}</dt><dd>{t('pages.aiAssistant.commandReceipt.milliseconds', { value: receipt.duration_ms.toLocaleString(i18n.language) })}</dd></div>
                     </dl>
+                    {receipt.failure && <p role="alert" className="whitespace-pre-wrap break-words text-destructive">{receipt.failure.message}</p>}
                     {receipt.streams.type === 'split' ? <>
                         {output(t('pages.aiAssistant.commandReceipt.stdout'), receipt.streams.stdout, receipt.streams.stdout_truncated)}
                         {output(t('pages.aiAssistant.commandReceipt.stderr'), receipt.streams.stderr, receipt.streams.stderr_truncated)}

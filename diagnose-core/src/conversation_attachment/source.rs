@@ -114,7 +114,11 @@ mod tests {
     #[test]
     fn command_text_is_not_reclassified_by_json_looking_contents() {
         let output = OperationOutput::Exec(ExecOutput {
-            exit_code: 0,
+            started: true,
+            termination_signal: None,
+            failure: None,
+            diagnostics: vec![],
+            exit_code: Some(0),
             duration_ms: 1,
             redactions: vec![],
             streams: ExecOutputStreams::Split {

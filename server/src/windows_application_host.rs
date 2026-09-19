@@ -1,6 +1,9 @@
 //! Private ordinary-user launch host; no server, UI, or model endpoint is started.
+use crate::worker::agent::application_launch::windows_diagnostics::failure;
 use crate::worker::agent::application_launch::{windows_package, windows_process};
+use desk_agent_protocol::application_launch::LaunchError;
 use desk_agent_protocol::application_launch::*;
+use desk_agent_protocol::native_diagnostic::DiagnosticStage;
 use serde::{Deserialize, Serialize};
 use std::{io, os::windows::io::AsRawHandle, time::Duration};
 use tokio::{
@@ -107,7 +110,8 @@ pub(crate) struct PreparedHost {
 }
 impl PreparedHost {
     pub(crate) async fn invoke(mut self, dispatch_id: String) -> LaunchApplicationResult {
-        let unknown = LaunchApplicationResult {
+        let mut unknown = LaunchApplicationResult {
+            diagnostic: None,
             dispatch_id: dispatch_id.clone(),
             launch_outcome: LaunchOutcome::OutcomeUnknown,
             argument_delivery: if self.request.args.is_empty() {
@@ -136,30 +140,84 @@ impl PreparedHost {
             Ok(Ok(result)) if result.dispatch_id == dispatch_id && !result.requested_admin => {
                 result
             }
-            _ => unknown,
+            Ok(Err(error)) => {
+                unknown.diagnostic = Some(
+                    failure(
+                        LaunchFailureReason::NativeFailure,
+                        DiagnosticStage::HelperCommunication,
+                        "application host invocation",
+                        &error,
+                    )
+                    .diagnostic,
+                );
+                unknown
+            }
+            Err(error) => {
+                unknown.diagnostic = Some(
+                    failure(
+                        LaunchFailureReason::NativeFailure,
+                        DiagnosticStage::HelperCommunication,
+                        "application host invocation deadline",
+                        &error,
+                    )
+                    .diagnostic,
+                );
+                unknown
+            }
+            Ok(Ok(_)) => {
+                unknown.diagnostic = Some(
+                    desk_agent_protocol::native_diagnostic::NativeDiagnostic::new(
+                        DiagnosticStage::HelperCommunication,
+                        "validate host receipt",
+                        "application",
+                        None,
+                        "Helper receipt identity did not match dispatch",
+                    ),
+                );
+                unknown
+            }
         }
     }
 }
 
 pub(crate) async fn prepare(
     request: &LaunchApplicationRequest,
-) -> Result<PreparedHost, LaunchFailureReason> {
+) -> Result<PreparedHost, LaunchError> {
     if request.run_as_admin {
-        return Err(LaunchFailureReason::PermissionDenied);
+        return Err(LaunchFailureReason::PermissionDenied.into());
     }
     request
         .validate()
-        .map_err(|_| LaunchFailureReason::InvalidTarget)?;
+        .map_err(|_| LaunchError::from(LaunchFailureReason::InvalidTarget))?;
     let session = windows_process::catalog_session_identity()?;
     let (sid, session_id) = session
         .rsplit_once(':')
         .ok_or(LaunchFailureReason::SessionUnavailable)?;
-    let session_id = session_id
-        .parse()
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    let session_id = session_id.parse().map_err(|error| {
+        failure(
+            LaunchFailureReason::SessionUnavailable,
+            DiagnosticStage::HelperCommunication,
+            "application host preparation",
+            &error,
+        )
+    })?;
     let name = format!("{PIPE_PREFIX}{}", uuid::Uuid::new_v4());
-    let pipe = server(&name, sid).map_err(|_| LaunchFailureReason::NativeFailure)?;
-    let executable = std::env::current_exe().map_err(|_| LaunchFailureReason::NativeFailure)?;
+    let pipe = server(&name, sid).map_err(|error| {
+        failure(
+            LaunchFailureReason::NativeFailure,
+            DiagnosticStage::HelperCommunication,
+            "application host preparation",
+            &error,
+        )
+    })?;
+    let executable = std::env::current_exe().map_err(|error| {
+        failure(
+            LaunchFailureReason::NativeFailure,
+            DiagnosticStage::HelperCommunication,
+            "application host preparation",
+            &error,
+        )
+    })?;
     let executable = executable
         .to_str()
         .ok_or(LaunchFailureReason::InvalidTarget)?;
@@ -174,41 +232,79 @@ pub(crate) async fn prepare(
     };
     let created = windows_process::prepare(&helper, sid, session_id)?
         .invoke_hidden_host(uuid::Uuid::new_v4().to_string());
-    let pid = created.created_process_id.ok_or(
-        created
+    let pid = created.created_process_id.ok_or_else(|| {
+        let mut error: LaunchError = created
             .failure_reason
-            .unwrap_or(LaunchFailureReason::NativeFailure),
-    )?;
+            .unwrap_or(LaunchFailureReason::NativeFailure)
+            .into();
+        if let Some(mut diagnostic) = created.diagnostic {
+            diagnostic.stage = DiagnosticStage::HelperStart;
+            error.diagnostic = diagnostic;
+        }
+        error
+    })?;
     let mut pipe = pipe;
     let exchange = tokio::time::timeout(TIMEOUT, async {
-        pipe.connect()
-            .await
-            .map_err(|_| LaunchFailureReason::NativeFailure)?;
+        pipe.connect().await.map_err(|error| {
+            failure(
+                LaunchFailureReason::NativeFailure,
+                DiagnosticStage::HelperCommunication,
+                "application host preparation",
+                &error,
+            )
+        })?;
         let mut peer = 0;
-        unsafe { GetNamedPipeClientProcessId(HANDLE(pipe.as_raw_handle()), &mut peer) }
-            .map_err(|_| LaunchFailureReason::PermissionDenied)?;
+        unsafe { GetNamedPipeClientProcessId(HANDLE(pipe.as_raw_handle()), &mut peer) }.map_err(
+            |error| {
+                failure(
+                    LaunchFailureReason::PermissionDenied,
+                    DiagnosticStage::HelperCommunication,
+                    "application host preparation",
+                    &error,
+                )
+            },
+        )?;
         if peer != pid {
-            return Err(LaunchFailureReason::PermissionDenied);
+            return Err(LaunchFailureReason::PermissionDenied.into());
         }
         write_frame(
             &mut pipe,
             &Prepare {
-                version: 1,
+                version: 2,
                 user_sid: sid.into(),
                 session_id,
                 request: request.clone(),
             },
         )
         .await
-        .map_err(|_| LaunchFailureReason::NativeFailure)?;
-        let identity: Result<ResolvedApplicationIdentity, LaunchFailureReason> =
-            read_frame(&mut pipe)
-                .await
-                .map_err(|_| LaunchFailureReason::NativeFailure)?;
+        .map_err(|error| {
+            failure(
+                LaunchFailureReason::NativeFailure,
+                DiagnosticStage::HelperCommunication,
+                "application host preparation",
+                &error,
+            )
+        })?;
+        let identity: Result<ResolvedApplicationIdentity, LaunchError> =
+            read_frame(&mut pipe).await.map_err(|error| {
+                failure(
+                    LaunchFailureReason::NativeFailure,
+                    DiagnosticStage::HelperCommunication,
+                    "application host preparation",
+                    &error,
+                )
+            })?;
         identity
     })
     .await
-    .map_err(|_| LaunchFailureReason::NativeFailure)??;
+    .map_err(|error| {
+        failure(
+            LaunchFailureReason::NativeFailure,
+            DiagnosticStage::HelperCommunication,
+            "application host preparation",
+            &error,
+        )
+    })??;
     Ok(PreparedHost {
         pipe,
         identity: exchange,
@@ -272,7 +368,7 @@ async fn serve(name: &str, parent_pid: u32) -> io::Result<()> {
         .map_err(io::Error::other)??;
     let session = windows_process::catalog_session_identity()
         .map_err(|_| io::Error::other("host user unavailable"))?;
-    if request.version != 1
+    if request.version != 2
         || request.request.run_as_admin
         || session != format!("{}:{}", request.user_sid, request.session_id)
     {
@@ -289,7 +385,7 @@ async fn serve(name: &str, parent_pid: u32) -> io::Result<()> {
     };
     let identity = match &executable {
         Some(Ok(prepared)) => Ok(prepared.identity.clone()),
-        Some(Err(reason)) => Err(*reason),
+        Some(Err(reason)) => Err(reason.clone()),
         None => windows_package::resolve(&request.request),
     };
     write_frame(&mut pipe, &identity).await?;

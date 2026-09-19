@@ -12,6 +12,13 @@ const receipt = {
 const wire = (value: unknown) => JSON.stringify({ Exec: value });
 
 describe('command receipt presentation', () => {
+    it('shows a failed start without fabricating an exit code and retains output', () => {
+        const failed = { ...receipt, exit_code: null, started: false, failure: { kind: 'Internal', message: 'CreateProcess: elevation required (740)' } };
+        expect(parseCommandReceipt(wire(failed))?.exit_code).toBeNull();
+        render(<AssistantCommandResult text={wire(failed)} />);
+        expect(screen.getByRole('alert').textContent).toContain('elevation required (740)');
+        expect(screen.getByText('Permission denied')).toBeTruthy();
+    });
     it('parses the actual tagged device receipt without altering its output', () => {
         expect(parseCommandReceipt(wire(receipt))).toEqual(receipt);
     });

@@ -1575,11 +1575,9 @@ pub async fn run_signaling_proxy(
                 {
                     use desk_agent_protocol::AgentOutcome;
                     let (success, summary, redactions) = match &payload.result.outcome {
-                        AgentOutcome::Ok(desk_agent_protocol::OperationOutput::Exec(o)) => (
-                            o.exit_code == 0,
-                            format!("exit {}", o.exit_code),
-                            o.redactions.len() as i32,
-                        ),
+                        AgentOutcome::Ok(desk_agent_protocol::OperationOutput::Exec(o)) => {
+                            (o.succeeded(), o.audit_summary(), o.redactions.len() as i32)
+                        }
                         AgentOutcome::Ok(_) => (true, "ok".to_string(), 0),
                         AgentOutcome::Err(e) => (false, format!("{:?}", e.kind), 0),
                     };

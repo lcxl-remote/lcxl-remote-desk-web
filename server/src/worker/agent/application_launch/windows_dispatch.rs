@@ -61,7 +61,9 @@ pub(crate) async fn run(
                         let identity = windows_package::resolve(request)?;
                         Ok((Prepared::Package, identity))
                     }
-                    ApplicationTargetKind::MacosBundle => Err(LaunchFailureReason::Unsupported),
+                    ApplicationTargetKind::MacosBundle => {
+                        Err(LaunchFailureReason::Unsupported.into())
+                    }
                 }
             },
             |prepared, id| async move {

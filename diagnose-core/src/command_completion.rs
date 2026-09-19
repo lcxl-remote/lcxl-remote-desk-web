@@ -8,7 +8,7 @@ use crate::{chat::ChatRole, seam::ModelRequest, session::PersistedAgentSession};
 
 pub const COMPLETION_GRACE_MS: u64 = 5 * 60 * 1000;
 
-pub const INTERPRETATION_INSTRUCTION: &str = "\n\nThis is a completed-command result interpretation, not an action turn. No tools are available. Summarize only the supplied result in the conversation language. Do not emit tool invocation markup, tool-call JSON, or claim to start further operations. If more investigation is needed, explain that it has not been performed and requires a normal user-confirmed action turn.";
+pub const INTERPRETATION_INSTRUCTION: &str = "\n\nThis is a completed-command result interpretation, not an action turn. No tools are available. Summarize only the supplied result in the conversation language. A receipt is not proof of success: inspect started, failure, exit_code, termination_signal and diagnostics together with retained output. Missing exit status or cleanup failure after startup means the final effects may be unknown; do not claim nothing happened or recommend automatic retry. Native OS refusal is distinct from owner approval. Do not emit tool invocation markup, tool-call JSON, or claim to start further operations. If more investigation is needed, explain that it has not been performed and requires a normal user-confirmed action turn.";
 
 /// Detect invocation structures, not a casual reference to a protocol name.
 /// These bytes are never parsed into executable operations.

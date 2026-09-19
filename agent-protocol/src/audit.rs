@@ -779,7 +779,7 @@ pub fn summarize_output(output: &OperationOutput) -> String {
                 o.enumeration_complete
             ),
         },
-        OperationOutput::Exec(o) => format!("exec: exit {}", o.exit_code),
+        OperationOutput::Exec(o) => format!("exec: {}", o.audit_summary()),
     }
 }
 

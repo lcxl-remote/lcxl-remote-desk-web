@@ -6,6 +6,16 @@ const receipt = { launch_outcome: 'launch_accepted', argument_delivery: 'submitt
     created_process_id: 42, created_process_elevated: false, failure_reason: null };
 const completion = { result: 'changed_but_unverified', output: { kind: 'application_launch', value: receipt } };
 describe('native launch result', () => {
+    it('renders native failure details as plain text', () => {
+        const value = { ...receipt, launch_outcome: 'launch_failed', created_process_id: null, created_process_elevated: null, diagnostic: { stage: 'process_creation', operation: 'CreateProcessW', domain: 'win32', code: 740, message: '<img src=x> elevation required' } };
+        const text = JSON.stringify({ result: 'definitely_not_started', output: { kind: 'application_launch', value } });
+        const parsed = parseLaunchReceipt(text)!;
+        expect(parsed).not.toBeNull();
+        const { container } = render(<AssistantLaunchResult receipt={parsed} text={text} />);
+        expect(container.textContent).toContain('740');
+        expect(container.textContent).toContain('<img src=x> elevation required');
+        expect(container.querySelector('img')).toBeNull();
+    });
     it('rejects contradictory privilege, process and acceptance facts', () => {
         for (const fields of [{ created_process_elevated: true }, { created_process_id: 4294967296 },
             { failure_reason: 'native_failure' }, { argument_delivery: 'unsupported' }]) {

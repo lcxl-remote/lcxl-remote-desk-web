@@ -53,9 +53,12 @@ pub mod exec_pty;
 pub mod exec_pty_wire;
 pub mod file_recovery;
 pub mod model_proxy;
+pub mod native_diagnostic;
 pub mod provenance;
 pub mod remote_tool;
 pub mod schedule;
+pub mod service_status;
+pub use service_status::{ServiceEntry, ServiceStatusOutput, ServiceStatusParams};
 pub mod terminal_ai_assistant;
 pub mod terminal_complete;
 pub mod visual_evidence;
@@ -759,32 +762,6 @@ pub struct NetworkPortsParams {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
-#[serde(deny_unknown_fields)]
-pub struct ServiceStatusParams {
-    #[serde(default)]
-    pub queries: Vec<String>,
-    #[serde(default)]
-    pub allow_unfiltered: bool,
-}
-impl ServiceStatusParams {
-    pub fn validate_selection(&self) -> Result<(), &'static str> {
-        if !validate_search_terms(&self.queries) {
-            return Err(
-                "queries accepts at most 16 nonempty strings, each at most 128 bytes. Required format: {\"queries\":[\"service name\",\"another name\"]}. No services were read.",
-            );
-        }
-        if self.queries.is_empty() && !self.allow_unfiltered {
-            return Err(
-                "Search conditions are required: use queries=[service names] with multiple fuzzy alternatives, or explicitly set allow_unfiltered=true for bounded enumeration. No services were read.",
-            );
-        }
-        Ok(())
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
-)]
 pub struct LogRecentParams {
     pub source: Option<String>,
     pub since_minutes: Option<u32>,
@@ -917,24 +894,6 @@ pub struct PortEntry {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
-pub struct ServiceStatusOutput {
-    pub services: Vec<ServiceEntry>,
-    pub truncated: bool,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
-)]
-pub struct ServiceEntry {
-    pub name: String,
-    pub display_name: Option<String>,
-    pub state: String,
-    pub start_type: Option<String>,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
-)]
 pub struct LogRecentOutput {
     pub events: Vec<LogEvent>,
     pub truncated: bool,
@@ -1059,11 +1018,56 @@ pub enum ExecTarget {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct ExecOutput {
-    pub exit_code: i32,
+    pub started: bool,
+    pub exit_code: Option<i32>,
+    pub termination_signal: Option<i32>,
+    pub failure: Option<AgentError>,
+    pub diagnostics: Vec<native_diagnostic::NativeDiagnostic>,
     pub streams: ExecOutputStreams,
     pub duration_ms: u32,
     #[serde(default)]
     pub redactions: Vec<String>,
+}
+
+impl ExecOutput {
+    pub fn outcome_unknown(&self) -> bool {
+        self.started
+            && ((self.exit_code.is_none()
+                && self.termination_signal.is_none()
+                && !self.diagnostics.iter().any(|d| d.domain == "posix_signal"))
+                || self
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.stage == native_diagnostic::DiagnosticStage::ProcessCleanup))
+    }
+    pub fn succeeded(&self) -> bool {
+        self.started
+            && self.failure.is_none()
+            && self.diagnostics.is_empty()
+            && self.exit_code == Some(0)
+            && self.termination_signal.is_none()
+    }
+    /// Content-free status for audit storage.
+    pub fn audit_summary(&self) -> String {
+        format!(
+            "started={} exit={:?} signal={:?} failure={:?}",
+            self.started,
+            self.exit_code,
+            self.termination_signal,
+            self.failure.as_ref().map(|error| &error.kind)
+        )
+    }
+    pub fn summary(&self) -> String {
+        if let Some(error) = &self.failure {
+            error.message.clone()
+        } else if let Some(signal) = self.termination_signal {
+            format!("Command terminated by signal {signal}")
+        } else if let Some(code) = self.exit_code {
+            format!("exit {code}")
+        } else {
+            "Command exit status unavailable".into()
+        }
+    }
 }
 
 /// Output shape follows the sealed I/O mode. A PTY has one combined terminal

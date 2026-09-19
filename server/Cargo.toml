@@ -153,6 +153,7 @@ zbus = { workspace = true }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+plist = "1.8"
 objc2 = { workspace = true, features = ["exception"] }
 block2 = "0.5"
 objc2-foundation = { workspace = true, features = ["NSGeometry"] }

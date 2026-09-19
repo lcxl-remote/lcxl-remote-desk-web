@@ -209,6 +209,42 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
+    /// The OS comes from authenticated edge readiness, never the controller OS.
+    pub fn with_service_platform(mut self, os: &str) -> Self {
+        let allowed: &[&str] = match os.to_ascii_lowercase().as_str() {
+            "windows" => &["start_types"],
+            "linux" => &["unit_file_states", "scope"],
+            "macos" | "darwin" => &["launch_policies"],
+            _ => &[],
+        };
+        for provider in self.providers.values_mut() {
+            for capability in &mut provider.capabilities {
+                if capability.tool_spec.name != "read_service_status" {
+                    continue;
+                }
+                if let Some(properties) =
+                    capability.tool_spec.parameters_schema["properties"].as_object_mut()
+                {
+                    for field in [
+                        "start_types",
+                        "unit_file_states",
+                        "launch_policies",
+                        "scope",
+                    ] {
+                        if !allowed.contains(&field) {
+                            properties.remove(field);
+                        }
+                    }
+                }
+                capability.tool_spec.description.push_str(&format!(
+                    " Current target OS: {os}. Available native filter fields: {}.",
+                    allowed.join(", ")
+                ));
+            }
+        }
+        self
+    }
+
     /// Per-request authority supplied by the runtime after authenticating the
     /// owner. It is not included in the discoverable capability catalog.
     pub fn with_command_policy(
@@ -455,6 +491,39 @@ mod tests {
                 capabilities: vec![wire],
             },
             capabilities: vec![capability],
+        }
+    }
+
+    #[test]
+    fn service_schema_only_advertises_the_authenticated_target_platform() {
+        for (os, expected) in [
+            ("windows", vec!["start_types"]),
+            ("linux", vec!["unit_file_states", "scope"]),
+            ("macos", vec!["launch_policies"]),
+        ] {
+            let mut service = provider("service", "service.read", "read_service_status");
+            service.capabilities[0].tool_spec.parameters_schema = json!({"properties":{"queries":{},"start_types":{},"unit_file_states":{},"launch_policies":{},"scope":{}}});
+            let registry = ProviderRegistryBuilder::new()
+                .register(service)
+                .build()
+                .unwrap()
+                .with_service_platform(os);
+            let schema = &registry.providers["service"].capabilities[0]
+                .tool_spec
+                .parameters_schema["properties"];
+            assert!(schema.get("queries").is_some());
+            for field in [
+                "start_types",
+                "unit_file_states",
+                "launch_policies",
+                "scope",
+            ] {
+                assert_eq!(
+                    schema.get(field).is_some(),
+                    expected.contains(&field),
+                    "{os}: {field}"
+                );
+            }
         }
     }
 

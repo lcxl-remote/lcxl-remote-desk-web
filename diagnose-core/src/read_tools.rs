@@ -128,10 +128,19 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_service_status",
             Capability::ServiceStatus,
-            "Search service names and display names using queries: 1–16 case-insensitive literal substrings combined with OR. No regex or exact-name selector. Search conditions are required unless allow_unfiltered=true explicitly requests a bounded listing. No match returns an empty list.",
+            "Search service names/display names with queries (case-insensitive substring OR). Native filters: Windows start_types; Linux unit_file_states and scope (system default, user=current desktop user, all=both); macOS launch_policies. Each filter array is OR and combines with queries using AND. Empty/omitted arrays impose no restriction. Supply queries or a nonempty native filter, otherwise allow_unfiltered=true is required. Pagination is over matches: repeat filters with next_cursor; an empty successful page ends the query. limit defaults to 50, maximum 200, with a 32 KiB JSON page budget. complete=false and errors indicate unavailable metadata or an incomplete query, never absence. Runtime status differs from configured startup behavior. macOS policy_source=disk is configuration only, not confirmed effective policy. Linux disabled is not Windows disabled. Never use another platform's filters.",
             json!({
                 "type": "object",
-                "properties": {"queries":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}}, "allow_unfiltered":{"type":"boolean","default":false}},
+                "properties": {
+                    "queries":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}},
+                    "allow_unfiltered":{"type":"boolean","default":false},
+                    "start_types":{"type":"array","maxItems":16,"items":{"type":"string","enum":desk_agent_protocol::service_status::WINDOWS_START_TYPES}},
+                    "unit_file_states":{"type":"array","maxItems":16,"items":{"type":"string","enum":desk_agent_protocol::service_status::UNIT_FILE_STATES}},
+                    "launch_policies":{"type":"array","maxItems":16,"items":{"type":"string","enum":desk_agent_protocol::service_status::LAUNCH_POLICIES}},
+                    "scope":{"type":"string","enum":["system","user","all"]},
+                    "limit":{"type":"integer","minimum":1,"maximum":200,"default":50},
+                    "cursor":{"type":"string","maxLength":4096}
+                },
                 "additionalProperties": false
             }),
         ),
@@ -614,7 +623,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             ContextKind::NetworkPorts(params)
         }
         "read_service_status" => {
-            let params = parse_params::<ServiceStatusParams>(&call.arguments_json).map_err(|error| bad_arguments(format!("{}. Required format: {{\"queries\":[\"service name\",\"another name\"]}}; the old name selector is not supported. No services were read.", error.message)))?;
+            let params = parse_params::<ServiceStatusParams>(&call.arguments_json).map_err(|error| bad_arguments(format!("{}. Use queries (an array of service-name keywords), a native platform filter, or allow_unfiltered=true. Keep filters unchanged when passing cursor. No services were read.", error.message)))?;
             params.validate_selection().map_err(bad_arguments)?;
             ContextKind::ServiceStatus(params)
         }

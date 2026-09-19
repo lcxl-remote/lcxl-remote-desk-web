@@ -135,7 +135,12 @@ fn completed(
                 result.launch_outcome
             ),
         }],
-        message: None,
+        message: result.diagnostic.as_ref().map(|d| {
+            format!(
+                "{:?} / {} / {} {:?}: {}",
+                d.stage, d.operation, d.domain, d.code, d.message
+            )
+        }),
         output: Some(ComputerActionOutput::ApplicationLaunch(result)),
     }
 }

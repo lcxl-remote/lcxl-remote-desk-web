@@ -21,7 +21,7 @@ pub(crate) async fn resolve(
     request: desk_agent_protocol::application_launch::LaunchApplicationRequest,
 ) -> Result<
     desk_agent_protocol::application_launch::ResolvedApplicationIdentity,
-    desk_agent_protocol::application_launch::LaunchFailureReason,
+    desk_agent_protocol::application_launch::LaunchError,
 > {
     use desk_agent_protocol::application_launch::{ApplicationTargetKind, LaunchFailureReason};
     request
@@ -50,7 +50,7 @@ pub(crate) async fn resolve(
                 Ok(prepared.identity.clone())
             }
             ApplicationTargetKind::WindowsAppId => windows_package::resolve(&request),
-            ApplicationTargetKind::MacosBundle => Err(LaunchFailureReason::Unsupported),
+            ApplicationTargetKind::MacosBundle => Err(LaunchFailureReason::Unsupported.into()),
         })
         .await
         .map_err(|_| LaunchFailureReason::NativeFailure)?
@@ -68,6 +68,8 @@ pub(crate) async fn resolve(
             .map(|prepared| prepared.identity)
     }
 }
+#[cfg(windows)]
+pub(crate) mod windows_diagnostics;
 #[cfg(windows)]
 pub(crate) mod windows_process;
 

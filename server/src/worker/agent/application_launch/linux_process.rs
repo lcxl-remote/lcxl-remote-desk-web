@@ -1,4 +1,23 @@
 //! User-manager transient services hand off cgroup lifetime independently of workers.
+use desk_agent_protocol::application_launch::LaunchError;
+use desk_agent_protocol::native_diagnostic::{DiagnosticStage, NativeDiagnostic};
+pub(super) fn bus_error(
+    reason: LaunchFailureReason,
+    operation: &str,
+    error: zbus::Error,
+) -> LaunchError {
+    let mut diagnostic = NativeDiagnostic::new(
+        DiagnosticStage::Environment,
+        operation,
+        "dbus",
+        None,
+        &error.to_string(),
+    );
+    if let zbus::Error::MethodError(name, _, _) = &error {
+        diagnostic.name = Some(name.to_string());
+    }
+    LaunchError { reason, diagnostic }
+}
 use desk_agent_protocol::application_launch::{
     ApplicationTargetKind, ArgumentDelivery, LaunchApplicationRequest, LaunchApplicationResult,
     LaunchFailureReason, LaunchOutcome,
@@ -23,7 +42,7 @@ pub(crate) struct PreparedExecutable {
     unset_environment: Vec<String>,
 }
 
-async fn manager(connection: &zbus::Connection) -> Result<zbus::Proxy<'_>, LaunchFailureReason> {
+async fn manager(connection: &zbus::Connection) -> Result<zbus::Proxy<'_>, LaunchError> {
     zbus::Proxy::new(
         connection,
         "org.freedesktop.systemd1",
@@ -31,27 +50,55 @@ async fn manager(connection: &zbus::Connection) -> Result<zbus::Proxy<'_>, Launc
         "org.freedesktop.systemd1.Manager",
     )
     .await
-    .map_err(|_| LaunchFailureReason::LifetimeIsolationUnavailable)
+    .map_err(|error| {
+        bus_error(
+            LaunchFailureReason::LifetimeIsolationUnavailable,
+            "systemd user manager",
+            error,
+        )
+    })
 }
 
 pub(crate) async fn prepare(
     request: &LaunchApplicationRequest,
-) -> Result<PreparedExecutable, LaunchFailureReason> {
+) -> Result<PreparedExecutable, LaunchError> {
     request
         .validate()
         .map_err(|_| LaunchFailureReason::InvalidTarget)?;
     if request.run_as_admin || request.target.kind != ApplicationTargetKind::Executable {
-        return Err(LaunchFailureReason::Unsupported);
+        return Err(LaunchFailureReason::Unsupported.into());
     }
-    let host =
-        super::unix_catalog_host::current().map_err(|_| LaunchFailureReason::SessionUnavailable)?;
-    let runtime =
-        std::env::var("XDG_RUNTIME_DIR").map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    let host = super::unix_catalog_host::current().map_err(|message| LaunchError {
+        reason: LaunchFailureReason::SessionUnavailable,
+        diagnostic: NativeDiagnostic::new(
+            DiagnosticStage::Environment,
+            "resolve desktop session",
+            "application",
+            None,
+            message,
+        ),
+    })?;
+    let runtime = std::env::var("XDG_RUNTIME_DIR").map_err(|error| LaunchError {
+        reason: LaunchFailureReason::SessionUnavailable,
+        diagnostic: NativeDiagnostic::new(
+            DiagnosticStage::Environment,
+            "resolve session environment",
+            "application",
+            None,
+            &error.to_string(),
+        ),
+    })?;
     let bus_path = Path::new(&runtime).join("bus");
-    let bus_metadata = std::fs::symlink_metadata(&bus_path)
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    let bus_metadata = std::fs::symlink_metadata(&bus_path).map_err(|error| LaunchError {
+        reason: LaunchFailureReason::SessionUnavailable,
+        diagnostic: NativeDiagnostic::from_io(
+            DiagnosticStage::TargetResolution,
+            "resolve application file",
+            &error,
+        ),
+    })?;
     if bus_metadata.uid() != unsafe { libc::geteuid() } || !bus_metadata.file_type().is_socket() {
-        return Err(LaunchFailureReason::SessionUnavailable);
+        return Err(LaunchFailureReason::SessionUnavailable.into());
     }
     // Use the verified user's runtime bus, never a model/service-provided address.
     let address = format!(
@@ -61,20 +108,38 @@ pub(crate) async fn prepare(
             .ok_or(LaunchFailureReason::SessionUnavailable)?
     );
     if address.contains(',') || address.contains(';') || address.contains('%') {
-        return Err(LaunchFailureReason::SessionUnavailable);
+        return Err(LaunchFailureReason::SessionUnavailable.into());
     }
-    let builder = zbus::connection::Builder::address(address.as_str())
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    let builder =
+        zbus::connection::Builder::address(address.as_str()).map_err(|error| LaunchError {
+            reason: LaunchFailureReason::SessionUnavailable,
+            diagnostic: NativeDiagnostic::new(
+                DiagnosticStage::Environment,
+                "resolve session environment",
+                "application",
+                None,
+                &error.to_string(),
+            ),
+        })?;
     let connection = tokio::time::timeout(Duration::from_secs(5), builder.build())
         .await
         .map_err(|_| LaunchFailureReason::SessionUnavailable)?
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+        .map_err(|error| {
+            bus_error(
+                LaunchFailureReason::SessionUnavailable,
+                "connect user session bus",
+                error,
+            )
+        })?;
     super::linux_session::verify(&connection, &host.session_id).await?;
     let manager = manager(&connection).await?;
-    let version: String = manager
-        .get_property("Version")
-        .await
-        .map_err(|_| LaunchFailureReason::LifetimeIsolationUnavailable)?;
+    let version: String = manager.get_property("Version").await.map_err(|error| {
+        bus_error(
+            LaunchFailureReason::LifetimeIsolationUnavailable,
+            "systemd user manager",
+            error,
+        )
+    })?;
     let major = version
         .trim_start_matches('v')
         .split(|c: char| !c.is_ascii_digit())
@@ -82,12 +147,16 @@ pub(crate) async fn prepare(
         .and_then(|v| v.parse::<u32>().ok());
     // ExitType=cgroup keeps forked applications alive after the initial process exits.
     if major.is_none_or(|v| v < 250) {
-        return Err(LaunchFailureReason::LifetimeIsolationUnavailable);
+        return Err(LaunchFailureReason::LifetimeIsolationUnavailable.into());
     }
-    let manager_environment: Vec<String> = manager
-        .get_property("Environment")
-        .await
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    let manager_environment: Vec<String> =
+        manager.get_property("Environment").await.map_err(|error| {
+            bus_error(
+                LaunchFailureReason::SessionUnavailable,
+                "read systemd environment",
+                error,
+            )
+        })?;
     let mut session = BTreeMap::new();
     for key in super::linux_environment::SESSION_KEYS {
         if let Some(value) = std::env::var_os(key) {
@@ -122,34 +191,72 @@ fn resolve_identity(
     request: &LaunchApplicationRequest,
     home: &Path,
     session: &str,
-) -> Result<ResolvedApplicationIdentity, LaunchFailureReason> {
+) -> Result<ResolvedApplicationIdentity, LaunchError> {
     let target = Path::new(&request.target.value);
     let cwd = request.cwd.as_deref().map(Path::new).unwrap_or(home);
     if !target.is_absolute() || !cwd.is_absolute() || !cwd.is_dir() {
-        return Err(LaunchFailureReason::InvalidTarget);
+        return Err(LaunchFailureReason::InvalidTarget.into());
     }
-    let target = std::fs::canonicalize(target).map_err(|_| LaunchFailureReason::InvalidTarget)?;
-    let cwd = std::fs::canonicalize(cwd).map_err(|_| LaunchFailureReason::InvalidTarget)?;
+    let target = std::fs::canonicalize(target).map_err(|error| LaunchError {
+        reason: LaunchFailureReason::InvalidTarget,
+        diagnostic: NativeDiagnostic::from_io(
+            DiagnosticStage::TargetResolution,
+            "resolve application file",
+            &error,
+        ),
+    })?;
+    let cwd = std::fs::canonicalize(cwd).map_err(|error| LaunchError {
+        reason: LaunchFailureReason::InvalidTarget,
+        diagnostic: NativeDiagnostic::from_io(
+            DiagnosticStage::TargetResolution,
+            "resolve application file",
+            &error,
+        ),
+    })?;
     let target_text = target.to_str().ok_or(LaunchFailureReason::InvalidTarget)?;
     let c_path = CString::new(target_text).map_err(|_| LaunchFailureReason::InvalidTarget)?;
     if unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } != 0 {
-        return Err(LaunchFailureReason::PermissionDenied);
+        return Err(LaunchError {
+            reason: LaunchFailureReason::PermissionDenied,
+            diagnostic: NativeDiagnostic::from_io(
+                DiagnosticStage::TargetResolution,
+                "access executable",
+                &std::io::Error::last_os_error(),
+            ),
+        });
     }
-    let mut file = std::fs::File::open(&target).map_err(|_| LaunchFailureReason::InvalidTarget)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| LaunchFailureReason::InvalidTarget)?;
+    let mut file = std::fs::File::open(&target).map_err(|error| LaunchError {
+        reason: LaunchFailureReason::InvalidTarget,
+        diagnostic: NativeDiagnostic::from_io(
+            DiagnosticStage::TargetResolution,
+            "resolve application file",
+            &error,
+        ),
+    })?;
+    let metadata = file.metadata().map_err(|error| LaunchError {
+        reason: LaunchFailureReason::InvalidTarget,
+        diagnostic: NativeDiagnostic::from_io(
+            DiagnosticStage::TargetResolution,
+            "read application identity",
+            &error,
+        ),
+    })?;
     if !metadata.is_file() || metadata.mode() & 0o6000 != 0 {
-        return Err(LaunchFailureReason::ElevationRequired);
+        return Err(LaunchFailureReason::ElevationRequired.into());
     }
     let mut hash = Sha256::new();
     hash.update(metadata.dev().to_le_bytes());
     hash.update(metadata.ino().to_le_bytes());
     let mut bytes = [0u8; 65536];
     loop {
-        let read = file
-            .read(&mut bytes)
-            .map_err(|_| LaunchFailureReason::InvalidTarget)?;
+        let read = file.read(&mut bytes).map_err(|error| LaunchError {
+            reason: LaunchFailureReason::InvalidTarget,
+            diagnostic: NativeDiagnostic::from_io(
+                DiagnosticStage::TargetResolution,
+                "read application identity",
+                &error,
+            ),
+        })?;
         if read == 0 {
             break;
         }
@@ -172,6 +279,7 @@ impl PreparedExecutable {
     /// The durable Invoking claim and current approval must precede this method.
     pub(crate) async fn invoke(self, dispatch_id: String) -> LaunchApplicationResult {
         let mut result = LaunchApplicationResult {
+            diagnostic: None,
             dispatch_id: dispatch_id.clone(),
             launch_outcome: LaunchOutcome::LaunchFailed,
             argument_delivery: if self.request.args.is_empty() {
@@ -200,13 +308,15 @@ impl PreparedExecutable {
         }
         if let Err(reason) = super::linux_session::verify(&self.connection, &host.session_id).await
         {
-            result.failure_reason = Some(reason);
+            result.failure_reason = Some(reason.reason);
+            result.diagnostic = Some(reason.diagnostic);
             return result;
         }
         let manager = match manager(&self.connection).await {
             Ok(manager) => manager,
             Err(reason) => {
-                result.failure_reason = Some(reason);
+                result.failure_reason = Some(reason.reason);
+                result.diagnostic = Some(reason.diagnostic);
                 return result;
             }
         };
@@ -253,7 +363,27 @@ impl PreparedExecutable {
             }
             // The bus may have disconnected after submission. Never reinterpret
             // transport failure as proof that no user unit was created.
-            Ok(Err(_)) | Err(_) => result.launch_outcome = LaunchOutcome::OutcomeUnknown,
+            Ok(Err(error)) => {
+                result.launch_outcome = LaunchOutcome::OutcomeUnknown;
+                let mut diagnostic = bus_error(
+                    LaunchFailureReason::NativeFailure,
+                    "StartTransientUnit",
+                    error,
+                )
+                .diagnostic;
+                diagnostic.stage = DiagnosticStage::ProcessCreation;
+                result.diagnostic = Some(diagnostic);
+            }
+            Err(error) => {
+                result.launch_outcome = LaunchOutcome::OutcomeUnknown;
+                result.diagnostic = Some(NativeDiagnostic::new(
+                    DiagnosticStage::ProcessWait,
+                    "StartTransientUnit",
+                    "timeout",
+                    None,
+                    &error.to_string(),
+                ));
+            }
         }
         result
     }

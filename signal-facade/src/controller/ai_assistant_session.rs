@@ -926,7 +926,18 @@ impl CommandTaskDto {
                 BackgroundTaskStateDto::Cancelled
             }
             Some(AgentOutcome::Err(_)) => BackgroundTaskStateDto::Failed,
-            Some(AgentOutcome::Ok(OperationOutput::Exec(output))) if output.exit_code != 0 => {
+            Some(AgentOutcome::Ok(OperationOutput::Exec(output))) if output.outcome_unknown() => {
+                BackgroundTaskStateDto::OutcomeUnknown
+            }
+            Some(AgentOutcome::Ok(OperationOutput::Exec(output)))
+                if output
+                    .failure
+                    .as_ref()
+                    .is_some_and(|e| e.kind == AgentErrorKind::Cancelled) =>
+            {
+                BackgroundTaskStateDto::Cancelled
+            }
+            Some(AgentOutcome::Ok(OperationOutput::Exec(output))) if !output.succeeded() => {
                 BackgroundTaskStateDto::Failed
             }
             Some(AgentOutcome::Ok(_)) => BackgroundTaskStateDto::Succeeded,
@@ -1625,6 +1636,51 @@ mod command_task_projection_tests {
         assert_eq!(task.execution_generation, "generation");
     }
 
+    #[test]
+    fn execution_receipt_is_not_automatically_a_success() {
+        for (started, exit_code, expected) in [
+            (true, None, BackgroundTaskStateDto::OutcomeUnknown),
+            (false, None, BackgroundTaskStateDto::Failed),
+            (true, Some(3), BackgroundTaskStateDto::Failed),
+        ] {
+            let receipt = desk_agent_protocol::ExecOutput {
+                started,
+                exit_code,
+                termination_signal: None,
+                failure: Some(AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: "native failure".into(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                }),
+                diagnostics: vec![],
+                streams: desk_agent_protocol::ExecOutputStreams::Split {
+                    stdout: "retained".into(),
+                    stderr: "".into(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                },
+                duration_ms: 1,
+                redactions: vec![],
+            };
+            let task = CommandTaskDto::project(
+                "task".into(),
+                "call".into(),
+                "generation".into(),
+                "done",
+                "now".into(),
+                Some(AgentOutcome::Ok(
+                    desk_agent_protocol::OperationOutput::Exec(receipt),
+                )),
+            );
+            assert_eq!(
+                std::mem::discriminant(&task.state),
+                std::mem::discriminant(&expected)
+            );
+            assert!(task.result.unwrap().contains("retained"));
+        }
+    }
     #[test]
     fn missing_or_invalid_result_is_unknown_not_success() {
         let task = CommandTaskDto::project(

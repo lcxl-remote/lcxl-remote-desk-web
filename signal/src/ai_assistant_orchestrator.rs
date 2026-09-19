@@ -165,6 +165,12 @@ pub(crate) async fn current_capability_projection<C: sea_orm::ConnectionTrait>(
     } else {
         None
     };
+    let provider_registry = provider_registry.with_service_platform(
+        cached_readiness
+            .as_ref()
+            .map(|r| r.readiness.os.as_str())
+            .unwrap_or("unknown"),
+    );
     let readiness = match cached_readiness
         .as_ref()
         .map(|cached| {

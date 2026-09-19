@@ -50,12 +50,16 @@ pub fn validate(
         || (result.created_process_elevated == Some(true) && !result.requested_admin)
         || (!accepted
             && (result.created_process_id.is_some() || result.created_process_elevated.is_some()))
-        || (accepted && result.failure_reason.is_some())
+        || (accepted && (result.failure_reason.is_some() || result.diagnostic.is_some()))
         || completed.facts.iter().any(|fact| fact.changed != accepted)
         || (accepted && completed.facts.len() != 1)
         || (binding.request().args.is_empty()
             != (result.argument_delivery == ArgumentDelivery::NotRequested))
         || (accepted && result.argument_delivery == ArgumentDelivery::Unsupported)
+        || result
+            .diagnostic
+            .as_ref()
+            .is_some_and(|diagnostic| !diagnostic.is_bounded())
         || result.observations.len() > 16
         || result.observations.iter().any(|observation| {
             observation.observed_at_unix_ms == 0 || observation.process_id == Some(0)
@@ -113,6 +117,7 @@ mod tests {
             message: None,
             output: Some(ComputerActionOutput::ApplicationLaunch(
                 LaunchApplicationResult {
+                    diagnostic: None,
                     dispatch_id: "dispatch".into(),
                     launch_outcome: LaunchOutcome::LaunchAccepted,
                     argument_delivery: ArgumentDelivery::NotRequested,
@@ -146,6 +151,33 @@ mod tests {
             let changed = serde_json::from_value(json).unwrap();
             assert!(validate(&binding, &changed).is_err());
         }
+    }
+    #[test]
+    fn failed_receipt_rejects_unbounded_native_messages() {
+        let (binding, mut completion) = fixture();
+        completion.result = ComputerActionResultClass::DefinitelyNotStarted;
+        completion.facts.clear();
+        let Some(ComputerActionOutput::ApplicationLaunch(result)) = &mut completion.output else {
+            unreachable!()
+        };
+        result.launch_outcome = LaunchOutcome::LaunchFailed;
+        result.created_process_id = None;
+        result.created_process_elevated = None;
+        result.diagnostic = Some(
+            desk_agent_protocol::native_diagnostic::NativeDiagnostic::new(
+                desk_agent_protocol::native_diagnostic::DiagnosticStage::ProcessCreation,
+                "spawn",
+                "win32",
+                Some(740),
+                "Elevation required",
+            ),
+        );
+        validate(&binding, &completion).unwrap();
+        let Some(ComputerActionOutput::ApplicationLaunch(result)) = &mut completion.output else {
+            unreachable!()
+        };
+        result.diagnostic.as_mut().unwrap().message = "x".repeat(1025);
+        assert!(validate(&binding, &completion).is_err());
     }
     #[test]
     fn unknown_cannot_be_relabelled_as_definitely_not_started() {

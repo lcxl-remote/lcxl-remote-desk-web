@@ -1,8 +1,10 @@
 //! One native submission across duplicate delivery, cancellation and worker restart.
 use super::journal::{InvocationClaim, LaunchJournal};
+use desk_agent_protocol::application_launch::LaunchError;
 use desk_agent_protocol::application_launch::{
     ArgumentDelivery, LaunchApplicationResult, LaunchFailureReason, LaunchOutcome,
 };
+use desk_agent_protocol::native_diagnostic::{DiagnosticStage, NativeDiagnostic};
 use desk_diagnose_core::application_launch::{
     LaunchApprovalBinding, LaunchApprovalSubject, ResolvedApplicationIdentity,
 };
@@ -15,6 +17,15 @@ pub(super) fn receipt(
     reason: Option<LaunchFailureReason>,
 ) -> LaunchApplicationResult {
     LaunchApplicationResult {
+        diagnostic: reason.map(|reason| {
+            let mut diagnostic = LaunchError::from(reason).diagnostic;
+            if reason == LaunchFailureReason::PermissionDenied {
+                diagnostic.stage = desk_agent_protocol::native_diagnostic::DiagnosticStage::Authorization;
+                diagnostic.operation = "verify launch authorization".into();
+                diagnostic.message = "Launch authorization or its binding is no longer valid; no native target launch was submitted.".into();
+            }
+            diagnostic
+        }),
         dispatch_id: dispatch_id.into(),
         launch_outcome: outcome,
         argument_delivery: if binding.request().args.is_empty() {
@@ -30,6 +41,21 @@ pub(super) fn receipt(
     }
 }
 
+fn journal_error(
+    binding: &LaunchApprovalBinding,
+    dispatch_id: &str,
+    operation: &str,
+    error: &std::io::Error,
+) -> LaunchApplicationResult {
+    let mut result = receipt(binding, dispatch_id, LaunchOutcome::OutcomeUnknown, None);
+    result.diagnostic = Some(NativeDiagnostic::from_io(
+        DiagnosticStage::ProcessWait,
+        operation,
+        error,
+    ));
+    result
+}
+
 /// The caller supplies current worker authorization checks, never model verdicts.
 /// Preparation resolves the target independently and cannot launch an application.
 pub(crate) async fn dispatch<P, Prepare, Invoke>(
@@ -42,7 +68,7 @@ pub(crate) async fn dispatch<P, Prepare, Invoke>(
     invoke: impl FnOnce(P, String) -> Invoke,
 ) -> LaunchApplicationResult
 where
-    Prepare: Future<Output = Result<(P, ResolvedApplicationIdentity), LaunchFailureReason>>,
+    Prepare: Future<Output = Result<(P, ResolvedApplicationIdentity), LaunchError>>,
     Invoke: Future<Output = LaunchApplicationResult>,
 {
     // A deserialized binding must reproduce its own digest as well as the current
@@ -58,8 +84,13 @@ where
             Some(LaunchFailureReason::PermissionDenied),
         );
     }
-    if journal.prepare(dispatch_id, binding.digest()).is_err() {
-        return receipt(binding, dispatch_id, LaunchOutcome::OutcomeUnknown, None);
+    if let Err(error) = journal.prepare(dispatch_id, binding.digest()) {
+        return journal_error(
+            binding,
+            dispatch_id,
+            "prepare durable launch record",
+            &error,
+        );
     }
     match journal.existing(dispatch_id, binding.digest()) {
         Ok(Some(InvocationClaim::Recorded(result))) if result.dispatch_id == dispatch_id => {
@@ -69,6 +100,9 @@ where
             return receipt(binding, dispatch_id, LaunchOutcome::NotDispatched, None);
         }
         Ok(None) => {}
+        Err(error) => {
+            return journal_error(binding, dispatch_id, "read durable launch record", &error);
+        }
         _ => return receipt(binding, dispatch_id, LaunchOutcome::OutcomeUnknown, None),
     }
     if let Err(reason) = check_authority() {
@@ -80,18 +114,23 @@ where
                 Some(reason),
             ),
             Ok(InvocationClaim::Recorded(result)) => result,
+            Err(error) => {
+                journal_error(binding, dispatch_id, "cancel durable launch record", &error)
+            }
             _ => receipt(binding, dispatch_id, LaunchOutcome::OutcomeUnknown, None),
         };
     }
     let (prepared, identity) = match prepare().await {
         Ok(value) => value,
         Err(reason) => {
-            return receipt(
+            let mut result = receipt(
                 binding,
                 dispatch_id,
                 LaunchOutcome::NotDispatched,
-                Some(reason),
+                Some(reason.reason),
             );
+            result.diagnostic = Some(reason.diagnostic);
+            return result;
         }
     };
     if binding
@@ -110,7 +149,10 @@ where
         Ok(InvocationClaim::Cancelled) => {
             return receipt(binding, dispatch_id, LaunchOutcome::NotDispatched, None);
         }
-        Ok(InvocationClaim::OutcomeUnknown) | Err(_) => {
+        Err(error) => {
+            return journal_error(binding, dispatch_id, "claim durable launch record", &error);
+        }
+        Ok(InvocationClaim::OutcomeUnknown) => {
             return receipt(binding, dispatch_id, LaunchOutcome::OutcomeUnknown, None);
         }
         Ok(InvocationClaim::Invoke) => {}
@@ -126,12 +168,24 @@ where
     };
     // A native receipt cannot be projected as durably resolved unless its exact
     // dispatch result survived persistence. Losing the write is an unknown outcome.
-    if result.dispatch_id != dispatch_id
-        || journal
-            .record(dispatch_id, binding.digest(), &result)
-            .is_err()
-    {
-        return receipt(binding, dispatch_id, LaunchOutcome::OutcomeUnknown, None);
+    if result.dispatch_id != dispatch_id {
+        let mut unknown = receipt(binding, dispatch_id, LaunchOutcome::OutcomeUnknown, None);
+        unknown.diagnostic = Some(NativeDiagnostic::new(
+            DiagnosticStage::HelperCommunication,
+            "validate launch receipt",
+            "application",
+            None,
+            "Received a receipt for a different dispatch; native outcome is unknown",
+        ));
+        return unknown;
+    }
+    if let Err(error) = journal.record(dispatch_id, binding.digest(), &result) {
+        return journal_error(
+            binding,
+            dispatch_id,
+            "persist durable launch receipt",
+            &error,
+        );
     }
     result
 }

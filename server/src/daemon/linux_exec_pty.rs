@@ -713,18 +713,60 @@ pub async fn run_root_pty(
     let reader_target = payload.session_target_id.clone();
     let reader_registration = payload.registration_generation;
     let reader_incarnation = payload.worker_incarnation;
+    let drain_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_drain_stop = Arc::clone(&drain_stop);
     let reader_task = tokio::task::spawn_blocking(move || {
         let mut retained = Vec::with_capacity(retain_cap.min(64 * 1024));
         let mut overflowed = false;
+        let mut read_error = None;
         let mut sequence = 0_u64;
         let mut chunk = vec![0_u8; MAX_PTY_DATA_FRAME_BYTES.min(8192)];
+        let mut drain_deadline = None;
         loop {
+            if reader_drain_stop.load(Ordering::Acquire) {
+                let deadline = drain_deadline
+                    .get_or_insert_with(|| std::time::Instant::now() + Duration::from_millis(250));
+                if std::time::Instant::now() >= *deadline {
+                    read_error = Some(
+                        desk_agent_protocol::native_diagnostic::NativeDiagnostic::new(
+                            desk_agent_protocol::native_diagnostic::DiagnosticStage::OutputRead,
+                            "drain elevated PTY",
+                            "timeout",
+                            None,
+                            "PTY drain deadline exceeded; retained output is incomplete",
+                        ),
+                    );
+                    break;
+                }
+            }
+            match crate::worker::exec_pty::native_io::readable(&reader) {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(error) => {
+                    read_error = Some(
+                        desk_agent_protocol::native_diagnostic::NativeDiagnostic::from_io(
+                            desk_agent_protocol::native_diagnostic::DiagnosticStage::OutputRead,
+                            "poll elevated PTY",
+                            &error,
+                        ),
+                    );
+                    reader_stop.store(STOP_INTERNAL, Ordering::Release);
+                    break;
+                }
+            }
             let count = match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(count) => count,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
-                Err(_) => {
+                Err(error) => {
+                    read_error = Some(
+                        desk_agent_protocol::native_diagnostic::NativeDiagnostic::from_io(
+                            desk_agent_protocol::native_diagnostic::DiagnosticStage::OutputRead,
+                            "read elevated PTY",
+                            &error,
+                        ),
+                    );
                     reader_stop.store(STOP_INTERNAL, Ordering::Release);
                     break;
                 }
@@ -768,7 +810,7 @@ pub async fn run_root_pty(
                 break;
             }
         }
-        (retained, overflowed)
+        (retained, overflowed, read_error)
     });
 
     let mut writer = tokio::fs::File::from_std(writer_file);
@@ -780,6 +822,7 @@ pub async fn run_root_pty(
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut status = None;
     let mut close_reason = PtyCloseReason::Exited;
+    let mut completion_diagnostics = Vec::new();
 
     loop {
         tokio::select! {
@@ -798,7 +841,8 @@ pub async fn run_root_pty(
                         break;
                     }
                     Ok(None) => {}
-                    Err(_) => {
+                    Err(error) => {
+                        completion_diagnostics.push(desk_agent_protocol::native_diagnostic::NativeDiagnostic::from_io(desk_agent_protocol::native_diagnostic::DiagnosticStage::ProcessWait, "wait elevated PTY", &error));
                         close_reason = PtyCloseReason::OutcomeUnknown;
                         break;
                     }
@@ -863,6 +907,15 @@ pub async fn run_root_pty(
                 "[exec-pty] scope cleanup failed generation={} error={error}",
                 payload.plan.execution_generation
             );
+            completion_diagnostics.push(
+                desk_agent_protocol::native_diagnostic::NativeDiagnostic::new(
+                    desk_agent_protocol::native_diagnostic::DiagnosticStage::ProcessCleanup,
+                    "stop systemd PTY scope",
+                    "application",
+                    None,
+                    &error.to_string(),
+                ),
+            );
             close_reason = PtyCloseReason::OutcomeUnknown;
         }
     }
@@ -870,11 +923,39 @@ pub async fn run_root_pty(
         status = prepared.child.try_wait().ok().flatten();
     }
     if status.is_none() {
-        let _ = prepared.child.kill();
-        status = prepared.child.wait().ok();
+        if let Err(error) = prepared.child.kill() {
+            completion_diagnostics.push(
+                desk_agent_protocol::native_diagnostic::NativeDiagnostic::from_io(
+                    desk_agent_protocol::native_diagnostic::DiagnosticStage::ProcessCleanup,
+                    "kill elevated PTY child",
+                    &error,
+                ),
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            match prepared.child.try_wait() {
+                Ok(Some(exit)) => {
+                    status = Some(exit);
+                    break;
+                }
+                Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) => {
+                    completion_diagnostics.push(
+                        desk_agent_protocol::native_diagnostic::NativeDiagnostic::from_io(
+                            desk_agent_protocol::native_diagnostic::DiagnosticStage::ProcessWait,
+                            "reap elevated PTY",
+                            &error,
+                        ),
+                    );
+                    break;
+                }
+            }
+        }
     }
+    drain_stop.store(true, Ordering::Release);
     drop(prepared.master);
-    let (retained, overflowed) = reader_task
+    let (retained, overflowed, read_error) = reader_task
         .await
         .map_err(|_| "PTY output reader failed".to_string())?;
     use std::os::unix::process::ExitStatusExt as _;
@@ -897,35 +978,30 @@ pub async fn run_root_pty(
     };
     let _ = carrier.route_daemon_closed(closed);
 
-    let outcome = match close_reason {
-        PtyCloseReason::Exited => crate::worker::exec_pty::finish_combined_result(
-            exit_status.unwrap_or(-1),
-            started_at.elapsed(),
-            &retained,
-            overflowed,
-            result_cap,
-        ),
-        PtyCloseReason::TimedOut => AgentOutcome::Err(crate::worker::exec_pty::agent_error(
-            AgentErrorKind::Timeout,
-            format!("PTY command timed out after {} ms", payload.plan.timeout_ms),
-        )),
-        PtyCloseReason::Cancelled
-        | PtyCloseReason::CarrierDisconnected
-        | PtyCloseReason::SlowConsumer
-        | PtyCloseReason::SessionStale
-        | PtyCloseReason::SequenceViolation => {
-            AgentOutcome::Err(crate::worker::exec_pty::agent_error(
-                AgentErrorKind::Cancelled,
-                format!("PTY command stopped: {close_reason:?}"),
-            ))
+    let mut outcome = crate::worker::exec_pty::finish_stopped_result(
+        status.as_ref().and_then(|value| value.code()),
+        close_reason,
+        started_at.elapsed(),
+        &retained,
+        overflowed,
+        result_cap,
+    );
+    if let AgentOutcome::Ok(desk_agent_protocol::OperationOutput::Exec(output)) = &mut outcome {
+        output.termination_signal = status.as_ref().and_then(|value| value.signal());
+        output.diagnostics.extend(completion_diagnostics);
+        if let Some(error) = read_error {
+            output.diagnostics.push(error);
+            if output.failure.is_none() {
+                output.failure = Some(desk_agent_protocol::AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::Internal,
+                    message: "PTY output capture failed; retained output is incomplete".into(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                });
+            }
         }
-        PtyCloseReason::OutcomeUnknown | PtyCloseReason::InternalError => {
-            AgentOutcome::Err(crate::worker::exec_pty::agent_error(
-                AgentErrorKind::Internal,
-                "PTY command outcome is unknown".to_string(),
-            ))
-        }
-    };
+    }
     Ok(RootPtyExecution {
         outcome,
         containment_identity,

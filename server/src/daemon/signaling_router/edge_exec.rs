@@ -662,8 +662,8 @@ async fn dispatch_root_fleet_pty(
         task_ctx.exec_capacity.release(&task_request_id);
         let (success, summary, redactions) = match &outcome {
             AgentOutcome::Ok(desk_agent_protocol::OperationOutput::Exec(output)) => (
-                output.exit_code == 0,
-                format!("exit {}", output.exit_code),
+                output.succeeded(),
+                output.audit_summary(),
                 output.redactions.len() as i32,
             ),
             AgentOutcome::Ok(_) => (true, "ok".to_string(), 0),

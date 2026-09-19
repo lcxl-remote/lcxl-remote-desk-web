@@ -107,7 +107,7 @@ struct Prepared {
     delivery: PreparedDelivery,
     template: Option<Value>,
     paths: Vec<String>,
-    command: Option<(i32, u32, bool)>,
+    command: Option<desk_agent_protocol::ExecOutput>,
 }
 
 fn prepare(
@@ -211,11 +211,7 @@ fn prepare(
                     let OperationOutput::Exec(ref exec) = output else {
                         unreachable!()
                     };
-                    command = Some((
-                        exec.exit_code,
-                        exec.duration_ms,
-                        !exec.redactions.is_empty(),
-                    ));
+                    command = Some(exec.clone());
                     let value = serde_json::to_value(&output)
                         .map_err(|_| invalid("Cannot encode command result"))?;
                     use desk_agent_protocol::ExecOutputStreams;
@@ -383,8 +379,8 @@ pub async fn externalize_with(
             "Tool result metadata exceeds 32768 bytes; narrow the source query. The operation must not be repeated.",
         ));
     }
-    let content = if let Some((exit_code, duration_ms, redactions_applied)) = prepared.command {
-        json!({"exit_code":exit_code,"duration_ms":duration_ms,"redactions_applied":redactions_applied,"streams":delivery.parts,
+    let content = if let Some(exec) = prepared.command {
+        json!({"started":exec.started,"exit_code":exec.exit_code,"termination_signal":exec.termination_signal,"failure":exec.failure,"diagnostics":exec.diagnostics,"duration_ms":exec.duration_ms,"redactions_applied":!exec.redactions.is_empty(),"streams":delivery.parts,
             "read_with": READ_ATTACHMENT_TOOL}).to_string()
     } else {
         let mut value = json!({"result_externalized":true,"parts":delivery.parts,"read_with":READ_ATTACHMENT_TOOL,
@@ -611,7 +607,11 @@ mod tests {
         let store = Store::default();
         let mut session = session();
         let command = OperationOutput::Exec(desk_agent_protocol::ExecOutput {
-            exit_code: 19,
+            started: true,
+            termination_signal: None,
+            failure: None,
+            diagnostics: vec![],
+            exit_code: Some(19),
             duration_ms: 80,
             redactions: vec![],
             streams: desk_agent_protocol::ExecOutputStreams::Split {

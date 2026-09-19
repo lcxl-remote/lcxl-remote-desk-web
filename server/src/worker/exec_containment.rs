@@ -55,11 +55,24 @@ pub fn provides_native_hard() -> bool {
 
 /// Why containment could not be established. The command must not be spawned.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContainmentError(pub String);
+pub struct ContainmentError(pub desk_agent_protocol::native_diagnostic::NativeDiagnostic);
+impl ContainmentError {
+    fn message(message: &str) -> Self {
+        Self(
+            desk_agent_protocol::native_diagnostic::NativeDiagnostic::new(
+                desk_agent_protocol::native_diagnostic::DiagnosticStage::ProcessContainment,
+                "prepare process containment",
+                "application",
+                None,
+                message,
+            ),
+        )
+    }
+}
 
 impl std::fmt::Display for ContainmentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}: {}", self.0.operation, self.0.message)
     }
 }
 
@@ -111,198 +124,36 @@ impl Containment {
     }
 
     /// Reclaim the whole tree now, rather than waiting for the drop.
-    pub fn reclaim(&mut self) {
-        self.inner.reclaim();
+    pub fn reclaim(
+        &mut self,
+    ) -> Result<(), desk_agent_protocol::native_diagnostic::NativeDiagnostic> {
+        self.inner.reclaim()
     }
 }
 
 impl Drop for Containment {
     fn drop(&mut self) {
-        self.inner.reclaim();
+        let _ = self.inner.reclaim();
     }
 }
 
 // ============================ Unix ============================
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod imp {
-    use super::*;
-
-    /// A POSIX process group. The child becomes the group leader, so everything it
-    /// spawns inherits the group and a single signal reaches all of it.
-    ///
-    /// Deliberately not cgroups on Linux: creating one requires a delegated subtree
-    /// the host usually does not have when it runs as an ordinary user, so it would
-    /// fail closed on exactly the common deployment. A process group works
-    /// unprivileged. It is escapable — a descendant may call `setsid` — but nothing
-    /// short of cgroups prevents that, and the practical leak this closes is the
-    /// ordinary child that simply inherits the group.
-    pub struct Platform {
-        pgid: Option<libc::pid_t>,
-    }
-
-    impl Platform {
-        pub fn prepare(_generation: &str) -> Result<(Self, Option<String>), ContainmentError> {
-            // A process group is named by its leader, which does not exist yet.
-            Ok((Self { pgid: None }, None))
-        }
-
-        pub fn apply(&self, cmd: &mut Command) {
-            // 0 means "new group led by the child", so the group id is the child pid.
-            cmd.process_group(0);
-        }
-
-        pub fn adopt(&mut self, child: &Child) -> Result<(), ContainmentError> {
-            let pid = child.id().ok_or_else(|| {
-                ContainmentError("the child exited before it could be contained".into())
-            })?;
-            self.pgid = Some(pid as libc::pid_t);
-            Ok(())
-        }
-
-        pub fn identity_after_adopt(&self) -> Option<String> {
-            self.pgid.map(|p| format!("pgid:{p}"))
-        }
-
-        pub fn reclaim(&mut self) {
-            let Some(pgid) = self.pgid.take() else {
-                return;
-            };
-            // Negative pid addresses the whole group. ESRCH (already gone) is the
-            // normal case after a clean exit and is not worth reporting.
-            unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
-            }
-        }
-    }
-}
+#[path = "exec_containment/unix.rs"]
+mod imp;
 
 // ============================ Windows ============================
 
 #[cfg(target_os = "windows")]
-mod imp {
-    use super::*;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject,
-    };
-    use windows::core::HSTRING;
-
-    /// A job object. Every process the child creates joins it automatically, and
-    /// terminating the job terminates all of them.
-    ///
-    /// `KILL_ON_JOB_CLOSE` is set as a backstop: if this process dies without
-    /// reclaiming, the kernel closes the last handle and tears the tree down
-    /// anyway. That covers the crash case no user-space cleanup can.
-    pub struct Platform {
-        job: Option<HANDLE>,
-    }
-
-    // SAFETY: `job` is a handle to a job object, a process-wide kernel object with
-    // no thread affinity (unlike GDI or window handles). The Tokio runtime may
-    // move, poll, and drop this containment on any worker thread, so the handle
-    // must cross threads. The calls we make on it — `AssignProcessToJobObject`,
-    // `TerminateJobObject`, `CloseHandle` — are all thread-agnostic kernel calls,
-    // and ownership is only ever moved, never shared, so `Send` is sound and
-    // `Sync` is neither needed nor claimed.
-    unsafe impl Send for Platform {}
-
-    impl Platform {
-        pub fn prepare(generation: &str) -> Result<(Self, Option<String>), ContainmentError> {
-            // Named so a leaked job is identifiable in a diagnostic tool; the name
-            // plays no part in reclamation.
-            let name = format!("Local\\LcxlExec-{generation}");
-            let job = unsafe { CreateJobObjectW(None, &HSTRING::from(&name)) }
-                .map_err(|e| ContainmentError(format!("could not create a job object: {e}")))?;
-
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { core::mem::zeroed() };
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            unsafe {
-                SetInformationJobObject(
-                    job,
-                    JobObjectExtendedLimitInformation,
-                    &limits as *const _ as *const core::ffi::c_void,
-                    core::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                )
-            }
-            .map_err(|e| {
-                unsafe {
-                    let _ = CloseHandle(job);
-                }
-                ContainmentError(format!("could not configure the job object: {e}"))
-            })?;
-
-            Ok((Self { job: Some(job) }, Some(name)))
-        }
-
-        pub fn apply(&self, _cmd: &mut Command) {
-            // Nothing to set before the spawn: assignment needs a process handle.
-        }
-
-        pub fn adopt(&mut self, child: &Child) -> Result<(), ContainmentError> {
-            let Some(job) = self.job else {
-                return Err(ContainmentError("the job object is gone".into()));
-            };
-            let handle = child.raw_handle().ok_or_else(|| {
-                ContainmentError("the child exited before it could be contained".into())
-            })?;
-            // Assignment happens just after the spawn rather than before it, because
-            // a process handle is required. A grandchild created in that instant
-            // would escape; since Windows 8 a process may belong to nested jobs, so
-            // the child itself always joins even if something else already placed it
-            // in a job.
-            unsafe { AssignProcessToJobObject(job, HANDLE(handle as *mut core::ffi::c_void)) }
-                .map_err(|e| ContainmentError(format!("could not contain the process: {e}")))?;
-            Ok(())
-        }
-
-        pub fn identity_after_adopt(&self) -> Option<String> {
-            // The job name was known before the spawn and has not changed.
-            None
-        }
-
-        pub fn reclaim(&mut self) {
-            let Some(job) = self.job.take() else {
-                return;
-            };
-            unsafe {
-                // Terminate first: closing the handle alone relies on this being the
-                // last reference, which the child having a handle can violate.
-                let _ = TerminateJobObject(job, 1);
-                let _ = CloseHandle(job);
-            }
-        }
-    }
-}
+#[path = "exec_containment/windows.rs"]
+mod imp;
 
 // ============================ Unsupported ============================
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-mod imp {
-    use super::*;
-
-    /// No containment primitive is wired for this platform, so execution is
-    /// refused rather than run unreclaimably.
-    pub struct Platform;
-
-    impl Platform {
-        pub fn prepare(_generation: &str) -> Result<(Self, Option<String>), ContainmentError> {
-            Err(ContainmentError(
-                "this platform has no process-tree containment, so execution is refused".into(),
-            ))
-        }
-        pub fn apply(&self, _cmd: &mut Command) {}
-        pub fn adopt(&mut self, _child: &Child) -> Result<(), ContainmentError> {
-            Err(ContainmentError("unsupported platform".into()))
-        }
-        pub fn identity_after_adopt(&self) -> Option<String> {
-            None
-        }
-        pub fn reclaim(&mut self) {}
-    }
-}
+#[path = "exec_containment/unsupported.rs"]
+mod imp;
 
 use imp::Platform;
 

@@ -223,6 +223,7 @@ pub struct ApplicationLaunchObservation {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema,
 )]
 pub struct LaunchApplicationResult {
+    pub diagnostic: Option<crate::native_diagnostic::NativeDiagnostic>,
     pub dispatch_id: String,
     pub launch_outcome: LaunchOutcome,
     pub argument_delivery: ArgumentDelivery,
@@ -232,6 +233,86 @@ pub struct LaunchApplicationResult {
     pub created_process_elevated: Option<bool>,
     pub observations: Vec<ApplicationLaunchObservation>,
 }
+
+/// Preparation failures retain their origin through helper-process transport.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema,
+)]
+pub struct LaunchError {
+    pub reason: LaunchFailureReason,
+    pub diagnostic: crate::native_diagnostic::NativeDiagnostic,
+}
+impl From<LaunchFailureReason> for LaunchError {
+    fn from(reason: LaunchFailureReason) -> Self {
+        use crate::native_diagnostic::{DiagnosticStage, NativeDiagnostic};
+        let (stage, operation, message) = match reason {
+            LaunchFailureReason::AdminRequired => (
+                DiagnosticStage::Environment,
+                "select elevated token",
+                "Administrator launch requested, but the current user has no usable elevated token. No UAC prompt was requested.",
+            ),
+            LaunchFailureReason::AdminLaunchUnavailable => (
+                DiagnosticStage::Environment,
+                "select elevated token",
+                "The host could not obtain a usable elevated user token. No UAC prompt was requested.",
+            ),
+            LaunchFailureReason::ElevationRequired => (
+                DiagnosticStage::ProcessCreation,
+                "application privilege requirement",
+                "The application requires elevated privileges; this launch cannot meet that requirement. No UAC prompt was requested.",
+            ),
+            LaunchFailureReason::SessionUnavailable => (
+                DiagnosticStage::Environment,
+                "validate user session",
+                "The required interactive user session or desktop is unavailable.",
+            ),
+            LaunchFailureReason::LifetimeIsolationUnavailable => (
+                DiagnosticStage::Environment,
+                "prepare independent application lifetime",
+                "The host could not prepare an independent application lifetime.",
+            ),
+            LaunchFailureReason::InvalidTarget => (
+                DiagnosticStage::TargetResolution,
+                "resolve application",
+                "The explicit target, arguments or working directory did not pass launch validation.",
+            ),
+            LaunchFailureReason::IdentityChanged => (
+                DiagnosticStage::TargetResolution,
+                "verify application identity",
+                "The target identity changed after approval; the launch was not submitted.",
+            ),
+            LaunchFailureReason::PermissionDenied => (
+                DiagnosticStage::TargetResolution,
+                "launch preflight",
+                "Launch preflight was denied. This alone does not establish an owner-approval failure or a UAC prompt.",
+            ),
+            LaunchFailureReason::Unsupported => (
+                DiagnosticStage::TargetResolution,
+                "validate launch options",
+                "These launch options are not supported on this platform.",
+            ),
+            LaunchFailureReason::NativeFailure => (
+                DiagnosticStage::ProcessCreation,
+                "native launch",
+                "The native operation failed without additional diagnostics.",
+            ),
+        };
+        Self {
+            reason,
+            diagnostic: NativeDiagnostic::new(stage, operation, "application", None, message),
+        }
+    }
+}
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:?}: {}: {}",
+            self.reason, self.diagnostic.operation, self.diagnostic.message
+        )
+    }
+}
+impl std::error::Error for LaunchError {}
 
 #[cfg(test)]
 mod tests {

@@ -6,15 +6,19 @@
 //! approved execution.
 
 use std::sync::Arc;
+#[cfg(unix)]
+#[path = "exec_pty_io_unix.rs"]
+pub(crate) mod native_io;
 
 use desk_agent_protocol::exec::ExecPlan;
-use desk_agent_protocol::{
-    AgentError, AgentErrorKind, AgentOutcome, ExecOutput, ExecOutputStreams, OperationOutput,
-};
+use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome};
+#[cfg(any(target_os = "linux", test))]
+use desk_agent_protocol::{ExecOutput, ExecOutputStreams, OperationOutput};
 use desk_ipc_protocol::dual_transport::EventSender;
 use desk_ipc_protocol::message::{ExecSpawnReport, WorkerToService};
 use tokio::sync::watch;
 
+#[cfg(any(target_os = "linux", test))]
 use crate::agent_adapter::redaction::{Redactor, RegexRedactor};
 use crate::model::settings::AiExecutionPolicy;
 use crate::worker::exec_registry::ExecRegistry;
@@ -75,6 +79,7 @@ fn effective_capabilities_for(
 /// Shared PTY result projector for worker-owned ordinary PTYs and daemon-owned
 /// root-contained PTYs. Raw terminal control strings and unredacted bytes never
 /// cross into the model-visible result.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn finish_combined_result(
     exit_code: i32,
     duration: std::time::Duration,
@@ -94,7 +99,16 @@ pub(crate) fn finish_combined_result(
     };
     let (terminal, truncated) = finalize_combined(redacted.text, cap, overflowed);
     AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
-        exit_code,
+        started: true,
+        termination_signal: None,
+        failure: (exit_code != 0).then(|| {
+            agent_error(
+                AgentErrorKind::Internal,
+                format!("PTY command exited with status {exit_code}"),
+            )
+        }),
+        diagnostics: vec![],
+        exit_code: Some(exit_code),
         streams: ExecOutputStreams::PtyCombined {
             terminal,
             truncated,
@@ -104,6 +118,7 @@ pub(crate) fn finish_combined_result(
     }))
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn finalize_combined(text: String, cap: usize, overflowed: bool) -> (String, bool) {
     if text.len() <= cap && !overflowed {
         return (text, false);
@@ -115,6 +130,52 @@ fn finalize_combined(text: String, cap: usize, overflowed: bool) -> (String, boo
     (text[..end].to_string(), true)
 }
 
+/// Stopped PTYs retain the same combined, redacted stream as normal exits.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn finish_stopped_result(
+    exit_code: Option<i32>,
+    reason: desk_agent_protocol::exec_pty::PtyCloseReason,
+    duration: std::time::Duration,
+    retained: &[u8],
+    overflowed: bool,
+    cap: usize,
+) -> AgentOutcome {
+    use desk_agent_protocol::exec_pty::PtyCloseReason;
+    let mut outcome =
+        finish_combined_result(exit_code.unwrap_or(0), duration, retained, overflowed, cap);
+    if let AgentOutcome::Ok(OperationOutput::Exec(output)) = &mut outcome {
+        output.exit_code = exit_code;
+        let kind = match reason {
+            PtyCloseReason::Exited => None,
+            PtyCloseReason::TimedOut => Some(AgentErrorKind::Timeout),
+            PtyCloseReason::Cancelled
+            | PtyCloseReason::CarrierDisconnected
+            | PtyCloseReason::SlowConsumer
+            | PtyCloseReason::SessionStale
+            | PtyCloseReason::SequenceViolation => Some(AgentErrorKind::Cancelled),
+            PtyCloseReason::OutcomeUnknown | PtyCloseReason::InternalError => {
+                Some(AgentErrorKind::Internal)
+            }
+        };
+        if let Some(kind) = kind {
+            output.failure = Some(agent_error(
+                kind,
+                format!(
+                    "PTY command started and stopped: {reason:?}; retained terminal output follows"
+                ),
+            ));
+        }
+        if exit_code.is_none() && output.failure.is_none() {
+            output.failure = Some(agent_error(
+                AgentErrorKind::Internal,
+                "PTY exit status unavailable".into(),
+            ));
+        }
+    }
+    outcome
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn project_terminal_text(bytes: &[u8]) -> String {
     #[derive(Clone, Copy)]
     enum State {
@@ -280,6 +341,28 @@ pub(crate) fn agent_error(kind: AgentErrorKind, message: String) -> AgentError {
 
 #[cfg(test)]
 mod gate_tests {
+    #[test]
+    fn stopped_pty_keeps_output_and_nullable_exit_without_fabricating_success() {
+        use desk_agent_protocol::{
+            AgentErrorKind, AgentOutcome, ExecOutputStreams, OperationOutput,
+        };
+        let outcome = super::finish_stopped_result(
+            None,
+            desk_agent_protocol::exec_pty::PtyCloseReason::TimedOut,
+            std::time::Duration::from_secs(1),
+            b"retained terminal",
+            false,
+            4096,
+        );
+        let AgentOutcome::Ok(OperationOutput::Exec(output)) = outcome else {
+            panic!("missing receipt")
+        };
+        assert!(output.started && output.exit_code.is_none() && !output.succeeded());
+        assert_eq!(output.failure.unwrap().kind, AgentErrorKind::Timeout);
+        assert!(
+            matches!(output.streams, ExecOutputStreams::PtyCombined { terminal, .. } if terminal == "retained terminal")
+        );
+    }
     use super::{
         ExecPtyCapabilities, effective_capabilities, effective_capabilities_for, runtime_support,
     };
@@ -330,7 +413,10 @@ mod gate_tests {
 
 #[cfg(target_os = "linux")]
 mod platform {
+    use desk_agent_protocol::OperationOutput;
+    use desk_agent_protocol::native_diagnostic::{DiagnosticStage, NativeDiagnostic};
     use std::io::Read;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::{Duration, Instant};
 
@@ -345,7 +431,7 @@ mod platform {
 
     #[cfg(test)]
     use crate::worker::exec_pty::project_terminal_text;
-    use crate::worker::exec_pty::{agent_error, finish_combined_result};
+    use crate::worker::exec_pty::{agent_error, finish_stopped_result, native_io};
     use crate::worker::exec_registry::ExecRegistry;
 
     const REDACTION_MARGIN: usize = 8 * 1024;
@@ -433,6 +519,18 @@ mod platform {
                 ));
             }
         };
+        let poll_fd = match native_io::duplicate(pair.master.as_raw_fd()) {
+            Ok(fd) => fd,
+            Err(error) => {
+                on_spawn(ExecSpawnReport::Failed {
+                    reason: format!("Cannot poll PTY output: {error}"),
+                });
+                return AgentOutcome::Err(agent_error(
+                    AgentErrorKind::Internal,
+                    format!("Cannot poll PTY output: {error}"),
+                ));
+            }
+        };
         let mut reader = match pair.master.try_clone_reader() {
             Ok(reader) => reader,
             Err(error) => {
@@ -492,7 +590,7 @@ mod platform {
             writer,
             pair.master,
         ) {
-            reclaim_group(pgid);
+            let _ = reclaim_group(pgid);
             let _ = child.kill();
             let _ = child.wait();
             return AgentOutcome::Err(agent_error(AgentErrorKind::Cancelled, error));
@@ -502,7 +600,7 @@ mod platform {
             .try_send(WorkerToService::ExecPtyOpened(opened.clone()))
             .is_err()
         {
-            reclaim_group(pgid);
+            let _ = reclaim_group(pgid);
             let _ = child.kill();
             let _ = child.wait();
             registry.detach_pty(&plan.execution_generation);
@@ -520,9 +618,13 @@ mod platform {
         let reader_session_target_id = opened.session_target_id.clone();
         let result_cap =
             (plan.max_stdout_bytes as usize).saturating_add(plan.max_stderr_bytes as usize);
+        let drain_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = Arc::clone(&drain_stop);
         let reader_task = std::thread::spawn(move || {
             read_output(
                 &mut reader,
+                poll_fd,
+                reader_stop,
                 reader_tx,
                 reader_stream_id,
                 reader_generation,
@@ -536,6 +638,7 @@ mod platform {
 
         let timeout = Duration::from_millis(plan.timeout_ms as u64);
         let mut close_reason = PtyCloseReason::Exited;
+        let mut diagnostics = Vec::new();
         let mut status = None;
         loop {
             if *cancel.borrow() {
@@ -570,6 +673,13 @@ mod platform {
                         "PTY child wait failed generation={} error={error}",
                         plan.execution_generation
                     );
+                    diagnostics.push(NativeDiagnostic::new(
+                        DiagnosticStage::ProcessWait,
+                        "wait PTY process",
+                        "io",
+                        None,
+                        &error.to_string(),
+                    ));
                     close_reason = PtyCloseReason::OutcomeUnknown;
                     break;
                 }
@@ -578,13 +688,65 @@ mod platform {
 
         // Reclaim the process group on every path, including a successful direct
         // child exit, so a background helper cannot outlive the approved command.
-        reclaim_group(pgid);
-        if status.is_none() {
-            let _ = child.kill();
-            status = child.wait().ok();
+        if let Err(error) = reclaim_group(pgid) {
+            diagnostics.push(error);
+            close_reason = PtyCloseReason::OutcomeUnknown;
         }
+        if status.is_none() {
+            if let Err(error) = child.kill() {
+                diagnostics.push(NativeDiagnostic::new(
+                    DiagnosticStage::ProcessCleanup,
+                    "kill PTY child",
+                    "io",
+                    None,
+                    &error.to_string(),
+                ));
+            }
+            let reap_deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < reap_deadline {
+                match child.try_wait() {
+                    Ok(Some(exit)) => {
+                        status = Some(exit);
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(CHILD_POLL_INTERVAL),
+                    Err(error) => {
+                        diagnostics.push(NativeDiagnostic::new(
+                            DiagnosticStage::ProcessWait,
+                            "reap PTY child",
+                            "io",
+                            None,
+                            &error.to_string(),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+        drain_stop.store(true, Ordering::Release);
         let input_stats = registry.detach_pty(&plan.execution_generation);
-        let reader_result = reader_task.join().unwrap_or_default();
+        let reader_result = reader_task.join().unwrap_or_else(|_| ReaderResult {
+            error: Some(NativeDiagnostic::new(
+                DiagnosticStage::OutputRead,
+                "read PTY",
+                "application",
+                None,
+                "PTY reader panicked; captured output is incomplete",
+            )),
+            ..Default::default()
+        });
+        if let Some(error) = &reader_result.error {
+            diagnostics.push(error.clone());
+        }
+        if let Some(signal) = status.as_ref().and_then(|value| value.signal()) {
+            diagnostics.push(NativeDiagnostic::new(
+                DiagnosticStage::ProcessWait,
+                "PTY signal termination",
+                "posix_signal",
+                None,
+                signal,
+            ));
+        }
         let exit_status = status.as_ref().map(|value| {
             if value.signal().is_some() {
                 -1
@@ -607,36 +769,33 @@ mod platform {
         debug_assert!(closed.validate().is_ok());
         let _ = live_tx.try_send(WorkerToService::ExecPtyClosed(closed));
 
-        match close_reason {
-            PtyCloseReason::Exited => finish_result(
-                exit_status.unwrap_or(-1),
-                started.elapsed(),
-                reader_result,
-                result_cap,
-            ),
-            PtyCloseReason::TimedOut => AgentOutcome::Err(agent_error(
-                AgentErrorKind::Timeout,
-                format!("PTY command timed out after {} ms", plan.timeout_ms),
-            )),
-            PtyCloseReason::Cancelled
-            | PtyCloseReason::CarrierDisconnected
-            | PtyCloseReason::SlowConsumer
-            | PtyCloseReason::SessionStale
-            | PtyCloseReason::SequenceViolation => AgentOutcome::Err(agent_error(
-                AgentErrorKind::Cancelled,
-                format!("PTY command stopped: {close_reason:?}"),
-            )),
-            PtyCloseReason::OutcomeUnknown | PtyCloseReason::InternalError => {
-                AgentOutcome::Err(agent_error(
+        let mut outcome = finish_stopped_result(
+            status
+                .as_ref()
+                .filter(|value| value.signal().is_none())
+                .map(|value| value.exit_code().min(i32::MAX as u32) as i32),
+            close_reason,
+            started.elapsed(),
+            &reader_result.retained,
+            reader_result.overflowed || reader_result.error.is_some(),
+            result_cap,
+        );
+        if let AgentOutcome::Ok(OperationOutput::Exec(output)) = &mut outcome {
+            if !diagnostics.is_empty() && output.failure.is_none() {
+                output.failure = Some(agent_error(
                     AgentErrorKind::Internal,
-                    "PTY command outcome is unknown".to_string(),
-                ))
+                    "PTY output or process completion reported an error; inspect diagnostics"
+                        .into(),
+                ));
             }
+            output.diagnostics.extend(diagnostics);
         }
+        outcome
     }
 
     #[derive(Default)]
     struct ReaderResult {
+        error: Option<NativeDiagnostic>,
         retained: Vec<u8>,
         total_bytes: u64,
         overflowed: bool,
@@ -644,6 +803,8 @@ mod platform {
 
     fn read_output(
         reader: &mut Box<dyn Read + Send>,
+        poll_fd: std::os::fd::OwnedFd,
+        drain_stop: Arc<std::sync::atomic::AtomicBool>,
         live_tx: mpsc::Sender<WorkerToService>,
         stream_id: String,
         generation: String,
@@ -657,12 +818,47 @@ mod platform {
         let mut result = ReaderResult::default();
         let mut sequence = 0u64;
         let mut chunk = vec![0u8; MAX_PTY_DATA_FRAME_BYTES.min(8192)];
+        let mut drain_deadline = None;
         loop {
+            if drain_stop.load(Ordering::Acquire) {
+                let deadline = drain_deadline
+                    .get_or_insert_with(|| Instant::now() + Duration::from_millis(250));
+                if Instant::now() >= *deadline {
+                    result.error = Some(NativeDiagnostic::new(
+                        DiagnosticStage::OutputRead,
+                        "drain PTY",
+                        "timeout",
+                        None,
+                        "PTY output drain deadline exceeded; retained output is incomplete",
+                    ));
+                    break;
+                }
+            }
+            match native_io::readable(&poll_fd) {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(error) => {
+                    result.error = Some(NativeDiagnostic::from_io(
+                        DiagnosticStage::OutputRead,
+                        "poll PTY",
+                        &error,
+                    ));
+                    break;
+                }
+            }
             let count = match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(count) => count,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                Err(error) => {
+                    result.error = Some(NativeDiagnostic::from_io(
+                        DiagnosticStage::OutputRead,
+                        "read PTY",
+                        &error,
+                    ));
+                    break;
+                }
             };
             result.total_bytes = result.total_bytes.saturating_add(count as u64);
             if result.retained.len() < retain_limit {
@@ -701,30 +897,20 @@ mod platform {
         result
     }
 
-    fn finish_result(
-        exit_code: i32,
-        duration: Duration,
-        reader: ReaderResult,
-        cap: usize,
-    ) -> AgentOutcome {
-        finish_combined_result(
-            exit_code,
-            duration,
-            &reader.retained,
-            reader.overflowed,
-            cap,
-        )
-    }
-
-    fn reclaim_group(pgid: Option<libc::pid_t>) {
+    fn reclaim_group(pgid: Option<libc::pid_t>) -> Result<(), NativeDiagnostic> {
         if let Some(pgid) = pgid {
-            // SAFETY: a negative pid addresses exactly the child-created process
-            // group returned by portable-pty. ESRCH is the normal already-gone
-            // case and needs no retry.
-            unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
+            if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(NativeDiagnostic::from_io(
+                        DiagnosticStage::ProcessCleanup,
+                        "kill PTY process group",
+                        &error,
+                    ));
+                }
             }
         }
+        Ok(())
     }
 
     #[cfg(test)]

@@ -8,6 +8,7 @@ type LaunchReceipt = {
     created_process_id?: number | null;
     created_process_elevated?: boolean | null;
     failure_reason?: string | null;
+    diagnostic?: { message: string; operation: string; domain: string; code: number | null } | null;
 };
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const reasons = ['invalid_target', 'identity_changed', 'elevation_required', 'admin_required', 'admin_launch_unavailable',
@@ -30,6 +31,10 @@ export function parseLaunchReceipt(text: string): LaunchReceipt | null {
             || (value.created_process_elevated === true && value.requested_admin !== true)
             || (value.launch_outcome === 'launch_accepted' && (value.failure_reason != null || value.argument_delivery === 'unsupported'))
             || (value.launch_outcome !== 'launch_accepted' && value.created_process_id != null)) return null;
+        if (value.diagnostic != null && (!record(value.diagnostic) || typeof value.diagnostic.message !== 'string'
+            || typeof value.diagnostic.operation !== 'string' || typeof value.diagnostic.domain !== 'string'
+            || (value.diagnostic.code !== null && !Number.isSafeInteger(value.diagnostic.code)))) return null;
+        if (value.launch_outcome === 'launch_accepted' && value.diagnostic != null) return null;
         return value as LaunchReceipt;
     } catch { return null; }
 }
@@ -40,6 +45,10 @@ export function AssistantLaunchResult({ receipt, text }: { receipt: LaunchReceip
             <p>{t('pages.aiAssistant.launchReceipt.readiness')}</p>
             {receipt.launch_outcome === 'outcome_unknown' && <p className="font-medium text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.launchReceipt.noRetry')}</p>}
             {receipt.failure_reason && <p>{t(`pages.aiAssistant.launchFailure.${receipt.failure_reason}`)}</p>}
+            {receipt.diagnostic && <div role="alert" className="space-y-1 break-words">
+                <p>{receipt.diagnostic.message}</p>
+                <p className="text-xs text-muted-foreground">{receipt.diagnostic.operation} · {receipt.diagnostic.domain}{receipt.diagnostic.code != null ? ` (${receipt.diagnostic.code})` : ''}</p>
+            </div>}
             <p>{t(`pages.aiAssistant.launchArguments.${receipt.argument_delivery}`)}</p>
             <p>{t(receipt.requested_admin ? 'pages.aiAssistant.launchReceipt.requestedAdmin' : 'pages.aiAssistant.launchReceipt.requestedUser')}</p>
             {receipt.created_process_id != null && <p>{t('pages.aiAssistant.launchReceipt.pid', { pid: receipt.created_process_id })}</p>}

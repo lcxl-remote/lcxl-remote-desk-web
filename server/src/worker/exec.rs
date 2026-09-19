@@ -21,10 +21,17 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use desk_agent_protocol::exec::{ExecIoMode, ExecPlan};
+use desk_agent_protocol::native_diagnostic::{DiagnosticStage, NativeDiagnostic};
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, AgentOutcome, ExecOutput, ExecOutputStreams, OperationOutput,
 };
 use log::warn;
+#[cfg(unix)]
+#[path = "exec_exit_unix.rs"]
+mod exit_platform;
+#[cfg(windows)]
+#[path = "exec_exit_windows.rs"]
+mod exit_platform;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -41,10 +48,9 @@ use desk_ipc_protocol::message::ExecSpawnReport;
 /// bounded at `cap + REDACTION_MARGIN` per stream.
 const REDACTION_MARGIN: usize = 8 * 1024;
 
-/// Execute a sealed plan and return the outcome. Execution failures (spawn
-/// error, timeout, fail-closed redaction) surface as [`AgentOutcome::Err`]; a
-/// process that ran (any exit code) surfaces as [`AgentOutcome::Ok`] with the
-/// scrubbed, capped output.
+/// Execute a sealed plan and return a receipt, including execution failures.
+/// `ExecOutput::succeeded` distinguishes successful completion from a failed
+/// receipt with retained output. Invalid input and redaction failure return Err.
 ///
 /// stdout/stderr are read **streaming** with a hard per-stream cap so a runaway
 /// command cannot balloon worker memory (only `max_*_bytes + REDACTION_MARGIN`
@@ -150,6 +156,26 @@ pub async fn execute_plan_cancellable(
         ));
     }
 
+    if cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+        on_spawn(ExecSpawnReport::Failed {
+            reason: "Cancelled before process creation".into(),
+        });
+        return failed_start(
+            false,
+            err(
+                AgentErrorKind::Cancelled,
+                "Command cancelled before process creation".into(),
+            ),
+            NativeDiagnostic::new(
+                DiagnosticStage::ProcessCreation,
+                "spawn command",
+                "application",
+                None,
+                "Cancelled before process creation",
+            ),
+        );
+    }
+
     // Establish the container before the spawn. Failing here refuses the command:
     // an execution that cannot be reclaimed is precisely what containment exists
     // to prevent, so running it anyway would defeat the purpose.
@@ -163,10 +189,14 @@ pub async fn execute_plan_cancellable(
             on_spawn(ExecSpawnReport::Failed {
                 reason: format!("the host cannot contain this command: {e}"),
             });
-            return AgentOutcome::Err(err(
-                AgentErrorKind::Internal,
-                format!("the host cannot contain this command, so it was not run: {e}"),
-            ));
+            return failed_start(
+                false,
+                err(
+                    AgentErrorKind::Internal,
+                    format!("Command was not started: containment preparation failed: {e}"),
+                ),
+                e.0,
+            );
         }
     };
 
@@ -185,8 +215,7 @@ pub async fn execute_plan_cancellable(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
-            // The control end only sees a generic `internal` kind; log the real
-            // OS error here so the cause (e.g. a missing program) is traceable.
+            // Preserve the OS error in both the local log and the receipt.
             warn!(
                 "exec spawn failed: template={} program={} error={e}",
                 plan.template_id, plan.program,
@@ -194,32 +223,24 @@ pub async fn execute_plan_cancellable(
             on_spawn(ExecSpawnReport::Failed {
                 reason: format!("failed to start command: {e}"),
             });
-            return AgentOutcome::Err(err(
-                AgentErrorKind::Internal,
-                format!("failed to start command: {e}"),
-            ));
+            return failed_start(
+                false,
+                err(
+                    AgentErrorKind::Internal,
+                    format!("Command was not started: {e}"),
+                ),
+                NativeDiagnostic::from_io(DiagnosticStage::ProcessCreation, "spawn command", &e),
+            );
         }
     };
 
     // The child exists but nothing yet ties its descendants to us. Until this
     // succeeds the tree is unreclaimable, so a failure kills the child outright
     // rather than letting it run loose.
-    if let Err(e) = containment.adopt(&child) {
+    let adoption_error = containment.adopt(&child).err();
+    if adoption_error.is_some() {
+        // Stop immediately, but still drain already captured output below.
         let _ = child.start_kill();
-        warn!(
-            "exec containment failed after spawn: template={} program={} error={e}",
-            plan.template_id, plan.program,
-        );
-        // The process did start, however briefly, so this is not reported as a
-        // failed spawn — saying "never ran" about something that did would be worse
-        // than saying nothing.
-        on_spawn(ExecSpawnReport::Started {
-            containment_identity: containment.identity().map(str::to_string),
-        });
-        return AgentOutcome::Err(err(
-            AgentErrorKind::Internal,
-            format!("the command was started but could not be contained: {e}"),
-        ));
     }
 
     on_spawn(ExecSpawnReport::Started {
@@ -232,71 +253,147 @@ pub async fn execute_plan_cancellable(
     let err_cap = plan.max_stderr_bytes as usize;
 
     let timeout = Duration::from_millis(plan.timeout_ms as u64);
-    // Drive both pipe readers and the process wait together so a process that
-    // fills one pipe while we read the other cannot deadlock. The whole thing is
-    // bounded by the timeout; on expiry the child is killed.
+    let mut out_capture = Capture::default();
+    let mut err_capture = Capture::default();
+    // Buffers live outside the cancelled future, so timeout cannot erase bytes.
     let run = async {
-        let read_out = read_capped(&mut stdout_pipe, out_cap);
-        let read_err = read_capped(&mut stderr_pipe, err_cap);
-        let ((out_bytes, out_over), (err_bytes, err_over)) = tokio::join!(read_out, read_err);
-        let status = child.wait().await;
-        (out_bytes, out_over, err_bytes, err_over, status)
+        tokio::join!(
+            read_into(&mut stdout_pipe, out_cap, &mut out_capture),
+            read_into(&mut stderr_pipe, err_cap, &mut err_capture)
+        );
+        child.wait().await
     };
-
-    // Race the command against both its deadline and a stop request. Losing to
-    // either reclaims the tree; the difference is only what the caller is told.
     let raced = tokio::select! {
         result = tokio::time::timeout(timeout, run) => Some(result),
         _ = cancellation_requested(cancel) => None,
     };
-
-    let Some(finished) = raced else {
-        // The tree goes, not just the process we can see. `child` is still borrowed
-        // by the abandoned future, but reclaiming the container already covers it —
-        // the child is a member of its own group.
-        containment.reclaim();
-        warn!(
-            "exec cancelled: template={} program={} generation={}",
-            plan.template_id, plan.program, plan.execution_generation,
-        );
-        return AgentOutcome::Err(err(
-            AgentErrorKind::Cancelled,
-            "the command was cancelled and its process tree reclaimed".to_string(),
-        ));
-    };
-
-    let (out_bytes, stdout_overflowed, err_bytes, stderr_overflowed, status) = match finished {
-        Ok(result) => result,
-        Err(_) => {
-            // Reclaim the whole tree, not just the process we can see: killing
-            // the direct child alone is what let a timed-out command's helpers
-            // keep running past their deadline.
-            containment.reclaim();
-            let _ = child.start_kill();
-            warn!(
-                "exec timed out: template={} program={} timeout_ms={}",
-                plan.template_id, plan.program, plan.timeout_ms,
-            );
-            return AgentOutcome::Err(err(
+    let mut diagnostics = Vec::new();
+    let (mut status, mut failure) = match raced {
+        Some(Ok(Ok(status))) => (Some(status), None),
+        Some(Ok(Err(e))) => {
+            diagnostics.push(NativeDiagnostic::from_io(
+                DiagnosticStage::ProcessWait,
+                "wait command",
+                &e,
+            ));
+            (
+                None,
+                Some(err(
+                    AgentErrorKind::Internal,
+                    format!("Command started but waiting for exit failed: {e}"),
+                )),
+            )
+        }
+        Some(Err(_)) => (
+            None,
+            Some(err(
                 AgentErrorKind::Timeout,
-                format!("command timed out after {} ms", plan.timeout_ms),
-            ));
-        }
+                format!(
+                    "Command started and exceeded its {} ms deadline",
+                    plan.timeout_ms
+                ),
+            )),
+        ),
+        None => (
+            None,
+            Some(err(
+                AgentErrorKind::Cancelled,
+                "Command started and was cancelled".into(),
+            )),
+        ),
     };
-
-    let status = match status {
-        Ok(status) => status,
-        Err(e) => {
-            warn!(
-                "exec wait failed: template={} program={} error={e}",
-                plan.template_id, plan.program,
-            );
-            return AgentOutcome::Err(err(
+    if let Some(error) = adoption_error {
+        failure = Some(err(
+            AgentErrorKind::Internal,
+            format!("Command started but could not be contained: {error}"),
+        ));
+        diagnostics.insert(0, error.0);
+    }
+    if let Err(diagnostic) = containment.reclaim() {
+        if failure.is_none() {
+            failure = Some(err(
                 AgentErrorKind::Internal,
-                format!("command failed: {e}"),
+                "Command process-tree cleanup failed".into(),
             ));
         }
-    };
+        diagnostics.push(diagnostic);
+    }
+    if status.is_none() {
+        if let Err(error) = child.start_kill() {
+            diagnostics.push(NativeDiagnostic::from_io(
+                DiagnosticStage::ProcessCleanup,
+                "kill command child",
+                &error,
+            ));
+        }
+        match tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
+            Ok(Ok(observed)) => status = Some(observed),
+            Ok(Err(error)) => diagnostics.push(NativeDiagnostic::from_io(
+                DiagnosticStage::ProcessWait,
+                "reap command child",
+                &error,
+            )),
+            Err(_) => diagnostics.push(NativeDiagnostic::new(
+                DiagnosticStage::ProcessCleanup,
+                "reap command child",
+                "application",
+                None,
+                "Child exit could not be confirmed within the cleanup deadline",
+            )),
+        }
+        let drain = async {
+            tokio::join!(
+                read_into(&mut stdout_pipe, out_cap, &mut out_capture),
+                read_into(&mut stderr_pipe, err_cap, &mut err_capture)
+            );
+        };
+        let _ = tokio::time::timeout(Duration::from_millis(250), drain).await;
+    }
+    for (name, capture) in [("stdout", &out_capture), ("stderr", &err_capture)] {
+        if let Some(e) = &capture.error {
+            diagnostics.push(NativeDiagnostic::from_io(
+                DiagnosticStage::OutputRead,
+                name,
+                e,
+            ));
+        }
+        if !capture.eof {
+            if failure.is_none() {
+                failure = Some(err(
+                    AgentErrorKind::Internal,
+                    format!("Command output is incomplete: {name} did not reach EOF"),
+                ));
+            }
+            if capture.error.is_none() {
+                diagnostics.push(NativeDiagnostic::new(
+                    DiagnosticStage::OutputRead,
+                    name,
+                    "application",
+                    None,
+                    "Output collection ended before EOF",
+                ));
+            }
+        }
+    }
+    let termination_signal = status.as_ref().and_then(exit_platform::signal);
+    if failure.is_none() && status.as_ref().is_some_and(|s| !s.success()) {
+        failure = Some(err(
+            AgentErrorKind::Internal,
+            match (status.as_ref().and_then(|s| s.code()), termination_signal) {
+                (Some(code), _) => format!(
+                    "Command exited with nonzero status {code}; inspect retained stdout/stderr"
+                ),
+                (_, Some(signal)) => {
+                    format!("Command terminated by signal {signal}; inspect retained stdout/stderr")
+                }
+                _ => "Command terminated without an exit code".into(),
+            },
+        ));
+    }
+    let stdout_overflowed = out_capture.total > out_cap || !out_capture.eof;
+    let stderr_overflowed = err_capture.total > err_cap || !err_capture.eof;
+    let out_bytes = out_capture.bytes;
+    let err_bytes = err_capture.bytes;
 
     let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
 
@@ -319,8 +416,11 @@ pub async fn execute_plan_cancellable(
     let (stderr_text, stderr_truncated) = finalize(stderr.text, err_cap, stderr_overflowed);
 
     AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
-        // `None` (terminated by a signal on Unix) maps to -1.
-        exit_code: status.code().unwrap_or(-1),
+        started: true,
+        termination_signal,
+        failure,
+        diagnostics,
+        exit_code: status.as_ref().and_then(|s| s.code()),
         streams: ExecOutputStreams::Split {
             stdout: stdout_text,
             stderr: stderr_text,
@@ -332,38 +432,71 @@ pub async fn execute_plan_cancellable(
     }))
 }
 
+fn failed_start(started: bool, failure: AgentError, diagnostic: NativeDiagnostic) -> AgentOutcome {
+    AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
+        started,
+        exit_code: None,
+        termination_signal: None,
+        failure: Some(failure),
+        diagnostics: vec![diagnostic],
+        streams: ExecOutputStreams::Split {
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: started,
+            stderr_truncated: started,
+        },
+        duration_ms: 0,
+        redactions: vec![],
+    }))
+}
+
 /// Read a pipe streaming, retaining at most `cap + REDACTION_MARGIN` bytes (the
 /// rest is drained so the process does not block on a full pipe). The margin is
 /// kept so the redactor can match a secret that straddles the payload cap; the
 /// caller redacts the retained text and then cuts it back to `cap`. Returns the
 /// retained bytes and whether the process produced **more than `cap`** bytes
 /// (i.e. the payload will be truncated). Reading a `None` pipe yields empty.
-async fn read_capped<R: AsyncRead + Unpin>(reader: &mut Option<R>, cap: usize) -> (Vec<u8>, bool) {
+#[derive(Default)]
+struct Capture {
+    bytes: Vec<u8>,
+    total: usize,
+    eof: bool,
+    error: Option<std::io::Error>,
+}
+async fn read_into<R: AsyncRead + Unpin>(
+    reader: &mut Option<R>,
+    cap: usize,
+    capture: &mut Capture,
+) {
+    if capture.eof || capture.error.is_some() {
+        return;
+    }
     let Some(reader) = reader.as_mut() else {
-        return (Vec::new(), false);
+        capture.eof = true;
+        return;
     };
-    let read_limit = cap.saturating_add(REDACTION_MARGIN);
-    let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
-    let mut total: usize = 0;
     loop {
         match reader.read(&mut chunk).await {
-            Ok(0) => break,
-            Ok(n) => {
-                total = total.saturating_add(n);
-                if buf.len() < read_limit {
-                    let take = (read_limit - buf.len()).min(n);
-                    buf.extend_from_slice(&chunk[..take]);
-                }
-                // Past the read limit: drain and discard so the child keeps
-                // running while worker memory stays bounded at the read limit.
+            Ok(0) => {
+                capture.eof = true;
+                return;
             }
-            Err(_) => break,
+            Ok(n) => {
+                capture.total = capture.total.saturating_add(n);
+                let take = cap
+                    .saturating_add(REDACTION_MARGIN)
+                    .saturating_sub(capture.bytes.len())
+                    .min(n);
+                capture.bytes.extend_from_slice(&chunk[..take]);
+            }
+            Err(e) => {
+                capture.error = Some(e);
+                return;
+            }
         }
     }
-    (buf, total > cap)
 }
-
 /// Cut already-redacted text back to the payload `cap` and report truncation.
 ///
 /// The redactor has already run over the retained text (cap + margin), so every
@@ -456,7 +589,10 @@ mod tests {
         p.argv.clear();
 
         let outcome = execute_plan_reporting(&p, move |r| sink.lock().unwrap().push(r)).await;
-        assert!(matches!(outcome, AgentOutcome::Err(_)), "{outcome:?}");
+        assert!(
+            matches!(&outcome, AgentOutcome::Ok(OperationOutput::Exec(o)) if !o.started && o.failure.is_some()),
+            "{outcome:?}"
+        );
 
         let reports = reports.lock().unwrap();
         assert!(
@@ -486,7 +622,7 @@ mod tests {
         ))
         .await;
         assert!(
-            matches!(&outcome, AgentOutcome::Err(e) if e.kind == AgentErrorKind::Timeout),
+            matches!(&outcome, AgentOutcome::Ok(OperationOutput::Exec(o)) if o.failure.as_ref().is_some_and(|e| e.kind == AgentErrorKind::Timeout)),
             "expected a timeout, got {outcome:?}"
         );
 
@@ -530,7 +666,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(&outcome, AgentOutcome::Err(e) if e.kind == AgentErrorKind::Cancelled),
+            matches!(&outcome, AgentOutcome::Ok(OperationOutput::Exec(o)) if o.failure.as_ref().is_some_and(|e| e.kind == AgentErrorKind::Cancelled)),
             "expected a cancellation, got {outcome:?}"
         );
         assert!(
@@ -561,7 +697,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(&outcome, AgentOutcome::Err(e) if e.kind == AgentErrorKind::Cancelled),
+            matches!(&outcome, AgentOutcome::Ok(OperationOutput::Exec(o)) if o.failure.as_ref().is_some_and(|e| e.kind == AgentErrorKind::Cancelled)),
             "expected a cancellation, got {outcome:?}"
         );
     }
@@ -592,7 +728,7 @@ mod tests {
         let started = Instant::now();
         let outcome = execute_plan_cancellable(&p, |_| {}, Some(watcher)).await;
         assert!(
-            matches!(&outcome, AgentOutcome::Err(e) if e.kind == AgentErrorKind::Cancelled),
+            matches!(&outcome, AgentOutcome::Ok(OperationOutput::Exec(o)) if o.failure.as_ref().is_some_and(|e| e.kind == AgentErrorKind::Cancelled)),
             "expected a cancellation, got {outcome:?}"
         );
         assert!(
@@ -702,16 +838,94 @@ mod tests {
     #[tokio::test]
     async fn runs_and_captures_stdout() {
         let out = exec_output(execute_plan(&plan("echo hello", 10_000, 65_536)).await);
-        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.exit_code, Some(0));
         let (stdout, _, stdout_truncated, _) = split_output(&out);
         assert!(stdout.contains("hello"), "stdout was {stdout:?}");
         assert!(!stdout_truncated);
     }
 
     #[tokio::test]
+    async fn cancellation_preserves_output_and_prestart_cancel_does_not_spawn() {
+        let cancelled = ExecCancel::new();
+        cancelled.cancel();
+        let output = exec_output(
+            execute_plan_cancellable(
+                &plan("echo must-not-run", 5000, 4096),
+                |report| assert!(matches!(report, ExecSpawnReport::Failed { .. })),
+                Some(cancelled.subscribe()),
+            )
+            .await,
+        );
+        assert!(!output.started);
+        assert_eq!(output.exit_code, None);
+        #[cfg(windows)]
+        let script = "echo retained-before-cancel & ping -n 20 127.0.0.1 >nul";
+        #[cfg(unix)]
+        let script = "echo retained-before-cancel; sleep 20";
+        let stop = ExecCancel::new();
+        let token = stop.clone();
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            token.cancel();
+        });
+        let output = exec_output(
+            execute_plan_cancellable(&plan(script, 5000, 4096), |_| {}, Some(stop.subscribe()))
+                .await,
+        );
+        cancel_task.await.unwrap();
+        assert!(output.started);
+        assert_eq!(
+            output.failure.as_ref().unwrap().kind,
+            AgentErrorKind::Cancelled
+        );
+        assert!(
+            split_output(&output).0.contains("retained-before-cancel"),
+            "{output:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_failure_keeps_prior_bytes_and_native_error() {
+        struct Broken(bool);
+        impl AsyncRead for Broken {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buffer: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                if self.0 {
+                    return std::task::Poll::Ready(Err(std::io::Error::from_raw_os_error(5)));
+                }
+                self.0 = true;
+                buffer.put_slice(b"retained");
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let mut capture = Capture::default();
+        read_into(&mut Some(Broken(false)), 4096, &mut capture).await;
+        assert_eq!(capture.bytes, b"retained");
+        assert_eq!(capture.error.unwrap().raw_os_error(), Some(5));
+        assert!(!capture.eof);
+    }
+
+    #[tokio::test]
+    async fn timeout_preserves_both_output_streams() {
+        #[cfg(windows)]
+        let script = "echo retained-out & echo retained-err 1>&2 & ping -n 20 127.0.0.1 >nul";
+        #[cfg(unix)]
+        let script = "echo retained-out; echo retained-err >&2; sleep 20";
+        let out = exec_output(execute_plan(&plan(script, 800, 4096)).await);
+        assert!(out.started);
+        assert_eq!(out.failure.as_ref().unwrap().kind, AgentErrorKind::Timeout);
+        let (stdout, stderr, _, _) = split_output(&out);
+        assert!(stdout.contains("retained-out"), "{out:?}");
+        assert!(stderr.contains("retained-err"), "{out:?}");
+    }
+
+    #[tokio::test]
     async fn reports_nonzero_exit_code() {
         let out = exec_output(execute_plan(&plan("exit 3", 10_000, 65_536)).await);
-        assert_eq!(out.exit_code, 3);
+        assert_eq!(out.exit_code, Some(3));
     }
 
     #[tokio::test]
@@ -782,10 +996,8 @@ mod tests {
         #[cfg(not(windows))]
         let snippet = "sleep 5";
         let outcome = execute_plan(&plan(snippet, 300, 65_536)).await;
-        match outcome {
-            AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::Timeout),
-            AgentOutcome::Ok(o) => panic!("expected timeout, ran to completion: {o:?}"),
-        }
+        let output = exec_output(outcome);
+        assert_eq!(output.failure.unwrap().kind, AgentErrorKind::Timeout);
     }
 
     #[tokio::test]
@@ -793,9 +1005,13 @@ mod tests {
         let mut p = plan("echo hi", 10_000, 65_536);
         p.program = "lcxl-definitely-not-a-real-binary".into();
         p.argv = Vec::new();
-        match execute_plan(&p).await {
-            AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::Internal),
-            AgentOutcome::Ok(o) => panic!("expected spawn error, got {o:?}"),
-        }
+        let output = exec_output(execute_plan(&p).await);
+        assert!(!output.started);
+        assert_eq!(output.failure.unwrap().kind, AgentErrorKind::Internal);
+        assert_eq!(
+            output.diagnostics[0].stage,
+            DiagnosticStage::ProcessCreation
+        );
+        assert!(!output.diagnostics[0].message.is_empty());
     }
 }

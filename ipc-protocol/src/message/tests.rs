@@ -2432,7 +2432,23 @@ fn exec_plan_and_result_round_trip_wincode() {
             exec_request_id: desk_agent_protocol::exec::ExecRequestId("exec-1".to_string()),
             outcome: desk_agent_protocol::AgentOutcome::Ok(
                 desk_agent_protocol::OperationOutput::Exec(desk_agent_protocol::ExecOutput {
-                    exit_code: 0,
+                    started: true,
+                    termination_signal: None,
+                    failure: Some(desk_agent_protocol::AgentError {
+                        kind: desk_agent_protocol::AgentErrorKind::Timeout,
+                        message: "Command timed out after output".into(),
+                        retryable: false,
+                        safe_for_model: true,
+                        error_code: None,
+                    }),
+                    diagnostics: vec![
+                        desk_agent_protocol::native_diagnostic::NativeDiagnostic::from_io(
+                            desk_agent_protocol::native_diagnostic::DiagnosticStage::OutputRead,
+                            "stdout",
+                            &std::io::Error::from_raw_os_error(5),
+                        ),
+                    ],
+                    exit_code: None,
                     streams: desk_agent_protocol::ExecOutputStreams::Split {
                         stdout: "ok".to_string(),
                         stderr: String::new(),
@@ -2451,10 +2467,21 @@ fn exec_plan_and_result_round_trip_wincode() {
             assert_eq!(p.request_id, "r-exec");
             assert_eq!(p.result.exec_request_id.0, "exec-1");
             assert_eq!(p.audit_source_request_id.as_deref(), Some("frame-req-9"));
-            assert!(matches!(
-                p.result.outcome,
-                desk_agent_protocol::AgentOutcome::Ok(_)
-            ));
+            let desk_agent_protocol::AgentOutcome::Ok(desk_agent_protocol::OperationOutput::Exec(
+                output,
+            )) = p.result.outcome
+            else {
+                panic!("lost execution receipt")
+            };
+            assert!(output.started && output.exit_code.is_none());
+            assert_eq!(
+                output.failure.unwrap().kind,
+                desk_agent_protocol::AgentErrorKind::Timeout
+            );
+            assert_eq!(output.diagnostics[0].code, Some(5));
+            assert!(
+                matches!(output.streams, desk_agent_protocol::ExecOutputStreams::Split { stdout, .. } if stdout == "ok")
+            );
         }
         other => panic!("unexpected: {other:?}"),
     }

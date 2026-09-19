@@ -1,9 +1,12 @@
 //! Explicit executable creation with a verified ordinary/elevated user token.
 //! No ShellExecute, runas, shell interpolation or exec containment is involved.
+use super::windows_diagnostics::failure;
+use desk_agent_protocol::application_launch::LaunchError;
 use desk_agent_protocol::application_launch::{
     ApplicationTargetKind, ArgumentDelivery, LaunchApplicationRequest, LaunchApplicationResult,
     LaunchFailureReason, LaunchOutcome,
 };
+use desk_agent_protocol::native_diagnostic::DiagnosticStage;
 use desk_diagnose_core::application_launch::ResolvedApplicationIdentity;
 use sha2::{Digest, Sha256};
 use std::{ffi::c_void, fs::File, io::Read, os::windows::fs::OpenOptionsExt, path::Path};
@@ -61,7 +64,7 @@ pub(crate) struct PreparedExecutable {
 fn token_value<T: Default>(
     token: HANDLE,
     class: TOKEN_INFORMATION_CLASS,
-) -> Result<T, LaunchFailureReason> {
+) -> Result<T, LaunchError> {
     let mut value = T::default();
     let mut size = 0;
     unsafe {
@@ -73,17 +76,32 @@ fn token_value<T: Default>(
             &mut size,
         )
     }
-    .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    .map_err(|error| {
+        failure(
+            LaunchFailureReason::SessionUnavailable,
+            DiagnosticStage::Environment,
+            "GetTokenInformation",
+            &error,
+        )
+    })?;
     Ok(value)
 }
 
-fn token_sid(token: HANDLE) -> Result<String, LaunchFailureReason> {
+fn token_sid(token: HANDLE) -> Result<String, LaunchError> {
     let mut size = 0;
-    unsafe {
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut size);
-    }
+    let sizing = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut size) };
     if size == 0 || size > 65536 {
-        return Err(LaunchFailureReason::SessionUnavailable);
+        return Err(sizing
+            .err()
+            .map(|error| {
+                failure(
+                    LaunchFailureReason::SessionUnavailable,
+                    DiagnosticStage::Environment,
+                    "GetTokenInformation(TokenUser size)",
+                    &error,
+                )
+            })
+            .unwrap_or_else(|| LaunchFailureReason::SessionUnavailable.into()));
     }
     // usize storage supplies the alignment required by TOKEN_USER and its SID.
     let mut buffer = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
@@ -95,58 +113,96 @@ fn token_sid(token: HANDLE) -> Result<String, LaunchFailureReason> {
             size,
             &mut size,
         )
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+        .map_err(|error| {
+            failure(
+                LaunchFailureReason::SessionUnavailable,
+                DiagnosticStage::Environment,
+                "GetTokenInformation(TokenUser)",
+                &error,
+            )
+        })?;
         let user = &*(buffer.as_ptr().cast::<TOKEN_USER>());
         let mut sid = PWSTR::null();
-        ConvertSidToStringSidW(user.User.Sid, &mut sid)
-            .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+        ConvertSidToStringSidW(user.User.Sid, &mut sid).map_err(|error| {
+            failure(
+                LaunchFailureReason::SessionUnavailable,
+                DiagnosticStage::Environment,
+                "ConvertSidToStringSidW",
+                &error,
+            )
+        })?;
         let text = sid.to_string();
         let _ = LocalFree(Some(HLOCAL(sid.0.cast())));
-        text.map_err(|_| LaunchFailureReason::SessionUnavailable)
+        text.map_err(|error| {
+            failure(
+                LaunchFailureReason::SessionUnavailable,
+                DiagnosticStage::Environment,
+                "decode token SID",
+                &error,
+            )
+        })
     }
 }
 
-pub(crate) fn current_elevated() -> Result<bool, LaunchFailureReason> {
+pub(crate) fn current_elevated() -> Result<bool, LaunchError> {
     catalog_session_identity()?;
     let mut raw = HANDLE::default();
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) }
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) }.map_err(|error| {
+        failure(
+            LaunchFailureReason::SessionUnavailable,
+            DiagnosticStage::Environment,
+            "OpenProcessToken",
+            &error,
+        )
+    })?;
     let token = OwnedHandle(raw);
     Ok(token_value::<TOKEN_ELEVATION>(token.0, TokenElevation)?.TokenIsElevated != 0)
 }
 
-pub(crate) fn catalog_session_identity() -> Result<String, LaunchFailureReason> {
+pub(crate) fn catalog_session_identity() -> Result<String, LaunchError> {
     require_default_desktop()?;
     let mut raw = HANDLE::default();
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) }
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) }.map_err(|error| {
+        failure(
+            LaunchFailureReason::SessionUnavailable,
+            DiagnosticStage::Environment,
+            "OpenProcessToken",
+            &error,
+        )
+    })?;
     let token = OwnedHandle(raw);
     let sid = token_sid(token.0)?;
     let session = token_value::<u32>(token.0, TokenSessionId)?;
     if session == 0 || matches!(sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20") {
-        return Err(LaunchFailureReason::SessionUnavailable);
+        return Err(LaunchFailureReason::SessionUnavailable.into());
     }
     Ok(format!("{sid}:{session}"))
 }
 
 /// Storage identity does not depend on the currently visible input desktop.
-pub(crate) fn storage_user_sid() -> Result<String, LaunchFailureReason> {
+pub(crate) fn storage_user_sid() -> Result<String, LaunchError> {
     let mut raw = HANDLE::default();
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) }
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) }.map_err(|error| {
+        failure(
+            LaunchFailureReason::SessionUnavailable,
+            DiagnosticStage::Environment,
+            "OpenProcessToken",
+            &error,
+        )
+    })?;
     let token = OwnedHandle(raw);
     let sid = token_sid(token.0)?;
     if matches!(sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20") {
-        return Err(LaunchFailureReason::SessionUnavailable);
+        return Err(LaunchFailureReason::SessionUnavailable.into());
     }
     Ok(sid)
 }
 
-fn require_default_desktop() -> Result<(), LaunchFailureReason> {
+fn require_default_desktop() -> Result<(), LaunchError> {
     use windows::Win32::System::StationsAndDesktops::{
         CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, OpenInputDesktop,
     };
-    fn is_default(desktop: HANDLE) -> Result<(), LaunchFailureReason> {
+    fn is_default(desktop: HANDLE) -> Result<(), LaunchError> {
         let mut name = [0u16; 256];
         unsafe {
             GetUserObjectInformationW(
@@ -157,21 +213,41 @@ fn require_default_desktop() -> Result<(), LaunchFailureReason> {
                 None,
             )
         }
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+        .map_err(|error| {
+            failure(
+                LaunchFailureReason::SessionUnavailable,
+                DiagnosticStage::Environment,
+                "GetUserObjectInformationW",
+                &error,
+            )
+        })?;
         let end = name.iter().position(|v| *v == 0).unwrap_or(name.len());
         if !String::from_utf16_lossy(&name[..end]).eq_ignore_ascii_case("default") {
-            return Err(LaunchFailureReason::SessionUnavailable);
+            return Err(LaunchFailureReason::SessionUnavailable.into());
         }
         Ok(())
     }
     unsafe {
-        let desktop = GetThreadDesktop(GetCurrentThreadId())
-            .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+        let desktop = GetThreadDesktop(GetCurrentThreadId()).map_err(|error| {
+            failure(
+                LaunchFailureReason::SessionUnavailable,
+                DiagnosticStage::Environment,
+                "GetThreadDesktop",
+                &error,
+            )
+        })?;
         is_default(HANDLE(desktop.0))?;
         // A worker may remain attached to Default while Winlogon/UAC is active.
         // Check the actual input desktop too, without switching or opening UI.
         let input = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS)
-            .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+            .map_err(|error| {
+                failure(
+                    LaunchFailureReason::SessionUnavailable,
+                    DiagnosticStage::Environment,
+                    "OpenInputDesktop",
+                    &error,
+                )
+            })?;
         let result = is_default(HANDLE(input.0));
         let _ = CloseDesktop(input);
         result
@@ -182,16 +258,16 @@ pub(crate) fn prepare(
     request: &LaunchApplicationRequest,
     expected_user_sid: &str,
     expected_session_id: u32,
-) -> Result<PreparedExecutable, LaunchFailureReason> {
+) -> Result<PreparedExecutable, LaunchError> {
     request
         .validate()
-        .map_err(|_| LaunchFailureReason::InvalidTarget)?;
+        .map_err(|_| LaunchError::from(LaunchFailureReason::InvalidTarget))?;
     if request.target.kind != ApplicationTargetKind::Executable {
-        return Err(LaunchFailureReason::Unsupported);
+        return Err(LaunchFailureReason::Unsupported.into());
     }
     require_default_desktop()?;
     if expected_user_sid.is_empty() || expected_session_id == 0 {
-        return Err(LaunchFailureReason::SessionUnavailable);
+        return Err(LaunchFailureReason::SessionUnavailable.into());
     }
     let mut raw = HANDLE::default();
     unsafe {
@@ -201,7 +277,14 @@ pub(crate) fn prepare(
             &mut raw,
         )
     }
-    .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    .map_err(|error| {
+        failure(
+            LaunchFailureReason::SessionUnavailable,
+            DiagnosticStage::Environment,
+            "OpenProcessToken",
+            &error,
+        )
+    })?;
     let current = OwnedHandle(raw);
     let current_sid = token_sid(current.0)?;
     // Service and builtin service identities are never application identities.
@@ -209,7 +292,7 @@ pub(crate) fn prepare(
         || matches!(current_sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20")
         || token_value::<u32>(current.0, TokenSessionId)? != expected_session_id
     {
-        return Err(LaunchFailureReason::SessionUnavailable);
+        return Err(LaunchFailureReason::SessionUnavailable.into());
     }
     let current_elevated =
         token_value::<TOKEN_ELEVATION>(current.0, TokenElevation)?.TokenIsElevated != 0;
@@ -220,82 +303,144 @@ pub(crate) fn prepare(
         if token_value::<TOKEN_ELEVATION_TYPE>(current.0, TokenElevationType)?
             == TokenElevationTypeDefault
         {
-            return Err(LaunchFailureReason::AdminRequired);
+            return Err(LaunchFailureReason::AdminRequired.into());
         }
     }
     let uses_current_token = current_elevated == request.run_as_admin;
     let token = if uses_current_token {
         current
     } else {
-        let linked =
-            token_value::<TOKEN_LINKED_TOKEN>(current.0, TokenLinkedToken).map_err(|_| {
-                if request.run_as_admin {
+        let linked = token_value::<TOKEN_LINKED_TOKEN>(current.0, TokenLinkedToken).map_err(
+            |mut error| {
+                error.reason = if request.run_as_admin {
                     LaunchFailureReason::AdminLaunchUnavailable
                 } else {
                     LaunchFailureReason::SessionUnavailable
-                }
-            })?;
+                };
+                error
+            },
+        )?;
         let linked = OwnedHandle(linked.LinkedToken);
         if token_sid(linked.0)? != current_sid
             || token_value::<u32>(linked.0, TokenSessionId)? != expected_session_id
             || (token_value::<TOKEN_ELEVATION>(linked.0, TokenElevation)?.TokenIsElevated != 0)
                 != request.run_as_admin
         {
-            return Err(LaunchFailureReason::SessionUnavailable);
+            return Err(LaunchFailureReason::SessionUnavailable.into());
         }
         linked
     };
     let mut environment = std::ptr::null_mut();
-    unsafe { CreateEnvironmentBlock(&mut environment, Some(token.0), false) }
-        .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+    unsafe { CreateEnvironmentBlock(&mut environment, Some(token.0), false) }.map_err(|error| {
+        failure(
+            LaunchFailureReason::SessionUnavailable,
+            DiagnosticStage::Environment,
+            "CreateEnvironmentBlock",
+            &error,
+        )
+    })?;
     let environment = UserEnvironment(environment);
     let cwd = if let Some(cwd) = &request.cwd {
         cwd.clone()
     } else {
         let mut size = 0;
-        unsafe {
-            let _ = GetUserProfileDirectoryW(token.0, None, &mut size);
-        }
+        let sizing = unsafe { GetUserProfileDirectoryW(token.0, None, &mut size) };
         if size == 0 || size > 32768 {
-            return Err(LaunchFailureReason::SessionUnavailable);
+            return Err(sizing
+                .err()
+                .map(|error| {
+                    failure(
+                        LaunchFailureReason::SessionUnavailable,
+                        DiagnosticStage::Environment,
+                        "GetUserProfileDirectoryW(size)",
+                        &error,
+                    )
+                })
+                .unwrap_or_else(|| LaunchFailureReason::SessionUnavailable.into()));
         }
         let mut profile = vec![0u16; size as usize];
         unsafe { GetUserProfileDirectoryW(token.0, Some(PWSTR(profile.as_mut_ptr())), &mut size) }
-            .map_err(|_| LaunchFailureReason::SessionUnavailable)?;
+            .map_err(|error| {
+                failure(
+                    LaunchFailureReason::SessionUnavailable,
+                    DiagnosticStage::Environment,
+                    "GetUserProfileDirectoryW",
+                    &error,
+                )
+            })?;
         let end = profile
             .iter()
             .position(|v| *v == 0)
             .unwrap_or(profile.len());
-        String::from_utf16(&profile[..end]).map_err(|_| LaunchFailureReason::SessionUnavailable)?
+        String::from_utf16(&profile[..end]).map_err(|error| {
+            failure(
+                LaunchFailureReason::SessionUnavailable,
+                DiagnosticStage::Environment,
+                "decode user profile directory",
+                &error,
+            )
+        })?
     };
     if !Path::new(&cwd).is_absolute()
         || !Path::new(&cwd).is_dir()
         || !Path::new(&request.target.value).is_absolute()
     {
-        return Err(LaunchFailureReason::InvalidTarget);
+        return Err(LaunchFailureReason::InvalidTarget.into());
     }
-    let target = std::fs::canonicalize(&request.target.value)
-        .map_err(|_| LaunchFailureReason::InvalidTarget)?;
-    let cwd = std::fs::canonicalize(cwd).map_err(|_| LaunchFailureReason::InvalidTarget)?;
+    let target = std::fs::canonicalize(&request.target.value).map_err(|error| {
+        failure(
+            LaunchFailureReason::InvalidTarget,
+            DiagnosticStage::TargetResolution,
+            "canonicalize executable",
+            &error,
+        )
+    })?;
+    let cwd = std::fs::canonicalize(cwd).map_err(|error| {
+        failure(
+            LaunchFailureReason::InvalidTarget,
+            DiagnosticStage::TargetResolution,
+            "canonicalize working directory",
+            &error,
+        )
+    })?;
     let command_line = checked_command_line(&target.to_string_lossy(), &request.args)?;
     let mut image = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(1)
         .open(&target)
-        .map_err(|_| LaunchFailureReason::InvalidTarget)?;
+        .map_err(|error| {
+            failure(
+                LaunchFailureReason::InvalidTarget,
+                DiagnosticStage::TargetResolution,
+                "open executable",
+                &error,
+            )
+        })?;
     if !image
         .metadata()
-        .map_err(|_| LaunchFailureReason::InvalidTarget)?
+        .map_err(|error| {
+            failure(
+                LaunchFailureReason::InvalidTarget,
+                DiagnosticStage::TargetResolution,
+                "executable metadata",
+                &error,
+            )
+        })?
         .is_file()
     {
-        return Err(LaunchFailureReason::InvalidTarget);
+        return Err(LaunchFailureReason::InvalidTarget.into());
     }
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 65536];
     loop {
-        let read = image
-            .read(&mut buffer)
-            .map_err(|_| LaunchFailureReason::InvalidTarget)?;
+        let read = image.read(&mut buffer).map_err(|error| {
+            failure(
+                LaunchFailureReason::InvalidTarget,
+                DiagnosticStage::TargetResolution,
+                "read executable",
+                &error,
+            )
+        })?;
         if read == 0 {
             break;
         }
@@ -343,7 +488,7 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
-fn checked_command_line(target: &str, args: &[String]) -> Result<Vec<u16>, LaunchFailureReason> {
+fn checked_command_line(target: &str, args: &[String]) -> Result<Vec<u16>, LaunchError> {
     let command = wide(
         &std::iter::once(target)
             .chain(args.iter().map(String::as_str))
@@ -354,7 +499,7 @@ fn checked_command_line(target: &str, args: &[String]) -> Result<Vec<u16>, Launc
     // CreateProcess counts UTF-16 code units, including the terminating NUL.
     // Check the fully quoted command before presenting a launch for approval.
     if command.len() > 32767 {
-        return Err(LaunchFailureReason::InvalidTarget);
+        return Err(LaunchFailureReason::InvalidTarget.into());
     }
     Ok(command)
 }
@@ -380,6 +525,7 @@ impl PreparedExecutable {
         creation_flags: windows::Win32::System::Threading::PROCESS_CREATION_FLAGS,
     ) -> LaunchApplicationResult {
         let mut result = LaunchApplicationResult {
+            diagnostic: None,
             dispatch_id,
             launch_outcome: LaunchOutcome::LaunchFailed,
             argument_delivery: if self.request.args.is_empty() {
@@ -396,7 +542,8 @@ impl PreparedExecutable {
         // External host Jobs are inherited normally; native launch does not
         // reject or escape them. It only avoids our per-command containment.
         if let Err(reason) = require_default_desktop() {
-            result.failure_reason = Some(reason);
+            result.failure_reason = Some(reason.reason);
+            result.diagnostic = Some(reason.diagnostic);
             return result;
         }
         let application = wide(&self.identity.canonical_target);
@@ -453,15 +600,27 @@ impl PreparedExecutable {
                 result.created_process_elevated = Some(self.elevated);
             }
             Err(error) => {
-                result.failure_reason = Some(match error.code().0 as u32 & 0xffff {
-                    740 => LaunchFailureReason::ElevationRequired,
-                    1314 if self.request.run_as_admin => {
+                let reason = match super::windows_diagnostics::win32_code(error.code().0) {
+                    Some(740) => LaunchFailureReason::ElevationRequired,
+                    Some(1314 | 1346 | 1349) if self.request.run_as_admin => {
                         LaunchFailureReason::AdminLaunchUnavailable
                     }
-                    5 | 1314 => LaunchFailureReason::PermissionDenied,
-                    2 | 3 | 193 => LaunchFailureReason::InvalidTarget,
+                    Some(5 | 1314) => LaunchFailureReason::PermissionDenied,
+                    Some(2 | 3 | 193) => LaunchFailureReason::InvalidTarget,
                     _ => LaunchFailureReason::NativeFailure,
-                })
+                };
+                let failure = failure(
+                    reason,
+                    DiagnosticStage::ProcessCreation,
+                    if self.uses_current_token {
+                        "CreateProcessW"
+                    } else {
+                        "CreateProcessAsUserW"
+                    },
+                    &error,
+                );
+                result.failure_reason = Some(failure.reason);
+                result.diagnostic = Some(failure.diagnostic);
             }
         }
         result
@@ -471,6 +630,80 @@ impl PreparedExecutable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires LRDM_TEST_ELEVATION_FIXTURE, a controlled requireAdministrator executable"]
+    fn controlled_elevation_failures_keep_native_diagnostics() {
+        assert!(
+            !current_elevated().unwrap(),
+            "Run this check from an ordinary user process"
+        );
+        let target = std::env::var("LRDM_TEST_ELEVATION_FIXTURE").expect("controlled fixture path");
+        let sid = storage_user_sid().unwrap();
+        let session: u32 = catalog_session_identity()
+            .unwrap()
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let request = LaunchApplicationRequest {
+            target: desk_agent_protocol::application_launch::ApplicationTarget {
+                kind: ApplicationTargetKind::Executable,
+                value: target,
+            },
+            args: vec![],
+            cwd: None,
+            run_as_admin: false,
+        };
+        let ordinary = prepare(&request, &sid, session)
+            .unwrap_or_else(|error| panic!("{error:?}"))
+            .invoke("test-ordinary".into());
+        assert_eq!(
+            ordinary.failure_reason,
+            Some(LaunchFailureReason::ElevationRequired),
+            "{ordinary:?}"
+        );
+        let diagnostic = ordinary.diagnostic.unwrap();
+        assert_eq!(
+            super::super::windows_diagnostics::win32_code(diagnostic.code.unwrap() as i32),
+            Some(740)
+        );
+        assert_eq!(diagnostic.stage, DiagnosticStage::ProcessCreation);
+        let administrator = LaunchApplicationRequest {
+            run_as_admin: true,
+            ..request
+        };
+        let result = match prepare(&administrator, &sid, session) {
+            Ok(prepared) => prepared.invoke("test-administrator".into()),
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error.reason,
+                        LaunchFailureReason::AdminRequired
+                            | LaunchFailureReason::AdminLaunchUnavailable
+                    ),
+                    "{error:?}"
+                );
+                assert!(!error.diagnostic.message.is_empty());
+                return;
+            }
+        };
+        assert!(
+            matches!(
+                result.failure_reason,
+                Some(
+                    LaunchFailureReason::AdminLaunchUnavailable
+                        | LaunchFailureReason::PermissionDenied
+                )
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            result.diagnostic.as_ref().unwrap().operation,
+            "CreateProcessAsUserW"
+        );
+        assert!(result.diagnostic.unwrap().code.is_some());
+    }
     #[test]
     fn command_limit_includes_quotes_separators_and_terminator() {
         let target = "C:\\app.exe";
@@ -486,15 +719,15 @@ mod tests {
         );
         assert_eq!(
             checked_command_line(target, &[at_limit + "a"]),
-            Err(LaunchFailureReason::InvalidTarget)
+            Err(LaunchFailureReason::InvalidTarget.into())
         );
         assert_eq!(
             checked_command_line(target, &["\\".repeat(16384)]),
-            Err(LaunchFailureReason::InvalidTarget)
+            Err(LaunchFailureReason::InvalidTarget.into())
         );
         assert_eq!(
             checked_command_line(target, &["\"".repeat(16384)]),
-            Err(LaunchFailureReason::InvalidTarget)
+            Err(LaunchFailureReason::InvalidTarget.into())
         );
     }
 

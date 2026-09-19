@@ -964,7 +964,11 @@ mod tests {
         let result_ok = ExecResultPayload {
             exec_request_id: ExecRequestId("exec_1".into()),
             outcome: AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
-                exit_code: 0,
+                started: true,
+                termination_signal: None,
+                failure: None,
+                diagnostics: vec![],
+                exit_code: Some(0),
                 streams: ExecOutputStreams::Split {
                     stdout: "Running".into(),
                     stderr: String::new(),

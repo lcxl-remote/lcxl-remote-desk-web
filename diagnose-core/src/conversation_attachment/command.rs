@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandReceipt {
-    pub exit_code: i32,
+    pub started: bool,
+    pub exit_code: Option<i32>,
+    pub termination_signal: Option<i32>,
+    pub failure: Option<AgentError>,
+    pub diagnostics: Vec<desk_agent_protocol::native_diagnostic::NativeDiagnostic>,
     pub duration_ms: u32,
     pub redactions_applied: bool,
     pub streams: Vec<DeliveredPart>,
@@ -56,7 +60,11 @@ pub fn prepare_command(
     let delivery = prepare_delivery(identity, parts, created_at_unix_ms)?;
     Ok(PreparedCommand {
         receipt: CommandReceipt {
+            started: output.started,
             exit_code: output.exit_code,
+            termination_signal: output.termination_signal,
+            failure: output.failure,
+            diagnostics: output.diagnostics,
             duration_ms: output.duration_ms,
             redactions_applied: !output.redactions.is_empty(),
             streams: delivery.parts,
@@ -78,11 +86,58 @@ mod tests {
         }
     }
     #[test]
+    fn failed_command_keeps_diagnostics_when_streams_are_externalized() {
+        let diagnostic = desk_agent_protocol::native_diagnostic::NativeDiagnostic::from_io(
+            desk_agent_protocol::native_diagnostic::DiagnosticStage::OutputRead,
+            "stderr",
+            &std::io::Error::from_raw_os_error(5),
+        );
+        let prepared = prepare_command(
+            &identity(),
+            ExecOutput {
+                started: true,
+                exit_code: None,
+                termination_signal: None,
+                failure: Some(AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::Timeout,
+                    message: "Timed out".into(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                }),
+                diagnostics: vec![diagnostic.clone()],
+                streams: ExecOutputStreams::Split {
+                    stdout: "retained".repeat(1000),
+                    stderr: "error".repeat(1000),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                },
+                duration_ms: 100,
+                redactions: vec![],
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(prepared.attachments.len(), 2);
+        assert_eq!(prepared.receipt.exit_code, None);
+        assert_eq!(prepared.receipt.diagnostics, vec![diagnostic]);
+        assert_eq!(
+            prepared.receipt.failure.unwrap().kind,
+            desk_agent_protocol::AgentErrorKind::Timeout
+        );
+        assert_eq!(prepared.attachments[0].content, b"retained".repeat(1000));
+        assert_eq!(prepared.attachments[1].content, b"error".repeat(1000));
+    }
+    #[test]
     fn typed_pty_result_does_not_invent_split_streams() {
         let prepared = prepare_command(
             &identity(),
             ExecOutput {
-                exit_code: 17,
+                started: true,
+                termination_signal: None,
+                failure: None,
+                diagnostics: vec![],
+                exit_code: Some(17),
                 duration_ms: 23,
                 redactions: vec!["secret".into()],
                 streams: ExecOutputStreams::PtyCombined {
@@ -93,7 +148,7 @@ mod tests {
             1,
         )
         .unwrap();
-        assert_eq!(prepared.receipt.exit_code, 17);
+        assert_eq!(prepared.receipt.exit_code, Some(17));
         assert_eq!(prepared.receipt.duration_ms, 23);
         assert!(prepared.receipt.redactions_applied);
         assert_eq!(prepared.receipt.streams.len(), 1);
@@ -110,7 +165,11 @@ mod tests {
         let prepared = prepare_command(
             &identity(),
             ExecOutput {
-                exit_code: 0,
+                started: true,
+                termination_signal: None,
+                failure: None,
+                diagnostics: vec![],
+                exit_code: Some(0),
                 duration_ms: 2,
                 redactions: vec![],
                 streams: ExecOutputStreams::Split {
