@@ -17,9 +17,18 @@ impl ToolSeam for GrantTools {
         call: &ToolCall,
         _: &crate::seam::ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
-        assert_eq!(call.name, "launch_application");
+        assert!(matches!(
+            call.name.as_str(),
+            "launch_application" | "exec_command" | "create_text_file"
+        ));
         self.reads.set(self.reads.get() + 1);
-        self.snapshot.borrow_mut().grants[0].remaining_uses = 0;
+        self.snapshot
+            .borrow_mut()
+            .grants
+            .iter_mut()
+            .find(|grant| grant.tool_name == call.name)
+            .unwrap()
+            .remaining_uses = 0;
         Ok(ExecOutcome::Executed {
             data_envelope: None,
             output: ToolRunOutput {
@@ -159,7 +168,7 @@ impl ModelSeam for ExactGrantModel {
 /// Real registry, scope projection, exact grant and permission-resume loop;
 /// native dispatch is replaced by the recording seam, so no app is launched.
 #[tokio::test]
-async fn native_launch_permission_resume_uses_registered_scope_and_exact_grant() {
+async fn permission_resume_keeps_scoped_prerequisites_and_validates_exact_grants() {
     use crate::dynamic_run::{
         GrantRequestItem, PERMISSION_REQUEST_SCHEMA_VERSION, PermissionRequest,
         PermissionRequestState,
@@ -168,6 +177,7 @@ async fn native_launch_permission_resume_uses_registered_scope_and_exact_grant()
     use sha2::{Digest, Sha256};
     for blocked in [
         "none",
+        "mixed",
         "expired",
         "revoked",
         "changed_input",
@@ -177,7 +187,12 @@ async fn native_launch_permission_resume_uses_registered_scope_and_exact_grant()
         "mode",
     ] {
         let (mut initial, providers, mut snapshot) = crate::grant_disclosure::tests::fixture();
-        let descriptor = providers.capability_for_tool("launch_application").unwrap();
+        let action_name = if blocked == "mixed" {
+            "exec_command"
+        } else {
+            "launch_application"
+        };
+        let descriptor = providers.capability_for_tool(action_name).unwrap();
         let mut registry = vec![descriptor.registered_tool()];
         crate::tool_exposure::retain_candidates(&providers, &mut registry, &[]);
         let mut scope = AgentScope {
@@ -207,7 +222,12 @@ async fn native_launch_permission_resume_uses_registered_scope_and_exact_grant()
             ChatRole::User,
             "open the approved app",
         ));
-        let exact = r#"{"args":[],"cwd":null,"run_as_admin":false,"target":{"kind":"executable","value":"C:\\app.exe"}}"#;
+        let launch_exact = r#"{"args":[],"cwd":null,"run_as_admin":false,"target":{"kind":"executable","value":"C:\\app.exe"}}"#;
+        let exact = if blocked == "mixed" {
+            r#"{"command":"python hello.py","cwd":"C:/Users/Public","shell":"powershell","timeout_ms":60000}"#
+        } else {
+            launch_exact
+        };
         let digest = format!("{:x}", Sha256::digest(exact.as_bytes()));
         let grant = &mut snapshot.grants[0];
         grant.provider_id = providers
@@ -266,26 +286,70 @@ async fn native_launch_permission_resume_uses_registered_scope_and_exact_grant()
         if blocked == "changed_input" {
             initial.permission_requests[0].items[0].canonical_input_json = Some("{}".into());
         }
-        let inventory = vec![crate::capability_availability::CapabilityAvailability {
-            provider_id: "application.launch".into(),
+        if blocked == "mixed" {
+            let create = providers.capability_for_tool("create_text_file").unwrap();
+            registry.push(create.registered_tool());
+            scope.granted.push(create.required_capability);
+            initial.scope_snapshot = scope.clone();
+            snapshot.ready_capabilities.push(create.required_capability);
+            let mut grant = snapshot.grants[0].clone();
+            grant.grant_id = "create-grant".into();
+            grant.provider_id = providers
+                .provider_for_capability(&create.wire.capability_id)
+                .unwrap()
+                .wire
+                .provider_id
+                .clone();
+            grant.capability_id = create.wire.capability_id.clone();
+            grant.tool_name = create.wire.tool_name.clone();
+            grant.tool_schema_version = create.wire.input_schema_version;
+            grant.effect = create.wire.effect;
+            grant.use_policy = CapabilityGrantUsePolicy::Reusable;
+            grant.canonical_input_digest_sha256 = None;
+            grant.resource_scope = vec!["directory:test".into()];
+            grant.operation_scope = vec!["create_new_artifact".into()];
+            grant.validate().unwrap();
+            snapshot.grants.push(grant);
+        }
+        let mut inventory = vec![crate::capability_availability::CapabilityAvailability {
+            provider_id: snapshot
+                .grants
+                .first()
+                .map(|g| g.provider_id.clone())
+                .unwrap_or_else(|| "application.launch".into()),
             capability_id: descriptor.wire.capability_id.clone(),
-            tool_name: "launch_application".into(),
+            tool_name: action_name.into(),
             compiled: true,
             enabled: true,
             connected: true,
             ready: true,
             reason: None,
         }];
+        if blocked == "mixed" {
+            let create = providers.capability_for_tool("create_text_file").unwrap();
+            let mut available = inventory[0].clone();
+            available.provider_id = snapshot.grants[1].provider_id.clone();
+            available.capability_id = create.wire.capability_id.clone();
+            available.tool_name = "create_text_file".into();
+            inventory.push(available);
+        }
         let session = MemSession {
             inner: RefCell::new(Some(initial)),
             ..Default::default()
         };
         let requests = Rc::new(RefCell::new(vec![]));
-        let turns = if blocked == "none" {
+        let turns = if blocked == "mixed" {
             vec![
-                tool_use_args("launch", "launch_application", exact),
+                tool_use_args(
+                    "create",
+                    "create_text_file",
+                    r#"{"filename":"hello.py","content":"print('hello world')"}"#,
+                ),
+                tool_use_args("launch", action_name, exact),
                 answer("done"),
             ]
+        } else if blocked == "none" {
+            vec![tool_use_args("launch", action_name, exact), answer("done")]
         } else {
             vec![answer("blocked")]
         };
@@ -298,7 +362,7 @@ async fn native_launch_permission_resume_uses_registered_scope_and_exact_grant()
             reads: std::cell::Cell::new(0),
         };
         let clock = || "1970-01-01T00:00:00.500Z".to_string();
-        let exact_names = vec!["launch_application".into()];
+        let exact_names = vec![action_name.into()];
         let mut deps = deps(&session, &model, &tools, &registry, &clock);
         deps.provider_registry = Some(&providers);
         deps.capability_inventory = Some(&inventory);
@@ -316,25 +380,42 @@ async fn native_launch_permission_resume_uses_registered_scope_and_exact_grant()
         .unwrap();
         assert_eq!(
             tools.reads.get(),
-            usize::from(blocked == "none"),
+            if blocked == "mixed" {
+                2
+            } else {
+                usize::from(blocked == "none")
+            },
             "{blocked}"
         );
         let requests = requests.borrow();
         assert_eq!(
-            requests[0]
-                .tools
-                .iter()
-                .any(|t| t.name == "launch_application"),
-            blocked == "none",
+            requests[0].tools.iter().any(|t| t.name == action_name),
+            matches!(blocked, "none" | "mixed"),
             "{blocked}"
         );
-        if blocked == "none" {
+        if blocked == "mixed" {
+            assert!(
+                requests[0]
+                    .tools
+                    .iter()
+                    .any(|t| t.name == "create_text_file")
+            );
+            assert!(
+                requests[0]
+                    .messages
+                    .iter()
+                    .any(|m| m.text.contains("dependency order"))
+            );
             assert!(
                 !requests[1]
                     .tools
                     .iter()
-                    .any(|t| t.name == "launch_application")
+                    .any(|t| t.name == "create_text_file")
             );
+            assert!(requests[1].tools.iter().any(|t| t.name == action_name));
+            assert!(!requests[2].tools.iter().any(|t| t.name == action_name));
+        } else if blocked == "none" {
+            assert!(!requests[1].tools.iter().any(|t| t.name == action_name));
         } else {
             let reason = match blocked {
                 "scope" => "missing_scope_capability",

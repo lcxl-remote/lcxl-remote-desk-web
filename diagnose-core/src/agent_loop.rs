@@ -1767,6 +1767,14 @@ async fn run_inner_impl(
                         snapshot.readiness_revision,
                     )
                 });
+        // Exact approval pins an action, but must not hide other active grants:
+        // a scoped write may be a prerequisite for that exact command.
+        let mut continuation_tools = deps.permission_continuation_exact_tools.to_vec();
+        if let Some(names) = &authority_names {
+            continuation_tools.extend(names.iter().cloned());
+        }
+        continuation_tools.sort();
+        continuation_tools.dedup();
         let mut exposed = exposed_tools(
             deps.registry,
             &session.scope_snapshot,
@@ -1895,7 +1903,7 @@ async fn run_inner_impl(
             let selected = crate::capability_disclosure::select_advertised_tools(
                 &raw_provider_exposed,
                 &session.capability_disclosure.loaded_tool_names,
-                if permission_continuation_pending { deps.permission_continuation_exact_tools } else { &[] },
+                if permission_continuation_pending { &continuation_tools } else { &[] },
                 pinned_context.max_context_bytes,
             ).map_err(|error| AgentError {
                 kind: AgentErrorKind::InvalidInput,
@@ -1922,9 +1930,7 @@ async fn run_inner_impl(
         }
         if permission_continuation_pending && !deps.permission_continuation_exact_tools.is_empty() {
             exposed.retain(|tool| {
-                deps.permission_continuation_exact_tools
-                    .iter()
-                    .any(|name| name == tool.name())
+                continuation_tools.iter().any(|name| name == tool.name())
                     || tool.effect == ToolEffect::RunProjection
             });
         }
@@ -2033,25 +2039,22 @@ async fn run_inner_impl(
                 safe_for_model: false,
                 error_code: None,
             })?;
-            let continuation_tools = raw_provider_exposed
+            let continuation_provider_tools = raw_provider_exposed
                 .iter()
                 .filter(|tool| {
                     !permission_continuation_pending
                         || deps.permission_continuation_exact_tools.is_empty()
-                        || deps
-                            .permission_continuation_exact_tools
-                            .iter()
-                            .any(|name| name == tool.name())
+                        || continuation_tools.iter().any(|name| name == tool.name())
                 })
                 .cloned()
                 .collect::<Vec<_>>();
             let projection = crate::capability_disclosure::project_capability_disclosure(
                 providers,
                 inventory,
-                &continuation_tools,
+                &continuation_provider_tools,
                 permission_candidates,
                 if permission_continuation_pending {
-                    deps.permission_continuation_exact_tools
+                    &continuation_tools
                 } else {
                     &[]
                 },
@@ -2224,7 +2227,7 @@ async fn run_inner_impl(
                     "runtime-permission-continuation-{turn_id}-{}",
                     session.input_revision
                 );
-                let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. Re-read CURRENT AUTHORIZED GRANTS. If a required tool has state=active with approved_exact_input, call that tool now with exactly approved_exact_input and no changed fields. Do not inspect again, create another preview, or request the same permission before that call, because doing so can replace the approved ephemeral object reference. If no matching active grant exists, adapt to the recorded decision or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
+                let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. Re-read CURRENT AUTHORIZED GRANTS. Continue in dependency order using active authorized tools: finish required prerequisites (for example create a file before executing it), and do not execute a dependent action if its prerequisite failed. When calling a tool with approved_exact_input, use exactly that input with no changed fields. Do not unnecessarily repeat inspection, recreate a preview, or request an already active permission, because this can replace the approved ephemeral object reference. If no matching active grant exists, adapt to the recorded decision or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
                 let marker_text = if permission_continuation_blocked {
                     let reasons = deps
                         .permission_continuation_exact_tools
@@ -2291,7 +2294,7 @@ async fn run_inner_impl(
                 let marker_id = format!(
                     "runtime-permission-protocol-retry-{turn_id}-{permission_protocol_retries}"
                 );
-                let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous permission-continuation response violated the tool-call protocol and was discarded before any action was recorded or executed. Return exactly one exposed tool call now, with no prose, no second JSON value, and no trailing characters. Copy approved_exact_input byte-for-byte as that tool's complete arguments; do not add, remove, reorder semantically, or infer fields. This notice grants no authority, and the server will still require the active exact grant and final validation.";
+                let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous permission-continuation response violated the tool-call protocol and was discarded before any action was recorded or executed. Return exactly one exposed tool call now, with no prose, no second JSON value, and no trailing characters. Choose the next authorized action in dependency order. If that tool has approved_exact_input, copy it byte-for-byte as the complete arguments; otherwise stay within its active grant scope. This notice grants no authority, and the server will still require the matching active grant and final validation.";
                 let parent = session
                     .conversation
                     .iter()
@@ -2661,9 +2664,7 @@ async fn run_inner_impl(
 
         if permission_continuation_pending
             && turn.tool_calls.iter().any(|call| {
-                deps.permission_continuation_exact_tools
-                    .iter()
-                    .any(|name| name == &call.name)
+                continuation_tools.iter().any(|name| name == &call.name)
                     && exposed.iter().any(|tool| tool.name() == call.name)
             })
         {
@@ -2865,7 +2866,7 @@ async fn run_inner_impl(
                             mint(),
                             &call.id,
                             format!(
-                                "tool `{}` is not advertised in this request. Check current authorization; request missing permission, or use describe_tools for a budget-hidden authorized tool. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
+                                "tool `{}` is not advertised in this request. This does not by itself mean permission was denied. Check CURRENT AUTHORIZED GRANTS and the capability index; request permission only if no matching active grant exists. Use describe_tools for a budget-hidden authorized tool only when describe_tools is advertised. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
                                 call.name,
                                 exposed
                                     .iter()

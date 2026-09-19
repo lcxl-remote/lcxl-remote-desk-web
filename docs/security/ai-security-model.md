@@ -157,3 +157,7 @@ The AI diagnose and Terminal AI Assistant panels disclose, from the first intera
 AI-generated output carries machine-readable provenance on its wire frame and a visible "AI-generated" marking in the UI. The marking is driven by the content being AI-generated, not by the provenance metadata being present, so a missing or stripped provenance never downgrades content to "not AI" (fail-closed). Provenance, when known, records which model produced the content and when.
 
 This covers every surface that shows model text: the diagnosis answer, the Terminal AI Assistant answer, the inline command completion, and the provider connectivity-test reply snippet. A model-generated command suggestion is a novel output, not an assistive edit of what you typed, so it is marked; the completion's zero-latency local guess from your own recent history is not AI and is not marked.
+
+## Continuing after approval
+
+Resuming after approval keeps other actively authorized tools available so prerequisites, such as creating a file before executing it, can complete first. Exact-input grants still require the approved arguments; every dispatch still validates scope, expiry, and remaining uses.

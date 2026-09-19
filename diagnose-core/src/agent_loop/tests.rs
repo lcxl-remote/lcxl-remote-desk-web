@@ -4275,7 +4275,7 @@ async fn exact_permission_resume_retries_one_precommit_protocol_error() {
     let recovery = requests[1].messages.last().unwrap();
     assert_eq!(recovery.role, ChatRole::SystemEvent);
     assert!(recovery.text.contains("no trailing characters"));
-    assert!(recovery.text.contains("approved_exact_input byte-for-byte"));
+    assert!(recovery.text.contains("copy it byte-for-byte"));
     assert!(
         !requests[2]
             .messages
@@ -4843,8 +4843,8 @@ async fn permission_resume_places_authorization_checkpoint_at_request_tail() {
         tail.text
             .starts_with("PERMISSION CONTINUATION CHECKPOINT (server authoritative)")
     );
-    assert!(tail.text.contains("call that tool now"));
-    assert!(tail.text.contains("Do not inspect again"));
+    assert!(tail.text.contains("Continue in dependency order"));
+    assert!(tail.text.contains("Do not unnecessarily repeat inspection"));
     assert!(
         tail.message_id
             .starts_with("runtime-permission-continuation-")
