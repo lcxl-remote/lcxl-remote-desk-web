@@ -790,13 +790,15 @@ export function AiAssistantWorkspace({
                             <Fragment key={message.id}>
                             <div
                                 key={message.id}
+                                id={message.role === 'tool_call' ? `assistant-call-${message.toolCallId}` : undefined}
+                                tabIndex={message.role === 'tool_call' ? -1 : undefined}
                                 className={`max-w-[90%] rounded-lg px-3 py-2 text-sm ${
                                     message.role === 'user'
                                         ? 'ml-auto bg-muted'
                                         : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
                                 }`}
                             >
-                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.aiAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} onExportBackup={exportBackup} /><AssistantResultAttachments sessionId={chat.sessionId} text={message.text} /></> : message.role === 'assistant'
+                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.aiAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} tool={chat.tools.find(tool => tool.callId === message.toolCallId)} onLocateCall={message.toolCallId ? () => { const target = document.getElementById(`assistant-call-${message.toolCallId}`); target?.scrollIntoView({ block: 'center', behavior: 'smooth' }); target?.focus({ preventScroll: true }); } : undefined} onExportBackup={exportBackup} /><AssistantResultAttachments sessionId={chat.sessionId} text={message.text} /></> : message.role === 'assistant'
                                     ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
                                     : <p className="whitespace-pre-wrap">{message.text}</p>}
                             </div>

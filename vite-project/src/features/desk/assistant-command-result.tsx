@@ -1,3 +1,5 @@
+import type { AiAssistantToolActivity } from './use-ai-assistant-chat';
+import { Button } from '@/components/ui/button';
 import { AssistantCodeBlock } from './assistant-code-block';
 import { Disclosure } from '@/components/ui/disclosure';
 import { useMemo } from 'react';
@@ -44,8 +46,21 @@ export function parseCommandReceipt(text: string): CommandReceipt | null {
     }
 }
 
-export function AssistantCommandResult({ text, onExportBackup }: { text: string; onExportBackup?: (id: string) => Promise<void> }) {
+export function AssistantCommandResult({ text, tool, onLocateCall, onExportBackup }: {
+    text: string;
+    tool?: AiAssistantToolActivity;
+    onLocateCall?: () => void;
+    onExportBackup?: (id: string) => Promise<void>;
+}) {
     const { t, i18n } = useTranslation();
+    const command = useMemo(() => {
+        if (tool?.name !== 'exec_command') return null;
+        try {
+            const args: unknown = JSON.parse(tool.argumentsJson);
+            return isRecord(args) && typeof args.command === 'string' && typeof args.shell === 'string'
+                ? { text: args.command, shell: args.shell } : null;
+        } catch { return null; }
+    }, [tool]);
     const receipt = useMemo(() => parseCommandReceipt(text), [text]);
     const fileReceipt = useMemo(() => parseFileReceipt(text), [text]);
     const launchReceipt = useMemo(() => parseLaunchReceipt(text), [text]);
@@ -58,31 +73,44 @@ export function AssistantCommandResult({ text, onExportBackup }: { text: string;
             {truncated && <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.commandReceipt.truncated')}</p>}
         </div>
     );
+    const duration = receipt ? t(`pages.aiAssistant.commandReceipt.${receipt.duration_ms >= 60000 ? 'minutes' : receipt.duration_ms >= 1000 ? 'seconds' : 'milliseconds'}`, {
+        value: (receipt.duration_ms / (receipt.duration_ms >= 60000 ? 60000 : receipt.duration_ms >= 1000 ? 1000 : 1)).toLocaleString(i18n.language, { maximumFractionDigits: 2 }),
+    }) : '';
     return (
-        <Disclosure className="min-w-0" title={<>
-                {t('pages.aiAssistant.commandResultTitle')}
-                {outcomeUnknown && <> · {t('pages.aiAssistant.toolCall.inspectBeforeRetry')}</>}
-            </>} summaryClassName="cursor-pointer rounded font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <div className="min-w-0 space-y-2">
+            {command && <div className="min-w-0 space-y-1">
+                <p className="text-xs text-muted-foreground">{command.shell}</p>
+                <p className="truncate font-mono text-xs" title={command.text}>{command.text.split(/\r?\n/).find(line => line.trim())?.slice(0, 160)}</p>
+                <Disclosure title={t('pages.aiAssistant.commandReceipt.command')}>
+                    <AssistantCodeBlock text={command.text} format="text" />
+                </Disclosure>
+                {onLocateCall && <Button variant="link" size="sm" className="h-auto p-0" onClick={onLocateCall}>{t('pages.aiAssistant.commandReceipt.locate')}</Button>}
+            </div>}
+            <Disclosure className="min-w-0" title={<>
+                    {t('pages.aiAssistant.commandResultTitle')}
+                    {outcomeUnknown && <> · {t('pages.aiAssistant.toolCall.inspectBeforeRetry')}</>}
+                </>} summaryClassName="cursor-pointer rounded font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
 
-            <div className="mt-3 space-y-3">
-                {receipt ? <>
-                    <dl className="flex flex-wrap gap-x-6 gap-y-2">
-                        <div><dt className="text-muted-foreground">{t('pages.aiAssistant.commandReceipt.exitCode')}</dt><dd>{receipt.exit_code ?? '—'}</dd></div>
-                        <div><dt className="text-muted-foreground">{t('pages.aiAssistant.commandReceipt.duration')}</dt><dd>{t('pages.aiAssistant.commandReceipt.milliseconds', { value: receipt.duration_ms.toLocaleString(i18n.language) })}</dd></div>
-                    </dl>
-                    {receipt.failure && <p role="alert" className="whitespace-pre-wrap break-words text-destructive">{receipt.failure.message}</p>}
-                    {receipt.streams.type === 'split' ? <>
-                        {output(t('pages.aiAssistant.commandReceipt.stdout'), receipt.streams.stdout, receipt.streams.stdout_truncated)}
-                        {output(t('pages.aiAssistant.commandReceipt.stderr'), receipt.streams.stderr, receipt.streams.stderr_truncated)}
-                    </> : output(t('pages.aiAssistant.commandReceipt.terminal'), receipt.streams.terminal, receipt.streams.truncated)}
-                    {!!receipt.redactions?.length && output(t('pages.aiAssistant.commandReceipt.redactions'), receipt.redactions.join('\n'), false)}
-                    <Disclosure title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs text-muted-foreground">
+                <div className="mt-3 space-y-3">
+                    {receipt ? <>
+                        <dl className="flex flex-wrap gap-x-6 gap-y-2">
+                            <div><dt className="text-muted-foreground">{t('pages.aiAssistant.commandReceipt.exitCode')}</dt><dd>{receipt.exit_code ?? '—'}</dd></div>
+                            <div><dt className="text-muted-foreground">{t('pages.aiAssistant.commandReceipt.duration')}</dt><dd>{duration}</dd></div>
+                        </dl>
+                        {receipt.failure && <p role="alert" className="whitespace-pre-wrap break-words text-destructive">{receipt.failure.message}</p>}
+                        {receipt.streams.type === 'split' ? <>
+                            {output(t('pages.aiAssistant.commandReceipt.stdout'), receipt.streams.stdout, receipt.streams.stdout_truncated)}
+                            {output(t('pages.aiAssistant.commandReceipt.stderr'), receipt.streams.stderr, receipt.streams.stderr_truncated)}
+                        </> : output(t('pages.aiAssistant.commandReceipt.terminal'), receipt.streams.terminal, receipt.streams.truncated)}
+                        {!!receipt.redactions?.length && output(t('pages.aiAssistant.commandReceipt.redactions'), receipt.redactions.join('\n'), false)}
+                        <Disclosure title={<>{t('pages.aiAssistant.commandReceipt.raw')}</>} summaryClassName="cursor-pointer text-xs text-muted-foreground">
 
-                        <AssistantCodeBlock text={text} />
-                    </Disclosure>
-                </> : <AssistantCodeBlock text={text} />}
-                <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.commandResultHint')}</p>
-            </div>
-        </Disclosure>
+                            <AssistantCodeBlock text={text} />
+                        </Disclosure>
+                    </> : <AssistantCodeBlock text={text} />}
+                    <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.commandResultHint')}</p>
+                </div>
+            </Disclosure>
+        </div>
     );
 }

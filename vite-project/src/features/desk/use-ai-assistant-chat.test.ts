@@ -453,7 +453,7 @@ describe('useAiAssistantChat', () => {
         expect(result.current.messages).toEqual([
             expect.objectContaining({ id: 'tool-call-command-1', role: 'tool_call', toolCallId: 'command-1' }),
             { id: 'waiting', role: 'assistant', text: 'Waiting for the background command.' },
-            { id: 'finished', role: 'tool_result', text: output },
+            { id: 'finished', role: 'tool_result', toolCallId: 'command-1', text: output },
         ]);
         expect(result.current.tools[0].status).toBe(output.startsWith('execution failed:') ? 'failed' : 'ok');
         expect(result.current.status).toBe('done');
@@ -478,7 +478,7 @@ describe('useAiAssistantChat', () => {
         await waitFor(() => expect(result.current.hydrating).toBe(false));
         expect(result.current.messages).toEqual([
             expect.objectContaining({ role: 'tool_call', toolCallId: 'file-1' }),
-            { id: 'finished', role: 'tool_result', text: output },
+            { id: 'finished', role: 'tool_result', toolCallId: 'file-1', text: output },
         ]);
         expect(result.current.tools[0].status).toBe('ok');
     });

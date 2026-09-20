@@ -257,7 +257,7 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 output: message.text,
             });
             if (!backgroundRunning && message.text && (existing?.name === 'exec_command' || nativeFileResult || message.backgroundTaskId || (nativeFailed && permissionReason))) {
-                messages.push({ id: message.id, role: 'tool_result', text: message.text, permissionReason });
+                messages.push({ id: message.id, role: 'tool_result', toolCallId: message.toolCallId, text: message.text, permissionReason });
             }
         }
     }

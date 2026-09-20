@@ -19,6 +19,18 @@ describe('command receipt presentation', () => {
         expect(screen.getByRole('alert').textContent).toContain('elevation required (740)');
         expect(screen.getByText('Permission denied')).toBeTruthy();
     });
+    it('identifies a late timeout by its original command and supports locating that call', () => {
+        const locate = vi.fn();
+        render(<AssistantCommandResult text={wire({ ...receipt, duration_ms: 300054 })}
+            tool={{ callId: 'search', name: 'exec_command', status: 'failed', output: null,
+                argumentsJson: JSON.stringify({ shell: 'powershell', command: "Get-ChildItem C:/ -Recurse\nWrite-Output done" }) }} onLocateCall={locate} />);
+        expect(screen.getByText('powershell')).toBeTruthy();
+        expect(screen.getByText('Get-ChildItem C:/ -Recurse')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.commandReceipt.minutes: 5')).toBeTruthy();
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.commandReceipt.locate' }));
+        expect(locate).toHaveBeenCalledOnce();
+    });
+
     it('parses the actual tagged device receipt without altering its output', () => {
         expect(parseCommandReceipt(wire(receipt))).toEqual(receipt);
     });
@@ -42,7 +54,7 @@ describe('command receipt presentation', () => {
         expect(details.getAttribute('data-state') === 'open').toBe(true);
         expect(screen.getByText('pages.aiAssistant.commandReceipt.exitCode')).toBeTruthy();
         expect(screen.getByText('1', { selector: 'dd' })).toBeTruthy();
-        expect(screen.getByText('pages.aiAssistant.commandReceipt.milliseconds: 1,234')).toBeTruthy();
+        expect(screen.getByText('pages.aiAssistant.commandReceipt.seconds: 1.23')).toBeTruthy();
         expect(screen.getByText('Permission denied')).toBeTruthy();
         expect(screen.getByText('pages.aiAssistant.commandReceipt.truncated')).toBeTruthy();
         expect(screen.getByText('secret removed')).toBeTruthy();
