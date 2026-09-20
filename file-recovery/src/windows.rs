@@ -24,6 +24,11 @@ mod movement;
 pub use movement::{MoveError, MoveOutcome, move_no_replace};
 pub use streams::{StreamInfo, StreamInventory, stream_inventory};
 
+/// Rights needed for child creation/replacement and directory flushing, without
+/// requiring permission to change the parent directory's attributes or EAs.
+pub const MUTATION_DIRECTORY_ACCESS: FILE_ACCESS_RIGHTS =
+    FILE_ACCESS_RIGHTS(FILE_GENERIC_READ.0 | FILE_ADD_FILE.0 | FILE_ADD_SUBDIRECTORY.0);
+
 pub fn current_user_sid() -> io::Result<String> {
     security::current_user()
 }

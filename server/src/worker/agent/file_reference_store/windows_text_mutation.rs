@@ -7,11 +7,9 @@ use desk_agent_protocol::computer_use::{
 };
 use desk_file_recovery::{
     BackupRequest, ChangeState, Vault, WindowsCommitRequest,
-    windows::{FileKind, MoveOutcome, SourceSnapshot, file_identity},
+    windows::{FileKind, MUTATION_DIRECTORY_ACCESS, MoveOutcome, SourceSnapshot, file_identity},
 };
-use windows::Win32::Storage::FileSystem::{
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-};
+use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
 fn conflict() -> AgentError {
     error(
@@ -22,6 +20,33 @@ fn conflict() -> AgentError {
 }
 fn now() -> u64 {
     Utc::now().timestamp_millis().max(1) as u64
+}
+
+// Adding children and flushing the directory do not require changing its
+// attributes or extended attributes. Public directories may deny those rights
+// while permitting safe replacement of user-owned files.
+fn open_mutation_parent(path: &Path) -> Result<OpenedFile, AgentError> {
+    let parent = open_verified_with_access(
+        path,
+        MUTATION_DIRECTORY_ACCESS.0,
+        (FILE_SHARE_READ | FILE_SHARE_WRITE).0,
+    )
+    .map_err(|mut cause| {
+        cause.message = format!(
+            "open parent directory for recoverable file replacement (read/create children): {}",
+            cause.message
+        );
+        cause
+    })?;
+    // Fail before backup or any rename if this filesystem cannot flush the held
+    // handle. Commit still flushes after the moves and retains unknown outcomes.
+    parent.handle.sync_all().map_err(|cause| {
+        io_error(
+            "flush parent directory before recoverable file replacement",
+            cause,
+        )
+    })?;
+    Ok(parent)
 }
 
 pub(crate) fn execute(
@@ -72,13 +97,7 @@ pub(crate) fn execute(
         return Err(conflict());
     }
     drop(selected_parent);
-    // This independently checked writable directory handle supports flushing the
-    // native rename; held ancestor handles continue to deny directory replacement.
-    let parent = open_verified_with_access(
-        &root.path,
-        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-        (FILE_SHARE_READ | FILE_SHARE_WRITE).0,
-    )?;
+    let parent = open_mutation_parent(&root.path)?;
     if file_identity(&parent.handle, FileKind::Directory).map_err(|_| conflict())? != parent_id {
         return Err(conflict());
     }
@@ -300,4 +319,88 @@ pub(crate) fn execute(
             "File change outcome is unknown; recovery material has been retained and the operation will not be repeated"
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desk_file_recovery::windows::{PrivateDirectory, move_no_replace};
+    use std::process::Command;
+    use windows::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+
+    #[test]
+    fn replacement_and_delete_without_parent_attribute_write() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("hello.py");
+        std::fs::write(&path, b"before").unwrap();
+        let sid = desk_file_recovery::windows::current_user_sid().unwrap();
+        // No inheritance flags: only this temporary directory denies attribute
+        // writes; its files remain writable, matching the Public directory case.
+        let result = Command::new("icacls.exe")
+            .arg(root.path())
+            .arg("/deny")
+            .arg(format!("*{sid}:(WA,WEA)"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            open_verified_with_access(
+                root.path(),
+                (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                (FILE_SHARE_READ | FILE_SHARE_WRITE).0
+            )
+            .is_err()
+        );
+        let parent = open_mutation_parent(root.path()).unwrap();
+        let parent_id = file_identity(&parent.handle, FileKind::Directory).unwrap();
+        let original_id = file_identity(&File::open(&path).unwrap(), FileKind::File).unwrap();
+        let source = SourceSnapshot::capture(&parent.handle, "hello.py", original_id).unwrap();
+        let tx = PrivateDirectory::open_or_create(&parent.handle, "transaction").unwrap();
+        let staged = source
+            .prepare_replacement(&tx, b"after", |_| Ok(()))
+            .unwrap();
+        staged.verify_for_source(&source).unwrap();
+        let tx_id = file_identity(tx.handle(), FileKind::Directory).unwrap();
+        move_no_replace(
+            source.handle(),
+            source.identity(),
+            tx.handle(),
+            tx_id,
+            "original",
+        )
+        .unwrap();
+        tx.handle().sync_all().unwrap();
+        move_no_replace(
+            staged.handle(),
+            staged.identity(),
+            &parent.handle,
+            parent_id,
+            "hello.py",
+        )
+        .unwrap();
+        source.finish_replacement_metadata(&staged).unwrap();
+        parent.handle.sync_all().unwrap();
+        assert_eq!(staged.content(), b"after");
+        assert_eq!(source.content(), b"before");
+        drop((source, staged, tx));
+        assert_eq!(std::fs::read(&path).unwrap(), b"after");
+        let id = file_identity(&File::open(&path).unwrap(), FileKind::File).unwrap();
+        let source = SourceSnapshot::capture(&parent.handle, "hello.py", id).unwrap();
+        let tx = PrivateDirectory::open_or_create(&parent.handle, "deletion").unwrap();
+        move_no_replace(
+            source.handle(),
+            source.identity(),
+            tx.handle(),
+            file_identity(tx.handle(), FileKind::Directory).unwrap(),
+            "original",
+        )
+        .unwrap();
+        parent.handle.sync_all().unwrap();
+        assert!(!path.exists());
+        assert_eq!(source.content(), b"after");
+    }
 }

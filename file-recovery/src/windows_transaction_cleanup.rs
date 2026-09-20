@@ -33,6 +33,20 @@ pub(crate) fn clean_transaction(
         .last()
         .ok_or_else(|| crate::invalid("transaction parent unavailable"))?;
     let identity = file_identity(parent, FileKind::Directory)?;
+    // Keep the ancestor chain pinned, but use a separately identity-checked
+    // writable handle for the mandatory post-removal directory flush.
+    use std::os::windows::fs::OpenOptionsExt;
+    let flush_parent = std::fs::OpenOptions::new()
+        .access_mode(crate::windows::MUTATION_DIRECTORY_ACCESS.0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+        .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+        .open(&tx.parent)?;
+    if file_identity(&flush_parent, FileKind::Directory)? != identity {
+        return Err(crate::invalid(
+            "cleanup parent changed before flush handle opened",
+        ));
+    }
+    flush_parent.sync_all()?;
     if identity.volume_serial != files.volume_serial || identity.file_id != files.parent_file_id {
         return Err(crate::invalid("transaction cleanup parent changed"));
     }
@@ -137,7 +151,7 @@ pub(crate) fn clean_transaction(
     // discover paths to delete from enumeration or journal strings.
     remove_handle(&directory)?;
     drop(directory);
-    parent.sync_all()
+    flush_parent.sync_all()
 }
 
 fn optional_snapshot(
