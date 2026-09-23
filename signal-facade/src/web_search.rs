@@ -363,6 +363,7 @@ fn project_results(
         content: serde_json::to_string(&result)
             .map_err(|_| internal("failed to encode Web Search result"))?,
         image_data_url: None,
+        document_preview: None,
     })
 }
 

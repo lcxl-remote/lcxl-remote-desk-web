@@ -49,6 +49,8 @@ fn sanitize_remote_output(
     cap: Capability,
     mut outcome: AgentOutcome,
 ) -> Result<RemoteToolOutput, AgentError> {
+    let mut document_preview = None;
+    let mut document_preview_page = None;
     let image = if cap == Capability::ScreenCaptureCurrent {
         let AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(
             desk_agent_protocol::ReadContextOutput::ScreenCaptureCurrent(shot),
@@ -101,11 +103,87 @@ fn sanitize_remote_output(
         })?;
         shot.image.clear();
         Some(image)
+    } else if cap == Capability::DocumentPreview {
+        let (page, descriptor) = match &mut outcome {
+            AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(
+                desk_agent_protocol::ReadContextOutput::DocumentPreview(descriptor),
+            )) => {
+                let page = descriptor.first_page.take().ok_or_else(|| AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: "document preview did not render its first page".into(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                })?;
+                (page, Some(descriptor.clone()))
+            }
+            AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(
+                desk_agent_protocol::ReadContextOutput::DocumentPreviewPage(page),
+            )) => {
+                let page = std::mem::replace(
+                    page,
+                    desk_agent_protocol::document_conversion::DocumentPreviewPageOutput {
+                        preview_id: String::new(),
+                        page: 0,
+                        page_count: 0,
+                        png: Vec::new(),
+                        width: 0,
+                        height: 0,
+                        pixels_per_point_milli: 0,
+                    },
+                );
+                (page, None)
+            }
+            _ => {
+                return Err(AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: "document preview returned an unexpected output shape".into(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                });
+            }
+        };
+        use base64::Engine as _;
+        let preview_data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&page.png)
+        );
+        let page = desk_agent_protocol::document_conversion::DocumentPreviewPageDescriptor {
+            preview_id: page.preview_id,
+            page: page.page,
+            page_count: page.page_count,
+            width: page.width,
+            height: page.height,
+            pixels_per_point_milli: page.pixels_per_point_milli,
+        };
+        if let Some(descriptor) = descriptor {
+            document_preview = Some(
+                desk_agent_protocol::document_conversion::DocumentPreviewFrame {
+                    descriptor,
+                    page,
+                    preview_data_url,
+                },
+            );
+        } else {
+            document_preview_page = Some(
+                desk_agent_protocol::document_conversion::DocumentPreviewPageFrame {
+                    page,
+                    preview_data_url,
+                },
+            );
+        }
+        None
     } else {
         None
     };
 
-    Ok(RemoteToolOutput { outcome, image })
+    Ok(RemoteToolOutput {
+        outcome,
+        image,
+        document_preview,
+        document_preview_page,
+    })
 }
 
 /// Runs a single server-stamped read envelope against the in-process device agent

@@ -56,6 +56,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::UpdateAiAssistantObjectContext
         | SignalingType::SelectAiAssistantSession
         | SignalingType::ManageScheduledTasks
+        | SignalingType::RequestDocumentPreviewPage
         | SignalingType::ManageFileRecovery => Request,
 
         SignalingType::HeartbeatAcknowledged
@@ -94,6 +95,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::AiAssistantObjectContextUpdated
         | SignalingType::AiAssistantSessionSelected
         | SignalingType::ScheduledTasksManaged
+        | SignalingType::DocumentPreviewPageUpdated
         | SignalingType::FileRecoveryManaged => Response,
 
         SignalingType::RevokeSupportCode
@@ -172,6 +174,7 @@ pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
             SignalingType::AiAssistantObjectContextUpdated
         }
         SignalingType::SelectAiAssistantSession => SignalingType::AiAssistantSessionSelected,
+        SignalingType::RequestDocumentPreviewPage => SignalingType::DocumentPreviewPageUpdated,
         _ => return None,
     })
 }
@@ -217,6 +220,7 @@ pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] 
         UpdateAiAssistantContext => &[AiAssistantContextUpdated],
         UpdateAiAssistantObjectContext => &[AiAssistantObjectContextUpdated],
         SelectAiAssistantSession => &[AiAssistantSessionSelected],
+        RequestDocumentPreviewPage => &[DocumentPreviewPageUpdated],
         _ => &[],
     }
 }

@@ -117,6 +117,7 @@ pub async fn fetch_public_web_page(validated: ValidatedFetch) -> Result<ToolRunO
             content: serde_json::to_string(&result)
                 .map_err(|_| internal("failed to encode Web Research result"))?,
             image_data_url: None,
+            document_preview: None,
         });
     }
     unreachable!("bounded redirect loop returns or continues")

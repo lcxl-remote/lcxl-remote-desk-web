@@ -6,6 +6,7 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::AgentError;
 use crate::content_safety::StreamRetractionReason;
+use crate::document_conversion::DocumentPreviewFrame;
 use crate::provenance::AiProvenance;
 use crate::visual_evidence::VisualEvidenceFrame;
 
@@ -50,6 +51,8 @@ pub enum AgentEventKind {
     /// A screen frame was shown to the model and is available to the active
     /// owner stream as a bounded preview plus auditable metadata.
     VisualEvidence,
+    /// A live owner-UI-only Typst document preview.
+    DocumentPreview,
     /// Terminal for the current planning turn: a normalized permission batch was
     /// durably recorded and is waiting for a separate trusted user decision.
     PermissionRequired,
@@ -122,6 +125,8 @@ pub struct AgentEvent {
     /// the metadata-only session projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_evidence: Option<VisualEvidenceFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_preview: Option<DocumentPreviewFrame>,
     /// `kind = PermissionRequired`: stable id of the durable request projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_request_id: Option<String>,
@@ -163,6 +168,7 @@ impl AgentEvent {
             tool_output: None,
             background_task_id: None,
             visual_evidence: None,
+            document_preview: None,
             permission_request_id: None,
             permission_item_count: None,
             answer: None,
@@ -332,6 +338,17 @@ impl AgentEvent {
         Self {
             visual_evidence: Some(visual_evidence),
             ..Self::base(request_id, seq, AgentEventKind::VisualEvidence)
+        }
+    }
+
+    pub fn document_preview(
+        request_id: impl Into<String>,
+        seq: u32,
+        document_preview: DocumentPreviewFrame,
+    ) -> Self {
+        Self {
+            document_preview: Some(document_preview),
+            ..Self::base(request_id, seq, AgentEventKind::DocumentPreview)
         }
     }
 

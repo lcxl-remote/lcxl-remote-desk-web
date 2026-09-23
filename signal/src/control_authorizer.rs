@@ -68,6 +68,7 @@ fn starts_ai_assistant_work(signaling_type: SignalingType) -> bool {
             | SignalingType::UpdateAiAssistantContext
             | SignalingType::UpdateAiAssistantObjectContext
             | SignalingType::SelectAiAssistantSession
+            | SignalingType::RequestDocumentPreviewPage
     )
 }
 
@@ -628,6 +629,32 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                         audience,
                         update,
                     ));
+                    ControlFrameOutcome::Handled
+                }
+                SignalingType::RequestDocumentPreviewPage => {
+                    let request = match model.get_data::<
+                        desk_agent_protocol::document_conversion::DocumentPreviewPageRequest,
+                    >() {
+                        Ok(request) if request.validate().is_ok() => request,
+                        _ => {
+                            return ControlFrameOutcome::Reject {
+                                code: DeskErrorCode::INVALID_PARAMS,
+                                message: "invalid document preview page request".into(),
+                            };
+                        }
+                    };
+                    actix_web::rt::spawn(
+                        crate::ai_assistant_orchestrator::render_document_preview_page(
+                            self.connection_map.clone(),
+                            self.db.clone(),
+                            model.request_id.clone(),
+                            actor.model.connection_id.clone(),
+                            to_id,
+                            actor_user_id,
+                            audience,
+                            request,
+                        ),
+                    );
                     ControlFrameOutcome::Handled
                 }
                 // The authenticated single-account owner asks the host to apply

@@ -28,6 +28,7 @@ fn output(value: ReadContextOutput) -> ToolRunOutput {
         format: crate::seam::ToolOutputFormat::Text,
         content: serde_json::to_string(&OperationOutput::ReadContext(value)).unwrap(),
         image_data_url: None,
+        document_preview: None,
     }
 }
 
@@ -105,6 +106,7 @@ fn read_output_limits_count_wire_bytes_and_actual_projections() {
         format: crate::seam::ToolOutputFormat::Text,
         content: "summary".into(),
         image_data_url: Some("data:image/png;base64,YQ==".into()),
+        document_preview: None,
     };
     let screen_call = call("read_system_info");
     assert!(validate_output(&registry, &screen_call, &screen, &limit(7, 1)).is_err());
@@ -191,6 +193,7 @@ fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
         })
         .to_string(),
         image_data_url: None,
+        document_preview: None,
     };
     assert!(validate_output(&registry, &search_call, &search, &limit(4096, 1)).is_err());
     validate_output(&registry, &search_call, &search, &limit(4096, 2)).unwrap();
@@ -220,7 +223,8 @@ fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
             &ToolRunOutput {
                 format: crate::seam::ToolOutputFormat::Text,
                 content: forged.to_string(),
-                image_data_url: None
+                image_data_url: None,
+                document_preview: None,
             },
             &limit(4096, 2)
         )
@@ -249,6 +253,7 @@ fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
         })
         .to_string(),
         image_data_url: None,
+        document_preview: None,
     };
     validate_output(&registry, &fetch_call, &fetch, &limit(4096, 1)).unwrap();
 }

@@ -353,6 +353,7 @@ mod tests {
             format: crate::seam::ToolOutputFormat::Text,
             content: "desktop metadata".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let envelope = read_result_envelope(
             &crate::ai_assistant::ai_assistant_provider_registry(),
@@ -381,7 +382,8 @@ mod tests {
                 &ToolRunOutput {
                     format: crate::seam::ToolOutputFormat::Text,
                     content: "data".into(),
-                    image_data_url: None
+                    image_data_url: None,
+                    document_preview: None,
                 },
                 label()
             )

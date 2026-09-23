@@ -161,6 +161,7 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
                     expires_at: (now + chrono::Duration::minutes(2)).to_rfc3339(),
                     server_api_version: 1,
                     os: "fixture".into(),
+                    interactive_user_home: None,
                     interactive_session_incarnation: "worker".into(),
                     local_ceiling_revision: 1,
                     capabilities: vec![ComputerUseCapabilityReadiness {
@@ -363,6 +364,8 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             let output = RemoteToolOutput {
                 outcome,
                 image: None,
+                document_preview: None,
+                document_preview_page: None,
             };
             let bytes = serde_json::to_vec(&output).unwrap();
             for chunk in chunk_bytes(&request.request_id, &bytes, 32) {

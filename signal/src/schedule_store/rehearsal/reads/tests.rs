@@ -233,6 +233,7 @@ async fn fixture_with_text(
                 format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                 content: result.text.clone(),
                 image_data_url: None,
+                document_preview: None,
             },
             desk_diagnose_core::model_message_labels::ReadResultLabel {
                 envelope_id: "original-read-source".into(),

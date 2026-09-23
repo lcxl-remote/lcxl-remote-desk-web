@@ -263,6 +263,7 @@ mod tests {
             expires_at: "2026-08-23T12:00:30Z".to_string(),
             server_api_version: desk_server_version::SERVER_API_VERSION,
             os: "windows".to_string(),
+            interactive_user_home: None,
             interactive_session_incarnation: incarnation.to_string(),
             local_ceiling_revision: 1,
             capabilities: Vec::new(),

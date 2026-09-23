@@ -79,6 +79,7 @@ impl ToolSeam for TransactionalTools<'_> {
             format: crate::seam::ToolOutputFormat::Text,
             content: "confirmed result".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let outcome = if self.mode == "backend-error" {
             Err(AgentError {

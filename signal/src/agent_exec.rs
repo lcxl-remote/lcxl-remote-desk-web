@@ -856,6 +856,7 @@ impl SignalAgentTools {
                     format: desk_diagnose_core::seam::ToolOutputFormat::outcome(&outcome),
                     content: outcome_content(&outcome),
                     image_data_url: None,
+                    document_preview: None,
                 },
                 event_id: Some(task.event_id),
             }),
@@ -913,6 +914,7 @@ impl ToolSeam for SignalAgentTools {
                 format: desk_diagnose_core::seam::ToolOutputFormat::operation(output),
                 content: serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string()),
                 image_data_url: entry.image_data_url.clone(),
+                document_preview: None,
             }),
             AgentOutcome::Err(error) => Err(error.clone()),
         }
@@ -1128,6 +1130,7 @@ impl ToolSeam for SignalAgentTools {
                     format: desk_diagnose_core::seam::ToolOutputFormat::outcome(&outcome),
                     content: outcome_content(&outcome),
                     image_data_url: None,
+                    document_preview: None,
                 },
                 event_id: Some(task.event_id),
             }),
@@ -1193,6 +1196,7 @@ impl ToolSeam for SignalAgentTools {
                                 .result_text
                                 .unwrap_or_else(|| "execution completed".to_string()),
                             image_data_url: None,
+                            document_preview: None,
                         },
                         event_id: Some(task.event_id),
                     });
@@ -1230,6 +1234,7 @@ impl ToolSeam for SignalAgentTools {
                             .result_text
                             .unwrap_or_else(|| "execution completed".to_string()),
                         image_data_url: None,
+                        document_preview: None,
                     },
                     event_id: Some(settled.event_id),
                 });

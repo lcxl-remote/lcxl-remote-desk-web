@@ -1852,7 +1852,8 @@ impl WorkerSession {
                                                 &selected_display,
                                             )
                                             .map_err(|error| error.message),
-                                        ComputerActionKind::File(_) => ceiling
+                                        ComputerActionKind::File(_)
+                                        | ComputerActionKind::DocumentConversion(_) => ceiling
                                             .enabled
                                             .then_some(())
                                             .ok_or_else(|| {
@@ -2358,6 +2359,60 @@ impl WorkerSession {
                                                             action_request_id: plan.action_request_id,
                                                             execution_generation: generation,
                                                             result: class,
+                                                            facts,
+                                                            message,
+                                                            output,
+                                                        },
+                                                    },
+                                                ),
+                                            );
+                                            return;
+                                        }
+                                        if let ComputerActionKind::DocumentConversion(action) = step.action.clone() {
+                                            let broker = action_broker.clone();
+                                            let generation_for_call = generation.clone();
+                                            let receipt = match crate::worker::agent::document_conversion::acquire_slot().await {
+                                                Ok(permit) => {
+                                                    crate::worker::agent::computer_use_writer::spawn_writer_task(
+                                                        broker.clone(),
+                                                        generation.clone(),
+                                                        move || {
+                                                            let _permit = permit;
+                                                            crate::worker::agent::document_conversion::convert_and_publish(
+                                                                &action,
+                                                                || broker.require_writer_lease(&generation_for_call).map(|_| ()),
+                                                            )
+                                                        },
+                                                    )
+                                                    .await
+                                                    .unwrap_or_else(|error| {
+                                                        (
+                                                            ComputerActionResultClass::OutcomeUnknown,
+                                                            vec![],
+                                                            Some(format!("document conversion worker failed to join: {error}; inspect the destination before retrying")),
+                                                            None,
+                                                        )
+                                                    })
+                                                }
+                                                Err(error) => (
+                                                    ComputerActionResultClass::Failed,
+                                                    vec![],
+                                                    Some(error.message),
+                                                    None,
+                                                ),
+                                            };
+                                            action_broker.release_writer_lease(&generation);
+                                            let (result, facts, message, output) = receipt;
+                                            let _ = action_writer.send(
+                                                WorkerToService::ComputerActionCompleted(
+                                                    ComputerActionCompletedPayload {
+                                                        request_id: payload.request_id,
+                                                        connection_id: payload.connection_id,
+                                                        completed: ComputerActionCompleted {
+                                                            work_id: plan.work_id,
+                                                            action_request_id: plan.action_request_id,
+                                                            execution_generation: generation,
+                                                            result,
                                                             facts,
                                                             message,
                                                             output,

@@ -9,6 +9,7 @@ impl ToolSeam for IdReadTools {
             format: crate::seam::ToolOutputFormat::Text,
             content: "observed UI".into(),
             image_data_url: None,
+            document_preview: None,
         })
     }
 }

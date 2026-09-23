@@ -96,6 +96,7 @@ async fn exercise(model_budget: u64) {
                 expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
                 server_api_version: 1,
                 os: "fixture".into(),
+                interactive_user_home: None,
                 interactive_session_incarnation: "fresh-worker".into(),
                 local_ceiling_revision: 1,
                 capabilities: vec![],

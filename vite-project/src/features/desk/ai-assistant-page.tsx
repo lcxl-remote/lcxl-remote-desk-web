@@ -9,6 +9,7 @@ import { useFollowLatest } from '@/hooks/use-follow-latest';
 import './assistant-responsive.css';
 import { AssistantSchedules } from './assistant-schedules';
 import { AssistantImages } from './assistant-images';
+import { AssistantDocumentPreviews } from './assistant-document-preview';
 import { AssistantReasoning } from './assistant-reasoning';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
@@ -785,6 +786,8 @@ export function AiAssistantWorkspace({
                             </div>
                         )}
                         <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running} deviceId={stableDeviceId} connectionId={deskId} />
+                        <AssistantDocumentPreviews previews={chat.documentPreviews}
+                            requestPage={chat.requestDocumentPreviewPage} />
                         <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence}
                             messages={chat.messages} renderMessage={(message) => (
                             <Fragment key={message.id}>

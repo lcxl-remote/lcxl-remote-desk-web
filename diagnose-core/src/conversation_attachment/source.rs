@@ -21,6 +21,7 @@ pub fn source_format(output: &OperationOutput) -> SourceFormat {
             ReadContextOutput::FileContentRead(_) => SourceFormat::FileText,
             ReadContextOutput::TerminalOutputInspect(_) => SourceFormat::TerminalText,
             ReadContextOutput::ScreenCaptureCurrent(_) => SourceFormat::Image,
+            ReadContextOutput::DocumentPreviewPage(_) => SourceFormat::Image,
             ReadContextOutput::SystemInfo(_)
             | ReadContextOutput::ProcessList(_)
             | ReadContextOutput::NetworkPorts(_)
@@ -40,7 +41,8 @@ pub fn source_format(output: &OperationOutput) -> SourceFormat {
             | ReadContextOutput::SpreadsheetFileInspect(_)
             | ReadContextOutput::SpreadsheetMergePreview(_)
             | ReadContextOutput::ApplicationList(_)
-            | ReadContextOutput::ApplicationLaunchResolve(_) => SourceFormat::Json,
+            | ReadContextOutput::ApplicationLaunchResolve(_)
+            | ReadContextOutput::DocumentPreview(_) => SourceFormat::Json,
         },
     }
 }

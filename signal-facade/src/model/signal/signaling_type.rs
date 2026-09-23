@@ -505,6 +505,15 @@ pub enum SignalingType {
     #[wincode(tag = 648)]
     FileRecoveryManaged = 648,
 
+    /// Owner browser to central brain: render one page from an existing
+    /// device-private document preview. This never enters model history.
+    #[wincode(tag = 649)]
+    RequestDocumentPreviewPage = 649,
+
+    /// Central brain to owner browser: one bounded UI-only preview page.
+    #[wincode(tag = 650)]
+    DocumentPreviewPageUpdated = 650,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,

@@ -19,6 +19,7 @@ pub mod browser_extension_bridge;
 pub mod collectors;
 pub mod computer_use_broker;
 pub mod computer_use_writer;
+pub(crate) mod document_conversion;
 pub mod eval;
 pub mod file_reference_store;
 #[cfg(target_os = "macos")]
@@ -232,12 +233,16 @@ impl DeviceAgent for LocalDeviceAgent {
         // daemon already rejects them here, but defend in depth in the worker
         // too. The input is cloned so the envelope stays
         // available for the post-dispatch audit events.
+        let actor_id = envelope.actor.actor_id.clone();
+        let device_id = envelope.target.device_id.clone();
         let result = match envelope.operation.input.clone() {
             OperationInput::ReadContext(rc) => {
                 dispatch_read_context(
                     rc.kind,
                     self.settings.as_ref(),
                     Arc::clone(&self.computer_use_broker),
+                    actor_id,
+                    device_id,
                 )
                 .await
             }
@@ -305,6 +310,8 @@ async fn dispatch_read_context(
     kind: ContextKind,
     settings: Option<&Arc<SharedSettings>>,
     computer_use_broker: Arc<computer_use_broker::ComputerUseBroker>,
+    actor_id: String,
+    device_id: String,
 ) -> Result<OperationOutput, AgentError> {
     match kind {
         ContextKind::SystemInfo(params) => {
@@ -679,6 +686,28 @@ async fn dispatch_read_context(
             let output = run_blocking(move || file_reference_store::read_text(&params)).await??;
             Ok(OperationOutput::ReadContext(
                 ReadContextOutput::FileContentRead(output),
+            ))
+        }
+        ContextKind::DocumentPreview(params) => {
+            let permit = document_conversion::acquire_slot().await?;
+            let output = run_blocking(move || {
+                let _permit = permit;
+                document_conversion::create_preview(params, actor_id, device_id)
+            })
+            .await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::DocumentPreview(output),
+            ))
+        }
+        ContextKind::DocumentPreviewPage(params) => {
+            let permit = document_conversion::acquire_slot().await?;
+            let output = run_blocking(move || {
+                let _permit = permit;
+                document_conversion::render_preview_page(params, &actor_id, &device_id)
+            })
+            .await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::DocumentPreviewPage(output),
             ))
         }
         ContextKind::SpreadsheetFileInspect(params) => {

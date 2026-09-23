@@ -136,6 +136,46 @@ pub fn validate_remote_tool_image(image: &RemoteToolImage) -> Result<(), ImageIn
     Ok(())
 }
 
+/// Validate an owner-UI-only document preview independently from model visual
+/// input. The descriptor must not retain the raw worker page bytes.
+pub fn validate_document_preview_frame(
+    preview: &desk_agent_protocol::document_conversion::DocumentPreviewFrame,
+) -> Result<(), ImageInputError> {
+    if preview.descriptor.first_page.is_some()
+        || preview.descriptor.preview_id != preview.page.preview_id
+        || preview.page.page == 0
+        || preview.page.page > preview.page.page_count
+        || preview.page.page_count != preview.descriptor.page_count
+        || preview.page.width == 0
+        || preview.page.height == 0
+    {
+        return Err(ImageInputError::MetadataMismatch);
+    }
+    let info = validate_image_data_url(&preview.preview_data_url)?;
+    if info.media_type != "image/png" {
+        return Err(ImageInputError::UnsupportedMediaType);
+    }
+    Ok(())
+}
+
+pub fn validate_document_preview_page_frame(
+    preview: &desk_agent_protocol::document_conversion::DocumentPreviewPageFrame,
+) -> Result<(), ImageInputError> {
+    if preview.page.preview_id.trim().is_empty()
+        || preview.page.page == 0
+        || preview.page.page > preview.page.page_count
+        || preview.page.width == 0
+        || preview.page.height == 0
+    {
+        return Err(ImageInputError::MetadataMismatch);
+    }
+    let info = validate_image_data_url(&preview.preview_data_url)?;
+    if info.media_type != "image/png" {
+        return Err(ImageInputError::UnsupportedMediaType);
+    }
+    Ok(())
+}
+
 /// Deterministic history projection of an original image receipt. Recovery does
 /// not redistribute pixels or claim that a model observed them. Callers must
 /// validate the original native receipt before using this text.

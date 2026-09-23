@@ -11,6 +11,7 @@ export type AiAssistantEventKind =
     | 'tool_started'
     | 'tool_finished'
     | 'visual_evidence'
+    | 'document_preview'
     | 'permission_required'
     | 'answer';
 
@@ -27,8 +28,49 @@ export type AiAssistantEvent = {
     tool_ok?: boolean | null;
     tool_output?: string | null;
     visual_evidence?: AiAssistantVisualEvidence | null;
+    document_preview?: AiAssistantDocumentPreview | null;
     answer?: string | null;
     provenance?: AiProvenance | null;
+};
+
+export type AiAssistantDocumentWarning = {
+    code: string;
+    page?: number | null;
+    detail: string;
+};
+
+export type AiAssistantDocumentPreview = {
+    loading?: boolean;
+    error?: string | null;
+    descriptor: {
+        preview_id: string;
+        source_digest_sha256: string;
+        page_count: number;
+        template_version: string;
+        font_set_sha256: string;
+        engine: string;
+        warnings: AiAssistantDocumentWarning[];
+    };
+    page: {
+        preview_id: string;
+        page: number;
+        page_count: number;
+        width: number;
+        height: number;
+        pixels_per_point_milli: number;
+    };
+    preview_data_url: string;
+};
+
+export type AiAssistantDocumentPreviewPageResponse = {
+    conversation_id: string;
+    preview_id: string;
+    page: number;
+    frame?: {
+        page: AiAssistantDocumentPreview['page'];
+        preview_data_url: string;
+    } | null;
+    error?: string | null;
 };
 
 export type AiAssistantVisualEvidence = {

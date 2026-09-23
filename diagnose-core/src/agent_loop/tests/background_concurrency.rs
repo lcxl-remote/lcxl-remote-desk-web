@@ -73,6 +73,7 @@ async fn wait_selects_second_task_and_keeps_first_running() {
                 format: crate::seam::ToolOutputFormat::Text,
                 content: "done".into(),
                 image_data_url: None,
+                document_preview: None,
             },
             event_id: Some("done-b".into()),
         }],

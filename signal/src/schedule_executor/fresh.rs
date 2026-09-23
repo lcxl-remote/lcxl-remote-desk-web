@@ -76,6 +76,9 @@ impl SignalScheduleExecutor {
         let mut tools =
             callable_tools(&providers, &inventory).map_err(|_| ScheduleStoreError::Invalid)?;
         tools.retain(|tool| {
+            !desk_diagnose_core::ai_assistant::is_interactive_only_tool(tool.name())
+        });
+        tools.retain(|tool| {
             crate::ai_assistant_orchestrator::fresh::contains_tool(
                 &contract,
                 &providers,

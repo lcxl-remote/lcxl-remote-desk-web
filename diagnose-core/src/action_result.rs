@@ -513,6 +513,7 @@ mod tests {
             format: crate::seam::ToolOutputFormat::Text,
             content: "du completed".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let receipt = origin
             .receipt(
@@ -591,6 +592,7 @@ mod tests {
             format: crate::seam::ToolOutputFormat::Text,
             content: "DEVICE RESULT".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let receipt = origin.receipt(action(), 1, 1000, &output).unwrap();
         assert!(receipt.envelope.allowed_destinations.is_empty());
@@ -613,7 +615,8 @@ mod tests {
                     &ToolRunOutput {
                         format: crate::seam::ToolOutputFormat::Text,
                         content: "CHANGED RESULT".into(),
-                        image_data_url: None
+                        image_data_url: None,
+                        document_preview: None,
                     }
                 )
                 .is_err()
@@ -650,6 +653,7 @@ mod tests {
             format: crate::seam::ToolOutputFormat::Text,
             content: "late result".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let receipt = origin.receipt(action(), 1, 9000, &output).unwrap();
         assert_eq!(receipt.envelope.retention.expires_at_unix_ms, Some(7000));

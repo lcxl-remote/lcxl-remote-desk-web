@@ -778,6 +778,17 @@ pub fn summarize_output(output: &OperationOutput) -> String {
                 o.entries.len(),
                 o.enumeration_complete
             ),
+            R::DocumentPreview(o) => format!(
+                "document.preview: {} pages, {} warnings",
+                o.page_count,
+                o.warnings.len()
+            ),
+            R::DocumentPreviewPage(o) => format!(
+                "document.preview.page: page {}/{}, {} bytes",
+                o.page,
+                o.page_count,
+                o.png.len()
+            ),
         },
         OperationOutput::Exec(o) => format!("exec: {}", o.audit_summary()),
     }
@@ -869,6 +880,8 @@ impl Capability {
             Capability::FileDeleteConfirmed => "file.delete.confirmed",
             Capability::ApplicationList => "application.list",
             Capability::ApplicationLaunchConfirmed => "application.launch.confirmed",
+            Capability::DocumentPreview => "document.preview",
+            Capability::DocumentConvertConfirmed => "document.convert.confirmed",
         }
     }
 }

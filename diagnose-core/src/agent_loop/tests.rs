@@ -21,6 +21,66 @@ mod original_results;
 mod version_handoff;
 
 #[test]
+fn interactive_home_is_a_short_lived_sensitive_model_projection() {
+    use desk_agent_protocol::data_lineage::{
+        ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DestinationIdentity,
+        RetentionBoundary, Sensitivity,
+    };
+    let destination = DestinationIdentity::Model {
+        connection_id: "gateway".into(),
+        connection_revision: 7,
+        model_id: "model".into(),
+        profile_revision: 9,
+    };
+    let runtime = DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: "runtime-envelope".into(),
+        content: ContentRef::EphemeralObservation {
+            observation_id: "runtime".into(),
+            size_bytes: 1,
+            expires_at_unix_ms: 99_999,
+        },
+        provenance: DataProvenance {
+            source_provider_id: "runtime".into(),
+            source_tool_name: "runtime".into(),
+            source_object_id: None,
+            source_envelope_ids: vec![],
+        },
+        digest_sha256: format!("{:x}", Sha256::digest(b"x")),
+        sensitivity: Sensitivity::Sensitive,
+        allowed_destinations: vec![destination.clone()],
+        retention: RetentionBoundary {
+            expires_at_unix_ms: Some(99_999),
+            delete_with_run: true,
+        },
+    };
+    let message = interactive_user_home_projection(
+        Some(r"C:\Users\owner"),
+        Some("worker-incarnation-7"),
+        Some(&runtime),
+        "turn-4",
+        10_000,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(message.role, ChatRole::SystemEvent);
+    assert!(message.text.contains(r"C:\\Users\\owner"));
+    let envelope = message.data_envelope.unwrap();
+    assert_eq!(envelope.sensitivity, Sensitivity::Sensitive);
+    assert_eq!(envelope.allowed_destinations, vec![destination]);
+    assert_eq!(
+        envelope.provenance.source_object_id.as_deref(),
+        Some("worker-incarnation-7")
+    );
+    assert_eq!(envelope.retention.expires_at_unix_ms, Some(310_000));
+    assert!(envelope.retention.delete_with_run);
+    assert!(matches!(
+        envelope.content,
+        ContentRef::EphemeralObservation { .. }
+    ));
+}
+
+#[test]
 fn selected_object_lineage_keeps_explicit_sources_without_later_context_expansion() {
     use crate::object_context::{
         ObjectContextBuild, ObjectContextMutation, build_object_context_mutation,
@@ -488,6 +548,7 @@ impl ToolSeam for BackgroundReadTools {
             format: crate::seam::ToolOutputFormat::Text,
             content: format!("{}: ok", call.name),
             image_data_url: None,
+            document_preview: None,
         })
     }
 
@@ -525,6 +586,7 @@ impl ToolSeam for BackgroundReadTools {
                     format: crate::seam::ToolOutputFormat::Text,
                     content: crate::chat::background_task_running_result("read-task"),
                     image_data_url: None,
+                    document_preview: None,
                 },
                 ok: true,
                 event_id: None,
@@ -567,6 +629,7 @@ impl ToolSeam for RecordingTools {
             format: crate::seam::ToolOutputFormat::Text,
             content: format!("{}: {}", call.name, self.reply),
             image_data_url: None,
+            document_preview: None,
         })
     }
 }
@@ -729,6 +792,8 @@ fn deps<'a>(
 ) -> LoopDeps<'a> {
     LoopDeps {
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         session_seam: sess,
         model,
         tools,
@@ -1053,6 +1118,8 @@ async fn capability_discovery_replaces_working_set_without_persisting_schema() {
     let clock = || "2026-09-03T00:00:01Z".to_string();
     let deps = LoopDeps {
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         session_seam: &sess,
         model: &model,
         tools: &tools,
@@ -2416,6 +2483,8 @@ async fn checkpoint_compression_preserves_disclosure_selection_without_summarizi
     let clock = || "2026-09-03T00:00:01Z".to_string();
     let loop_deps = LoopDeps {
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         session_seam: &sess,
         model: &model,
         tools: &tools,
@@ -3786,7 +3855,7 @@ async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded
         long.loaded_capability_detail_utf8_bytes
     );
     assert_eq!(short.loaded_capability_count, long.loaded_capability_count);
-    assert_eq!(long.capability_registry_count, 60);
+    assert_eq!(long.capability_registry_count, 62);
     assert!(long.conversation_message_count > short.conversation_message_count);
     assert!(long.session_snapshot_json_bytes > short.session_snapshot_json_bytes);
     println!(
@@ -3829,6 +3898,7 @@ impl ToolSeam for ScriptedTools {
             format: crate::seam::ToolOutputFormat::Text,
             content: format!("{}: ok", call.name),
             image_data_url: None,
+            document_preview: None,
         })
     }
     async fn confirm_and_exec(
@@ -3936,6 +4006,8 @@ fn exec_deps<'a>(
 ) -> LoopDeps<'a> {
     LoopDeps {
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         session_seam: sess,
         model,
         tools: scripted,
@@ -3970,6 +4042,7 @@ async fn mutating_executes_then_answers() {
             format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
+            document_preview: None,
         },
         event_id: None,
     }]);
@@ -4033,6 +4106,7 @@ async fn exact_permission_resume_preserves_other_tool_definitions() {
             format: crate::seam::ToolOutputFormat::Text,
             content: "action completed".into(),
             image_data_url: None,
+            document_preview: None,
         },
         event_id: None,
     }]);
@@ -4238,6 +4312,7 @@ async fn exact_permission_resume_retries_one_precommit_protocol_error() {
             format: crate::seam::ToolOutputFormat::Text,
             content: "action completed".into(),
             image_data_url: None,
+            document_preview: None,
         },
         event_id: None,
     }]);
@@ -4316,6 +4391,7 @@ async fn exact_permission_resume_retries_one_answer_without_invoking_the_approve
             format: crate::seam::ToolOutputFormat::Text,
             content: "action completed".into(),
             image_data_url: None,
+            document_preview: None,
         },
         event_id: None,
     }]);
@@ -5059,6 +5135,7 @@ async fn wait_for_task_completes_clears_executing_and_acks() {
                 format: crate::seam::ToolOutputFormat::Text,
                 content: "exit_code=0".into(),
                 image_data_url: None,
+                document_preview: None,
             },
             event_id: Some("work:8:done".into()),
         }],
@@ -5226,6 +5303,7 @@ async fn executed_keys_the_result_message_on_the_delivery_id() {
             format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
+            document_preview: None,
         },
         event_id: Some("work:8:done".into()),
     }]);
@@ -5441,6 +5519,8 @@ async fn mutating_backend_error_fails_turn() {
     let user = ChatMessage::text("u", ChatRole::User, "do it");
     let deps = LoopDeps {
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         session_seam: &sess,
         model: &model,
         tools: &failing,
@@ -5507,6 +5587,7 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
                         format: crate::seam::ToolOutputFormat::Text,
                         content: "exit_code=0".into(),
                         image_data_url: None,
+                        document_preview: None,
                     },
                     event_id: None,
                 })
@@ -5547,6 +5628,8 @@ async fn retryable_mutating_error_returns_to_model_for_correction() {
     let user = ChatMessage::text("u", ChatRole::User, "sleep briefly");
     let deps = LoopDeps {
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         session_seam: &sess,
         model: &model,
         tools: &tools,
@@ -5753,6 +5836,7 @@ async fn streams_awaiting_approval_event() {
             format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
+            document_preview: None,
         },
         event_id: None,
     }]);
@@ -6548,6 +6632,7 @@ impl ToolSeam for ImageTools {
             format: crate::seam::ToolOutputFormat::Text,
             content: self.raw_content.clone(),
             image_data_url: Some(self.image_data_url.clone()),
+            document_preview: None,
         })
     }
 }
@@ -6612,6 +6697,8 @@ async fn rejected_tool_image_is_not_persisted_and_remaining_calls_are_paired() {
     let clock = || "t".to_string();
     let loop_deps = LoopDeps {
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         session_seam: &sess,
         model: &model,
         tools: &image_tools,
@@ -6687,6 +6774,7 @@ async fn rejected_mutating_result_image_is_not_persisted_and_delivery_is_acked()
             format: crate::seam::ToolOutputFormat::Text,
             content: RAW_TOOL_CONTENT.into(),
             image_data_url: Some(image_data_url.clone()),
+            document_preview: None,
         },
         event_id: Some("work:8:done".into()),
     }]);
@@ -6791,6 +6879,7 @@ async fn unavailable_wait_result_image_fails_closed_clears_task_and_acks() {
                 format: crate::seam::ToolOutputFormat::Text,
                 content: RAW_TOOL_CONTENT.into(),
                 image_data_url: Some(image_data_url.clone()),
+                document_preview: None,
             },
             event_id: Some("work:8:done".into()),
         }],
@@ -8109,6 +8198,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
                 format: crate::seam::ToolOutputFormat::Text,
                 content: "xlsx created".into(),
                 image_data_url: None,
+                document_preview: None,
             },
             event_id: None,
         },
@@ -8118,6 +8208,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
                 format: crate::seam::ToolOutputFormat::Text,
                 content: "docx created".into(),
                 image_data_url: None,
+                document_preview: None,
             },
             event_id: None,
         },
@@ -8127,6 +8218,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
                 format: crate::seam::ToolOutputFormat::Text,
                 content: "gmail handed off".into(),
                 image_data_url: None,
+                document_preview: None,
             },
             event_id: None,
         },
@@ -8136,6 +8228,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
                 format: crate::seam::ToolOutputFormat::Text,
                 content: "slack handed off".into(),
                 image_data_url: None,
+                document_preview: None,
             },
             event_id: None,
         },

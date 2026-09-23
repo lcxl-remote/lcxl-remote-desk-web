@@ -116,6 +116,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                 expires_at: (now + chrono::Duration::minutes(2)).to_rfc3339(),
                 server_api_version: 1,
                 os: "fixture".into(),
+                interactive_user_home: None,
                 interactive_session_incarnation: "desktop-1".into(),
                 local_ceiling_revision: 1,
                 capabilities: [
@@ -423,6 +424,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                     format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                     content: "background".into(),
                     image_data_url: None,
+                    document_preview: None,
                 });
             }
             let context = ExecContext {
@@ -456,6 +458,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                         format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                         content: "unknown".into(),
                         image_data_url: None,
+                        document_preview: None,
                     })
                 }
                 ExecOutcome::Dispatched(action) if background => {
@@ -505,6 +508,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                         format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                         content: "background".into(),
                         image_data_url: None,
+                        document_preview: None,
                     })
                 }
                 other => panic!("unexpected browser outcome: {other:?}"),

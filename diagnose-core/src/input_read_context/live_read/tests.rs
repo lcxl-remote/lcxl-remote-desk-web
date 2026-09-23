@@ -19,6 +19,7 @@ fn readiness() -> ComputerUseReadiness {
         expires_at: "2026-08-31T00:01:00Z".into(),
         server_api_version: 1,
         os: "macos".into(),
+        interactive_user_home: None,
         interactive_session_incarnation: "worker-1".into(),
         local_ceiling_revision: 1,
         capabilities: TOOLS
@@ -296,6 +297,7 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
             format: crate::seam::ToolOutputFormat::Text,
             content: "synthetic document content".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let envelope = crate::model_message_labels::read_result_envelope(
             &crate::ai_assistant::ai_assistant_provider_registry(),
@@ -335,12 +337,14 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
             format: crate::seam::ToolOutputFormat::Text,
             content: "x".repeat(1025),
             image_data_url: None,
+            document_preview: None,
         };
         assert!(binding.label(&call, &oversized, envelope.clone()).is_err());
         let image = ToolRunOutput {
             format: crate::seam::ToolOutputFormat::Text,
             content: "".into(),
             image_data_url: Some("data:image/png;base64,x".into()),
+            document_preview: None,
         };
         assert!(binding.label(&call, &image, envelope.clone()).is_err());
         let mut changed = selection.clone();

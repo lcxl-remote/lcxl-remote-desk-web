@@ -31,6 +31,14 @@ pub(crate) fn publish_artifact(
     publish(directory, file_name, bytes, 4 * 1024 * 1024, 200)
 }
 
+pub(crate) fn publish_document(
+    directory: &ObjectRef,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<CreatedTextArtifact, PublishFailure> {
+    publish(directory, file_name, bytes, 32 * 1024 * 1024, 200)
+}
+
 /// Call only after exact-action admission; never retry OutcomeUnknown.
 pub fn publish_pptx(
     directory: &ObjectRef,

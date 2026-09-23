@@ -13,6 +13,7 @@ fn readiness() -> ComputerUseReadiness {
         expires_at: "2026-08-31T00:01:00Z".into(),
         server_api_version: 1,
         os: "macos".into(),
+        interactive_user_home: None,
         interactive_session_incarnation: "worker-1".into(),
         local_ceiling_revision: 1,
         capabilities: vec![],

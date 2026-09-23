@@ -56,6 +56,7 @@ async fn original_result_preserves_label_without_factory_or_new_input_binding() 
             format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let envelope = original(&output, ephemeral);
         let scripted = tools(vec![ExecOutcome::Executed {
@@ -74,6 +75,7 @@ async fn original_result_preserves_label_without_factory_or_new_input_binding() 
                 format: crate::seam::ToolOutputFormat::Text,
                 content: user.text.clone(),
                 image_data_url: None,
+                document_preview: None,
             },
             false,
         );
@@ -113,6 +115,7 @@ async fn inconsistent_original_result_is_not_saved_acknowledged_or_relabelled() 
             format: crate::seam::ToolOutputFormat::Text,
             content: "exit_code=0".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let mut envelope = original(&output, false);
         match corruption {
@@ -181,6 +184,7 @@ async fn original_result_save_failure_leaves_delivery_unacknowledged() {
         format: crate::seam::ToolOutputFormat::Text,
         content: "exit_code=0".into(),
         image_data_url: None,
+        document_preview: None,
     };
     let envelope = original(&output, false);
     let scripted = tools(vec![ExecOutcome::Executed {
@@ -235,6 +239,7 @@ async fn original_failure_preserves_receipt_reports_failure_and_stops_the_group(
         format: crate::seam::ToolOutputFormat::Text,
         content: "a native receipt without an error keyword".into(),
         image_data_url: None,
+        document_preview: None,
     };
     let envelope = original(&output, true);
     let scripted = tools(vec![ExecOutcome::Failed {
@@ -298,6 +303,7 @@ async fn original_failure_rejects_corruption_and_never_acks_before_save() {
             format: crate::seam::ToolOutputFormat::Text,
             content: "native failure".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let mut envelope = original(&output, false);
         if case == "corrupt-output" {

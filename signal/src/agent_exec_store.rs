@@ -155,6 +155,7 @@ impl SignalAgentExecStore {
                     .clone()
                     .ok_or_else(|| internal("command result is missing"))?,
                 image_data_url: None,
+                document_preview: None,
             };
             let action = desk_diagnose_core::session::ActionIdentity::agent_exec(
                 task.id,

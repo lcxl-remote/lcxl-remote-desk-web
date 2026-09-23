@@ -58,6 +58,8 @@ pub const WEB_RESEARCH_PROVIDER_ID: &str = "web.research";
 pub const WEB_SEARCH_PROVIDER_ID: &str = "web.search";
 pub const FILE_ARTIFACT_PROVIDER_ID: &str = "file.artifact";
 pub const TEXT_FILE_PROVIDER_ID: &str = "file.text";
+pub const DOCUMENT_PREVIEW_PROVIDER_ID: &str = "document.preview";
+pub const DOCUMENT_CONVERSION_PROVIDER_ID: &str = "document.convert";
 pub const LOCAL_COMMUNICATION_DRAFT_PROVIDER_ID: &str = "communication.local_draft";
 pub const OUTLOOK_NEW_HANDOFF_PROVIDER_ID: &str = "communication.outlook_new.handoff";
 pub const GMAIL_WEB_HANDOFF_PROVIDER_ID: &str = "communication.gmail_web.handoff";
@@ -110,6 +112,8 @@ pub const BRAVE_WEB_SEARCH_CONNECTOR_ID: &str = crate::web_research::BRAVE_WEB_S
 pub const FILE_ARTIFACT_CREATE_CAPABILITY_ID: &str = "file.artifact.create";
 pub const TEXT_FILE_UPDATE_CAPABILITY_ID: &str = "file.text.update";
 pub const TEXT_FILE_DELETE_CAPABILITY_ID: &str = "file.text.delete";
+pub const DOCUMENT_PREVIEW_CAPABILITY_ID: &str = "document.preview";
+pub const DOCUMENT_CONVERT_CAPABILITY_ID: &str = "document.convert.confirmed";
 pub const LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID: &str = "communication.local_draft.create";
 pub const OUTLOOK_NEW_HANDOFF_CAPABILITY_ID: &str = "communication.outlook_new.handoff";
 pub const GMAIL_WEB_HANDOFF_CAPABILITY_ID: &str = "communication.gmail_web.handoff";
@@ -248,6 +252,9 @@ pub const OUTLOOK_NEW_APPLICATION_ID: &str =
 pub const FILE_WORKSPACE_ADAPTER_VERSION: &str = "file-workspace-handle-read/v1";
 pub const SPREADSHEET_FILE_ADAPTER_VERSION: &str = "spreadsheet-file-inert-read/v1";
 pub const FILE_ARTIFACT_ADAPTER_VERSION: &str = "file-artifact-create-new/v1";
+pub const DOCUMENT_CONVERSION_ADAPTER_ID: &str = "document.conversion.edge";
+pub const DOCUMENT_CONVERSION_ADAPTER_VERSION: &str =
+    desk_agent_protocol::document_conversion::DOCUMENT_CONVERSION_ADAPTER_VERSION;
 pub const TEXT_FILE_ADAPTER_ID: &str = "file.text.macos.edge";
 pub const TEXT_FILE_ADAPTER_VERSION: &str = "file-text-recoverable/v1";
 pub const TERMINAL_OUTPUT_ADAPTER_VERSION: &str = "terminal-output-snapshot/v1";
@@ -342,6 +349,12 @@ pub fn is_requestable_desktop_read(name: &str) -> bool {
                 .collect()
         });
     NAMES.contains(name)
+}
+
+/// These tools depend on a live owner conversation and short-lived worker
+/// state, so they cannot be recorded in or replayed from a scheduled task.
+pub fn is_interactive_only_tool(name: &str) -> bool {
+    matches!(name, "preview_document" | "convert_document")
 }
 
 pub fn retain_selected_context_tools(
@@ -795,6 +808,16 @@ pub fn provider_readiness_reports(
                 CURRENT_SCREEN_PROVIDER_ID,
                 CURRENT_SCREEN_CAPABILITY_ID,
                 CURRENT_SCREEN_ADAPTER_ID,
+            ),
+            Capability::DocumentPreview => (
+                DOCUMENT_PREVIEW_PROVIDER_ID,
+                DOCUMENT_PREVIEW_CAPABILITY_ID,
+                DOCUMENT_CONVERSION_ADAPTER_ID,
+            ),
+            Capability::DocumentConvertConfirmed => (
+                DOCUMENT_CONVERSION_PROVIDER_ID,
+                DOCUMENT_CONVERT_CAPABILITY_ID,
+                DOCUMENT_CONVERSION_ADAPTER_ID,
             ),
             _ => continue,
         };
@@ -1405,6 +1428,55 @@ fn create_text_artifact_tool() -> RegisteredTool {
             }),
         },
         required_capability: Capability::FileArtifactCreateConfirmed,
+        effect: ToolEffect::Mutating,
+    }
+}
+
+fn preview_document_tool() -> RegisteredTool {
+    RegisteredTool {
+        spec: ToolSpec {
+            name: "preview_document".into(),
+            description: "Compile one verified Markdown or UTF-8 TXT file with the built-in Typst template and create a short-lived page preview for the current conversation. This does not create a PDF, does not modify the source, and returns only preview metadata; page pixels are shown in the UI and are not sent to the model. Select the source from a recorded inspect_files or successful file-result call.".into(),
+            parameters_schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+        },
+        required_capability: Capability::DocumentPreview,
+        effect: ToolEffect::ReadOnly,
+    }
+}
+
+fn convert_document_tool() -> RegisteredTool {
+    RegisteredTool {
+        spec: ToolSpec {
+            name: "convert_document".into(),
+            description: "Convert exactly one verified local document in process and create one new output file in an owner-approved conversation directory. Supported conversions are PDF to Markdown/TXT and Markdown/TXT to PDF. Existing files are never overwritten. Typst preview is independent and is never required before conversion. PDF extraction is text-only and reports scanned or blank pages; narrow pages when needed.".into(),
+            parameters_schema: json!({
+                "type": "object",
+                "properties": {
+                    "output_name": {
+                        "type": "string", "minLength": 1, "maxLength": 200,
+                        "description": "One safe output leaf name whose suffix matches the conversion."
+                    },
+                    "conversion": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type":"string","enum":["pdf_to_markdown","pdf_to_text","markdown_to_pdf","text_to_pdf"]},
+                            "pages": {"type":"array","maxItems":64,"items":{"type":"object","properties":{"start":{"type":"integer","minimum":1,"maximum":500},"end":{"type":"integer","minimum":1,"maximum":500}},"required":["start","end"],"additionalProperties":false}},
+                            "page_markers": {"type":"string","enum":["none","html_comment","plain_text"]}
+                        },
+                        "required": ["kind"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["output_name", "conversion"],
+                "additionalProperties": false
+            }),
+        },
+        required_capability: Capability::DocumentConvertConfirmed,
         effect: ToolEffect::Mutating,
     }
 }
@@ -2175,7 +2247,9 @@ fn provider_for_tool(
     mut tool: RegisteredTool,
 ) -> ProviderDescriptor {
     crate::provider_preflight::text_file::selection::add_schema(&mut tool);
-    if crate::provider_preflight::ArtifactCallPreflight::supports(tool.name()) {
+    if crate::provider_preflight::ArtifactCallPreflight::supports(tool.name())
+        || tool.name() == "convert_document"
+    {
         if let Some(properties) = tool
             .spec
             .parameters_schema
@@ -3233,6 +3307,47 @@ pub fn ai_assistant_provider_registry() -> ProviderRegistry {
         vec![AuthorizationResourceKind::FreshObjectReference],
         browser_activate_tool(),
     );
+    let mut document_preview = provider_for_tool(
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
+        DOCUMENT_PREVIEW_PROVIDER_ID,
+        DOCUMENT_PREVIEW_CAPABILITY_ID,
+        "assistant.capability.documentPreview",
+        vec![DOCUMENT_CONVERSION_ADAPTER_ID.into()],
+        ExecutionLocality::Edge,
+        CapabilityEffect::ReadFile,
+        1,
+        Vec::new(),
+        vec![CapabilityDataCategory::FileContent],
+        vec![AuthorizationResourceKind::FreshObjectReference],
+        preview_document_tool(),
+    );
+    let mut document_conversion = provider_for_tool(
+        crate::tool_exposure::ExposureRequirement::NoAttachment,
+        DOCUMENT_CONVERSION_PROVIDER_ID,
+        DOCUMENT_CONVERT_CAPABILITY_ID,
+        "assistant.capability.documentConvert",
+        vec![DOCUMENT_CONVERSION_ADAPTER_ID.into()],
+        ExecutionLocality::Edge,
+        CapabilityEffect::WriteArtifact,
+        1,
+        Vec::new(),
+        vec![CapabilityDataCategory::FileContent],
+        vec![AuthorizationResourceKind::FreshObjectReference],
+        convert_document_tool(),
+    );
+    for descriptor in [&mut document_preview, &mut document_conversion] {
+        descriptor.wire.capabilities[0]
+            .prerequisites
+            .platforms
+            .push(CapabilityPlatform::Linux);
+        descriptor.capabilities[0]
+            .wire
+            .prerequisites
+            .platforms
+            .push(CapabilityPlatform::Linux);
+        descriptor.wire.capabilities[0].limits.hard_timeout_ms = 60_000;
+        descriptor.capabilities[0].wire.limits.hard_timeout_ms = 60_000;
+    }
     assert!(reads.is_empty(), "unmapped AI Assistant read tool");
     let preview = provider_for_tool(
         crate::tool_exposure::ExposureRequirement::NoAttachment,
@@ -3296,6 +3411,8 @@ pub fn ai_assistant_provider_registry() -> ProviderRegistry {
         .register(browser_wait)
         .register(browser_fill)
         .register(browser_activate)
+        .register(document_preview)
+        .register(document_conversion)
         .register(preview)
         .build()
         .expect("static AI Assistant Provider registry must be valid")
@@ -3483,6 +3600,19 @@ pub fn ai_assistant_edge_adapter_registry() -> EdgeAdapterRegistry {
                 .limits,
         })
         .register(EdgeAdapterDescriptor {
+            adapter_id: DOCUMENT_CONVERSION_ADAPTER_ID.into(),
+            adapter_version: DOCUMENT_CONVERSION_ADAPTER_VERSION.into(),
+            capability_ids: vec![
+                DOCUMENT_PREVIEW_CAPABILITY_ID.into(),
+                DOCUMENT_CONVERT_CAPABILITY_ID.into(),
+            ],
+            limits: providers
+                .capability(DOCUMENT_CONVERT_CAPABILITY_ID)
+                .expect("static document conversion capability exists")
+                .wire
+                .limits,
+        })
+        .register(EdgeAdapterDescriptor {
             adapter_id: TEXT_FILE_ADAPTER_ID.into(),
             adapter_version: TEXT_FILE_ADAPTER_VERSION.into(),
             capability_ids: vec![
@@ -3654,6 +3784,22 @@ pub fn current_time_prompt(now_unix_ms: u64) -> String {
     )
 }
 
+/// Dynamic, device-authored path guidance. It does not select a directory and
+/// must never be treated as a filesystem reference or authorization.
+pub fn interactive_user_home_prompt(home: Option<&str>) -> String {
+    let Some(home) = home.filter(|value| {
+        !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+    }) else {
+        return String::new();
+    };
+    let Ok(encoded) = serde_json::to_string(home) else {
+        return String::new();
+    };
+    format!(
+        "\nINTERACTIVE USER HOME (device runtime state): {encoded}. This is the Home directory of the user that owns the current interactive worker. It is path guidance only, not a selected directory or permission. When the user has not specified a destination and no suitable conversation directory exists, prefer this path when calling request_directory. Never substitute Public, a shared directory, the process working directory, a temporary directory, or a service-account Home.\n"
+    )
+}
+
 pub fn build_ai_assistant_system_message(locale: Option<&str>) -> ChatMessage {
     build_ai_assistant_system_message_with_catalog(locale, "")
 }
@@ -3776,6 +3922,7 @@ mod tests {
             expires_at: "2026-09-02T11:01:00Z".into(),
             server_api_version: 1,
             os: "macos".into(),
+            interactive_user_home: None,
             interactive_session_incarnation: "worker-1".into(),
             local_ceiling_revision: 3,
             capabilities: Vec::new(),
@@ -3833,7 +3980,7 @@ mod tests {
     #[test]
     fn registry_contains_reads_preview_and_bounded_artifact_create() {
         let tools = ai_assistant_tool_registry();
-        assert_eq!(tools.len(), 60);
+        assert_eq!(tools.len(), 62);
         assert_eq!(
             tools
                 .iter()
@@ -3852,6 +3999,7 @@ mod tests {
                     "create_word_report",
                     "create_workbook",
                     "delete_text_file",
+                    "convert_document",
                     EXECUTE_BACKGROUND_INPUT_TOOL,
                     "exec_command",
                     "launch_application",
@@ -3931,6 +4079,17 @@ mod tests {
     }
 
     #[test]
+    fn interactive_home_is_runtime_guidance_not_directory_authority() {
+        let text = interactive_user_home_prompt(Some(r"C:\Users\Alice"));
+        assert!(text.contains(r#""C:\\Users\\Alice""#));
+        assert!(text.contains("path guidance only"));
+        assert!(text.contains("request_directory"));
+        assert!(text.contains("not a selected directory or permission"));
+        assert!(interactive_user_home_prompt(None).is_empty());
+        assert!(interactive_user_home_prompt(Some("bad\npath")).is_empty());
+    }
+
+    #[test]
     fn prompt_distinguishes_history_from_current_state_and_authority() {
         let text = build_ai_assistant_system_message(None).text;
         assert!(text.contains("immutable historical evidence"));
@@ -3957,7 +4116,7 @@ mod tests {
     #[test]
     fn provider_inventory_is_static_complete_and_secret_free() {
         let registry = ai_assistant_provider_registry();
-        assert_eq!(registry.providers().len(), 47);
+        assert_eq!(registry.providers().len(), 49);
         for provider in registry.providers() {
             provider.validate().unwrap();
         }
@@ -3990,6 +4149,8 @@ mod tests {
             WEB_RESEARCH_FETCH_CAPABILITY_ID,
             WEB_RESEARCH_SEARCH_CAPABILITY_ID,
             FILE_ARTIFACT_CREATE_CAPABILITY_ID,
+            DOCUMENT_PREVIEW_CAPABILITY_ID,
+            DOCUMENT_CONVERT_CAPABILITY_ID,
             LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID,
             OUTLOOK_NEW_HANDOFF_CAPABILITY_ID,
             GMAIL_WEB_HANDOFF_CAPABILITY_ID,
@@ -4113,6 +4274,8 @@ mod tests {
         legacy.push(windows_word::patch_tool());
         legacy.push(windows_excel::inspect_tool());
         legacy.push(windows_excel::patch_tool());
+        legacy.push(preview_document_tool());
+        legacy.push(convert_document_tool());
         legacy.push(batch_inspect_tool(
             "inspect_powerpoint_file",
             "Read a bounded title and presenter-notes projection from exactly one conversation-directory PPTX file snapshot. No Office application or Live session is opened. The model cannot nominate a path, source token, or interactive target.",
@@ -4304,6 +4467,7 @@ mod tests {
                 "patch_excel_copy",
                 "patch_powerpoint_copy",
                 "create_text_file",
+                "convert_document",
                 "delete_text_file",
                 EXECUTE_BACKGROUND_INPUT_TOOL,
                 "exec_command",
@@ -4316,6 +4480,7 @@ mod tests {
                 "launch_application",
                 "list_applications",
                 PREVIEW_COMPUTER_ACTION_TOOL,
+                "preview_document",
                 "read_container_list",
                 "read_current_screen",
                 "read_network_ports",
@@ -4355,6 +4520,7 @@ mod tests {
                 "patch_excel_copy",
                 "patch_powerpoint_copy",
                 "create_text_file",
+                "convert_document",
                 "delete_text_file",
                 EXECUTE_BACKGROUND_INPUT_TOOL,
                 "exec_command",
@@ -4367,6 +4533,7 @@ mod tests {
                 "launch_application",
                 "list_applications",
                 PREVIEW_COMPUTER_ACTION_TOOL,
+                "preview_document",
                 "read_container_list",
                 "read_current_screen",
                 "read_network_ports",

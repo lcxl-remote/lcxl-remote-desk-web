@@ -252,6 +252,21 @@ impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
         ));
     }
 
+    fn on_document_preview(
+        &mut self,
+        preview: &desk_agent_protocol::document_conversion::DocumentPreviewFrame,
+    ) {
+        if self.terminated {
+            return;
+        }
+        let seq = self.next_seq();
+        self.sink.emit(AgentEvent::document_preview(
+            &self.request_id,
+            seq,
+            preview.clone(),
+        ));
+    }
+
     fn on_permission_requested(&mut self, request_id: &str, item_count: usize) {
         if self.terminated {
             return;

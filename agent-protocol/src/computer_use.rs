@@ -142,6 +142,7 @@ pub enum ComputerUseAdapterKind {
     OutlookNewMailto,
     OfficeWord,
     NativeApplication,
+    DocumentConversion,
 }
 
 #[derive(
@@ -1377,6 +1378,7 @@ pub enum ComputerActionKind {
         action: UiSemanticAction,
     },
     LaunchApplication(crate::application_launch::LaunchApprovalBinding),
+    DocumentConversion(crate::document_conversion::DocumentConvertAction),
 }
 
 impl ComputerActionKind {
@@ -1455,6 +1457,7 @@ impl ComputerActionKind {
             },
             Self::Communication(_) => Capability::CommunicationOutlookNewHandoffConfirmed,
             Self::LaunchApplication(_) => Capability::ApplicationLaunchConfirmed,
+            Self::DocumentConversion(_) => Capability::DocumentConvertConfirmed,
         }
     }
 }
@@ -2245,6 +2248,7 @@ pub enum ComputerActionOutput {
     FileArtifact(CreatedFileArtifactOutput),
     TextFileMutation(TextFileMutationOutput),
     ApplicationLaunch(crate::application_launch::LaunchApplicationResult),
+    DocumentArtifact(crate::document_conversion::DocumentArtifactOutput),
 }
 
 #[derive(
@@ -2456,6 +2460,9 @@ pub struct ComputerUseReadiness {
     pub expires_at: String,
     pub server_api_version: i32,
     pub os: String,
+    /// Absolute Home directory of the OS user that owns this interactive
+    /// worker. This is runtime guidance for the Assistant, never authority.
+    pub interactive_user_home: Option<String>,
     pub interactive_session_incarnation: String,
     pub local_ceiling_revision: u64,
     pub capabilities: Vec<ComputerUseCapabilityReadiness>,
@@ -3101,6 +3108,7 @@ mod tests {
             expires_at: "2026-08-23T11:01:00Z".to_string(),
             server_api_version: 1,
             os: "windows".to_string(),
+            interactive_user_home: None,
             interactive_session_incarnation: "session-1".to_string(),
             local_ceiling_revision: 1,
             capabilities: vec![ComputerUseCapabilityReadiness {
@@ -3129,6 +3137,7 @@ mod tests {
             expires_at: "2026-08-23T11:01:00Z".into(),
             server_api_version: 1,
             os: "windows".into(),
+            interactive_user_home: None,
             interactive_session_incarnation: "session-1".into(),
             local_ceiling_revision: 1,
             capabilities: vec![ComputerUseCapabilityReadiness {

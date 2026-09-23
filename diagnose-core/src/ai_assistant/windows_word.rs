@@ -100,6 +100,7 @@ mod tests {
             expires_at: "2026-09-14T00:01:00Z".into(),
             server_api_version: 1,
             os: "windows".into(),
+            interactive_user_home: None,
             interactive_session_incarnation: "1:worker".into(),
             local_ceiling_revision: 3,
             context_references: vec![],

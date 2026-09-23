@@ -93,6 +93,7 @@ async fn select_live_document(store: &SignalAgentRunEventStore) {
         expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
         server_api_version: 1,
         os: "macos".into(),
+        interactive_user_home: None,
         interactive_session_incarnation: "worker-1".into(),
         local_ceiling_revision: 1,
         capabilities: vec![ComputerUseCapabilityReadiness {
@@ -543,6 +544,7 @@ async fn shared_object_binding_clamps_all_file_reads_and_rejects_expired_or_chan
             format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: "x".repeat(4097),
             image_data_url: None,
+            document_preview: None,
         };
         assert!(
             binding
@@ -553,6 +555,7 @@ async fn shared_object_binding_clamps_all_file_reads_and_rejects_expired_or_chan
             format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: "".into(),
             image_data_url: Some("data:image/png;base64,synthetic".into()),
+            document_preview: None,
         };
         assert!(
             binding

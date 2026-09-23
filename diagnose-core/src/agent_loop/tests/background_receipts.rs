@@ -42,6 +42,7 @@ fn failed_receipt() -> WaitOutcome {
         format: crate::seam::ToolOutputFormat::Text,
         content: "original native failure".into(),
         image_data_url: None,
+        document_preview: None,
     };
     WaitOutcome::FailedWithReceipt {
         action: crate::session::ActionIdentity::agent_exec(8, "exec_task9", "e9"),
@@ -273,6 +274,7 @@ async fn background_receipt_wait_in_a_batch_does_not_split_or_ack_an_open_tool_g
         format: crate::seam::ToolOutputFormat::Text,
         content: "original native result".into(),
         image_data_url: None,
+        document_preview: None,
     };
     let envelope = original_results::original(&output, false);
     let completed = || WaitOutcome::CompletedWithReceipt {
@@ -325,6 +327,7 @@ async fn background_receipt_keeps_original_call_and_label_separate_from_wait_sta
         format: crate::seam::ToolOutputFormat::Text,
         content: "original native result".into(),
         image_data_url: None,
+        document_preview: None,
     };
     let envelope = original_results::original(&output, false);
     let scripted = tools_with_waits(
@@ -409,6 +412,7 @@ async fn background_receipt_rejects_mismatched_identity_or_bytes_without_ack() {
             format: crate::seam::ToolOutputFormat::Text,
             content: "original native result".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let mut envelope = original_results::original(&output, false);
         let mut action = crate::session::ActionIdentity::agent_exec(8, "exec_task9", "e9");
@@ -480,6 +484,7 @@ async fn background_unknown_wait_retains_original_anchor_for_late_completion() {
         format: crate::seam::ToolOutputFormat::Text,
         content: "late original result".into(),
         image_data_url: None,
+        document_preview: None,
     };
     let envelope = original_results::original(&output, false);
     let scripted = tools_with_waits(
@@ -568,6 +573,7 @@ async fn background_wait_rejects_missing_duplicate_or_wrong_original_anchor() {
                 format: crate::seam::ToolOutputFormat::Text,
                 content: "late original result".into(),
                 image_data_url: None,
+                document_preview: None,
             };
             let envelope = original_results::original(&output, false);
             let outcome = if completed {
@@ -635,6 +641,7 @@ fn background_status_inherits_proposal_boundary_without_requesting_a_native_rece
             format: crate::seam::ToolOutputFormat::Text,
             content: "proposal".into(),
             image_data_url: None,
+            document_preview: None,
         },
         true,
     );

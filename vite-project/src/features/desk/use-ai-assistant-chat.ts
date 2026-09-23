@@ -16,7 +16,7 @@ import type {
     RehearsalView,
 } from '@/services/types';
 import { deskErrorCodeEnum } from '@/services/types';
-import type { AiAssistantEvent, AiAssistantVisualEvidence } from './ai-assistant-event';
+import type { AiAssistantDocumentPreview, AiAssistantDocumentPreviewPageResponse, AiAssistantEvent, AiAssistantVisualEvidence } from './ai-assistant-event';
 import {
     SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
     SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT,
@@ -25,6 +25,8 @@ import {
     SIGNALING_TYPE_CODE_AI_ASSISTANT_OBJECT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED,
     SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+    SIGNALING_TYPE_CODE_DOCUMENT_PREVIEW_PAGE_UPDATED,
+    SIGNALING_TYPE_CODE_REQUEST_DOCUMENT_PREVIEW_PAGE,
     SIGNALING_TYPE_CODE_SELECT_AI_ASSISTANT_SESSION,
     SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_CONTEXT,
     SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
@@ -377,6 +379,8 @@ export function useAiAssistantChat({
     }>({ hasMore: false, nextBeforeMessageId: null });
     const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
     const [visualEvidence, setVisualEvidence] = useState<AiAssistantVisualEvidence[]>([]);
+    const [documentPreviews, setDocumentPreviews] = useState<AiAssistantDocumentPreview[]>([]);
+    const documentPreviewPageRequests = useRef(new Map<string, { previewId: string; page: number }>());
     const [sessionTarget, setSessionTarget] = useState<SessionTargetDescriptor | null>(null);
     const [sessionTargets, setSessionTargets] = useState<SessionTargetDescriptor[]>([]);
     const [sessionTargetReady, setSessionTargetReady] = useState(!targetSelectionEnabled);
@@ -431,6 +435,23 @@ export function useAiAssistantChat({
         );
         return true;
     }, [connected, deskId, sendMessage, targetSelectionEnabled]);
+
+    const requestDocumentPreviewPage = useCallback((previewId: string, page: number) => {
+        const sessionId = snapshotWatermark.current?.conversationId === conversationId.current
+            ? snapshotWatermark.current.sessionId : undefined;
+        const preview = documentPreviews.find(item => item.descriptor.preview_id === previewId);
+        if (connected === false || !sessionId || !preview || preview.loading
+            || !Number.isInteger(page) || page < 1 || page > preview.descriptor.page_count) return false;
+        const requestId = sendMessage(
+            SIGNALING_TYPE_CODE_REQUEST_DOCUMENT_PREVIEW_PAGE,
+            { conversation_id: sessionId, preview_id: previewId, page, spec_version: 1 },
+            deskId,
+        );
+        documentPreviewPageRequests.current.set(requestId, { previewId, page });
+        setDocumentPreviews(current => current.map(item => item.descriptor.preview_id === previewId
+            ? { ...item, loading: true, error: null } : item));
+        return true;
+    }, [connected, deskId, documentPreviews, sendMessage]);
 
     useEffect(() => {
         if (!targetSelectionEnabled) return;
@@ -763,6 +784,8 @@ export function useAiAssistantChat({
             setFileScope({ revision: 0, directories: [] });
             directorySelectors.current = null;
             setVisualEvidence([]);
+            setDocumentPreviews([]);
+            documentPreviewPageRequests.current.clear();
             setContextUsage(null);
             setContextNotices([]);
             setRemoteActive(false);
@@ -778,6 +801,24 @@ export function useAiAssistantChat({
     }, []);
 
     useEffect(() => subscribe((message: SignalingMessage) => {
+        if (message.signaling_type === SIGNALING_TYPE_CODE_DOCUMENT_PREVIEW_PAGE_UPDATED) {
+            if (!message.request_id) return;
+            const pending = documentPreviewPageRequests.current.get(message.request_id);
+            if (!pending) return;
+            documentPreviewPageRequests.current.delete(message.request_id);
+            const response = message.signaling_data as AiAssistantDocumentPreviewPageResponse | null;
+            setDocumentPreviews(current => current.map(item => {
+                if (item.descriptor.preview_id !== pending.previewId) return item;
+                if (!response || response.preview_id !== pending.previewId
+                    || response.page !== pending.page || !response.frame) {
+                    return { ...item, loading: false,
+                        error: response?.error ?? translate.current('pages.aiAssistant.documentPreview.loadFailed') };
+                }
+                return { ...item, page: response.frame.page,
+                    preview_data_url: response.frame.preview_data_url, loading: false, error: null };
+            }));
+            return;
+        }
         if (
             message.signaling_type === SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED
             && sessionTargetRequest.current
@@ -897,6 +938,15 @@ export function useAiAssistantChat({
             case 'visual_evidence':
                 if (event.visual_evidence) {
                     setVisualEvidence((current) => upsertVisualEvidence(current, event.visual_evidence!));
+                }
+                break;
+            case 'document_preview':
+                if (event.document_preview) {
+                    setDocumentPreviews(current => [
+                        ...current.filter(preview => preview.descriptor.preview_id
+                            !== event.document_preview!.descriptor.preview_id),
+                        event.document_preview!,
+                    ]);
                 }
                 break;
             case 'answer':
@@ -1094,6 +1144,7 @@ export function useAiAssistantChat({
         setRemoteActive(true);
         lastSeq.current = -1;
         previewArgs.current.clear();
+        documentPreviewPageRequests.current.clear();
         const requestId = v4();
         const payload = {
                 question: trimmed,
@@ -1321,6 +1372,7 @@ export function useAiAssistantChat({
         setFileScope({ revision: 0, directories: [] });
         directorySelectors.current = null;
         setVisualEvidence([]);
+        setDocumentPreviews([]);
         setContextUsage(null);
         setContextNotices([]);
         setRemoteActive(false);
@@ -1382,6 +1434,8 @@ export function useAiAssistantChat({
         fileScope,
         updateDirectory,
         visualEvidence,
+        documentPreviews,
+        requestDocumentPreviewPage,
         hydrating,
         contextUpdating,
         taskStatusProjection,

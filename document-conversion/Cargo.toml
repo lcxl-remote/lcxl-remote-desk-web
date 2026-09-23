@@ -1,0 +1,19 @@
+[package]
+name = "desk-document-conversion"
+description = "Bounded in-process PDF, Markdown, TXT, and Typst document conversion"
+license.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+flate2 = { workspace = true }
+png = { workspace = true }
+pulldown-cmark = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+typst = { workspace = true }
+typst-pdf = { workspace = true }
+typst-render = { workspace = true }
+unpdf = { workspace = true }
+url = { workspace = true }

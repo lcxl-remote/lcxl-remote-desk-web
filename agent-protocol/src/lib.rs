@@ -44,6 +44,7 @@ pub mod computer_use;
 pub mod content_safety;
 pub mod data_lineage;
 pub mod diagnose;
+pub mod document_conversion;
 pub mod edge_exec;
 pub mod evidence;
 pub mod exec;
@@ -535,6 +536,10 @@ pub enum Capability {
     ApplicationList,
     #[serde(rename = "application.launch.confirmed")]
     ApplicationLaunchConfirmed,
+    #[serde(rename = "document.preview")]
+    DocumentPreview,
+    #[serde(rename = "document.convert.confirmed")]
+    DocumentConvertConfirmed,
 }
 
 // ============================ Operation ============================
@@ -603,6 +608,9 @@ impl OperationInput {
                 ContextKind::TerminalOutputInspect(_) => Capability::TerminalOutputRead,
                 ContextKind::ApplicationList(_) => Capability::ApplicationList,
                 ContextKind::ApplicationLaunchResolve(_) => Capability::ApplicationList,
+                ContextKind::DocumentPreview(_) | ContextKind::DocumentPreviewPage(_) => {
+                    Capability::DocumentPreview
+                }
             }),
             OperationInput::Exec(_) => None,
         }
@@ -668,6 +676,8 @@ pub enum ContextKind {
     SpreadsheetBatchInspect(computer_use::SpreadsheetBatchInspectParams),
     ApplicationList(application_launch::ListApplicationsRequest),
     ApplicationLaunchResolve(application_launch::LaunchApplicationRequest),
+    DocumentPreview(document_conversion::DocumentPreviewParams),
+    DocumentPreviewPage(document_conversion::DocumentPreviewPageParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
@@ -695,6 +705,8 @@ pub enum ReadContextOutput {
     TerminalOutputInspect(computer_use::TerminalOutputInspectOutput),
     ApplicationList(application_launch::ApplicationCatalogPage),
     ApplicationLaunchResolve(application_launch::LaunchPreflightReceipt),
+    DocumentPreview(document_conversion::DocumentPreviewOutput),
+    DocumentPreviewPage(document_conversion::DocumentPreviewPageOutput),
 }
 
 // -------- read params (fields are additive) --------

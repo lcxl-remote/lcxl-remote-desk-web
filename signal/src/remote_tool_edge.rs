@@ -6,6 +6,7 @@
 
 mod application;
 pub(crate) mod directory;
+pub(crate) mod document_preview;
 mod object_read;
 
 use std::collections::HashMap;
@@ -129,6 +130,7 @@ fn browser_read_outcome(outcome: ExecOutcome) -> Result<ReadOutcome, AgentError>
                     &action.action_request_id,
                 ),
                 image_data_url: None,
+                document_preview: None,
             },
             ok: true,
             event_id: None,
@@ -288,6 +290,36 @@ fn decode_output(bytes: &[u8]) -> Result<RemoteToolOutput, AgentError> {
                 true,
             )
         })?;
+    }
+    if let Some(preview) = &output.document_preview {
+        desk_diagnose_core::image_input::validate_document_preview_frame(preview).map_err(|e| {
+            error(
+                AgentErrorKind::TransportError,
+                format!("invalid remote document preview: {e}"),
+                false,
+                true,
+            )
+        })?;
+    }
+    if let Some(preview) = &output.document_preview_page {
+        desk_diagnose_core::image_input::validate_document_preview_page_frame(preview).map_err(
+            |e| {
+                error(
+                    AgentErrorKind::TransportError,
+                    format!("invalid remote document preview page: {e}"),
+                    false,
+                    true,
+                )
+            },
+        )?;
+    }
+    if output.document_preview.is_some() && output.document_preview_page.is_some() {
+        return Err(error(
+            AgentErrorKind::TransportError,
+            "remote output contains multiple document preview payloads",
+            false,
+            true,
+        ));
     }
     Ok(output)
 }
@@ -1282,6 +1314,7 @@ impl SignalAiAssistantTools {
                     "tool error: the tool could not complete".into()
                 },
                 image_data_url: None,
+                document_preview: None,
             };
             let (_, digest_sha256) = tool_output_fingerprint(&output)?;
             self.verified_read_labels
@@ -1671,6 +1704,7 @@ impl SignalAiAssistantTools {
                         format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                         content,
                         image_data_url: None,
+                        document_preview: None,
                     })
                     .map_err(Into::into)
             } else {
@@ -3171,6 +3205,12 @@ impl SignalAiAssistantTools {
             file_name: String,
             draft: desk_agent_protocol::communication::LocalDraftDocument,
         }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DocumentConvertArgs {
+            output_name: String,
+            conversion: desk_agent_protocol::document_conversion::DocumentConversionOptions,
+        }
         enum ArtifactRequest {
             Text(TextArgs),
             Spreadsheet(SpreadsheetArgs),
@@ -3180,9 +3220,19 @@ impl SignalAiAssistantTools {
             },
             Word(WordArgs),
             LocalDraft(LocalDraftArgs),
+            Document(DocumentConvertArgs),
         }
 
-        let action_call = desk_diagnose_core::provider_preflight::without_directory_selector(call)?;
+        let source_selector_call = call.clone();
+        let action_call = if call.name == "convert_document" {
+            let without_source =
+                desk_diagnose_core::provider_preflight::text_file::selection::without_selectors(
+                    call,
+                )?;
+            desk_diagnose_core::provider_preflight::without_directory_selector(&without_source)?
+        } else {
+            desk_diagnose_core::provider_preflight::without_directory_selector(call)?
+        };
         let canonical_call = call;
         let call = &action_call;
         let (args, required_capability, _operation, orchestrator_grant) = match call.name.as_str() {
@@ -3316,6 +3366,21 @@ impl SignalAiAssistantTools {
                     desk_diagnose_core::ai_assistant::WORD_DOCUMENT_CREATE_CAPABILITY_ID,
                 )
             }
+            "convert_document" => (
+                ArtifactRequest::Document(serde_json::from_str(&call.arguments_json).map_err(
+                    |decode_error| {
+                        error(
+                            AgentErrorKind::InvalidInput,
+                            format!("invalid document conversion input: {decode_error}"),
+                            false,
+                            true,
+                        )
+                    },
+                )?),
+                desk_agent_protocol::Capability::DocumentConvertConfirmed,
+                "convert_document_create_new",
+                desk_diagnose_core::ai_assistant::DOCUMENT_CONVERT_CAPABILITY_ID,
+            ),
             _ => {
                 return Err(error(
                     AgentErrorKind::UnsupportedCapability,
@@ -3348,21 +3413,31 @@ impl SignalAiAssistantTools {
                 true,
             ));
         }
-        let artifact_preflight =
+        let artifact_preflight = if canonical_call.name == "convert_document" {
+            let source =
+                desk_diagnose_core::provider_preflight::text_file::document_source_evidence(
+                    &current_session,
+                    &source_selector_call,
+                    now_ms,
+                )?;
+            desk_diagnose_core::provider_preflight::ArtifactCallPreflight::build_document(
+                &self.provider_registry,
+                ProductSurface::OssPersonalOwner,
+                canonical_call,
+                &source.reference,
+                source.sha256,
+                &selected_directories[0],
+                now_ms,
+            )?
+        } else {
             desk_diagnose_core::provider_preflight::ArtifactCallPreflight::build(
                 &self.provider_registry,
                 ProductSurface::OssPersonalOwner,
-                call,
+                canonical_call,
                 &selected_directories,
-                u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
-                    error(
-                        AgentErrorKind::Internal,
-                        "system clock predates the Unix epoch",
-                        false,
-                        false,
-                    )
-                })?,
-            )?;
+                now_ms,
+            )?
+        };
         if artifact_preflight.required_capability() != required_capability
             || artifact_preflight.target() != &selected_directories[0]
         {
@@ -3639,8 +3714,33 @@ impl SignalAiAssistantTools {
             "create one inert local-only UTF-8 plain-text draft without overwrite or external delivery".into(),
             "re-render with shared trusted logic, reopen through the retained parent handle, and verify exact bytes plus SHA-256".into(),
         ),
+        ArtifactRequest::Document(args) => {
+            let action = artifact_preflight.action().clone();
+            let ComputerActionKind::DocumentConversion(sealed) = &action else {
+                return Err(error(
+                    AgentErrorKind::Internal,
+                    "document conversion preflight returned the wrong action",
+                    false,
+                    false,
+                ));
+            };
+            if sealed.output_name != args.output_name || sealed.conversion != args.conversion {
+                return Err(error(
+                    AgentErrorKind::Internal,
+                    "document conversion parsers produced different typed input",
+                    false,
+                    false,
+                ));
+            }
+            (
+                action,
+                "new converted document does not exist in the selected directory".into(),
+                "convert the verified source in process and create one new output without overwrite".into(),
+                "verify the source identity and digest, then reopen the new output and verify exact bytes plus SHA-256".into(),
+            )
+        }
     };
-        let action = ComputerActionKind::File(artifact_preflight.action().clone());
+        let action = artifact_preflight.action().clone();
         if action != decoded_action {
             let dispatch_error = error(
                 AgentErrorKind::Internal,
@@ -3666,14 +3766,22 @@ impl SignalAiAssistantTools {
             device_id: self.target_device_id.clone(),
             interactive_session_incarnation: readiness.readiness.interactive_session_incarnation,
             adapter: ComputerUseAdapterRef {
-                kind: ComputerUseAdapterKind::FileSystem,
+                kind: if matches!(action, ComputerActionKind::DocumentConversion(_)) {
+                    ComputerUseAdapterKind::DocumentConversion
+                } else {
+                    ComputerUseAdapterKind::FileSystem
+                },
                 version: artifact_preflight.adapter_version().into(),
             },
             approval_id: grant_id.clone(),
             approved_actor_id: self.actor_id.clone(),
             draft_hash: canonical_input_digest_sha256.clone(),
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
-            timeout_ms: 30_000,
+            timeout_ms: if matches!(action, ComputerActionKind::DocumentConversion(_)) {
+                60_000
+            } else {
+                30_000
+            },
             actions: vec![ComputerActionStep {
                 target: selected_directories[0].clone(),
                 action,
@@ -5260,6 +5368,12 @@ impl SignalAiAssistantTools {
             } else {
                 None
             };
+        if let OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::DocumentPreview(params),
+        }) = &mut input
+        {
+            params.conversation_id = self.run_id.clone();
+        }
         desk_diagnose_core::provider_preflight::read::limits::bind(
             &self.provider_registry,
             call,
@@ -5420,7 +5534,9 @@ impl SignalAiAssistantTools {
             .wire
             .limits
             .max_output_bytes;
-        let encoded_output = serde_json::to_vec(&output).map_err(|_| {
+        let mut model_output = output.clone();
+        model_output.document_preview = None;
+        let encoded_output = serde_json::to_vec(&model_output).map_err(|_| {
             ProviderInvokeError::from(error(
                 AgentErrorKind::Internal,
                 "remote observation result cannot be measured",
@@ -5456,6 +5572,7 @@ impl SignalAiAssistantTools {
                     format: desk_diagnose_core::seam::ToolOutputFormat::operation(&value),
                     content: serde_json::to_string(&value).unwrap_or_else(|_| "{}".into()),
                     image_data_url: output.image.map(|image| image.data_url),
+                    document_preview: output.document_preview,
                 };
                 desk_diagnose_core::provider_preflight::read::limits::validate_output(
                     &self.provider_registry,
@@ -5671,6 +5788,7 @@ impl ToolSeam for SignalAiAssistantTools {
                 | "create_formula_workbook"
                 | "create_word_report"
                 | "create_local_message_draft"
+                | "convert_document"
         ) {
             return Ok(ExecOutcome::Rejected {
                 reason: Some("this AI Assistant mutation is not enabled".into()),
@@ -6029,6 +6147,7 @@ mod tests {
                 format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                 content: "browser_reference_stale: read browser_take_snapshot".into(),
                 image_data_url: None,
+                document_preview: None,
             },
             event_id: Some("failed-read-event".into()),
             data_envelope: None,
@@ -6191,6 +6310,7 @@ mod tests {
             format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: "bounded result".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let (_, digest_sha256) = tool_output_fingerprint(&output).unwrap();
         let verified = VerifiedReadLabel {
@@ -6206,6 +6326,7 @@ mod tests {
                     format: desk_diagnose_core::seam::ToolOutputFormat::Text,
                     content: "changed result".into(),
                     image_data_url: None,
+                    document_preview: None,
                 },
                 &verified,
                 199,
@@ -6796,11 +6917,13 @@ mod tests {
             format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: "screen metadata".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let with_image = ToolRunOutput {
             format: desk_diagnose_core::seam::ToolOutputFormat::Text,
             content: text_only.content.clone(),
             image_data_url: Some("data:image/jpeg;base64,AQID".into()),
+            document_preview: None,
         };
         let (text_size, text_digest) = tool_output_fingerprint(&text_only).unwrap();
         let (image_size, image_digest) = tool_output_fingerprint(&with_image).unwrap();

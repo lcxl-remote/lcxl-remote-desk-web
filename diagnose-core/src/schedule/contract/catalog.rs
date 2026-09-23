@@ -26,6 +26,9 @@ impl ValidatedTaskContract {
         allowed_capabilities: &[Capability],
     ) -> Result<(), TaskCatalogError> {
         for rule in &self.contract.permissions {
+            if crate::ai_assistant::is_interactive_only_tool(&rule.tool_name) {
+                return Err(TaskCatalogError::Unavailable);
+            }
             let capability = registry
                 .capability_for_tool(&rule.tool_name)
                 .ok_or(TaskCatalogError::Unavailable)?;

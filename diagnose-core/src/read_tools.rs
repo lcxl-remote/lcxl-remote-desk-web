@@ -16,6 +16,7 @@ use desk_agent_protocol::computer_use::{
     SpreadsheetMergeColumnRule, SpreadsheetMergePreviewParams, SpreadsheetStatisticRequest,
     TerminalOutputInspectParams, UiInspectParams,
 };
+use desk_agent_protocol::document_conversion::DocumentPreviewParams;
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, Capability, ContainerListParams, ContextKind, LogRecentParams,
     NetworkPortsParams, OperationInput, ProcessListParams, ReadContextInput, ScreenCaptureParams,
@@ -799,6 +800,18 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                     expires_at: "1970-01-01T00:00:00Z".into(),
                 },
                 max_bytes: 64 * 1024,
+            })
+        }
+        "preview_document" => {
+            let _ = parse_params::<NoToolArgs>(&call.arguments_json)?;
+            ContextKind::DocumentPreview(DocumentPreviewParams {
+                file: ObjectRef {
+                    token: "selected:server_resolved".into(),
+                    snapshot_id: "selected:server_resolved".into(),
+                    object_kind: desk_agent_protocol::computer_use::ObjectKind::File,
+                    expires_at: "1970-01-01T00:00:00Z".into(),
+                },
+                conversation_id: "selected:server_resolved".into(),
             })
         }
         "inspect_spreadsheets" => {

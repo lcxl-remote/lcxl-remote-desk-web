@@ -130,6 +130,7 @@ pub fn verified_action_source(
         format: crate::seam::ToolOutputFormat::Text,
         content: results[0].text.clone(),
         image_data_url: results[0].image_data_url.clone(),
+        document_preview: None,
     };
     receipt
         .validate_for(origin, receipt.action.clone(), receipt.attempt, &output)
@@ -212,6 +213,7 @@ fn project_tool_result_source(
         format: crate::seam::ToolOutputFormat::Text,
         content: result.text.clone(),
         image_data_url: result.image_data_url.clone(),
+        document_preview: None,
     };
     let envelope = result
         .data_envelope
@@ -286,6 +288,7 @@ mod tests {
             format: crate::seam::ToolOutputFormat::Text,
             content: "original result".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let mut envelope = read_result_envelope(

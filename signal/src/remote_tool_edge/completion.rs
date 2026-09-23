@@ -87,6 +87,7 @@ impl SignalAiAssistantTools {
                     format: desk_diagnose_core::seam::ToolOutputFormat::Json,
                     content: projection.content,
                     image_data_url: None,
+                    document_preview: None,
                 };
                 return Ok(match projection.outcome {
                     CapabilityDispatchOutcome::Succeeded => ExecOutcome::Executed {
@@ -354,6 +355,7 @@ fn validate_output(
                 action,
                 ComputerActionKind::Browser(_)
                     | ComputerActionKind::File(_)
+                    | ComputerActionKind::DocumentConversion(_)
                     | ComputerActionKind::SpreadsheetLiveBatch(_)
                     | ComputerActionKind::DocumentLiveBatch(_)
                     | ComputerActionKind::PresentationLiveBatch(_)
@@ -403,6 +405,22 @@ fn validate_output(
                 _ => return Err(invalid()),
             };
             if &artifact.file_name != expected || (verified && !completed.facts[0].changed) {
+                return Err(invalid());
+            }
+        }
+        (
+            ComputerActionKind::DocumentConversion(action),
+            ComputerActionOutput::DocumentArtifact(document),
+        ) => {
+            document.artifact.validate().map_err(|_| invalid())?;
+            if document.conversion != action.conversion.kind
+                || document.artifact.file_name != action.output_name
+                || action
+                    .expected_source_sha256
+                    .as_ref()
+                    .is_some_and(|digest| digest != &document.source_digest_sha256)
+                || (verified && !completed.facts[0].changed)
+            {
                 return Err(invalid());
             }
         }

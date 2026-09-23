@@ -1129,6 +1129,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::AiAssistantContextUpdated
             | SignalingType::AiAssistantObjectContextUpdated
             | SignalingType::AiAssistantSessionSelected
+            | SignalingType::DocumentPreviewPageUpdated
             | SignalingType::TerminalAiAssistantUpdated
             | SignalingType::TerminalCompletionsGenerated
             | SignalingType::ExecutionPreviewGenerated
@@ -1253,6 +1254,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::UpdateAiAssistantContext
             | SignalingType::UpdateAiAssistantObjectContext
             | SignalingType::SelectAiAssistantSession
+            | SignalingType::RequestDocumentPreviewPage
             | SignalingType::ManageScheduledTasks
             | SignalingType::ManageFileRecovery => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {

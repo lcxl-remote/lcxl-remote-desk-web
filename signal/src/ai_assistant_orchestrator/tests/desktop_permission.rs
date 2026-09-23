@@ -178,6 +178,7 @@ async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup
                 expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
                 server_api_version: 1,
                 os: "macos".into(),
+                interactive_user_home: None,
                 interactive_session_incarnation: "worker".into(),
                 local_ceiling_revision: 1,
                 capabilities: vec![ComputerUseCapabilityReadiness {
@@ -369,6 +370,8 @@ async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup
                 ),
             )),
             image: None,
+            document_preview: None,
+            document_preview_page: None,
         };
 
         if read_name == "inspect_desktop_ui" {

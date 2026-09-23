@@ -7,6 +7,7 @@
 
 mod application_catalog;
 mod ui_platform;
+mod user_home;
 #[cfg(windows)]
 mod windows_excel;
 #[cfg(windows)]
@@ -205,6 +206,7 @@ struct StoredObject {
 struct ReadinessFingerprint {
     server_api_version: i32,
     os: String,
+    interactive_user_home: Option<String>,
     interactive_session_incarnation: String,
     local_ceiling_revision: u64,
     capabilities: Vec<ComputerUseCapabilityReadiness>,
@@ -1420,6 +1422,7 @@ impl ComputerUseBroker {
             expires_at: expires_at.to_rfc3339(),
             server_api_version: desk_server_version::SERVER_API_VERSION,
             os: std::env::consts::OS.into(),
+            interactive_user_home: user_home::current(),
             interactive_session_incarnation,
             local_ceiling_revision: ceiling.revision,
             capabilities: vec![
@@ -1748,6 +1751,31 @@ impl ComputerUseBroker {
                         .then_some(ComputerUseReadinessReason::UnsupportedPlatform),
                 },
                 ComputerUseCapabilityReadiness {
+                    capability: Capability::DocumentPreview,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::DocumentConversion,
+                        version:
+                            desk_diagnose_core::ai_assistant::DOCUMENT_CONVERSION_ADAPTER_VERSION
+                                .into(),
+                    },
+                    supported: file_provider_supported,
+                    ready: file_provider_supported,
+                    reason: (!file_provider_supported)
+                        .then_some(ComputerUseReadinessReason::UnsupportedPlatform),
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::DocumentConvertConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::DocumentConversion,
+                        version:
+                            desk_diagnose_core::ai_assistant::DOCUMENT_CONVERSION_ADAPTER_VERSION
+                                .into(),
+                    },
+                    supported: file_provider_supported,
+                    ready: file_provider_supported && ceiling.enabled,
+                    reason: artifact_reason,
+                },
+                ComputerUseCapabilityReadiness {
                     capability: Capability::SpreadsheetFileInspect,
                     adapter: ComputerUseAdapterRef {
                         kind: ComputerUseAdapterKind::FileSystem,
@@ -1999,6 +2027,7 @@ impl ComputerUseBroker {
         let fingerprint = ReadinessFingerprint {
             server_api_version: readiness.server_api_version,
             os: readiness.os.clone(),
+            interactive_user_home: readiness.interactive_user_home.clone(),
             interactive_session_incarnation: readiness.interactive_session_incarnation.clone(),
             local_ceiling_revision: readiness.local_ceiling_revision,
             capabilities: readiness.capabilities.clone(),
@@ -5221,7 +5250,7 @@ mod tests {
         let observed = chrono::DateTime::parse_from_rfc3339(&readiness.observed_at).unwrap();
         let expires = chrono::DateTime::parse_from_rfc3339(&readiness.expires_at).unwrap();
         assert_eq!((expires - observed).num_seconds(), 60);
-        assert_eq!(readiness.capabilities.len(), 40);
+        assert_eq!(readiness.capabilities.len(), 42);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(
                 entry.capability,
@@ -5233,6 +5262,7 @@ mod tests {
                     | Capability::FileContentRead
                     | Capability::SpreadsheetFileInspect
                     | Capability::SpreadsheetMergePreview
+                    | Capability::DocumentPreview
                     | Capability::TerminalOutputRead
             ) {
                 entry.ready == cfg!(any(windows, target_os = "linux", target_os = "macos"))
@@ -5295,6 +5325,8 @@ mod tests {
                     | Capability::BrowserExternalSendConfirmed
                     | Capability::ApplicationList
                     | Capability::ApplicationLaunchConfirmed
+                    | Capability::DocumentPreview
+                    | Capability::DocumentConvertConfirmed
             )
         }));
     }

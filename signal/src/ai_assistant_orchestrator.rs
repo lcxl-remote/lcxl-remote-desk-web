@@ -365,6 +365,64 @@ pub async fn send_capability_inventory(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn render_document_preview_page(
+    connections: web::Data<SharedConnectionMap>,
+    db: DatabaseConnection,
+    request_id: String,
+    browser_connection_id: String,
+    target_connection_id: String,
+    actor_user_id: i32,
+    target_device_id: String,
+    request: desk_agent_protocol::document_conversion::DocumentPreviewPageRequest,
+) {
+    use desk_agent_protocol::document_conversion::DocumentPreviewPageResponse;
+    let actor_id = actor_user_id.to_string();
+    let accessible = crate::agent_session_store::SignalAgentSessionStore::new(db)
+        .read_assistant_snapshot_for_subject(&request.conversation_id, &actor_id, &target_device_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    let result = if accessible {
+        crate::remote_tool_edge::document_preview::render_page(
+            connections.as_ref(),
+            &target_connection_id,
+            &actor_id,
+            &target_device_id,
+            &request.conversation_id,
+            &request.preview_id,
+            request.page,
+        )
+        .await
+    } else {
+        Err(transport_error("Document preview is unavailable"))
+    };
+    let response = DocumentPreviewPageResponse {
+        conversation_id: request.conversation_id,
+        preview_id: request.preview_id,
+        page: request.page,
+        frame: result.as_ref().ok().cloned(),
+        error: result.err().map(|error| error.message),
+    };
+    let browser = {
+        let map = connections.read().await;
+        map.get(&browser_connection_id).cloned()
+    };
+    let Some(browser) = browser else { return };
+    let frame = SignalingModel::new(
+        &request_id,
+        SignalingType::DocumentPreviewPageUpdated,
+        None,
+        Some(browser_connection_id),
+        serde_json::to_value(response).ok(),
+        None,
+    );
+    if let Err(error) = send_frame(&browser, &frame).await {
+        log::warn!("[ai-assistant] failed to send document preview page: {error}");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn update_context(
     connections: web::Data<SharedConnectionMap>,
     db: DatabaseConnection,
@@ -1883,6 +1941,22 @@ async fn compose_turn_inner(
         system_prompt,
         max_steps_per_turn: config.max_steps_per_turn,
         response_locale: ask.locale.clone(),
+        interactive_user_home: scheduled
+            .is_none()
+            .then(|| {
+                readiness
+                    .as_ref()
+                    .and_then(|state| state.interactive_user_home.as_deref())
+            })
+            .flatten(),
+        interactive_user_home_incarnation: scheduled
+            .is_none()
+            .then(|| {
+                readiness
+                    .as_ref()
+                    .map(|state| state.interactive_session_incarnation.as_str())
+            })
+            .flatten(),
         max_same_tool_per_turn: config.max_same_tool_calls_per_turn,
         clock: &clock,
         heartbeat: Some(heartbeat.as_ref()),

@@ -31,7 +31,10 @@ use desk_agent_protocol::computer_use::{
     ComputerActionCompleted, ComputerActionOutput, ComputerActionResultClass,
 };
 use desk_agent_protocol::content_safety::{ContentSafetyDecision, StreamRetractionReason};
-use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope};
+use desk_agent_protocol::data_lineage::{
+    ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance, DestinationIdentity,
+    RetentionBoundary, Sensitivity,
+};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
@@ -327,6 +330,11 @@ pub struct LoopDeps<'a> {
     pub system_prompt: ChatMessage,
     /// Explicit control-end preference. Missing values preserve the saved locale.
     pub response_locale: Option<String>,
+    /// Current interactive worker user's Home directory. This is guidance for
+    /// proposing a directory selection, not a selected directory or grant.
+    pub interactive_user_home: Option<&'a str>,
+    /// Worker incarnation that reported `interactive_user_home`.
+    pub interactive_user_home_incarnation: Option<&'a str>,
     /// Per-turn model→tool step budget (circuit breaker). Diagnose passes
     /// [`crate::MAX_STEPS_PER_TURN`]; the latency-sensitive Terminal AI Assistant
     /// passes a tighter bound.
@@ -837,6 +845,7 @@ async fn append_reviewed_tool_result_inner(
         format,
         content,
         image_data_url,
+        document_preview: _,
     } = output;
     let Some(image_data_url) = image_data_url else {
         // With no new image there is nothing to rotate: any previously retained
@@ -2161,7 +2170,23 @@ async fn run_inner_impl(
                 "runtime_context",
             )?;
         }
+        let home_projection = match (
+            deps.interactive_user_home,
+            deps.interactive_user_home_incarnation,
+        ) {
+            (Some(home), Some(incarnation)) => interactive_user_home_projection(
+                Some(home),
+                Some(incarnation),
+                system_prompt.data_envelope.as_ref(),
+                turn_id,
+                current_unix_ms(deps.clock)?,
+            )?,
+            _ => None,
+        };
         let mut messages = vec![system_prompt];
+        if let Some(projection) = home_projection {
+            messages.push(projection);
+        }
         if session.surface == AgentSessionSurface::AiAssistant
             && deps.model.command_completion_event_id().is_none()
         {
@@ -3176,7 +3201,7 @@ async fn run_inner_impl(
                             if read_requires_version {
                                 session.turn_state = TurnState::Running;
                             }
-                            let (out, ok, event_id, provided_envelope, background_task) =
+                            let (mut out, ok, event_id, provided_envelope, background_task) =
                                 match completion.outcome {
                                     Ok(ReadOutcome::PermissionRequired { request }) => {
                                         return task_permission::pause(
@@ -3208,6 +3233,7 @@ async fn run_inner_impl(
                                                 "tool error: the tool could not complete".into()
                                             },
                                             image_data_url: None,
+                                            document_preview: None,
                                         },
                                         false,
                                         None,
@@ -3220,6 +3246,7 @@ async fn run_inner_impl(
                                     || event_id.is_some()
                                     || provided_envelope.is_some()
                                     || out.image_data_url.is_some()
+                                    || out.document_preview.is_some()
                                 {
                                     return Err(invalid_original_result());
                                 }
@@ -3239,6 +3266,10 @@ async fn run_inner_impl(
                                 finish_tool(session, &call.id, true, sink);
                                 deps.session_seam.save(session).await?;
                                 continue;
+                            }
+                            let document_preview = out.document_preview.take();
+                            if document_preview.is_some() && call.name != "preview_document" {
+                                return Err(invalid_original_result());
                             }
                             // A model-visible tool error is still data produced by
                             // the selected source. Information-flow-enforced
@@ -3299,13 +3330,16 @@ async fn run_inner_impl(
                                     current_input_revision,
                                 });
                             }
-                            finish_tool(session, &call.id, ok, sink);
                             // Persist each read-only result before advancing to the
                             // next call. On a crash, the OSS recovery layer can then
                             // distinguish the still-unstarted calls from any later
                             // durable mutating task instead of treating the whole
                             // assistant batch as an unknown execution.
                             deps.session_seam.save(session).await?;
+                            if let Some(preview) = document_preview.as_ref() {
+                                sink.on_document_preview(preview);
+                            }
+                            finish_tool(session, &call.id, ok, sink);
                             if let Some(event_id) = event_id {
                                 let _ = deps.tools.ack_delivery(&event_id).await;
                             }
@@ -4891,6 +4925,65 @@ fn invalid_original_result() -> AgentError {
     }
 }
 
+fn interactive_user_home_projection(
+    home: Option<&str>,
+    worker_incarnation: Option<&str>,
+    current_runtime_envelope: Option<&DataEnvelope>,
+    turn_id: &str,
+    now_unix_ms: u64,
+) -> Result<Option<ChatMessage>, AgentError> {
+    let text = crate::ai_assistant::interactive_user_home_prompt(home);
+    let Some(worker_incarnation) = worker_incarnation.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let allowed_destinations = current_runtime_envelope
+        .into_iter()
+        .flat_map(|envelope| &envelope.allowed_destinations)
+        .filter(|destination| matches!(destination, DestinationIdentity::Model { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    if allowed_destinations.len() != 1 {
+        return Err(invalid_original_result());
+    }
+    let text = text.trim().to_string();
+    let expires_at_unix_ms = now_unix_ms.saturating_add(5 * 60 * 1_000);
+    let message_id = format!("runtime-interactive-home-{turn_id}");
+    let digest_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let mut message = ChatMessage::system_event(&message_id, &text);
+    message.data_envelope = Some(DataEnvelope {
+        schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+        envelope_id: format!("env-{message_id}"),
+        content: ContentRef::EphemeralObservation {
+            observation_id: format!("interactive-home-{turn_id}"),
+            size_bytes: text.len() as u64,
+            expires_at_unix_ms,
+        },
+        provenance: DataProvenance {
+            source_provider_id: "session-worker-runtime".into(),
+            source_tool_name: "interactive-user-home".into(),
+            source_object_id: Some(worker_incarnation.to_string()),
+            source_envelope_ids: Vec::new(),
+        },
+        digest_sha256,
+        sensitivity: Sensitivity::Sensitive,
+        allowed_destinations,
+        retention: RetentionBoundary {
+            expires_at_unix_ms: Some(expires_at_unix_ms),
+            delete_with_run: true,
+        },
+    });
+    message
+        .data_envelope
+        .as_ref()
+        .expect("home projection envelope")
+        .validate()
+        .map_err(|_| invalid_original_result())?;
+    Ok(Some(message))
+}
+
 fn original_action_anchor(
     session: &crate::session::PersistedAgentSession,
     action: &crate::session::ActionIdentity,
@@ -4927,6 +5020,7 @@ fn append_mutating_result(
         format: crate::seam::ToolOutputFormat::Text,
         content: message.text.clone(),
         image_data_url: message.image_data_url.clone(),
+        document_preview: None,
     };
     // Control outcomes are not native Provider results. Inherit the original
     // proposal's boundary without inventing a completion receipt or asking a

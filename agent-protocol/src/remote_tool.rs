@@ -19,6 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::document_conversion::{DocumentPreviewFrame, DocumentPreviewPageFrame};
 use crate::{AgentError, AgentOutcome, ReadonlyAgentEnvelope};
 
 /// Signaling WebSocket frame ceiling shared by AI Assistant RPCs.
@@ -74,6 +75,13 @@ pub struct RemoteToolOutput {
     pub outcome: AgentOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<RemoteToolImage>,
+    /// UI-only document preview, kept separate from model-ready visual input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_preview: Option<DocumentPreviewFrame>,
+    /// UI-only page response for explicit owner paging. This never enters a
+    /// ToolRunOutput or model-visible agent event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_preview_page: Option<DocumentPreviewPageFrame>,
 }
 
 /// A bounded, model-ready visual attachment produced at the edge.
@@ -248,6 +256,8 @@ mod tests {
                 height: 200,
                 decoded_bytes: 3,
             }),
+            document_preview: None,
+            document_preview_page: None,
         };
         let json = serde_json::to_string(&output).unwrap();
         let back: RemoteToolOutput = serde_json::from_str(&json).unwrap();

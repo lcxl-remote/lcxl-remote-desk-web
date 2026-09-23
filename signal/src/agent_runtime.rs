@@ -391,6 +391,8 @@ pub async fn resume_completion_turn(
         response_format: desk_diagnose_core::prompt::ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         max_steps_per_turn: config.max_steps_per_turn.min(AUTO_FOLLOW_UP_MAX_STEPS),
         max_same_tool_per_turn: config
             .max_same_tool_calls_per_turn

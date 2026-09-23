@@ -1355,7 +1355,27 @@ pub fn read_verified_bytes(
     file: &ObjectRef,
     max_bytes: u64,
 ) -> Result<VerifiedFileBytes, AgentError> {
-    if max_bytes == 0 || max_bytes > 16 * 1024 * 1024 || file.object_kind != ObjectKind::File {
+    read_verified_bytes_with_ceiling(file, max_bytes, 16 * 1024 * 1024)
+}
+
+/// Read a document selected through the ordinary opaque file-reference path.
+/// The larger ceiling is intentionally confined to in-process document
+/// conversion and does not relax the generic file-reading contract.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub fn read_verified_document_bytes(
+    file: &ObjectRef,
+    max_bytes: u64,
+) -> Result<VerifiedFileBytes, AgentError> {
+    read_verified_bytes_with_ceiling(file, max_bytes, 32 * 1024 * 1024)
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn read_verified_bytes_with_ceiling(
+    file: &ObjectRef,
+    max_bytes: u64,
+    allowed_ceiling: u64,
+) -> Result<VerifiedFileBytes, AgentError> {
+    if max_bytes == 0 || max_bytes > allowed_ceiling || file.object_kind != ObjectKind::File {
         return Err(error(
             AgentErrorKind::InvalidInput,
             "selected file byte read exceeds its object or size ceiling",
@@ -1423,6 +1443,18 @@ pub fn read_verified_bytes(
     Err(error(
         AgentErrorKind::UnsupportedCapability,
         "handle-bound file reading is unavailable on this platform",
+        false,
+    ))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub fn read_verified_document_bytes(
+    _file: &ObjectRef,
+    _max_bytes: u64,
+) -> Result<VerifiedFileBytes, AgentError> {
+    Err(error(
+        AgentErrorKind::UnsupportedCapability,
+        "handle-bound document reading is unavailable on this platform",
         false,
     ))
 }
@@ -1804,6 +1836,16 @@ pub fn create_binary_artifact(
     file_name: &str,
     content_bytes: &[u8],
 ) -> Result<CreatedTextArtifact, AgentError> {
+    create_binary_artifact_with_limit(directory, file_name, content_bytes, 4 * 1024 * 1024)
+}
+
+#[cfg(target_os = "linux")]
+fn create_binary_artifact_with_limit(
+    directory: &ObjectRef,
+    file_name: &str,
+    content_bytes: &[u8],
+    max_bytes: usize,
+) -> Result<CreatedTextArtifact, AgentError> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -1830,10 +1872,10 @@ pub fn create_binary_artifact(
             false,
         ));
     }
-    if content_bytes.len() > 4 * 1024 * 1024 {
+    if content_bytes.len() > max_bytes {
         return Err(error(
             AgentErrorKind::OutputLimitExceeded,
-            "artifact content exceeds the 4 MiB binary artifact ceiling",
+            format!("artifact content exceeds the {max_bytes} byte ceiling"),
             false,
         ));
     }

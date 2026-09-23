@@ -12,6 +12,8 @@ pub fn supports(name: &str) -> bool {
             | "inspect_excel_cell"
             | "inspect_spreadsheets"
             | "preview_spreadsheet_merge"
+            | "preview_document"
+            | "convert_document"
     )
 }
 

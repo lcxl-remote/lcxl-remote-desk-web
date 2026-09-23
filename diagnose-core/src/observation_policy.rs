@@ -26,6 +26,7 @@ pub fn require_device_observation(capability: Capability) -> Result<(), AgentErr
         | Capability::SpreadsheetLiveInspect
         | Capability::DocumentLiveInspect
         | Capability::PresentationLiveInspect => Ok(()),
+        Capability::DocumentPreview => Ok(()),
         // These capabilities are unsupported here or use a dedicated path,
         // even when their operation is itself read-only.
         Capability::ContainerInspect
@@ -57,7 +58,8 @@ pub fn require_device_observation(capability: Capability) -> Result<(), AgentErr
         | Capability::BrowserExternalDraftWriteConfirmed
         | Capability::BrowserExternalSendConfirmed
         | Capability::FileDeleteConfirmed
-        | Capability::ApplicationLaunchConfirmed => Err(AgentError {
+        | Capability::ApplicationLaunchConfirmed
+        | Capability::DocumentConvertConfirmed => Err(AgentError {
             kind: AgentErrorKind::UnsupportedCapability,
             message: "AI Assistant may only invoke selected read-only observations".into(),
             retryable: false,

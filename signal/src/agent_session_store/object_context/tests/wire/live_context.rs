@@ -143,6 +143,7 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
                 expires_at: (now + Duration::seconds(60)).to_rfc3339(),
                 server_api_version: desk_server_version::SERVER_API_VERSION,
                 os: "macos".into(),
+                interactive_user_home: None,
                 interactive_session_incarnation: "live-worker".into(),
                 local_ceiling_revision: 1,
                 capabilities: [

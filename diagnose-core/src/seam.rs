@@ -168,6 +168,13 @@ pub trait TurnSink {
         let _ = evidence;
     }
 
+    fn on_document_preview(
+        &mut self,
+        preview: &desk_agent_protocol::document_conversion::DocumentPreviewFrame,
+    ) {
+        let _ = preview;
+    }
+
     /// The planning turn durably created a permission request and paused before
     /// any requested tool dispatch. The UI fetches full details from session
     /// state and performs a separate trusted decision action.
@@ -405,6 +412,9 @@ pub struct ToolRunOutput {
     pub format: ToolOutputFormat,
     pub content: String,
     pub image_data_url: Option<String>,
+    /// Live owner-UI document preview. The loop removes it before constructing
+    /// durable/model-visible history.
+    pub document_preview: Option<desk_agent_protocol::document_conversion::DocumentPreviewFrame>,
 }
 
 /// The producer declares the format; JSON-looking text is still text.

@@ -550,7 +550,11 @@ fn validate_read_selector(
     let metadata = source.name == "inspect_files";
     let direct_file = matches!(
         source.name.as_str(),
-        "create_text_file" | "create_local_message_draft" | "read_text_file" | UPDATE_TEXT_TOOL
+        "create_text_file"
+            | "create_local_message_draft"
+            | "read_text_file"
+            | UPDATE_TEXT_TOOL
+            | "convert_document"
     );
     if direct_file && has_entry {
         let example = serde_json::json!({"file_result_call_id":id});
@@ -707,6 +711,113 @@ pub(super) fn batch_source_file(
     Ok(read_evidence(session, &selectors[0], now)?
         .reference
         .clone())
+}
+
+#[derive(Clone)]
+pub struct DocumentSourceEvidence {
+    pub reference: ObjectRef,
+    pub sha256: Option<String>,
+}
+
+/// Resolve one local-only conversion source from authoritative same-conversation
+/// evidence. This does not authorize model egress and never accepts a path or
+/// opaque reference from model arguments.
+pub fn document_source_evidence(
+    session: &crate::session::PersistedAgentSession,
+    call: &ToolCall,
+    now: u64,
+) -> Result<DocumentSourceEvidence, AgentError> {
+    let selectors = selection::selectors(call)?;
+    if selectors.len() != 1 {
+        return Err(unavailable());
+    }
+    let selector = &selectors[0];
+    validate_read_selector(session, selector)?;
+    let id = read_result_id(selector)?.ok_or_else(unavailable)?;
+    let mut source_calls = session
+        .conversation
+        .iter()
+        .filter(|message| message.role == crate::chat::ChatRole::Assistant)
+        .flat_map(|message| &message.tool_calls)
+        .filter(|candidate| candidate.id == id);
+    let source_call = source_calls.next().ok_or_else(unavailable)?;
+    if source_calls.next().is_some() {
+        return Err(unavailable());
+    }
+    if source_call.name != "convert_document" {
+        let evidence = read_evidence(session, selector, now)?;
+        return Ok(DocumentSourceEvidence {
+            reference: evidence.reference,
+            sha256: (!evidence.sha256.is_empty()).then_some(evidence.sha256),
+        });
+    }
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    let descriptor = registry
+        .capability_for_tool("convert_document")
+        .ok_or_else(unavailable)?;
+    let provider = registry
+        .provider_for_capability(&descriptor.wire.capability_id)
+        .ok_or_else(unavailable)?;
+    let mut selected = None;
+    for message in &session.conversation {
+        if !matches!(
+            message.role,
+            crate::chat::ChatRole::Tool | crate::chat::ChatRole::UntrustedOutput
+        ) || message.tool_call_id.as_deref() != Some(&id)
+        {
+            continue;
+        }
+        let Some(envelope) = &message.trusted_tool_result().data_envelope else {
+            continue;
+        };
+        if envelope.validate().is_err()
+            || crate::model_egress::envelope_expires_by(envelope, now)
+            || envelope.provenance.source_tool_name != "convert_document"
+            || envelope.provenance.source_provider_id != provider.wire.provider_id
+            || envelope.digest_sha256
+                != format!(
+                    "{:x}",
+                    Sha256::digest(message.trusted_tool_result().text.as_bytes())
+                )
+        {
+            continue;
+        }
+        let Ok(completed) = serde_json::from_str::<
+            desk_agent_protocol::computer_use::ComputerActionCompleted,
+        >(&message.trusted_tool_result().text) else {
+            continue;
+        };
+        if completed.result
+            != desk_agent_protocol::computer_use::ComputerActionResultClass::Verified
+        {
+            continue;
+        }
+        let Some(desk_agent_protocol::computer_use::ComputerActionOutput::DocumentArtifact(output)) =
+            completed.output
+        else {
+            continue;
+        };
+        output.artifact.validate().map_err(|_| unavailable())?;
+        if output.artifact.size_bytes
+            > desk_agent_protocol::document_conversion::MAX_DOCUMENT_OUTPUT_BYTES
+        {
+            return Err(unavailable());
+        }
+        let evidence = DocumentSourceEvidence {
+            reference: output.artifact.file,
+            sha256: Some(output.artifact.digest_sha256),
+        };
+        if selected
+            .as_ref()
+            .is_some_and(|prior: &DocumentSourceEvidence| {
+                prior.reference != evidence.reference || prior.sha256 != evidence.sha256
+            })
+        {
+            return Err(unavailable());
+        }
+        selected = Some(evidence);
+    }
+    selected.ok_or_else(unavailable)
 }
 
 pub(super) fn batch_source_files(
@@ -895,6 +1006,9 @@ impl ResultFileRead {
                     params.files = self.files();
                     params.max_bytes = params.max_bytes.min(32 * 1024);
                 }
+                ContextKind::DocumentPreview(params) => {
+                    params.file = self.file.clone();
+                }
                 ContextKind::SpreadsheetBatchInspect(params) => {
                     params.file = Some(self.file.clone());
                     params.max_bytes = params.max_bytes.min(32 * 1024);
@@ -952,6 +1066,13 @@ impl ResultFileRead {
                 }
                 ("preview_spreadsheet_merge", SpreadsheetMergePreview(result))
                     if result.input_digests_sha256.len() <= self.files().len() =>
+                {
+                    return Ok(());
+                }
+                ("preview_document", DocumentPreview(result))
+                    if result.source_digest_sha256.len() == 64
+                        && result.page_count > 0
+                        && !result.preview_id.is_empty() =>
                 {
                     return Ok(());
                 }
@@ -2003,6 +2124,7 @@ mod tests {
             format: crate::seam::ToolOutputFormat::Text,
             content: "New device completion metadata".into(),
             image_data_url: None,
+            document_preview: None,
         };
         let receipt = origin.receipt(action.clone(), 1, 3000, &output).unwrap();
         receipt

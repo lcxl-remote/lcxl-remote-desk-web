@@ -175,6 +175,7 @@ impl ToolSeam for GatedTools {
             format: crate::seam::ToolOutputFormat::Text,
             content: self.read_reply.clone(),
             image_data_url: None,
+            document_preview: None,
         })
     }
     async fn confirm_and_exec(
@@ -300,6 +301,8 @@ fn deps<'a>(
 ) -> LoopDeps<'a> {
     LoopDeps {
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         session_seam: sess,
         model,
         tools,
@@ -606,6 +609,7 @@ impl ToolSeam for ScriptedReadTools {
             format: crate::seam::ToolOutputFormat::Text,
             content,
             image_data_url: None,
+            document_preview: None,
         })
     }
 }
@@ -702,6 +706,8 @@ async fn stage2_dynamic_readonly_rehearsal_has_no_fixed_workflow_or_mutation_pat
     let clock = || "2026-08-26T00:00:00Z".to_string();
     let deps = LoopDeps {
         response_locale: None,
+        interactive_user_home: None,
+        interactive_user_home_incarnation: None,
         session_seam: &sess,
         model: &model,
         tools: &tools,

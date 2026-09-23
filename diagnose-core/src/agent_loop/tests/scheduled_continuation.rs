@@ -461,6 +461,7 @@ impl ToolSeam for ExpiringTools<'_> {
             format: crate::seam::ToolOutputFormat::Text,
             content: "first result".into(),
             image_data_url: None,
+            document_preview: None,
         })
     }
 }

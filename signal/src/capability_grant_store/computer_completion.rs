@@ -201,6 +201,7 @@ fn decode(
             format: desk_diagnose_core::seam::ToolOutputFormat::Json,
             content: terminal.projection.content.clone(),
             image_data_url: None,
+            document_preview: None,
         };
         terminal
             .receipt
@@ -237,6 +238,7 @@ pub(super) fn terminal_result(
             format: desk_diagnose_core::seam::ToolOutputFormat::Json,
             content: terminal.projection.content,
             image_data_url: None,
+            document_preview: None,
         },
         receipt: terminal.receipt,
         outcome: terminal.projection.outcome,
@@ -437,6 +439,7 @@ impl SignalCapabilityGrantStore {
                         format: desk_diagnose_core::seam::ToolOutputFormat::Json,
                         content: projection.content.clone(),
                         image_data_url: None,
+                        document_preview: None,
                     },
                 )
                 .map_err(|_| invalid())?;

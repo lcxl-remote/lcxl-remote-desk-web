@@ -35,6 +35,7 @@ impl ToolSeam for GrantTools {
                 format: crate::seam::ToolOutputFormat::Text,
                 content: "launch accepted by test seam".into(),
                 image_data_url: None,
+                document_preview: None,
             },
             event_id: None,
         })
@@ -46,6 +47,7 @@ impl ToolSeam for GrantTools {
             format: crate::seam::ToolOutputFormat::Text,
             content: "immutable observation".into(),
             image_data_url: None,
+            document_preview: None,
         })
     }
 }

@@ -118,6 +118,62 @@ pub(crate) fn create_binary_artifact(
     super::create_binary_artifact(directory, name, bytes).map_err(Failure::from)
 }
 
+pub(crate) fn create_document_artifact(
+    directory: &ObjectRef,
+    name: &str,
+    bytes: &[u8],
+) -> Result<CreatedTextArtifact, Failure> {
+    if bytes.len() > 32 * 1024 * 1024 {
+        return Err(error(
+            AgentErrorKind::OutputLimitExceeded,
+            "converted document exceeds the 32 MiB output ceiling",
+            false,
+        )
+        .into());
+    }
+    #[cfg(windows)]
+    {
+        super::windows_publish::publish_document(directory, name, bytes).map_err(|failure| {
+            match failure {
+                super::windows_publish::PublishFailure::NotCreated(error) => error.into(),
+                super::windows_publish::PublishFailure::OutcomeUnknown(error) => {
+                    Failure::unknown(error.message)
+                }
+            }
+        })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut published = false;
+        super::macos_publish::publish_with_limit(
+            directory,
+            name,
+            bytes,
+            32 * 1024 * 1024,
+            &mut published,
+        )
+        .map_err(|error| {
+            if published {
+                Failure::unknown(error.message)
+            } else {
+                error.into()
+            }
+        })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        super::create_binary_artifact_with_limit(directory, name, bytes, 32 * 1024 * 1024)
+            .map_err(Failure::from)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (directory, name, bytes);
+        Err(Failure::from(
+            "document publication is unavailable on this platform".to_string(),
+        ))
+    }
+}
+
 pub(crate) fn create_text_artifact(
     directory: &ObjectRef,
     name: &str,

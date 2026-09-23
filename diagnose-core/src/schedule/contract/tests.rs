@@ -1214,6 +1214,7 @@ fn rehearsal_graph_requires_each_original_read_even_when_it_has_known_parents() 
         format: crate::seam::ToolOutputFormat::Text,
         content: "system report".into(),
         image_data_url: None,
+        document_preview: None,
     };
     let mut label = read_result_envelope(
         &crate::ai_assistant::ai_assistant_provider_registry(),
@@ -1442,6 +1443,7 @@ fn compressed_answer_preserves_original_read_scope() {
         format: crate::seam::ToolOutputFormat::Text,
         content: "r".repeat(1000),
         image_data_url: None,
+        document_preview: None,
     };
     let label = read_result_envelope(
         &crate::ai_assistant::ai_assistant_provider_registry(),
@@ -1746,6 +1748,53 @@ fn publication_catalog_rechecks_current_identity_capability_and_limits() {
         checked.validate_current_catalog(&restricted, surface, &allowed),
         Err(TaskCatalogError::Unavailable)
     );
+}
+
+#[test]
+fn publication_catalog_rejects_interactive_document_tools() {
+    use desk_agent_protocol::capability_provider::ProductSurface;
+
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    for tool_name in ["preview_document", "convert_document"] {
+        let capability = registry.capability_for_tool(tool_name).unwrap();
+        let provider = registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .unwrap();
+        let mut input = contract();
+        let rule = &mut input.permissions[0];
+        rule.provider_id = provider.wire.provider_id.clone();
+        rule.capability_id = capability.wire.capability_id.clone();
+        rule.tool_name = capability.wire.tool_name.clone();
+        rule.tool_schema_version = capability.wire.input_schema_version;
+        rule.effect = capability.wire.effect;
+        rule.risk_tier = crate::capability_risk::classify_provider_descriptor_floor(
+            rule.effect,
+            &capability.wire.data_policy,
+        );
+        rule.automatic.limits.max_items_per_call = 1;
+        rule.approval_ceiling.limits.max_items_per_call = 1;
+        if rule.effect.is_side_effecting() {
+            rule.input = TaskInputConstraint::Exact {
+                canonical_json: "{}".into(),
+            };
+            input.steps.push(TaskFixedStep {
+                step_id: "document-conversion".into(),
+                rule_id: rule.rule_id.clone(),
+                depends_on: vec![],
+                binding: TaskStepBinding::Exact,
+            });
+        }
+        let checked = validate_contract(&input).unwrap();
+        assert_eq!(
+            checked.validate_current_catalog(
+                &registry,
+                ProductSurface::ManagerPersonalOwner,
+                &[capability.required_capability],
+            ),
+            Err(TaskCatalogError::Unavailable),
+            "{tool_name} must remain unavailable to scheduled publication"
+        );
+    }
 }
 
 #[test]

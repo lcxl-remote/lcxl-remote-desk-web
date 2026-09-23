@@ -350,6 +350,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::UpdateAiAssistantObjectContext
         | SignalingType::AiAssistantContextUpdated
         | SignalingType::AiAssistantObjectContextUpdated
+        | SignalingType::RequestDocumentPreviewPage
+        | SignalingType::DocumentPreviewPageUpdated
         | SignalingType::UpdateAiAssistantSettings
         | SignalingType::SelectAiAssistantSession
         | SignalingType::AiAssistantSessionSelected => RouteOwnership::Daemon,
@@ -1334,7 +1336,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::UpdateAiAssistantContext
         | SignalingType::UpdateAiAssistantObjectContext
         | SignalingType::AiAssistantContextUpdated
-        | SignalingType::AiAssistantObjectContextUpdated => {
+        | SignalingType::AiAssistantObjectContextUpdated
+        | SignalingType::RequestDocumentPreviewPage
+        | SignalingType::DocumentPreviewPageUpdated => {
             log::warn!("[router] dropped central-only AI Assistant frame at edge");
             Ok(())
         }

@@ -186,6 +186,7 @@ impl SignalCapabilityGrantStore {
                 format: crate::agent_exec_store::output_format(&task),
                 content: task.result_text.clone().ok_or_else(invalid)?,
                 image_data_url: None,
+                document_preview: None,
             };
             receipt
                 .validate_for(

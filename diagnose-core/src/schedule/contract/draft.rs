@@ -15,6 +15,9 @@ pub fn observed_rule(
     message: Option<ObservedMessage<'_>>,
     registry: &ProviderRegistry,
 ) -> Result<(), TaskContractError> {
+    if crate::ai_assistant::is_interactive_only_tool(&observed.tool_name) {
+        return Err(TaskContractError::InvalidIdentity);
+    }
     let descriptor = registry
         .capability_for_tool(&observed.tool_name)
         .ok_or(TaskContractError::InvalidIdentity)?;
@@ -146,11 +149,10 @@ pub fn observed_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn repeated_reads_keep_observed_scope_and_reject_a_different_scope() {
-        let registry = crate::ai_assistant::ai_assistant_provider_registry();
-        let descriptor = registry.capability_for_tool("read_system_info").unwrap();
-        let observed = ObservedCapabilityAuthority {
+
+    fn observed(tool_name: &str, registry: &ProviderRegistry) -> ObservedCapabilityAuthority {
+        let descriptor = registry.capability_for_tool(tool_name).unwrap();
+        ObservedCapabilityAuthority {
             target_session_id: None,
             envelope_ids: vec![],
             content_digests_sha256: vec![],
@@ -161,7 +163,7 @@ mod tests {
                 .provider_id
                 .clone(),
             capability_id: descriptor.wire.capability_id.clone(),
-            tool_name: "read_system_info".into(),
+            tool_name: tool_name.into(),
             tool_schema_version: descriptor.wire.input_schema_version,
             effect: descriptor.wire.effect,
             risk_tier: crate::capability_risk::classify_provider_descriptor_floor(
@@ -172,8 +174,11 @@ mod tests {
             resources: vec!["device:1".into()],
             operations: vec!["read".into()],
             export_destinations: vec![],
-        };
-        let mut contract = TaskContract {
+        }
+    }
+
+    fn empty_contract() -> TaskContract {
+        TaskContract {
             schema_version: 1,
             schedule_id: "task".into(),
             task_revision: 1,
@@ -184,7 +189,34 @@ mod tests {
             steps: vec![],
             exception_mode: TaskExceptionMode::Deny,
             budget: crate::schedule::TASK_PUBLICATION_BUDGET,
-        };
+        }
+    }
+
+    #[test]
+    fn interactive_document_tools_cannot_enter_a_schedule_contract() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        for tool_name in ["preview_document", "convert_document"] {
+            let mut contract = empty_contract();
+            assert_eq!(
+                observed_rule(
+                    &mut contract,
+                    &observed(tool_name, &registry),
+                    Some("{}"),
+                    None,
+                    &registry,
+                ),
+                Err(TaskContractError::InvalidIdentity)
+            );
+            assert!(contract.permissions.is_empty());
+            assert!(contract.steps.is_empty());
+        }
+    }
+
+    #[test]
+    fn repeated_reads_keep_observed_scope_and_reject_a_different_scope() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let observed = observed("read_system_info", &registry);
+        let mut contract = empty_contract();
         observed_rule(&mut contract, &observed, None, None, &registry).unwrap();
         observed_rule(&mut contract, &observed, None, None, &registry).unwrap();
         assert_eq!(contract.permissions.len(), 1);

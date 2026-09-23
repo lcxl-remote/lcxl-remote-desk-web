@@ -262,6 +262,7 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                 expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
                 server_api_version: 1,
                 os: if live { "macos" } else { "fixture" }.into(),
+                interactive_user_home: None,
                 interactive_session_incarnation: "worker".into(),
                 local_ceiling_revision: 1,
                 capabilities: vec![ComputerUseCapabilityReadiness {
@@ -1022,6 +1023,8 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                 )
             })),
             image: None,
+            document_preview: None,
+            document_preview_page: None,
         };
         if change == Some("live_after") {
             let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();

@@ -4,6 +4,7 @@ use super::*;
 use desk_agent_protocol::{
     communication::LocalDraftDocument,
     computer_use::{FilePatchAction, WordReportWebSource},
+    document_conversion::{DocumentConversionOptions, DocumentConvertAction},
 };
 
 pub const TEXT_ARTIFACT_MEDIA_TYPE: &str = "text/plain;charset=utf-8";
@@ -62,6 +63,13 @@ struct WordArgs {
 struct LocalDraftArgs {
     file_name: String,
     draft: LocalDraftDocument,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocumentConvertArgs {
+    output_name: String,
+    conversion: DocumentConversionOptions,
 }
 
 fn safe_leaf(value: &str, suffix: Option<&str>) -> bool {
@@ -216,7 +224,7 @@ pub fn without_directory_selector(call: &ToolCall) -> Result<ToolCall, AgentErro
 
 pub struct ArtifactCallPreflight {
     target: ObjectRef,
-    action: FilePatchAction,
+    action: ComputerActionKind,
     capability: CapabilityDescriptor,
     provider_id: String,
     surface: ProductSurface,
@@ -237,7 +245,76 @@ impl ArtifactCallPreflight {
                 | "create_formula_workbook"
                 | "create_word_report"
                 | "create_local_message_draft"
+                | "convert_document"
         )
+    }
+
+    pub fn from_session(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        session: &crate::session::PersistedAgentSession,
+        call: &ToolCall,
+        now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
+        let destination = crate::file_scope::select_output_directory(session, call, now_unix_ms)
+            .map_err(|_| unavailable())?;
+        if call.name == "convert_document" {
+            let source = crate::provider_preflight::text_file::document_source_evidence(
+                session,
+                call,
+                now_unix_ms,
+            )?;
+            Self::build_document(
+                registry,
+                surface,
+                call,
+                &source.reference,
+                source.sha256,
+                &destination,
+                now_unix_ms,
+            )
+        } else {
+            Self::build(
+                registry,
+                surface,
+                call,
+                std::slice::from_ref(&destination),
+                now_unix_ms,
+            )
+        }
+    }
+
+    /// Check a frozen document-conversion plan against the original model call.
+    /// This only detects persisted-plan drift. Dispatch must still re-resolve the
+    /// source receipt and destination directory from authoritative session state.
+    pub fn frozen_document_resources(
+        call: &ToolCall,
+        target: &ObjectRef,
+        action: &ComputerActionKind,
+    ) -> Result<Vec<String>, AgentError> {
+        if call.name != "convert_document" {
+            return Err(unavailable());
+        }
+        let ComputerActionKind::DocumentConversion(document) = action else {
+            return Err(unavailable());
+        };
+        let action_call = crate::provider_preflight::text_file::selection::without_selectors(call)?;
+        let action_call = without_directory_selector(&action_call)?;
+        let args: DocumentConvertArgs =
+            serde_json::from_str(&action_call.arguments_json).map_err(|_| unavailable())?;
+        if target != &document.destination_parent
+            || document.source.object_kind != ObjectKind::File
+            || document.destination_parent.object_kind != ObjectKind::Directory
+            || args.output_name != document.output_name
+            || args.conversion != document.conversion
+            || document.validate().is_err()
+        {
+            return Err(unavailable());
+        }
+        Ok(fresh_object_resource_scope(&[
+            document.source.clone(),
+            document.destination_parent.clone(),
+        ]))
     }
 
     pub fn build(
@@ -273,14 +350,10 @@ impl ArtifactCallPreflight {
         }
         let target = directories[0].clone();
         let expiry = u64::MAX;
-        let action = artifact_action_from_call(call)?;
-        let action = ComputerActionKind::File(action);
+        let action = ComputerActionKind::File(artifact_action_from_call(call)?);
         if action.required_capability() != capability.required_capability {
             return Err(unavailable());
         }
-        let ComputerActionKind::File(action) = action else {
-            unreachable!()
-        };
         let canonical_input_json = canonical_tool_permission_input_json(
             &call.name,
             serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,
@@ -310,10 +383,96 @@ impl ArtifactCallPreflight {
         })
     }
 
+    pub fn build_document(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        source: &ObjectRef,
+        expected_source_sha256: Option<String>,
+        destination: &ObjectRef,
+        now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
+        let capability = registry
+            .capability_for_tool(&call.name)
+            .ok_or_else(unavailable)?;
+        let provider = registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .ok_or_else(unavailable)?;
+        if call.name != "convert_document"
+            || !matches!(
+                surface,
+                ProductSurface::OssPersonalOwner | ProductSurface::ManagerPersonalOwner
+            )
+            || !capability.wire.surfaces.contains(&surface)
+            || capability.wire.authorization_hint.resources
+                != [AuthorizationResourceKind::FreshObjectReference]
+            || call.arguments_json.len() > capability.wire.limits.max_input_bytes as usize
+            || source.object_kind != ObjectKind::File
+            || destination.object_kind != ObjectKind::Directory
+            || now_unix_ms == 0
+        {
+            return Err(unavailable());
+        }
+        let action_call = crate::provider_preflight::text_file::selection::without_selectors(call)?;
+        let action_call = without_directory_selector(&action_call)?;
+        let args: DocumentConvertArgs =
+            serde_json::from_str(&action_call.arguments_json).map_err(|_| unavailable())?;
+        let action = ComputerActionKind::DocumentConversion(DocumentConvertAction {
+            source: source.clone(),
+            destination_parent: destination.clone(),
+            expected_source_sha256,
+            output_name: args.output_name,
+            conversion: args.conversion,
+        });
+        let ComputerActionKind::DocumentConversion(document) = &action else {
+            unreachable!()
+        };
+        document.validate().map_err(|_| unavailable())?;
+        if action.required_capability() != capability.required_capability {
+            return Err(unavailable());
+        }
+        let canonical_input_json = canonical_tool_permission_input_json(
+            &call.name,
+            serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,
+        )
+        .map_err(|_| unavailable())?;
+        let operation_scope = canonical_compiled_scope(
+            &capability.wire.authorization_hint.resources,
+            capability.wire.effect,
+        )
+        .ok_or_else(unavailable)?
+        .operations;
+        let valid_until_unix_ms = [source, destination]
+            .iter()
+            .filter_map(|reference| {
+                chrono::DateTime::parse_from_rfc3339(&reference.expires_at).ok()
+            })
+            .filter_map(|value| u64::try_from(value.timestamp_millis()).ok())
+            .min()
+            .filter(|expiry| *expiry > now_unix_ms)
+            .ok_or_else(unavailable)?;
+        Ok(Self {
+            target: destination.clone(),
+            action,
+            capability: capability.clone(),
+            provider_id: provider.wire.provider_id.clone(),
+            surface,
+            canonical_input_digest_sha256: format!(
+                "{:x}",
+                Sha256::digest(canonical_input_json.as_bytes())
+            ),
+            canonical_input_json,
+            resource_scope: fresh_object_resource_scope(&[source.clone(), destination.clone()]),
+            operation_scope,
+            risk_tier: classify_provider_call(capability, call)?,
+            valid_until_unix_ms,
+        })
+    }
+
     pub fn target(&self) -> &ObjectRef {
         &self.target
     }
-    pub fn action(&self) -> &FilePatchAction {
+    pub fn action(&self) -> &ComputerActionKind {
         &self.action
     }
     pub fn canonical_input_json(&self) -> &str {
@@ -330,14 +489,17 @@ impl ArtifactCallPreflight {
     }
     pub fn adapter_version(&self) -> &'static str {
         match &self.action {
-            FilePatchAction::CreateTextArtifact { .. }
-            | FilePatchAction::CreateLocalCommunicationDraftArtifact { .. } => {
-                crate::ai_assistant::FILE_ARTIFACT_ADAPTER_VERSION
-            }
-            FilePatchAction::CreateSpreadsheetArtifact { .. }
-            | FilePatchAction::CreateSpreadsheetFormulaArtifact { .. }
-            | FilePatchAction::CreateWordReportArtifact { .. } => {
-                crate::ai_assistant::SPREADSHEET_FILE_ADAPTER_VERSION
+            ComputerActionKind::File(
+                FilePatchAction::CreateTextArtifact { .. }
+                | FilePatchAction::CreateLocalCommunicationDraftArtifact { .. },
+            ) => crate::ai_assistant::FILE_ARTIFACT_ADAPTER_VERSION,
+            ComputerActionKind::File(
+                FilePatchAction::CreateSpreadsheetArtifact { .. }
+                | FilePatchAction::CreateSpreadsheetFormulaArtifact { .. }
+                | FilePatchAction::CreateWordReportArtifact { .. },
+            ) => crate::ai_assistant::SPREADSHEET_FILE_ADAPTER_VERSION,
+            ComputerActionKind::DocumentConversion(_) => {
+                crate::ai_assistant::DOCUMENT_CONVERSION_ADAPTER_VERSION
             }
             _ => unreachable!("artifact preflight only constructs create-new actions"),
         }

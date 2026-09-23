@@ -7,6 +7,22 @@ pub(super) fn publish(
     content_bytes: &[u8],
     published: &mut bool,
 ) -> Result<CreatedTextArtifact, AgentError> {
+    publish_with_limit(
+        directory,
+        file_name,
+        content_bytes,
+        4 * 1024 * 1024,
+        published,
+    )
+}
+
+pub(super) fn publish_with_limit(
+    directory: &ObjectRef,
+    file_name: &str,
+    content_bytes: &[u8],
+    max_bytes: usize,
+    published: &mut bool,
+) -> Result<CreatedTextArtifact, AgentError> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -17,10 +33,10 @@ pub(super) fn publish(
             false,
         ));
     }
-    if content_bytes.len() > 4 * 1024 * 1024 {
+    if content_bytes.len() > max_bytes {
         return Err(error(
             AgentErrorKind::OutputLimitExceeded,
-            "artifact content exceeds the 4 MiB binary artifact ceiling",
+            format!("artifact content exceeds the {max_bytes} byte ceiling"),
             false,
         ));
     }
