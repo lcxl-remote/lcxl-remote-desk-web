@@ -46,6 +46,9 @@ pub(crate) mod text_mutation;
 #[cfg(any(windows, target_os = "macos"))]
 #[path = "file_reference_store/text_recovery_context.rs"]
 mod text_recovery_context;
+#[cfg(any(windows, target_os = "macos"))]
+#[path = "file_reference_store/text_replace.rs"]
+mod text_replace;
 
 #[cfg(windows)]
 pub mod windows_batch;

@@ -128,17 +128,7 @@ pub(crate) fn execute(
             ..
         } => {
             let text = std::str::from_utf8(source.content()).map_err(|_| conflict())?;
-            if before.is_empty()
-                || text
-                    .char_indices()
-                    .filter(|(offset, _)| text[*offset..].starts_with(before))
-                    .take(2)
-                    .count()
-                    != 1
-            {
-                return Err(conflict());
-            }
-            Some(text.replacen(before, after, 1).into_bytes())
+            Some(super::text_replace::replace_once(text, before, after)?)
         }
         FilePatchAction::DeleteText { .. } => None,
         _ => return Err(conflict()),
