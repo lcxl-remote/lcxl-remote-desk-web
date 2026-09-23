@@ -329,6 +329,7 @@ fn validate_source_kind(
             lower.ends_with(".md") || lower.ends_with(".markdown")
         }
         DocumentConversionKind::TextToPdf => lower.ends_with(".txt"),
+        DocumentConversionKind::TypstToPdf => lower.ends_with(".typ"),
     };
     valid.then_some(()).ok_or_else(|| {
         error(
@@ -345,6 +346,7 @@ fn map_options(options: &DocumentConversionOptions) -> engine::ConvertOptions {
             DocumentConversionKind::PdfToText => engine::ConversionKind::PdfToText,
             DocumentConversionKind::MarkdownToPdf => engine::ConversionKind::MarkdownToPdf,
             DocumentConversionKind::TextToPdf => engine::ConversionKind::TextToPdf,
+            DocumentConversionKind::TypstToPdf => engine::ConversionKind::TypstToPdf,
         },
         pages: options
             .pages
@@ -433,6 +435,18 @@ fn error(kind: AgentErrorKind, message: impl Into<String>) -> AgentError {
 mod tests {
     use super::*;
     use desk_agent_protocol::document_conversion::DOCUMENT_PREVIEW_SPEC_VERSION;
+
+    #[test]
+    fn typst_source_requires_typ_extension() {
+        assert!(
+            validate_source_kind("report.TYP", b"Hello", DocumentConversionKind::TypstToPdf)
+                .is_ok()
+        );
+        assert!(
+            validate_source_kind("report.txt", b"Hello", DocumentConversionKind::TypstToPdf)
+                .is_err()
+        );
+    }
 
     fn params(preview_id: &str, conversation_id: &str) -> DocumentPreviewPageParams {
         DocumentPreviewPageParams {

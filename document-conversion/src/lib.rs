@@ -21,6 +21,7 @@ pub const MAX_GENERATED_PAGES: usize = 500;
 pub const MAX_PREVIEW_BYTES: usize = 400_000;
 
 pub const TEMPLATE_VERSION: &str = "standard/v1";
+pub const DIRECT_TYPST_TEMPLATE_VERSION: &str = "source/v1";
 pub const ENGINE_VERSION: &str = "typst/0.14.2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +30,7 @@ pub enum SourceFormat {
     Pdf,
     Markdown,
     Text,
+    Typst,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +40,7 @@ pub enum ConversionKind {
     PdfToText,
     MarkdownToPdf,
     TextToPdf,
+    TypstToPdf,
 }
 
 impl ConversionKind {
@@ -46,6 +49,7 @@ impl ConversionKind {
             Self::PdfToMarkdown | Self::PdfToText => SourceFormat::Pdf,
             Self::MarkdownToPdf => SourceFormat::Markdown,
             Self::TextToPdf => SourceFormat::Text,
+            Self::TypstToPdf => SourceFormat::Typst,
         }
     }
 
@@ -53,7 +57,7 @@ impl ConversionKind {
         match self {
             Self::PdfToMarkdown => "text/markdown;charset=utf-8",
             Self::PdfToText => "text/plain;charset=utf-8",
-            Self::MarkdownToPdf | Self::TextToPdf => "application/pdf",
+            Self::MarkdownToPdf | Self::TextToPdf | Self::TypstToPdf => "application/pdf",
         }
     }
 }
@@ -181,7 +185,7 @@ pub fn convert(
         ConversionKind::PdfToMarkdown | ConversionKind::PdfToText => {
             pdf_extract::convert(source, options)
         }
-        ConversionKind::MarkdownToPdf | ConversionKind::TextToPdf => {
+        ConversionKind::MarkdownToPdf | ConversionKind::TextToPdf | ConversionKind::TypstToPdf => {
             if !options.pages.is_empty() || options.page_markers.is_some() {
                 return Err(ConversionError::new(
                     "invalid_conversion_options",
@@ -205,7 +209,12 @@ pub fn convert(
                 media_type: options.kind.media_type(),
                 details: ConversionDetails::PdfGeneration {
                     output_pages: page_count,
-                    template_version: TEMPLATE_VERSION.into(),
+                    template_version: if options.kind == ConversionKind::TypstToPdf {
+                        DIRECT_TYPST_TEMPLATE_VERSION
+                    } else {
+                        TEMPLATE_VERSION
+                    }
+                    .into(),
                     font_set_sha256,
                     engine: ENGINE_VERSION.into(),
                 },
@@ -239,7 +248,7 @@ pub fn preview(source: &[u8], format: SourceFormat) -> Result<PreviewDocument, C
 fn validate_source_size(source: &[u8], format: SourceFormat) -> Result<(), ConversionError> {
     let limit = match format {
         SourceFormat::Pdf => MAX_SOURCE_BYTES,
-        SourceFormat::Markdown | SourceFormat::Text => MAX_TEXT_SOURCE_BYTES,
+        SourceFormat::Markdown | SourceFormat::Text | SourceFormat::Typst => MAX_TEXT_SOURCE_BYTES,
     };
     if source.len() > limit {
         return Err(ConversionError::new(
@@ -257,7 +266,7 @@ fn decode_utf8(source: &[u8]) -> Result<&str, ConversionError> {
     std::str::from_utf8(source).map_err(|_| {
         ConversionError::new(
             "invalid_source_encoding",
-            "Markdown and TXT sources must be valid UTF-8",
+            "Markdown, TXT, and Typst sources must be valid UTF-8",
         )
     })
 }
@@ -298,5 +307,49 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "invalid_conversion_options");
+    }
+
+    #[test]
+    fn converts_typst_source_without_applying_markdown_template() {
+        let output = convert(
+            b"#set page(width: 40pt, height: 40pt, margin: 0pt)\nHello",
+            &ConvertOptions {
+                kind: ConversionKind::TypstToPdf,
+                pages: Vec::new(),
+                page_markers: None,
+            },
+        )
+        .unwrap();
+        assert!(output.bytes.starts_with(b"%PDF-"));
+        assert_eq!(output.media_type, "application/pdf");
+        assert!(matches!(
+            output.details,
+            ConversionDetails::PdfGeneration { ref template_version, .. }
+                if template_version == DIRECT_TYPST_TEMPLATE_VERSION
+        ));
+    }
+
+    #[test]
+    fn typst_conversion_rejects_external_files_and_pdf_extraction_options() {
+        let options = ConvertOptions {
+            kind: ConversionKind::TypstToPdf,
+            pages: Vec::new(),
+            page_markers: None,
+        };
+        let missing_file = convert(b"#include \"secret.typ\"", &options).unwrap_err();
+        assert_eq!(missing_file.code, "document_compile_failed");
+        let unavailable_package =
+            convert(b"#import \"@preview/example:1.0.0\"", &options).unwrap_err();
+        assert_eq!(unavailable_package.code, "document_compile_failed");
+
+        let invalid_options = convert(
+            b"Hello",
+            &ConvertOptions {
+                pages: vec![PageRange { start: 1, end: 1 }],
+                ..options
+            },
+        )
+        .unwrap_err();
+        assert_eq!(invalid_options.code, "invalid_conversion_options");
     }
 }

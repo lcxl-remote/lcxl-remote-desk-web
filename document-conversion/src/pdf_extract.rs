@@ -90,7 +90,9 @@ pub(crate) fn convert(
         let rendered = match options.kind {
             ConversionKind::PdfToMarkdown => render::to_markdown(&one, &render_options),
             ConversionKind::PdfToText => render::to_text(&one, &render_options),
-            ConversionKind::MarkdownToPdf | ConversionKind::TextToPdf => unreachable!(),
+            ConversionKind::MarkdownToPdf
+            | ConversionKind::TextToPdf
+            | ConversionKind::TypstToPdf => unreachable!(),
         }
         .map_err(map_unpdf_error)?;
         rendered_pages.push((*page_number, rendered));

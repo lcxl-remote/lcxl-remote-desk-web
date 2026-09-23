@@ -21,6 +21,7 @@ pub enum DocumentSourceFormat {
     Pdf,
     Markdown,
     Text,
+    Typst,
 }
 
 #[derive(
@@ -32,6 +33,7 @@ pub enum DocumentConversionKind {
     PdfToText,
     MarkdownToPdf,
     TextToPdf,
+    TypstToPdf,
 }
 
 impl DocumentConversionKind {
@@ -40,6 +42,7 @@ impl DocumentConversionKind {
             Self::PdfToMarkdown | Self::PdfToText => DocumentSourceFormat::Pdf,
             Self::MarkdownToPdf => DocumentSourceFormat::Markdown,
             Self::TextToPdf => DocumentSourceFormat::Text,
+            Self::TypstToPdf => DocumentSourceFormat::Typst,
         }
     }
 
@@ -47,7 +50,7 @@ impl DocumentConversionKind {
         match self {
             Self::PdfToMarkdown => ".md",
             Self::PdfToText => ".txt",
-            Self::MarkdownToPdf | Self::TextToPdf => ".pdf",
+            Self::MarkdownToPdf | Self::TextToPdf | Self::TypstToPdf => ".pdf",
         }
     }
 }
@@ -289,7 +292,9 @@ impl DocumentConvertAction {
                     return Err("HTML page markers are invalid for text output");
                 }
             }
-            DocumentConversionKind::MarkdownToPdf | DocumentConversionKind::TextToPdf => {
+            DocumentConversionKind::MarkdownToPdf
+            | DocumentConversionKind::TextToPdf
+            | DocumentConversionKind::TypstToPdf => {
                 if !self.conversion.pages.is_empty() || self.conversion.page_markers.is_some() {
                     return Err("PDF extraction options are invalid for PDF generation");
                 }
@@ -385,5 +390,33 @@ mod tests {
         invalid.page = 1;
         invalid.spec_version += 1;
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn typst_to_pdf_uses_exact_pdf_output_and_rejects_extraction_options() {
+        let mut action = DocumentConvertAction {
+            source: object_ref(ObjectKind::File),
+            destination_parent: object_ref(ObjectKind::Directory),
+            expected_source_sha256: None,
+            output_name: "report.pdf".into(),
+            conversion: DocumentConversionOptions {
+                kind: DocumentConversionKind::TypstToPdf,
+                pages: Vec::new(),
+                page_markers: None,
+            },
+        };
+        assert_eq!(action.validate(), Ok(()));
+        assert_eq!(
+            action.conversion.kind.source_format(),
+            DocumentSourceFormat::Typst
+        );
+        action.conversion.page_markers = Some(DocumentPageMarkerStyle::None);
+        assert_eq!(
+            action.validate(),
+            Err("PDF extraction options are invalid for PDF generation")
+        );
+        action.conversion.page_markers = None;
+        action.output_name = "report.typ".into();
+        assert!(action.validate().is_err());
     }
 }

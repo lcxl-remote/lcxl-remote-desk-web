@@ -1453,7 +1453,7 @@ fn convert_document_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "convert_document".into(),
-            description: "Convert exactly one verified local document in process and create one new output file in an owner-approved conversation directory. Supported conversions are PDF to Markdown/TXT and Markdown/TXT to PDF. Existing files are never overwritten. Typst preview is independent and is never required before conversion. PDF extraction is text-only and reports scanned or blank pages; narrow pages when needed.".into(),
+            description: "Convert exactly one verified local document in process and create one new output file in an owner-approved conversation directory. Supported conversions are PDF to Markdown/TXT and Markdown/TXT/Typst to PDF. Typst source must be a verified UTF-8 .typ file; imports and external files are unavailable. Existing files are never overwritten. Typst preview is independent and is never required before conversion. PDF extraction is text-only and reports scanned or blank pages; narrow pages when needed.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1464,7 +1464,7 @@ fn convert_document_tool() -> RegisteredTool {
                     "conversion": {
                         "type": "object",
                         "properties": {
-                            "kind": {"type":"string","enum":["pdf_to_markdown","pdf_to_text","markdown_to_pdf","text_to_pdf"]},
+                            "kind": {"type":"string","enum":["pdf_to_markdown","pdf_to_text","markdown_to_pdf","text_to_pdf","typst_to_pdf"]},
                             "pages": {"type":"array","maxItems":64,"items":{"type":"object","properties":{"start":{"type":"integer","minimum":1,"maximum":500},"end":{"type":"integer","minimum":1,"maximum":500}},"required":["start","end"],"additionalProperties":false}},
                             "page_markers": {"type":"string","enum":["none","html_comment","plain_text"]}
                         },

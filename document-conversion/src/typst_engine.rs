@@ -36,6 +36,10 @@ pub(crate) fn compile(
             typst: crate::markdown::text_to_typst(source)?,
             warnings: Vec::new(),
         },
+        SourceFormat::Typst => crate::markdown::RenderedMarkdown {
+            typst: source.into(),
+            warnings: Vec::new(),
+        },
         SourceFormat::Pdf => {
             return Err(ConversionError::new(
                 "unsupported_source_format",
@@ -43,7 +47,11 @@ pub(crate) fn compile(
             ));
         }
     };
-    let source = format!("{TEMPLATE}\n{}", rendered.typst);
+    let source = if format == SourceFormat::Typst {
+        rendered.typst
+    } else {
+        format!("{TEMPLATE}\n{}", rendered.typst)
+    };
     let world = MemoryWorld::new(source)?;
     let result = typst::compile::<PagedDocument>(&world);
     let document = result.output.map_err(|diagnostics| {
