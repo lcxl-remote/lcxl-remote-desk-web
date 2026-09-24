@@ -157,7 +157,7 @@ arboard = { version = "3.6", features = ["wayland-data-control"] }
 plist = "1.8"
 objc2 = { workspace = true, features = ["exception"] }
 block2 = "0.5"
-objc2-foundation = { workspace = true, features = ["NSGeometry"] }
+objc2-foundation = { workspace = true, features = ["NSGeometry", "NSString"] }
 foreign-types = "0.5"
 core-graphics = { workspace = true }
 core-foundation = "0.9"

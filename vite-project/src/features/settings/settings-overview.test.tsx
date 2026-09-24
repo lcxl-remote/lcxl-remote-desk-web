@@ -58,4 +58,21 @@ describe("SettingsOverview AI settings placement", () => {
         expect(aiModelLink(c)).toBeNull()
         expect(aiPolicyLink(c)).not.toBeNull()
     })
+
+    it("uses icons and concise descriptions on the newer overview cards", () => {
+        const c = renderFor("default")
+        const cards = [
+            ["web-search", "Choose the web search service for the AI Assistant."],
+            ["schedule-budget", "Set runtime budget limits for independent automatic tasks."],
+            ["goal-budget", "Set runtime budget limits for long-running goals."],
+            ["context-management", "Choose summary and trimming settings for long conversations."],
+        ]
+        for (const [path, description] of cards) {
+            const card = c.querySelector(`a[href="/system/${path}"]`)
+            expect(card?.querySelector("svg.text-primary")).not.toBeNull()
+            const summary = card?.querySelector(".text-muted-foreground")
+            expect(summary?.textContent).toBe(description)
+            expect(summary?.classList.contains("line-clamp-2")).toBe(true)
+        }
+    })
 })

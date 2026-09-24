@@ -2034,6 +2034,10 @@ export default {
   'pages.settings.category.general': 'General Settings',
   'pages.settings.category.signal': 'Signal Server Settings',
   'pages.settings.category.desk': 'Desk Server Settings',
+  'pages.settings.overview.webSearchDescription': 'Choose the web search service for the AI Assistant.',
+  'pages.settings.overview.scheduleBudgetDescription': 'Set runtime budget limits for independent automatic tasks.',
+  'pages.settings.overview.goalBudgetDescription': 'Set runtime budget limits for long-running goals.',
+  'pages.settings.overview.contextManagementDescription': 'Choose summary and trimming settings for long conversations.',
   'pages.settings.backToOverview': 'Back to Settings Overview',
 
   'pages.layout.serviceBanner.title': 'Unlock Full Remote Control',

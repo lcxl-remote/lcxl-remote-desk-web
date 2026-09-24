@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo";
 import { startupModeEnum } from "@/services/types";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings, FileText, Server, Key, Shield, ShieldCheck, Network, Monitor, Bot, KeyRound, Link2 } from "lucide-react";
+import { Settings, FileText, Server, Key, Shield, ShieldCheck, Network, Monitor, Bot, KeyRound, Link2, Search, CalendarClock, Target, Layers3 } from "lucide-react";
 
 export function SettingsOverview() {
     const { t } = useTranslation();
@@ -117,32 +117,44 @@ export function SettingsOverview() {
                         <Link to="/system/web-search" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>
-                                    <CardTitle className="text-lg">{t('pages.webSearch.title')}</CardTitle>
-                                    <CardDescription>{t('pages.webSearch.description')}</CardDescription>
+                                    <div className="flex items-center gap-2">
+                                        <Search className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('pages.webSearch.title')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">{t('pages.settings.overview.webSearchDescription')}</CardDescription>
                                 </CardHeader>
                             </Card>
                         </Link>
                         <Link to="/system/schedule-budget" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>
-                                    <CardTitle className="text-lg">{t('schedules.policy.title')}</CardTitle>
-                                    <CardDescription>{t('schedules.policy.description')}</CardDescription>
+                                    <div className="flex items-center gap-2">
+                                        <CalendarClock className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('schedules.policy.title')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">{t('pages.settings.overview.scheduleBudgetDescription')}</CardDescription>
                                 </CardHeader>
                             </Card>
                         </Link>
                         <Link to="/system/goal-budget" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>
-                                    <CardTitle className="text-lg">{t('pages.aiAssistant.goalBudgetPolicyTitle')}</CardTitle>
-                                    <CardDescription>{t('pages.aiAssistant.goalBudgetPolicyDescription')}</CardDescription>
+                                    <div className="flex items-center gap-2">
+                                        <Target className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('pages.aiAssistant.goalBudgetPolicyTitle')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">{t('pages.settings.overview.goalBudgetDescription')}</CardDescription>
                                 </CardHeader>
                             </Card>
                         </Link>
                         <Link to="/system/context-management" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>
-                                    <CardTitle className="text-lg">{t('pages.contextManagement.title')}</CardTitle>
-                                    <CardDescription>{t('pages.contextManagement.description')}</CardDescription>
+                                    <div className="flex items-center gap-2">
+                                        <Layers3 className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('pages.contextManagement.title')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">{t('pages.settings.overview.contextManagementDescription')}</CardDescription>
                                 </CardHeader>
                             </Card>
                         </Link>
