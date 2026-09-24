@@ -46,6 +46,10 @@ pub enum ToolEffect {
     DirectoryPlanning,
     /// Creates only an owner-reviewable schedule draft from a user turn.
     SchedulePlanning,
+    /// Proposes a long-running goal for owner approval; it cannot start work.
+    GoalOpenPlanning,
+    /// Ends one claimed long-running goal segment. No device action or grant.
+    GoalControl,
 }
 
 /// A tool registered with the agent loop: its model-facing spec, the capability
@@ -77,7 +81,9 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
         | ToolEffect::CapabilityDiscovery
         | ToolEffect::ConversationHistory
         | ToolEffect::DirectoryPlanning
-        | ToolEffect::SchedulePlanning => true,
+        | ToolEffect::SchedulePlanning
+        | ToolEffect::GoalOpenPlanning
+        | ToolEffect::GoalControl => true,
         ToolEffect::Mutating => matches!(
             mode,
             ExecutionMode::ConfirmEachAction
@@ -118,6 +124,12 @@ pub fn exposure_block_reason(
     }
     if tool.effect == ToolEffect::RunProjection {
         return None;
+    }
+    if tool.effect == ToolEffect::GoalControl {
+        return (origin != TriggerOrigin::GoalContinuation).then_some("not_a_goal_segment");
+    }
+    if tool.effect == ToolEffect::GoalOpenPlanning {
+        return (origin != TriggerOrigin::User).then_some("trigger_origin_disallows_planning");
     }
     if tool.effect == ToolEffect::PermissionPlanning {
         return None;

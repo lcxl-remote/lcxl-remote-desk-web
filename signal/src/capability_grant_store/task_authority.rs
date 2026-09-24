@@ -3,7 +3,8 @@ use crate::entity::agent_session;
 use desk_agent_protocol::capability_grant::{CapabilityGrant, CapabilityGrantIssuer};
 use desk_diagnose_core::{
     capability_grant::{
-        CapabilityGrantCall, match_capability_grant, match_reserved_capability_grant,
+        CapabilityGrantCall, match_ai_capability_grant, match_capability_grant,
+        match_reserved_ai_capability_grant, match_reserved_capability_grant,
         match_reserved_task_capability_grant, match_task_capability_grant,
     },
     session::{PersistedAgentSession, TriggerOrigin},
@@ -49,6 +50,24 @@ pub(super) async fn match_current_on(
             match_reserved_task_capability_grant(grant, call, current.provenance())
         } else {
             match_task_capability_grant(grant, call, current.provenance())
+        }
+        .map_err(|_| invalid())
+    } else if matches!(grant.issued_by, CapabilityGrantIssuer::AiApproval(_)) {
+        let session = session.ok_or_else(invalid)?;
+        if session.actor_id != call.actor_id || session.device_id != call.target_device_id {
+            return Err(invalid());
+        }
+        let current = crate::agent_approval_store::current_grant_parent_on(
+            txn,
+            &session,
+            grant,
+            call.now_unix_ms,
+        )
+        .await?;
+        if reserved {
+            match_reserved_ai_capability_grant(grant, call, &current)
+        } else {
+            match_ai_capability_grant(grant, call, &current)
         }
         .map_err(|_| invalid())
     } else {

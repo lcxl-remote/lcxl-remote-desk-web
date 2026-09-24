@@ -11,9 +11,11 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 
 use crate::entity::{
-    agent_action_item, agent_capability_dispatch_outbox, agent_capability_grant, agent_exec_task,
-    agent_grant_reservation, agent_run_event, agent_session, ai_usage, device_code,
-    host_remote_access_state, model_egress_receipt, turn_usage, usage_retention,
+    agent_action_item, agent_approval_delegation, agent_approval_review,
+    agent_capability_dispatch_outbox, agent_capability_grant, agent_exec_task,
+    agent_goal_open_request, agent_goal_run, agent_grant_reservation, agent_run_event,
+    agent_session, ai_usage, approval_review_secret, device_code, host_remote_access_state,
+    model_egress_receipt, turn_usage, usage_retention,
 };
 use crate::error::DeskSignalError;
 use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
@@ -207,7 +209,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 17;
+const SIGNAL_SCHEMA_VERSION: i32 = 21;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -262,9 +264,16 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, ai_usage::Entity).await?;
     create_latest_model_provider(db).await?;
     create_latest_probe_observation(db).await?;
+    create_latest_approval_model_provider(db).await?;
+    create_latest_approval_model_probe_observation(db).await?;
+    create_entity(db, &schema, approval_review_secret::Entity).await?;
     create_entity(db, &schema, usage_retention::Entity).await?;
     create_entity(db, &schema, host_remote_access_state::Entity).await?;
     create_entity(db, &schema, agent_session::Entity).await?;
+    create_entity(db, &schema, agent_goal_run::Entity).await?;
+    create_entity(db, &schema, agent_goal_open_request::Entity).await?;
+    create_entity(db, &schema, agent_approval_delegation::Entity).await?;
+    create_entity(db, &schema, agent_approval_review::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_attachment::Entity).await?;
     create_entity(
         db,
@@ -288,6 +297,7 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, crate::entity::agent_permission_resume::Entity).await?;
     create_entity(db, &schema, crate::entity::web_search_config::Entity).await?;
     create_entity(db, &schema, crate::entity::schedule_budget_policy::Entity).await?;
+    create_entity(db, &schema, crate::entity::goal_budget_policy::Entity).await?;
     create_entity(
         db,
         &schema,
@@ -342,6 +352,42 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     ] {
         db.execute(&index).await?;
     }
+    db.execute_unprepared(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_goal_run_live_conversation \
+         ON agent_goal_run (conversation_id) \
+         WHERE status NOT IN ('completed', 'failed', 'cancelled')",
+    )
+    .await?;
+    db.execute_unprepared(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_goal_run_running_owner \
+         ON agent_goal_run (actor_id) WHERE status = 'running'",
+    )
+    .await?;
+    db.execute_unprepared(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_goal_run_running_device \
+         ON agent_goal_run (device_id) WHERE status = 'running'",
+    )
+    .await?;
+    db.execute_unprepared(
+        "CREATE INDEX IF NOT EXISTS idx_agent_goal_run_queue \
+         ON agent_goal_run (status, next_attempt_at, updated_at, id)",
+    )
+    .await?;
+    db.execute_unprepared(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_goal_open_request_pending \
+         ON agent_goal_open_request (conversation_id) WHERE status = 'pending'",
+    )
+    .await?;
+    db.execute_unprepared(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_approval_delegation_active \
+         ON agent_approval_delegation (conversation_id) WHERE status = 'active'",
+    )
+    .await?;
+    db.execute_unprepared(
+        "CREATE INDEX IF NOT EXISTS idx_agent_approval_review_claim \
+         ON agent_approval_review (status, lease_deadline, expires_at, id)",
+    )
+    .await?;
     Ok(())
 }
 
@@ -383,6 +429,49 @@ async fn create_latest_probe_observation<C: ConnectionTrait>(db: &C) -> Result<(
            stop_reason TEXT NULL,\
            validated_capabilities TEXT NOT NULL CHECK (json_valid(validated_capabilities) AND json_type(validated_capabilities) = 'object'),\
            FOREIGN KEY (model_provider_id) REFERENCES model_provider(id) ON DELETE CASCADE\
+         )",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn create_latest_approval_model_provider<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+    db.execute_unprepared(
+        "CREATE TABLE approval_model_provider (\
+           id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),\
+           enabled INTEGER NOT NULL DEFAULT 0,\
+           wire_protocol TEXT NULL, model TEXT NULL, base_url TEXT NULL, api_key TEXT NULL,\
+           profile_schema_version INTEGER NOT NULL CHECK (profile_schema_version >= 1),\
+           request_options TEXT NOT NULL CHECK (json_valid(request_options) AND json_type(request_options) = 'object'),\
+           output_limit_field TEXT NOT NULL,\
+           probe_max_output_tokens INTEGER NOT NULL CHECK (probe_max_output_tokens > 0),\
+           runtime_max_output_tokens INTEGER NOT NULL CHECK (runtime_max_output_tokens > 0),\
+           max_context_bytes INTEGER NOT NULL CHECK (max_context_bytes BETWEEN 4096 AND 16777216),\
+           prices_json TEXT NULL CHECK (prices_json IS NULL OR (json_valid(prices_json) AND json_type(prices_json) = 'object')),\
+           connection_revision INTEGER NOT NULL CHECK (connection_revision >= 1),\
+           profile_revision INTEGER NOT NULL CHECK (profile_revision >= 1),\
+           configuration_revision INTEGER NOT NULL CHECK (configuration_revision >= 1),\
+           updated_at TEXT NOT NULL\
+         )",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn create_latest_approval_model_probe_observation<C: ConnectionTrait>(
+    db: &C,
+) -> Result<(), DbErr> {
+    db.execute_unprepared(
+        "CREATE TABLE approval_model_probe_observation (\
+           approval_model_provider_id INTEGER PRIMARY KEY NOT NULL CHECK (approval_model_provider_id = 1),\
+           connection_revision INTEGER NOT NULL CHECK (connection_revision >= 1),\
+           profile_revision INTEGER NOT NULL CHECK (profile_revision >= 1),\
+           configuration_revision INTEGER NOT NULL CHECK (configuration_revision >= 1),\
+           tested_at TEXT NOT NULL, reasoning_observed INTEGER NULL,\
+           reasoning_tokens INTEGER NULL CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),\
+           stop_reason TEXT NULL,\
+           validated_capabilities TEXT NOT NULL CHECK (json_valid(validated_capabilities) AND json_type(validated_capabilities) = 'object'),\
+           FOREIGN KEY (approval_model_provider_id) REFERENCES approval_model_provider(id) ON DELETE CASCADE\
          )",
     )
     .await?;
@@ -464,9 +553,16 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     check_entity!(ai_usage);
     check_entity!(model_provider);
     check_entity!(model_probe_observation);
+    check_entity!(approval_model_provider);
+    check_entity!(approval_model_probe_observation);
+    check_entity!(approval_review_secret);
     check_entity!(usage_retention);
     check_entity!(host_remote_access_state);
     check_entity!(agent_session);
+    check_entity!(agent_goal_run);
+    check_entity!(agent_goal_open_request);
+    check_entity!(agent_approval_delegation);
+    check_entity!(agent_approval_review);
     check_entity!(agent_attachment);
     check_entity!(agent_file_recovery_cleanup);
     check_entity!(agent_file_recovery_scope);
@@ -481,6 +577,7 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     check_entity!(web_search_config);
     check_entity!(context_management_config);
     check_entity!(schedule_budget_policy);
+    check_entity!(goal_budget_policy);
     check_entity!(agent_schedule);
     check_entity!(agent_schedule_run);
     check_entity!(agent_task_contract);
@@ -663,10 +760,24 @@ mod tests {
             "ai_usage_hourly",
             "model_provider",
             "model_probe_observation",
+            "approval_model_provider",
+            "approval_model_probe_observation",
+            "approval_review_secret",
             SCHEMA_LOCK_TABLE,
             "usage_retention",
             "host_remote_access_state",
             "agent_session",
+            "agent_goal_run",
+            "agent_goal_open_request",
+            "agent_approval_delegation",
+            "agent_approval_review",
+            "uq_agent_goal_run_live_conversation",
+            "uq_agent_goal_run_running_owner",
+            "uq_agent_goal_run_running_device",
+            "idx_agent_goal_run_queue",
+            "uq_agent_goal_open_request_pending",
+            "uq_agent_approval_delegation_active",
+            "idx_agent_approval_review_claim",
             "agent_attachment",
             "agent_file_recovery_cleanup",
             "agent_file_recovery_scope",

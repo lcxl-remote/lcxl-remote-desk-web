@@ -10,6 +10,7 @@ use desk_diagnose_core::context_attachment::{
     AttachmentStaleReason, AttachmentState, ContextAttachment, ContextAttachmentKind,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use utoipa::ToSchema;
 
@@ -106,6 +107,58 @@ pub struct CapabilityGrantRevokeBody {
     pub session: Option<String>,
     pub grant_id: String,
     pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalDelegationOpenBody {
+    pub connection: String,
+    pub conversation: Option<String>,
+    pub session: Option<String>,
+    pub expected_input_revision: u64,
+    /// Client-generated operation identity recorded with the owner's decision.
+    pub owner_authorization_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalDelegationCloseBody {
+    pub connection: String,
+    pub conversation: Option<String>,
+    pub session: Option<String>,
+    pub delegation_id: String,
+    pub owner_decision_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalDelegationDto {
+    pub delegation_id: String,
+    pub status: String,
+    pub reviews_used: u64,
+    pub tokens_used: u64,
+    pub cost_used_micros: u64,
+    pub created_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalModelReadinessDto {
+    pub available: bool,
+    pub reason: Option<String>,
+}
+
+impl From<&desk_diagnose_core::approval_delegation::ApprovalDelegation> for ApprovalDelegationDto {
+    fn from(value: &desk_diagnose_core::approval_delegation::ApprovalDelegation) -> Self {
+        Self {
+            delegation_id: value.delegation_id.clone(),
+            status: value.status.as_str().into(),
+            reviews_used: value.usage.reviews_used,
+            tokens_used: value.usage.tokens_used,
+            cost_used_micros: value.usage.cost_used_micros,
+            created_at_unix_ms: value.created_at_unix_ms,
+        }
+    }
 }
 
 /// Receipt correlation for independent automation run review, not a conversation write gate.
@@ -493,6 +546,13 @@ pub struct AiAssistantSessionSnapshotDto {
     pub file_scope: FileScopeDto,
     /// Persisted owner-visible failure for the current terminal turn.
     pub terminal_error: Option<desk_agent_protocol::AgentError>,
+    /// Server-owned durable goal status; independent of the current turn.
+    pub goal: Option<AiAssistantGoalDto>,
+    /// An AI proposal remains inert until the owner decides this exact request.
+    pub pending_goal_open_request: Option<AiAssistantGoalOpenRequestDto>,
+    /// Current/latest owner delegation; it does not grant any tool authority.
+    pub approval_delegation: Option<ApprovalDelegationDto>,
+    pub approval_model_readiness: ApprovalModelReadinessDto,
     pub context_usage: Option<ContextUsageDto>,
     /// Opaque recovery selector; ownership is rechecked on every read or stop.
     pub session_id: String,
@@ -535,6 +595,195 @@ pub struct AiAssistantSessionSnapshotDto {
     pub context_notices: Vec<ContextNoticeDto>,
     /// Durable selection metadata only; no UI tree, cells, files or screenshots.
     pub context_attachments: Vec<ContextAttachmentDto>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantGoalDto {
+    pub goal_id: String,
+    pub previous_completed_goal_id: Option<String>,
+    pub previous_completion_summary: Option<String>,
+    pub goal_revision: u64,
+    pub goal_text: String,
+    pub device_id: String,
+    pub state: String,
+    pub state_version: u64,
+    pub status_reason: Option<String>,
+    pub pause_reason: Option<String>,
+    pub slice_seq: u32,
+    pub used_slices: u32,
+    pub limit_slices: u32,
+    pub used_model_tokens: u64,
+    pub limit_model_tokens: u64,
+    pub used_model_calls: u32,
+    pub used_tool_calls: u32,
+    pub used_active_time_ms: u64,
+    pub limits: AiAssistantGoalLimitsDto,
+    pub created_at_unix_ms: u64,
+    pub deadline_unix_ms: u64,
+    pub next_attempt_unix_ms: Option<u64>,
+    pub updated_at_unix_ms: u64,
+    pub checkpoint_summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantGoalOpenRequestDto {
+    pub request_id: String,
+    pub goal_text: String,
+    pub previous_completed_goal_id: Option<String>,
+    pub target_goal_id: Option<String>,
+    pub target_goal_revision: Option<u64>,
+    pub device_id: String,
+    pub input_revision: u64,
+    pub limits: AiAssistantGoalLimitsDto,
+    pub expires_at_unix_ms: u64,
+}
+
+impl From<&desk_diagnose_core::goal::GoalOpenRequest> for AiAssistantGoalOpenRequestDto {
+    fn from(request: &desk_diagnose_core::goal::GoalOpenRequest) -> Self {
+        Self {
+            request_id: request.request_id.clone(),
+            goal_text: request.goal_text.clone(),
+            previous_completed_goal_id: request.previous_completed_goal_id.clone(),
+            target_goal_id: request.target_goal_id.clone(),
+            target_goal_revision: request.target_goal_revision,
+            device_id: request.device_id.clone(),
+            input_revision: request.input_revision,
+            limits: request.limits.into(),
+            expires_at_unix_ms: request.expires_at_unix_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantGoalOpenDecisionBody {
+    pub connection: String,
+    pub conversation: Option<String>,
+    pub session: Option<String>,
+    pub request_id: String,
+    pub approve: bool,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantGoalOpenDecisionDto {
+    pub request_id: String,
+    pub state: String,
+    pub goal: Option<AiAssistantGoalDto>,
+}
+
+impl AiAssistantGoalOpenDecisionDto {
+    pub fn from_result(
+        request: &desk_diagnose_core::goal::GoalOpenRequest,
+        goal: Option<&desk_diagnose_core::goal::GoalRun>,
+    ) -> Self {
+        Self {
+            request_id: request.request_id.clone(),
+            state: request.state.as_str().to_owned(),
+            goal: goal.map(AiAssistantGoalDto::from),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantGoalControlBody {
+    pub connection: String,
+    pub conversation: Option<String>,
+    pub session: Option<String>,
+    pub goal_id: String,
+    pub expected_state_version: u64,
+    pub action: AiAssistantGoalOwnerAction,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiAssistantGoalOwnerAction {
+    Pause,
+    Resume,
+    RetryStalled,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantGoalLimitsDto {
+    pub active_time_ms: u64,
+    pub model_tokens: u64,
+    pub model_calls: u32,
+    pub tool_calls: u32,
+    pub slices: u32,
+    pub stalled_slices: u32,
+}
+
+impl From<desk_diagnose_core::goal::GoalLimits> for AiAssistantGoalLimitsDto {
+    fn from(value: desk_diagnose_core::goal::GoalLimits) -> Self {
+        Self {
+            active_time_ms: value.active_time_ms,
+            model_tokens: value.model_tokens,
+            model_calls: value.model_calls,
+            tool_calls: value.tool_calls,
+            slices: value.slices,
+            stalled_slices: value.stalled_slices,
+        }
+    }
+}
+
+impl AiAssistantGoalControlBody {
+    pub fn owner_action(&self) -> desk_diagnose_core::goal::GoalOwnerAction {
+        use desk_diagnose_core::goal::GoalOwnerAction;
+        match self.action {
+            AiAssistantGoalOwnerAction::Pause => GoalOwnerAction::Pause,
+            AiAssistantGoalOwnerAction::Resume => GoalOwnerAction::Resume,
+            AiAssistantGoalOwnerAction::RetryStalled => GoalOwnerAction::RetryStalled,
+            AiAssistantGoalOwnerAction::Cancel => GoalOwnerAction::Cancel,
+        }
+    }
+}
+
+impl From<&desk_diagnose_core::goal::GoalRun> for AiAssistantGoalDto {
+    fn from(goal: &desk_diagnose_core::goal::GoalRun) -> Self {
+        Self {
+            goal_id: goal.goal_id.clone(),
+            previous_completed_goal_id: goal
+                .previous_completion
+                .as_ref()
+                .map(|previous| previous.goal_id.clone()),
+            previous_completion_summary: goal
+                .previous_completion
+                .as_ref()
+                .map(|previous| previous.summary.clone()),
+            goal_revision: goal.goal_revision,
+            goal_text: goal.goal_text.clone(),
+            device_id: goal.device_id.clone(),
+            state: goal.status_code().into(),
+            state_version: goal.state_version,
+            status_reason: goal.status_reason.clone(),
+            pause_reason: match goal.state {
+                desk_diagnose_core::goal::GoalState::Paused(reason) => Some(reason.as_str().into()),
+                _ => None,
+            },
+            slice_seq: goal.slice_seq,
+            used_slices: goal.used.slices,
+            limit_slices: goal.limits.slices,
+            used_model_tokens: goal.used.total_tokens().unwrap_or(u64::MAX),
+            limit_model_tokens: goal.limits.model_tokens,
+            used_model_calls: goal.used.model_calls,
+            used_tool_calls: goal.used.tool_calls,
+            used_active_time_ms: goal.used.active_time_ms,
+            limits: goal.limits.into(),
+            created_at_unix_ms: goal.created_at_unix_ms,
+            deadline_unix_ms: goal.deadline_unix_ms,
+            next_attempt_unix_ms: goal.next_attempt_unix_ms,
+            updated_at_unix_ms: goal.updated_at_unix_ms,
+            checkpoint_summary: goal
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.summary.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, ToSchema)]
@@ -1063,6 +1312,63 @@ mod text_file_confirmation;
 pub use text_file_confirmation::TextFileConfirmationDto;
 
 impl PermissionRequestDto {
+    pub fn with_decision(
+        mut self,
+        event: Option<&desk_diagnose_core::dynamic_run::PermissionDecidedEvent>,
+    ) -> Self {
+        use desk_diagnose_core::dynamic_run::{PermissionDecisionSource, PermissionItemDecision};
+        self.decision = event
+            .filter(|event| event.request_id == self.request_id)
+            .map(|event| {
+                let (source, reviews, system_reason) = match &event.decision_source {
+                    PermissionDecisionSource::UserDecision => {
+                        (PermissionDecisionSourceDto::Owner, None, None)
+                    }
+                    PermissionDecisionSource::AiApproval { reviews, .. } => (
+                        PermissionDecisionSourceDto::AiApproval,
+                        Some(reviews.as_slice()),
+                        None,
+                    ),
+                    PermissionDecisionSource::ReviewUnavailable {
+                        reason_code,
+                        reason,
+                        ..
+                    } => (
+                        PermissionDecisionSourceDto::ReviewUnavailable,
+                        None,
+                        Some((reason_code, reason)),
+                    ),
+                };
+                PermissionDecisionSummaryDto {
+                    source,
+                    decided_at: event.event.created_at.clone(),
+                    items: event
+                        .items
+                        .iter()
+                        .map(|item| {
+                            let review = reviews.and_then(|reviews| {
+                                reviews.iter().find(|review| review.item_id == item.item_id)
+                            });
+                            PermissionItemDecisionSummaryDto {
+                                item_id: item.item_id.clone(),
+                                approved: matches!(
+                                    &item.decision,
+                                    PermissionItemDecision::Approve { .. }
+                                ),
+                                reason_code: review
+                                    .map(|review| review.reason_code.clone())
+                                    .or_else(|| system_reason.map(|(code, _)| code.to_string())),
+                                reason: review.map(|review| review.reason.clone()).or_else(|| {
+                                    system_reason.map(|(_, reason)| reason.to_string())
+                                }),
+                            }
+                        })
+                        .collect(),
+                }
+            });
+        self
+    }
+
     pub fn with_file_evidence(
         request: desk_diagnose_core::dynamic_run::PermissionRequest,
         messages: &[desk_diagnose_core::chat::ChatMessage],
@@ -1178,6 +1484,32 @@ pub struct PermissionRequestDto {
     pub state: PermissionRequestStateDto,
     pub items: Vec<GrantRequestItemDto>,
     pub created_at: String,
+    pub decision: Option<PermissionDecisionSummaryDto>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionDecisionSummaryDto {
+    pub source: PermissionDecisionSourceDto,
+    pub decided_at: String,
+    pub items: Vec<PermissionItemDecisionSummaryDto>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecisionSourceDto {
+    Owner,
+    AiApproval,
+    ReviewUnavailable,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionItemDecisionSummaryDto {
+    pub item_id: String,
+    pub approved: bool,
+    pub reason_code: Option<String>,
+    pub reason: Option<String>,
 }
 
 impl From<desk_diagnose_core::dynamic_run::TaskStatus> for TaskStatusDto {
@@ -1306,6 +1638,7 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                 })
                 .collect(),
             created_at: request.created_at,
+            decision: None,
         }
     }
 }
@@ -1330,9 +1663,260 @@ pub struct AiAssistantSessionListDto {
     pub sessions: Vec<AiAssistantSessionSummaryDto>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AiAssistantAttentionQuery {
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+/// Durable owner action needed outside the currently open conversation. The
+/// identifier changes with the authoritative state version, so clients can
+/// deduplicate reminders without persisting a second copy of session content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiAssistantAttentionReason {
+    GoalOpenApproval,
+    PermissionApproval,
+    GoalNeedsInput,
+    GoalBudget,
+    GoalStalled,
+    GoalBlocked,
+    GoalDeadlineSoon,
+}
+
+impl AiAssistantAttentionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GoalOpenApproval => "goal_open_approval",
+            Self::PermissionApproval => "permission_approval",
+            Self::GoalNeedsInput => "goal_needs_input",
+            Self::GoalBudget => "goal_budget",
+            Self::GoalStalled => "goal_stalled",
+            Self::GoalBlocked => "goal_blocked",
+            Self::GoalDeadlineSoon => "goal_deadline_soon",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantAttentionItemDto {
+    pub attention_id: String,
+    pub session_id: String,
+    pub client_conversation_id: Option<String>,
+    pub device_id: String,
+    pub goal_id: Option<String>,
+    pub request_id: Option<String>,
+    pub reason: AiAssistantAttentionReason,
+    pub state_version: u64,
+    pub updated_at_unix_ms: u64,
+    pub deadline_unix_ms: Option<u64>,
+}
+
+impl AiAssistantAttentionItemDto {
+    pub fn for_goal(goal: &desk_diagnose_core::goal::GoalRun, now_unix_ms: u64) -> Vec<Self> {
+        use desk_diagnose_core::goal::{GoalPauseReason, GoalState, GoalWaitReason};
+        let reason = match goal.state {
+            GoalState::Waiting(GoalWaitReason::User)
+            | GoalState::Paused(GoalPauseReason::NeedsNextStep) => {
+                Some(AiAssistantAttentionReason::GoalNeedsInput)
+            }
+            GoalState::Paused(GoalPauseReason::Budget) => {
+                Some(AiAssistantAttentionReason::GoalBudget)
+            }
+            GoalState::Paused(GoalPauseReason::Stalled) => {
+                Some(AiAssistantAttentionReason::GoalStalled)
+            }
+            GoalState::Paused(
+                GoalPauseReason::Recovery
+                | GoalPauseReason::ContextTooSmall
+                | GoalPauseReason::AttachmentMissing
+                | GoalPauseReason::AttachmentCapacity,
+            )
+            | GoalState::Blocked => Some(AiAssistantAttentionReason::GoalBlocked),
+            _ => None,
+        };
+        let mut items = reason
+            .map(|reason| vec![Self::from_goal(goal, reason)])
+            .unwrap_or_default();
+        if !goal.state.is_terminal()
+            && now_unix_ms < goal.deadline_unix_ms
+            && goal.deadline_unix_ms - now_unix_ms <= 24 * 60 * 60 * 1_000
+        {
+            items.push(Self::from_goal(
+                goal,
+                AiAssistantAttentionReason::GoalDeadlineSoon,
+            ));
+        }
+        items
+    }
+
+    pub fn from_goal(
+        goal: &desk_diagnose_core::goal::GoalRun,
+        reason: AiAssistantAttentionReason,
+    ) -> Self {
+        let identity = format!(
+            "goal:{}:{}:{}",
+            goal.goal_id,
+            goal.state_version,
+            reason.as_str()
+        );
+        Self {
+            attention_id: format!("attention-{:x}", Sha256::digest(identity.as_bytes())),
+            session_id: goal.conversation_id.clone(),
+            client_conversation_id: None,
+            device_id: goal.device_id.clone(),
+            goal_id: Some(goal.goal_id.clone()),
+            request_id: None,
+            reason,
+            state_version: goal.state_version,
+            updated_at_unix_ms: goal.updated_at_unix_ms,
+            deadline_unix_ms: Some(goal.deadline_unix_ms),
+        }
+    }
+
+    pub fn from_goal_open(request: &desk_diagnose_core::goal::GoalOpenRequest) -> Self {
+        let identity = format!(
+            "goal-open:{}:{}",
+            request.request_id, request.input_revision
+        );
+        Self {
+            attention_id: format!("attention-{:x}", Sha256::digest(identity.as_bytes())),
+            session_id: request.conversation_id.clone(),
+            client_conversation_id: None,
+            device_id: request.device_id.clone(),
+            goal_id: request.target_goal_id.clone(),
+            request_id: Some(request.request_id.clone()),
+            reason: AiAssistantAttentionReason::GoalOpenApproval,
+            state_version: request.input_revision,
+            updated_at_unix_ms: request.created_at_unix_ms,
+            deadline_unix_ms: Some(request.expires_at_unix_ms),
+        }
+    }
+
+    pub fn from_permission(
+        session_id: &str,
+        device_id: &str,
+        request: &desk_diagnose_core::dynamic_run::PermissionRequest,
+        updated_at_unix_ms: u64,
+    ) -> Self {
+        let identity = format!(
+            "permission:{}:{}",
+            request.request_id, request.input_revision
+        );
+        Self {
+            attention_id: format!("attention-{:x}", Sha256::digest(identity.as_bytes())),
+            session_id: session_id.to_owned(),
+            client_conversation_id: None,
+            device_id: device_id.to_owned(),
+            goal_id: None,
+            request_id: Some(request.request_id.clone()),
+            reason: AiAssistantAttentionReason::PermissionApproval,
+            state_version: request.input_revision,
+            updated_at_unix_ms,
+            deadline_unix_ms: None,
+        }
+    }
+
+    pub fn from_command_approval(
+        session_id: &str,
+        device_id: &str,
+        request_id: &str,
+        updated_at_unix_ms: u64,
+        deadline_unix_ms: Option<u64>,
+    ) -> Self {
+        let identity = format!("command-approval:{request_id}");
+        Self {
+            attention_id: format!("attention-{:x}", Sha256::digest(identity.as_bytes())),
+            session_id: session_id.to_owned(),
+            client_conversation_id: None,
+            device_id: device_id.to_owned(),
+            goal_id: None,
+            request_id: Some(request_id.to_owned()),
+            reason: AiAssistantAttentionReason::PermissionApproval,
+            state_version: 1,
+            updated_at_unix_ms,
+            deadline_unix_ms,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantAttentionListDto {
+    pub items: Vec<AiAssistantAttentionItemDto>,
+    pub has_more: bool,
+    pub off_page_reminder_available: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attention_identity_tracks_goal_state_version_and_reason() {
+        use desk_diagnose_core::goal::{
+            GoalLimits, GoalModelBinding, GoalOpening, GoalPauseReason, GoalRun, GoalState,
+        };
+        let mut goal = GoalRun::new(
+            "goal".into(),
+            "run".into(),
+            "owner".into(),
+            "device".into(),
+            "Finish the report".into(),
+            "message".into(),
+            GoalOpening::OwnerRequest,
+            GoalModelBinding {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                profile_revision: 1,
+                model_id: "model".into(),
+            },
+            1,
+            1_000,
+            GoalLimits::default(),
+        )
+        .unwrap();
+        goal.state = GoalState::Paused(GoalPauseReason::Budget);
+        let first = AiAssistantAttentionItemDto::for_goal(&goal, 1_000);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].reason, AiAssistantAttentionReason::GoalBudget);
+        let same = AiAssistantAttentionItemDto::for_goal(&goal, 1_000);
+        assert_eq!(first[0].attention_id, same[0].attention_id);
+        goal.state_version += 1;
+        let revised = AiAssistantAttentionItemDto::for_goal(&goal, 1_000);
+        assert_ne!(first[0].attention_id, revised[0].attention_id);
+        assert_eq!(first[0].session_id, "run");
+    }
+
+    #[test]
+    fn approaching_deadline_is_a_separate_action_without_goal_text() {
+        use desk_diagnose_core::goal::{GoalLimits, GoalModelBinding, GoalOpening, GoalRun};
+        let goal = GoalRun::new(
+            "goal".into(),
+            "run".into(),
+            "owner".into(),
+            "device".into(),
+            "Private target details".into(),
+            "message".into(),
+            GoalOpening::OwnerRequest,
+            GoalModelBinding {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                profile_revision: 1,
+                model_id: "model".into(),
+            },
+            1,
+            1_000,
+            GoalLimits::default(),
+        )
+        .unwrap();
+        let soon = AiAssistantAttentionItemDto::for_goal(&goal, goal.deadline_unix_ms - 60_000);
+        assert_eq!(soon.len(), 1);
+        assert_eq!(soon[0].reason, AiAssistantAttentionReason::GoalDeadlineSoon);
+        let serialized = serde_json::to_string(&soon).unwrap();
+        assert!(!serialized.contains("Private target details"));
+    }
 
     #[test]
     fn context_usage_exposes_only_budget_metadata() {

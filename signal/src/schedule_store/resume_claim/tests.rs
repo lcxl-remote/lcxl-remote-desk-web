@@ -3,7 +3,7 @@ use desk_agent_protocol::{
     AgentScope, ExecutionMode,
     schedule::{ScheduleRule, ScheduledTaskKind},
 };
-use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema, TransactionTrait};
 async fn base_fixture() -> (
     ScheduleStore,
     entity::Model,
@@ -106,6 +106,60 @@ fn claim(run: &run::Model) -> ContinuationClaim<'_> {
             policy_name: None,
         },
     }
+}
+
+#[tokio::test]
+async fn active_goal_prevents_a_scheduled_continuation_from_claiming_its_conversation() {
+    let (store, queued, original, _) = fixture().await;
+    let goal = desk_diagnose_core::goal::GoalRun::new(
+        "goal-1".into(),
+        "source".into(),
+        "1".into(),
+        "device-1".into(),
+        "Finish the report".into(),
+        "owner-input".into(),
+        desk_diagnose_core::goal::GoalOpening::OwnerRequest,
+        desk_diagnose_core::goal::GoalModelBinding {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            profile_revision: 1,
+            model_id: "model".into(),
+        },
+        1,
+        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
+        desk_diagnose_core::goal::GoalLimits::default(),
+    )
+    .unwrap();
+    let txn = store.db.begin().await.unwrap();
+    crate::agent_goal_store::insert_on(&txn, &goal)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    assert!(matches!(
+        store.claim_conversation_resume(claim(&queued)).await,
+        Err(ScheduleStoreError::Conflict)
+    ));
+    assert_eq!(
+        session_row::Entity::find_by_id(original.id)
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        original.version
+    );
+    run::Entity::update_many()
+        .set(run::ActiveModel {
+            start_deadline: Set(0),
+            ..Default::default()
+        })
+        .filter(run::Column::Id.eq(queued.id))
+        .exec(&store.db)
+        .await
+        .unwrap();
+    let expired = store.expire_pending(&queued.run_id).await.unwrap();
+    assert_eq!(expired.error_kind.as_deref(), Some("active_goal_conflict"));
 }
 #[tokio::test]
 async fn occurrence_and_session_are_claimed_once_without_new_user_input() {

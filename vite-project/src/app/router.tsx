@@ -58,6 +58,10 @@ export const router = createBrowserRouter([
                 lazy: async () => ({ Component: (await import('@/features/schedules/oss-page')).default }),
             },
             {
+                path: 'ai-assistant/attention',
+                lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-attention-page')).default }),
+            },
+            {
                 path: 'desk/list',
                 lazy: async () => ({
                     Component: (await import('@/features/desk/desk-list')).default,
@@ -190,6 +194,10 @@ export const router = createBrowserRouter([
                     {
                         path: 'schedule-budget',
                         lazy: async () => ({ Component: (await import('@/features/settings/schedule-budget-settings')).default }),
+                    },
+                    {
+                        path: 'goal-budget',
+                        lazy: async () => ({ Component: (await import('@/features/settings/goal-budget-policy-settings')).default }),
                     },
                     {
                         path: 'context-management',

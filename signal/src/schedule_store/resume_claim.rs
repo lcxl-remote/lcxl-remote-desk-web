@@ -1,6 +1,8 @@
 //! Atomic occurrence/session claim for an explicitly confirmed continuation.
 use super::{ScheduleStore, ScheduleStoreError, entity};
-use crate::entity::{agent_schedule_run as run, agent_session as session_row};
+use crate::entity::{
+    agent_goal_run as goal_row, agent_schedule_run as run, agent_session as session_row,
+};
 use desk_agent_protocol::AgentScope;
 use desk_diagnose_core::{
     schedule::{SCHEDULE_CALC_VERSION, lifecycle::FailureState},
@@ -197,6 +199,17 @@ impl ScheduleStore {
                 .is_err()
         {
             return Err(ScheduleStoreError::NotFound);
+        }
+        if goal_row::Entity::find()
+            .filter(goal_row::Column::ConversationId.eq(source))
+            .filter(goal_row::Column::ActorId.eq(input.owner.to_string()))
+            .filter(goal_row::Column::DeviceId.eq(&task.target_device_id))
+            .filter(goal_row::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
+            .one(&txn)
+            .await?
+            .is_some()
+        {
+            return Err(ScheduleStoreError::Conflict);
         }
         if (permission.is_some()
             && session.input_revision != task.requirement_revision.unwrap() as u64)

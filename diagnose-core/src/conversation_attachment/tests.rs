@@ -338,6 +338,36 @@ fn batch_quota_protects_already_present_parts_from_its_own_eviction() {
 }
 
 #[test]
+fn goal_dependencies_are_not_lru_victims() {
+    let incoming = delivery(vec![text_part("stdout", 5000)], 1).unwrap();
+    let mut checkpoint = metadata("checkpoint", ContentKind::Text, "");
+    checkpoint.size_bytes = MAX_SESSION_BYTES / 2;
+    checkpoint.last_accessed_at_unix_ms = 1;
+    let mut other = metadata("other", ContentKind::Text, "");
+    other.size_bytes = MAX_SESSION_BYTES / 2;
+    other.last_accessed_at_unix_ms = 2;
+    let existing = [checkpoint, other];
+    let plan =
+        batch::plan_batch_protecting(&existing, &incoming.attachments, &["checkpoint".into()])
+            .unwrap();
+    assert_eq!(plan.evict_ids, vec!["other"]);
+    let capacity = batch::plan_batch_protecting(
+        &existing,
+        &incoming.attachments,
+        &["checkpoint".into(), "other".into()],
+    )
+    .unwrap_err();
+    assert_eq!(
+        capacity.kind,
+        desk_agent_protocol::AgentErrorKind::AttachmentCapacity
+    );
+    assert!(
+        batch::plan_batch_protecting(&existing, &incoming.attachments, &["missing".into()],)
+            .is_err()
+    );
+}
+
+#[test]
 fn many_short_lines_keep_metadata_bounded_and_can_be_fully_read() {
     let content = "x\n".repeat(2000);
     let meta = metadata("a", ContentKind::Text, &content);

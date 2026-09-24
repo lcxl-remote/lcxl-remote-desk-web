@@ -103,6 +103,7 @@ type Props = {
     /// Stable device identity for browser-side conversation intent. The OSS
     /// connection id changes after a server restart, while client_id does not.
     conversationStorageScope?: string;
+    initialConversationId?: string | null;
     subscribe: (handler: SignalingSubscriber) => () => void;
     sendMessage: (
         type: number,
@@ -180,11 +181,79 @@ type PersistedSnapshotMessage = {
     toolCalls?: PersistedToolCall[];
 };
 
+export type AiAssistantGoal = {
+    goalId: string;
+    previousCompletedGoalId?: string | null;
+    previousCompletionSummary?: string | null;
+    goalRevision: number;
+    goalText: string;
+    deviceId: string;
+    state: string;
+    stateVersion: number;
+    statusReason?: string | null;
+    pauseReason?: string | null;
+    sliceSeq: number;
+    usedSlices: number;
+    limitSlices: number;
+    usedModelTokens: number;
+    limitModelTokens: number;
+    usedModelCalls: number;
+    usedToolCalls: number;
+    usedActiveTimeMs: number;
+    limits: AiAssistantGoalLimits;
+    createdAtUnixMs: number;
+    deadlineUnixMs: number;
+    nextAttemptUnixMs?: number | null;
+    updatedAtUnixMs: number;
+    checkpointSummary?: string | null;
+};
+
+export type AiAssistantGoalOpenRequest = {
+    requestId: string;
+    goalText: string;
+    previousCompletedGoalId?: string | null;
+    targetGoalId?: string | null;
+    targetGoalRevision?: number | null;
+    deviceId: string;
+    inputRevision: number;
+    limits: AiAssistantGoalLimits;
+    expiresAtUnixMs: number;
+};
+
+export type AiAssistantGoalLimits = {
+    activeTimeMs: number;
+    modelTokens: number;
+    modelCalls: number;
+    toolCalls: number;
+    slices: number;
+    stalledSlices: number;
+};
+
+export type AiAssistantGoalOwnerAction = 'pause' | 'resume' | 'retry_stalled' | 'cancel';
+
+export type AiAssistantApprovalDelegation = {
+    delegationId: string;
+    status: string;
+    reviewsUsed: number;
+    tokensUsed: number;
+    costUsedMicros: number;
+    createdAtUnixMs: number;
+};
+
+export type AiAssistantApprovalModelReadiness = {
+    available: boolean;
+    reason?: string | null;
+};
+
 type PersistedSnapshot = {
     actionPermissionReasons?: Record<string, string>;
     requestId?: string;
     fileScope?: AssistantFileScopeView;
     terminalError?: { message: string; error_code?: number | null } | null;
+    goal?: AiAssistantGoal | null;
+    pendingGoalOpenRequest?: AiAssistantGoalOpenRequest | null;
+    approvalDelegation?: AiAssistantApprovalDelegation | null;
+    approvalModelReadiness?: AiAssistantApprovalModelReadiness | null;
     contextNotices?: ContextNoticeDto[];
     contextUsage?: AssistantContextUsage | null;
     sessionId: string;
@@ -307,6 +376,7 @@ export function useAiAssistantChat({
     deskId,
     connected,
     conversationStorageScope = deskId,
+    initialConversationId,
     subscribe,
     sendMessage,
 }: Props) {
@@ -358,6 +428,13 @@ export function useAiAssistantChat({
     const [contextUpdating, setContextUpdating] = useState(false);
     const [taskStatusProjection, setTaskStatusProjection] =
         useState<AiAssistantTaskStatusProjection | null>(null);
+    const [goal, setGoal] = useState<AiAssistantGoal | null>(null);
+    const [goalUpdating, setGoalUpdating] = useState(false);
+    const [pendingGoalOpenRequest, setPendingGoalOpenRequest] = useState<AiAssistantGoalOpenRequest | null>(null);
+    const [goalOpenUpdating, setGoalOpenUpdating] = useState(false);
+    const [approvalDelegation, setApprovalDelegation] = useState<AiAssistantApprovalDelegation | null>(null);
+    const [approvalModelReadiness, setApprovalModelReadiness] = useState<AiAssistantApprovalModelReadiness | null>(null);
+    const [approvalUpdating, setApprovalUpdating] = useState(false);
     const [permissionRequests, setPermissionRequests] = useState<PermissionRequestDto[]>([]);
     const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTaskDto[]>([]);
     const [commandTasks, setCommandTasks] = useState<CommandTaskDto[]>([]);
@@ -551,6 +628,10 @@ export function useAiAssistantChat({
             setAttachments(projected.attachments);
             setFileScope(snapshot.fileScope ?? { revision: 0, directories: [] });
             setTaskStatusProjection(projected.taskStatusProjection);
+            setGoal(snapshot.goal ?? null);
+            setPendingGoalOpenRequest(snapshot.pendingGoalOpenRequest ?? null);
+            setApprovalDelegation(snapshot.approvalDelegation ?? null);
+            setApprovalModelReadiness(snapshot.approvalModelReadiness ?? null);
             setPermissionRequests(projected.permissionRequests);
             setBackgroundTasks(projected.backgroundTasks);
             setCommandTasks(snapshot.commandTasks ?? []);
@@ -586,6 +667,9 @@ export function useAiAssistantChat({
                     setError(agentErrorMessage(translate.current, snapshot.terminalError.error_code,
                         snapshot.terminalError.message, 'The AI Assistant turn could not complete.'));
 
+                } else if (snapshot.goal && !['completed', 'failed', 'cancelled'].includes(snapshot.goal.state)) {
+                    setStatus(snapshot.goal.state === 'waiting_approval' ? 'permission_required' : 'done');
+                    setError(null);
                 } else if (projected.permissionRequests.some((request) => request.state === 'pending')
                     || snapshot.fileScope?.directories.some(directory => directory.state === 'pending')) {
                     setStatus('permission_required');
@@ -683,7 +767,8 @@ export function useAiAssistantChat({
     useEffect(() => {
         let stored: string | null = null;
         try {
-            stored = rehearsal?.client_conversation_id ?? localStorage.getItem(storageKey(conversationStorageScope));
+            stored = rehearsal?.client_conversation_id ?? initialConversationId
+                ?? localStorage.getItem(storageKey(conversationStorageScope));
         } catch {
             stored = null;
         }
@@ -718,6 +803,10 @@ export function useAiAssistantChat({
         contextTimer.current = null;
         setContextUpdating(false);
         setTaskStatusProjection(null);
+        setGoal(null);
+        setPendingGoalOpenRequest(null);
+        setApprovalDelegation(null);
+        setApprovalModelReadiness(null);
         setPermissionRequests([]);
         setBackgroundTasks([]);
         setCommandTasks([]);
@@ -733,7 +822,7 @@ export function useAiAssistantChat({
         if (!stored) return;
 
         void loadSnapshot(stored, true);
-    }, [conversationStorageScope, loadSnapshot, rehearsal?.client_conversation_id]);
+    }, [conversationStorageScope, initialConversationId, loadSnapshot, rehearsal?.client_conversation_id]);
 
     useEffect(() => {
         const interval = window.setInterval(() => {
@@ -759,6 +848,10 @@ export function useAiAssistantChat({
             contextTimer.current = null;
             setContextUpdating(false);
             setTaskStatusProjection(null);
+            setGoal(null);
+            setPendingGoalOpenRequest(null);
+            setApprovalDelegation(null);
+            setApprovalModelReadiness(null);
             setPermissionRequests([]);
             setBackgroundTasks([]);
             setCommandTasks([]);
@@ -1114,6 +1207,8 @@ export function useAiAssistantChat({
         question: string,
         locale?: string,
         selectedCapabilityIds: string[] = [],
+        startGoal = false,
+        previousCompletedGoalId: string | null = null,
     ) => {
         if (rehearsal && (rehearsal.status !== 'pending' || rehearsalSent.current || question !== rehearsal.prompt || conversationId.current !== rehearsal.client_conversation_id)) return false;
         const trimmed = rehearsal ? rehearsal.prompt : question.trim();
@@ -1152,6 +1247,8 @@ export function useAiAssistantChat({
                 conversation_id: conversationId.current,
                 locale: rehearsal ? rehearsal.locale ?? undefined : locale,
                 selected_capability_ids: [...selectedCapabilityIds],
+                start_goal: !rehearsal && startGoal,
+                previous_completed_goal_id: !rehearsal && startGoal ? previousCompletedGoalId : null,
                 selected_attachment_ids: rehearsal ? [] : selectedObjects
                     .map((attachment) => attachment.id),
             };
@@ -1263,6 +1360,130 @@ export function useAiAssistantChat({
         request: PermissionRequestDto,
         items: PermissionDecisionBody['items'],
     ) => submitPermissionDecision(request, items), [submitPermissionDecision]);
+
+    const setAutomaticApproval = useCallback(async (enabled: boolean) => {
+        const selected = conversationId.current;
+        const watermark = snapshotWatermark.current;
+        if (!selected || !watermark || watermark.conversationId !== selected
+            || !Number.isSafeInteger(watermark.inputRevision)
+            || approvalUpdating || (enabled && (!approvalModelReadiness?.available
+                || remoteActive || activeRequest.current !== null))
+            || (!enabled && !approvalDelegation)) return false;
+        setApprovalUpdating(true);
+        setError(null);
+        const endpoint = enabled ? 'open' : 'close';
+        const payload = enabled ? {
+            connection: deskId,
+            conversation: selected,
+            session: watermark.sessionId,
+            expectedInputRevision: watermark.inputRevision,
+            ownerAuthorizationId: v4(),
+        } : {
+            connection: deskId,
+            conversation: selected,
+            session: watermark.sessionId,
+            delegationId: approvalDelegation?.delegationId,
+            ownerDecisionId: v4(),
+        };
+        try {
+            const response = await fetch(`/api/my/ai-assistant-session/approval-delegation/${endpoint}`, {
+                method: 'POST', credentials: 'include',
+                headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const result = response.ok ? await response.json() : null;
+            if (!response.ok || !result?.success || !result?.data?.delegationId) {
+                throw new Error(result?.message ?? 'Approval mode change was rejected.');
+            }
+            if (conversationId.current === selected) await loadSnapshot(selected);
+            return true;
+        } catch (reason) {
+            // A lost response may still have committed the owner decision.
+            if (conversationId.current === selected) {
+                await loadSnapshot(selected);
+                setError(reason instanceof Error ? reason.message : 'Approval mode change failed.');
+            }
+            return false;
+        } finally {
+            setApprovalUpdating(false);
+        }
+    }, [deskId, approvalUpdating, approvalModelReadiness, approvalDelegation,
+        remoteActive, loadSnapshot]);
+
+    const controlGoal = useCallback(async (action: AiAssistantGoalOwnerAction) => {
+        const selected = conversationId.current;
+        const watermark = snapshotWatermark.current;
+        if (!selected || !watermark || watermark.conversationId !== selected
+            || !goal || !Number.isSafeInteger(goal.stateVersion) || goalUpdating) return false;
+        setGoalUpdating(true);
+        setError(null);
+        try {
+            const response = await fetch('/api/my/ai-assistant-session/goal/control', {
+                method: 'POST', credentials: 'include',
+                headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    connection: deskId, conversation: selected, session: watermark.sessionId,
+                    goalId: goal.goalId, expectedStateVersion: goal.stateVersion,
+                    action,
+                }),
+            });
+            const result = response.ok ? await response.json() : null;
+            if (!response.ok || !result?.success || !result?.data?.goalId) {
+                throw new Error(result?.message ?? 'Goal control was rejected.');
+            }
+            if (conversationId.current === selected) {
+                setGoal(result.data as AiAssistantGoal);
+                await loadSnapshot(selected);
+            }
+            return true;
+        } catch (reason) {
+            if (conversationId.current === selected) {
+                await loadSnapshot(selected);
+                setError(reason instanceof Error ? reason.message : 'Goal control failed.');
+            }
+            return false;
+        } finally {
+            setGoalUpdating(false);
+        }
+    }, [deskId, goal, goalUpdating, loadSnapshot]);
+
+    const decideGoalOpen = useCallback(async (approve: boolean) => {
+        const selected = conversationId.current;
+        const watermark = snapshotWatermark.current;
+        const request = pendingGoalOpenRequest;
+        if (!selected || !watermark || watermark.conversationId !== selected
+            || !request || goalOpenUpdating || request.expiresAtUnixMs <= Date.now()) return false;
+        setGoalOpenUpdating(true);
+        setError(null);
+        try {
+            const response = await fetch('/api/my/ai-assistant-session/goal/open-decision', {
+                method: 'POST', credentials: 'include',
+                headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    connection: deskId, conversation: selected, session: watermark.sessionId,
+                    requestId: request.requestId, approve,
+                }),
+            });
+            const result = response.ok ? await response.json() : null;
+            if (!response.ok || !result?.success || !result?.data?.requestId) {
+                throw new Error(result?.message ?? 'Goal decision was rejected.');
+            }
+            if (conversationId.current === selected) {
+                setPendingGoalOpenRequest(null);
+                if (result.data.goal) setGoal(result.data.goal as AiAssistantGoal);
+                await loadSnapshot(selected);
+            }
+            return true;
+        } catch (reason) {
+            if (conversationId.current === selected) {
+                await loadSnapshot(selected);
+                setError(reason instanceof Error ? reason.message : 'Goal decision failed.');
+            }
+            return false;
+        } finally {
+            setGoalOpenUpdating(false);
+        }
+    }, [deskId, pendingGoalOpenRequest, goalOpenUpdating, loadSnapshot]);
 
     const revokeCapabilityGrant = useCallback(async (grantId: string) => {
         const currentConversationId = conversationId.current;
@@ -1378,6 +1599,10 @@ export function useAiAssistantChat({
         setRemoteActive(false);
         setContextUpdating(false);
         setTaskStatusProjection(null);
+        setGoal(null);
+        setPendingGoalOpenRequest(null);
+        setApprovalDelegation(null);
+        setApprovalModelReadiness(null);
         setPermissionRequests([]);
         setBackgroundTasks([]);
         setCommandTasks([]);
@@ -1439,6 +1664,16 @@ export function useAiAssistantChat({
         hydrating,
         contextUpdating,
         taskStatusProjection,
+        goal,
+        goalUpdating,
+        controlGoal,
+        pendingGoalOpenRequest,
+        goalOpenUpdating,
+        decideGoalOpen,
+        approvalDelegation,
+        approvalModelReadiness,
+        approvalUpdating,
+        setAutomaticApproval,
         permissionRequests,
         backgroundTasks,
         commandTasks,

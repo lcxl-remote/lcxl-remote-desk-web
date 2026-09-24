@@ -1,0 +1,1 @@
+{"type":"object","required":["itemId","approved"],"properties":{"approved":{"type":"boolean"},"itemId":{"type":"string"},"reason":{"type":["string","null"]},"reasonCode":{"type":["string","null"]}},"x-readme-ref-name":"PermissionItemDecisionSummaryDto"}

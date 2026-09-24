@@ -3,11 +3,22 @@ use super::{
     AttachmentMetadata, Availability, ContentKind, MAX_SESSION_BYTES, digest, invalid, prepare_text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use desk_agent_protocol::AgentError;
+use desk_agent_protocol::{AgentError, AgentErrorKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const MAX_PARTS: usize = 8;
+pub const ATTACHMENT_QUOTA_ERROR: &str = "Attachment batch exceeds the conversation quota";
+
+fn capacity() -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::AttachmentCapacity,
+        message: ATTACHMENT_QUOTA_ERROR.into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    }
+}
 
 /// The source chooses its format. JSON is never inferred from a text prefix.
 #[derive(Debug, Clone)]
@@ -82,6 +93,17 @@ pub fn plan_batch(
     existing: &[AttachmentMetadata],
     incoming: &[PreparedAttachment],
 ) -> Result<BatchWritePlan, AgentError> {
+    plan_batch_protecting(existing, incoming, &[])
+}
+
+/// Reserve current goal/checkpoint dependencies before choosing LRU victims.
+/// The caller must read these IDs under the same parent-session lock used for
+/// the attachment write.
+pub fn plan_batch_protecting(
+    existing: &[AttachmentMetadata],
+    incoming: &[PreparedAttachment],
+    protected_ids: &[String],
+) -> Result<BatchWritePlan, AgentError> {
     if incoming.len() > MAX_PARTS {
         return Err(invalid("Too many attachment parts"));
     }
@@ -89,7 +111,8 @@ pub fn plan_batch(
         insert_indices: vec![],
         evict_ids: vec![],
     };
-    let mut protected = BTreeSet::new();
+    let mut protected: BTreeSet<String> = protected_ids.iter().cloned().collect();
+    let mut incoming_ids = BTreeSet::new();
     let mut additional = 0_u64;
     let subject = incoming
         .first()
@@ -116,9 +139,10 @@ pub fn plan_batch(
     }
     for (index, part) in incoming.iter().enumerate() {
         part.metadata.verify(&part.content)?;
-        if !protected.insert(part.metadata.attachment_id.clone()) {
+        if !incoming_ids.insert(part.metadata.attachment_id.clone()) {
             return Err(invalid("Duplicate incoming attachment identity"));
         }
+        protected.insert(part.metadata.attachment_id.clone());
         if let Some(stored) = existing
             .iter()
             .find(|row| row.attachment_id == part.metadata.attachment_id)
@@ -141,6 +165,15 @@ pub fn plan_batch(
                 .checked_add(part.metadata.size_bytes)
                 .ok_or_else(|| invalid("Attachment quota arithmetic overflow"))?;
             plan.insert_indices.push(index);
+        }
+    }
+    for id in protected_ids {
+        if !incoming_ids.contains(id)
+            && !existing
+                .iter()
+                .any(|row| row.attachment_id == *id && row.availability == Availability::Available)
+        {
+            return Err(invalid("Required goal attachment is missing"));
         }
     }
     let mut total = existing
@@ -174,7 +207,7 @@ pub fn plan_batch(
         plan.evict_ids.push(candidate.attachment_id.clone());
     }
     if total > MAX_SESSION_BYTES {
-        return Err(invalid("Attachment batch exceeds the conversation quota"));
+        return Err(capacity());
     }
     Ok(plan)
 }
@@ -292,7 +325,7 @@ pub fn prepare_delivery(
                 .stored_bytes
                 .checked_add(metadata.size_bytes)
                 .filter(|total| *total <= MAX_SESSION_BYTES)
-                .ok_or_else(|| invalid("Attachment batch exceeds the conversation quota"))?;
+                .ok_or_else(capacity)?;
             let reference = AttachmentReference {
                 attachment_id,
                 kind,

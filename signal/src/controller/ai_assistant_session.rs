@@ -7,6 +7,7 @@
 //! session id; the subsequent store operation still checks the original actor and
 //! device. This recovery selector is not authority to execute a new action.
 
+use actix_session::Session;
 use actix_web::{HttpResponse, get, post, web};
 use desk_agent_protocol::ai_assistant::AiAssistantAsk;
 use desk_diagnose_core::conversation_key::derive_conversation_key;
@@ -14,6 +15,7 @@ use desk_diagnose_core::{
     ai_assistant::{ai_assistant_provider_registry, provider_readiness_reports},
     capability_availability::project_capability_availability,
 };
+use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
@@ -27,6 +29,48 @@ pub const TAG: &str = "AiAssistantSession";
 mod command_tasks;
 pub(crate) mod recovery;
 pub use desk_signal_facade::controller::ai_assistant_session::*;
+
+#[utoipa::path(
+    tag = TAG,
+    summary = "List durable AI Assistant actions requiring the account owner's attention",
+    params(
+        ("offset" = Option<usize>, Query, description = "Rows to skip"),
+        ("limit" = Option<usize>, Query, description = "Maximum rows, default 30 and capped at 100"),
+    ),
+    responses((status = 200, body = RestResponse<AiAssistantAttentionListDto>)),
+)]
+#[get("/my/ai-assistant-attention")]
+pub async fn list_ai_assistant_attention(
+    session: Session,
+    query: web::Query<AiAssistantAttentionQuery>,
+) -> Result<HttpResponse, DeskSignalError> {
+    let owner = session.get_current_user::<CurrentUser>().map_err(|error| {
+        DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.to_string())
+    })?;
+    if owner.is_none() {
+        return Ok(not_accessible());
+    }
+    let now = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+        DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, "invalid system clock")
+    })?;
+    let items = crate::agent_owner_attention::list_goal_attention(
+        crate::db::get_db(),
+        &SINGLE_ACCOUNT_USER_ID.to_string(),
+        now,
+    )
+    .await?;
+    let offset = query.offset.unwrap_or_default();
+    let limit = query.limit.unwrap_or(30).clamp(1, 100);
+    let has_more = offset.saturating_add(limit) < items.len();
+    let items = items.into_iter().skip(offset).take(limit).collect();
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+        AiAssistantAttentionListDto {
+            items,
+            has_more,
+            off_page_reminder_available: false,
+        },
+    )))
+}
 
 async fn read_action_permission_reasons(
     db: &sea_orm::DatabaseConnection,
@@ -57,6 +101,218 @@ fn not_accessible() -> HttpResponse {
         DeskErrorCode::PERMISSION_ERROR,
         "AI Assistant session not found or not accessible".to_string(),
     ))
+}
+
+#[utoipa::path(
+    tag = TAG,
+    summary = "Enable independent AI review for one owner conversation",
+    request_body = ApprovalDelegationOpenBody,
+    responses((status = 200, body = RestResponse<ApprovalDelegationDto>)),
+)]
+#[post("/my/ai-assistant-session/approval-delegation/open")]
+pub async fn open_ai_assistant_approval_delegation(
+    connection_map: web::Data<SharedConnectionMap>,
+    body: web::Json<ApprovalDelegationOpenBody>,
+) -> Result<HttpResponse, DeskSignalError> {
+    if !crate::ai_assistant_gate::global_ai_assistant_gate().is_enabled() {
+        return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            "AI Assistant is disabled on this device".to_string(),
+        )));
+    }
+    let db = crate::db::get_db();
+    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let Some((session_id, device_id)) = recovery::resolve(
+        &SignalAgentSessionStore::new(db.clone()),
+        &connection_map,
+        &actor_id,
+        &body.connection,
+        body.session.as_deref(),
+        body.conversation.as_deref(),
+    )
+    .await?
+    else {
+        return Ok(not_accessible());
+    };
+    let now = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "invalid system clock",
+        )
+    })?;
+    let delegation = crate::agent_approval_store::open_for_subject(
+        db,
+        &session_id,
+        &actor_id,
+        &device_id,
+        body.expected_input_revision,
+        body.owner_authorization_id.clone(),
+        now,
+    )
+    .await
+    .map_err(|_| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "Approval reviewer is unavailable or conversation state changed; refresh and retry",
+        )
+    })?;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+        ApprovalDelegationDto::from(&delegation),
+    )))
+}
+
+#[utoipa::path(
+    tag = TAG,
+    summary = "Disable independent AI review for one owner conversation",
+    request_body = ApprovalDelegationCloseBody,
+    responses((status = 200, body = RestResponse<ApprovalDelegationDto>)),
+)]
+#[post("/my/ai-assistant-session/approval-delegation/close")]
+pub async fn close_ai_assistant_approval_delegation(
+    connection_map: web::Data<SharedConnectionMap>,
+    body: web::Json<ApprovalDelegationCloseBody>,
+) -> Result<HttpResponse, DeskSignalError> {
+    let db = crate::db::get_db();
+    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let Some((session_id, device_id)) = recovery::resolve(
+        &SignalAgentSessionStore::new(db.clone()),
+        &connection_map,
+        &actor_id,
+        &body.connection,
+        body.session.as_deref(),
+        body.conversation.as_deref(),
+    )
+    .await?
+    else {
+        return Ok(not_accessible());
+    };
+    let now = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "invalid system clock",
+        )
+    })?;
+    let delegation = crate::agent_approval_store::close_for_subject(
+        db,
+        &session_id,
+        &actor_id,
+        &device_id,
+        &body.delegation_id,
+        &body.owner_decision_id,
+        now,
+    )
+    .await
+    .map_err(|_| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "Approval delegation changed; refresh and retry",
+        )
+    })?;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+        ApprovalDelegationDto::from(&delegation),
+    )))
+}
+
+#[utoipa::path(
+    tag = TAG,
+    summary = "Pause, resume or cancel one owner-approved AI Assistant goal",
+    request_body = AiAssistantGoalControlBody,
+    responses((status = 200, body = RestResponse<AiAssistantGoalDto>)),
+)]
+#[post("/my/ai-assistant-session/goal/control")]
+pub async fn control_ai_assistant_goal(
+    connection_map: web::Data<SharedConnectionMap>,
+    body: web::Json<AiAssistantGoalControlBody>,
+) -> Result<HttpResponse, DeskSignalError> {
+    let action = body.owner_action();
+    let db = crate::db::get_db();
+    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let Some((session_id, device_id)) = recovery::resolve(
+        &SignalAgentSessionStore::new(db.clone()),
+        &connection_map,
+        &actor_id,
+        &body.connection,
+        body.session.as_deref(),
+        body.conversation.as_deref(),
+    )
+    .await?
+    else {
+        return Ok(not_accessible());
+    };
+    let goal = crate::agent_goal_store::apply_owner_action(
+        db,
+        &session_id,
+        &actor_id,
+        &device_id,
+        &body.goal_id,
+        body.expected_state_version,
+        action,
+        chrono::Utc::now(),
+    )
+    .await?
+    .ok_or_else(|| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "Goal state changed or a segment is still running; refresh and retry",
+        )
+    })?;
+    Ok(
+        HttpResponse::Ok().json(RestResponse::succeed_with_data(AiAssistantGoalDto::from(
+            &goal,
+        ))),
+    )
+}
+
+#[utoipa::path(
+    tag = TAG,
+    summary = "Approve or deny an AI-proposed AI Assistant goal",
+    request_body = AiAssistantGoalOpenDecisionBody,
+    responses((status = 200, body = RestResponse<AiAssistantGoalOpenDecisionDto>)),
+)]
+#[post("/my/ai-assistant-session/goal/open-decision")]
+pub async fn decide_ai_assistant_goal_open(
+    connection_map: web::Data<SharedConnectionMap>,
+    body: web::Json<AiAssistantGoalOpenDecisionBody>,
+) -> Result<HttpResponse, DeskSignalError> {
+    let db = crate::db::get_db();
+    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let Some((session_id, device_id)) = recovery::resolve(
+        &SignalAgentSessionStore::new(db.clone()),
+        &connection_map,
+        &actor_id,
+        &body.connection,
+        body.session.as_deref(),
+        body.conversation.as_deref(),
+    )
+    .await?
+    else {
+        return Ok(not_accessible());
+    };
+    let (request, goal) = crate::agent_goal_open_store::decide_for_subject(
+        db,
+        &session_id,
+        &actor_id,
+        &device_id,
+        &body.request_id,
+        body.approve,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|_| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "Goal proposal changed or its model is unavailable; refresh and retry",
+        )
+    })?
+    .ok_or_else(|| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "Goal proposal is no longer pending; refresh the conversation",
+        )
+    })?;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+        AiAssistantGoalOpenDecisionDto::from_result(&request, goal.as_ref()),
+    )))
 }
 
 #[utoipa::path(
@@ -125,6 +381,49 @@ pub async fn get_ai_assistant_session(
             let background_tasks = snapshot.background_tasks;
             let capability_grants = snapshot.capability_grants;
             let snapshot = snapshot.session;
+            let goal = crate::agent_goal_store::load_latest_for_subject(
+                crate::db::get_db(),
+                &session_id,
+                &actor_id,
+                &target_audience,
+            )
+            .await
+            .map_err(|_| {
+                DeskSignalError::new_custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "goal snapshot unavailable",
+                )
+            })?;
+            let pending_goal_open_request = crate::agent_goal_open_store::pending_for_subject(
+                crate::db::get_db(),
+                &session_id,
+                &actor_id,
+                &target_audience,
+            )
+            .await
+            .map_err(|_| {
+                DeskSignalError::new_custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "goal opening request snapshot unavailable",
+                )
+            })?;
+            let approval_delegation = crate::agent_approval_store::load_latest_for_subject(
+                crate::db::get_db(),
+                &session_id,
+                &actor_id,
+                &target_audience,
+            )
+            .await
+            .map_err(|_| {
+                DeskSignalError::new_custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "approval delegation snapshot unavailable",
+                )
+            })?;
+            let approval_reason = crate::approval_model_provider::load(crate::db::get_db())
+                .await?
+                .unavailable_reason()
+                .map(str::to_owned);
             let action_permission_reasons = read_action_permission_reasons(
                 crate::db::get_db(),
                 &session_id,
@@ -133,13 +432,38 @@ pub async fn get_ai_assistant_session(
             .await?;
             let evidence_summary =
                 build_evidence_summary(&snapshot.messages, &snapshot.context_attachments);
-            let permission_requests = snapshot
-                .permission_requests
-                .into_iter()
-                .map(|request| {
+            let mut permission_requests = Vec::with_capacity(snapshot.permission_requests.len());
+            for request in snapshot.permission_requests {
+                let decision = if matches!(
+                    request.state,
+                    desk_diagnose_core::dynamic_run::PermissionRequestState::Approved
+                        | desk_diagnose_core::dynamic_run::PermissionRequestState::PartiallyApproved
+                        | desk_diagnose_core::dynamic_run::PermissionRequestState::Denied
+                ) {
+                    store
+                        .permission_decision_event(
+                            crate::agent_session_store::PermissionDecisionSubject {
+                                conversation_id: &session_id,
+                                actor_id: &actor_id,
+                                device_id: &target_audience,
+                            },
+                            &request.request_id,
+                        )
+                        .await
+                        .map_err(|error| {
+                            DeskSignalError::new_custom_error(
+                                DeskErrorCode::SYSTEM_ERROR,
+                                &error.message,
+                            )
+                        })?
+                } else {
+                    None
+                };
+                permission_requests.push(
                     PermissionRequestDto::with_file_evidence(request, &snapshot.messages)
-                })
-                .collect();
+                        .with_decision(decision.as_ref()),
+                );
+            }
             let visual_evidence = desk_diagnose_core::visual_evidence::durable_projection(
                 &snapshot.visual_evidence,
                 u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
@@ -157,6 +481,17 @@ pub async fn get_ai_assistant_session(
                     action_permission_reasons,
                     file_scope: snapshot.file_scope.into(),
                     terminal_error: snapshot.terminal_error,
+                    goal: goal.as_ref().map(AiAssistantGoalDto::from),
+                    pending_goal_open_request: pending_goal_open_request
+                        .as_ref()
+                        .map(AiAssistantGoalOpenRequestDto::from),
+                    approval_delegation: approval_delegation
+                        .as_ref()
+                        .map(ApprovalDelegationDto::from),
+                    approval_model_readiness: ApprovalModelReadinessDto {
+                        available: approval_reason.is_none(),
+                        reason: approval_reason,
+                    },
                     session_id: session_id.clone(),
                     context_usage: snapshot.context_usage.map(Into::into),
                     seq: snapshot.seq,
@@ -441,7 +776,30 @@ pub(crate) async fn decide_permission_on(
         .map_err(|error| {
             DeskSignalError::new_custom_error(DeskErrorCode::PRECONDITION_FAILED, &error.message)
         })?;
+    let goal_wake = if decision.newly_recorded {
+        match crate::agent_goal_store::wake_for_permission_decision(
+            &db,
+            &session_id,
+            &actor_id,
+            &target_audience,
+            &body.request_id,
+            now_dt,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                log::warn!(
+                    "[ai-assistant-goal] owner permission decision routing deferred: {error}"
+                );
+                desk_diagnose_core::goal::GoalPermissionWake::Held
+            }
+        }
+    } else {
+        desk_diagnose_core::goal::GoalPermissionWake::NoGoal
+    };
     if decision.newly_recorded
+        && goal_wake == desk_diagnose_core::goal::GoalPermissionWake::NoGoal
         && let Some(snapshot) = store
             .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
             .await
@@ -462,6 +820,8 @@ pub(crate) async fn decide_permission_on(
             // active context is not authority to expand a permission resume.
             selected_capability_ids: Vec::new(),
             selected_attachment_ids: Vec::new(),
+            start_goal: false,
+            previous_completed_goal_id: None,
         };
         let resume_connections = connection_map.clone();
         let resume_db = db.clone();

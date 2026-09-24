@@ -52,7 +52,8 @@ use crate::seam::{
     SessionSeam, ToolSeam, TurnSink, WaitOutcome,
 };
 use crate::session::{
-    AgentSessionSurface, ExecutionState, PersistedAgentSession, SubjectMismatch, TurnState,
+    AgentSessionSurface, ExecutionState, PersistedAgentSession, SubjectMismatch, TriggerOrigin,
+    TurnState,
 };
 
 /// The placeholder tool-result text written when a mutating execution's outcome is
@@ -291,6 +292,17 @@ pub enum LoopOutcome {
     /// A normalized permission batch was durably recorded for user decision.
     /// No grant was minted and no requested tool was dispatched.
     PermissionRequested { request_id: String },
+    /// A model-proposed long-running goal is awaiting its owner's decision.
+    /// The request alone neither starts work nor grants device authority.
+    GoalOpenRequested { request_id: String },
+    /// A goal-only planning control was accepted and atomically settled with
+    /// the session. It does not grant authority or dispatch device work.
+    GoalControlled {
+        control: crate::goal::GoalControl,
+        call_id: String,
+    },
+    /// A hard total-goal budget could not reserve the next model/tool call.
+    GoalBudgetReached,
 }
 
 /// The seams + config the loop runs over, borrowed for one turn.
@@ -526,6 +538,35 @@ pub async fn resume_agent_turn_after_permission(
     run_or_resume(deps, claim, Some(decision_message), sink).await
 }
 
+/// Drive a segment whose goal and session leases were atomically claimed by a
+/// durable coordinator. This entry cannot claim a fresh turn on its own.
+pub async fn run_preclaimed_goal_slice(
+    deps: &LoopDeps<'_>,
+    session: PersistedAgentSession,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
+    if session.trigger_origin != TriggerOrigin::GoalContinuation
+        || session.focus_epoch.goal_segment.is_none()
+        || !session.turn_state.is_active()
+    {
+        return Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "goal segment was not atomically claimed".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        });
+    }
+    let turn_id = session.current_turn_id.clone().ok_or_else(|| AgentError {
+        kind: AgentErrorKind::Internal,
+        message: "claimed goal segment has no turn identity".into(),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })?;
+    drive_claimed(deps, session, turn_id, None, sink).await
+}
+
 /// Shared body of [`run_agent_turn`] / [`resume_agent_turn`]: claim the turn, keep
 /// the lease alive, optionally append a message, run the loop, then settle and
 /// persist once. `to_append` is the user message for a control-end turn, or `None`
@@ -567,6 +608,16 @@ async fn drive_claimed_inner(
     to_append: Option<ChatMessage>,
     sink: &mut dyn TurnSink,
 ) -> Result<LoopOutcome, AgentError> {
+    let prior_message_ids: HashSet<String> =
+        if session.trigger_origin == TriggerOrigin::GoalContinuation {
+            session
+                .conversation
+                .iter()
+                .map(|message| message.message_id.clone())
+                .collect()
+        } else {
+            HashSet::new()
+        };
     // Keep the lease alive for the (possibly long) turn with the just-claimed
     // token; the guard stops renewal when dropped on every exit path below.
     let _lease_guard = deps
@@ -671,7 +722,8 @@ async fn drive_claimed_inner(
     if matches!(&result, Ok(LoopOutcome::Answered(_))) {
         crate::conversation_attachment::model_read::release_consumed(&mut session.conversation)?;
     }
-    session.finish_turn(terminal, (deps.clock)());
+    let settled_at = (deps.clock)();
+    session.finish_turn(terminal, settled_at.clone());
     session.terminal_permission_request_id = match &result {
         Ok(LoopOutcome::PermissionRequested { request_id }) => Some(request_id.clone()),
         _ => None,
@@ -692,8 +744,75 @@ async fn drive_claimed_inner(
     }
     crate::image_input::strip_session_images(&mut session.conversation);
     crate::visual_evidence::strip_previews(&mut session.visual_evidence);
-    // Surface a save failure only if the loop itself otherwise succeeded.
-    let save = deps.session_seam.save(&mut session).await;
+    // A goal segment has two authorities: the conversation turn and GoalRun.
+    // Commit their terminal transition together, including the ledger event.
+    // The ordinary save would expose an idle session while the goal is still
+    // running after a process crash.
+    let save = if session.trigger_origin == crate::session::TriggerOrigin::GoalContinuation {
+        let result_fingerprints =
+            settled_goal_result_fingerprints(&session, deps.registry, &prior_message_ids);
+        let end = match &result {
+            Ok(LoopOutcome::GoalControlled { control, .. }) => {
+                crate::goal::GoalSegmentEnd::Control(control.clone())
+            }
+            Ok(LoopOutcome::GoalBudgetReached) => {
+                crate::goal::GoalSegmentEnd::Pause(crate::goal::GoalPauseReason::Budget)
+            }
+            Ok(LoopOutcome::PermissionRequested { request_id }) => {
+                crate::goal::GoalSegmentEnd::Control(crate::goal::GoalControl::Wait {
+                    reason: crate::goal::GoalWaitReason::Approval,
+                    reference_id: request_id.clone(),
+                })
+            }
+            Ok(LoopOutcome::ContextWindowExceeded) => {
+                crate::goal::GoalSegmentEnd::Pause(crate::goal::GoalPauseReason::ContextTooSmall)
+            }
+            Err(error) if error.kind == AgentErrorKind::AttachmentCapacity => {
+                crate::goal::GoalSegmentEnd::Pause(crate::goal::GoalPauseReason::AttachmentCapacity)
+            }
+            Ok(LoopOutcome::Answered(_)) | Ok(LoopOutcome::CircuitBreak(_)) => {
+                crate::goal::GoalSegmentEnd::Pause(crate::goal::GoalPauseReason::NeedsNextStep)
+            }
+            Err(error)
+                if error.kind == AgentErrorKind::ModelUnavailable
+                    && session.unclosed_tool_call_ids().is_empty()
+                    && session.execution_state.tasks().is_empty()
+                    && !session.execution_state.has_unresolved_outcome() =>
+            {
+                crate::goal::GoalSegmentEnd::WaitForModel {
+                    retry_after_unix_ms: deps.model.retry_after_unix_ms(),
+                }
+            }
+            Err(error)
+                if error.kind == AgentErrorKind::ModelRejected
+                    && session.unclosed_tool_call_ids().is_empty()
+                    && session.execution_state.tasks().is_empty()
+                    && !session.execution_state.has_unresolved_outcome() =>
+            {
+                crate::goal::GoalSegmentEnd::BlockModel
+            }
+            _ => crate::goal::GoalSegmentEnd::Pause(crate::goal::GoalPauseReason::Recovery),
+        };
+        let settled = deps
+            .session_seam
+            .settle_goal_slice(&mut session, &end, &result_fingerprints, &settled_at)
+            .await;
+        if settled.is_ok()
+            && let Ok(LoopOutcome::GoalControlled { control, call_id }) = &result
+        {
+            finish_tool(&session, call_id, true, sink);
+            let message = match control {
+                crate::goal::GoalControl::Continue { progress, .. } => progress,
+                crate::goal::GoalControl::Wait { reference_id, .. } => reference_id,
+                crate::goal::GoalControl::Complete { summary, .. } => summary,
+                crate::goal::GoalControl::Blocked { reason } => reason,
+            };
+            sink.on_answer_committed(message);
+        }
+        settled
+    } else {
+        deps.session_seam.save(&mut session).await
+    };
     if save.is_err()
         && let Some(outcome) = settle_if_superseded(deps, &session, sink).await?
     {
@@ -704,6 +823,142 @@ async fn drive_claimed_inner(
         (Ok(_), Err(e)) => Err(e),
         (Err(e), _) => Err(e),
     }
+}
+
+/// Progress is a new result actually recorded by the server, not the model's
+/// `control_goal.progress` prose. Ignore volatile receipt metadata for inline
+/// JSON so polling the same resource cannot reset the stagnation counter.
+fn stable_goal_result_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.retain(|key, _| {
+                !matches!(
+                    key.as_str(),
+                    "observed_at"
+                        | "observed_at_unix_ms"
+                        | "checked_at"
+                        | "checked_at_unix_ms"
+                        | "captured_at"
+                        | "captured_at_unix_ms"
+                        | "fetched_at"
+                        | "fetched_at_unix_ms"
+                        | "retrieved_at"
+                        | "retrieved_at_unix_ms"
+                        | "elapsed_ms"
+                        | "duration_ms"
+                        | "request_id"
+                        | "trace_id"
+                        | "correlation_id"
+                )
+            });
+            for nested in fields.values_mut() {
+                stable_goal_result_json(nested);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for nested in items.iter_mut() {
+                stable_goal_result_json(nested);
+            }
+            items.sort_by_key(serde_json::Value::to_string);
+        }
+        _ => {}
+    }
+}
+
+fn rejects_required_tool_choice(error: &AgentError) -> bool {
+    if error.kind != AgentErrorKind::ModelRejected {
+        return false;
+    }
+    let message = error.message.to_ascii_lowercase();
+    (message.contains("tool_choice") || message.contains("tool choice"))
+        && [
+            "unsupported",
+            "not supported",
+            "invalid",
+            "unknown",
+            "required",
+            "any",
+        ]
+        .iter()
+        .any(|term| message.contains(term))
+}
+
+fn settled_goal_result_fingerprints(
+    session: &PersistedAgentSession,
+    registry: &[RegisteredTool],
+    prior_message_ids: &HashSet<String>,
+) -> Vec<String> {
+    let mut fingerprints = std::collections::BTreeSet::new();
+    for result in &session.conversation {
+        if result.role != ChatRole::Tool
+            || prior_message_ids.contains(&result.message_id)
+            || result.text.trim().is_empty()
+            || result.text.starts_with("tool error:")
+            || result.text.starts_with("not executed:")
+            || result
+                .raw_result
+                .as_ref()
+                .is_some_and(|raw| !raw.restorable)
+        {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&result.text)
+            && (value.get("ok") == Some(&serde_json::Value::Bool(false))
+                || value.get("success") == Some(&serde_json::Value::Bool(false))
+                || value.get("result_stored") == Some(&serde_json::Value::Bool(false))
+                || value.get("error").is_some_and(|error| !error.is_null()))
+        {
+            continue;
+        }
+        let Some(call_id) = result.tool_call_id.as_deref() else {
+            continue;
+        };
+        let Some(call) = session
+            .conversation
+            .iter()
+            .flat_map(|message| &message.tool_calls)
+            .find(|call| call.id == call_id)
+        else {
+            continue;
+        };
+        if matches!(call.name.as_str(), "update_task_status" | "control_goal") {
+            continue;
+        }
+        if !registry.iter().any(|tool| {
+            tool.name() == call.name
+                && matches!(tool.effect, ToolEffect::ReadOnly | ToolEffect::Mutating)
+        }) {
+            continue;
+        }
+        let stable_result = if let Some(raw) = &result.raw_result {
+            if let Some(mut template) = raw.template.clone() {
+                // Large fields have already become null slots. The remaining
+                // structured facts can still be compared without attachment
+                // IDs, access timestamps, or receipt-order noise.
+                stable_goal_result_json(&mut template);
+                template.to_string()
+            } else {
+                // Full externalization has no inline value to normalize. The
+                // original digest prevents a fresh attachment ID from making
+                // identical content appear new.
+                raw.original_sha256.clone()
+            }
+        } else if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&result.text) {
+            stable_goal_result_json(&mut value);
+            value.to_string()
+        } else {
+            result.text.trim().to_owned()
+        };
+        let arguments = match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        // Stable identity includes the queried resource, so two different
+        // resources with the same short result remain distinct facts.
+        let identity = format!("{}:{}:{stable_result}", call.name, arguments);
+        fingerprints.insert(format!("{:x}", Sha256::digest(identity.as_bytes())));
+    }
+    fingerprints.into_iter().collect()
 }
 fn canonical_arguments_json(raw: &str) -> String {
     let value: serde_json::Value =
@@ -817,6 +1072,14 @@ fn append_reviewed_tool_result<'a, 'd: 'a>(
 > {
     Box::pin(async move {
         let before = session.clone();
+        let capacity_receipt =
+            (session.trigger_origin == TriggerOrigin::GoalContinuation).then(|| {
+                (
+                    message_id.clone(),
+                    data_envelope.clone(),
+                    format!("{:x}", Sha256::digest(output.content.as_bytes())),
+                )
+            });
         let result = append_reviewed_tool_result_inner(
             deps,
             session,
@@ -826,7 +1089,25 @@ fn append_reviewed_tool_result<'a, 'd: 'a>(
             data_envelope,
         )
         .await;
-        if result.is_err() {
+        if let Err(error) = &result
+            && error.kind == AgentErrorKind::AttachmentCapacity
+            && let Some((receipt_id, parent, digest)) = capacity_receipt
+        {
+            *session = before;
+            let text = serde_json::json!({
+                "status": "attachment_capacity",
+                "result_stored": false,
+                "original_result_sha256": digest,
+                "instruction": "The goal is paused. Inspect the original action ledger before considering any retry."
+            }).to_string();
+            let mut receipt = ChatMessage::tool_result(receipt_id, call_id, text);
+            receipt.data_envelope = crate::conversation_attachment::delivery::projection_envelope(
+                parent.as_ref(),
+                receipt.text.as_bytes(),
+                "attachment-capacity",
+            )?;
+            session.conversation.push(receipt);
+        } else if result.is_err() {
             *session = before;
         }
         result
@@ -1704,6 +1985,8 @@ async fn run_inner_impl(
     let mut truncated_turn_retries: u8 = 0;
     let mut permission_protocol_retries: u8 = 0;
     let mut post_tool_permission_protocol_retries: u8 = 0;
+    let mut goal_correction_attempted = false;
+    let mut goal_required_choice_rejected = false;
     // A permission decision resumes at the authorization boundary, not at the
     // beginning of the user's workflow. Keep a recency-edge checkpoint in
     // model requests until the model proposes the exact Provider call made
@@ -1786,13 +2069,32 @@ async fn run_inner_impl(
         }
         continuation_tools.sort();
         continuation_tools.dedup();
+        let planning_goal = if session.surface == AgentSessionSurface::AiAssistant
+            && session.trigger_origin == TriggerOrigin::User
+        {
+            deps.session_seam.load_goal_for_planning(session).await?
+        } else {
+            None
+        };
+        let latest_completed_goal = if session.surface == AgentSessionSurface::AiAssistant
+            && session.trigger_origin == TriggerOrigin::User
+            && planning_goal.is_none()
+        {
+            deps.session_seam
+                .load_latest_completed_goal(session)
+                .await?
+        } else {
+            None
+        };
         let mut exposed = exposed_tools(
             deps.registry,
             &session.scope_snapshot,
             &session.execution_state,
             session.trigger_origin,
         );
-        let policy_read_names = if let Some(snapshot) = &authority {
+        let policy_read_names = if planning_goal.is_some() {
+            Vec::new()
+        } else if let Some(snapshot) = &authority {
             exposed
                 .iter()
                 .filter(|tool| {
@@ -1852,6 +2154,39 @@ async fn run_inner_impl(
                         && policy_read_names.iter().any(|name| name == tool.name()))
             });
         }
+        if planning_goal.is_some() {
+            // A stopped goal's user turn is only for clarification or a new
+            // owner-reviewed goal proposal. It cannot perform device actions.
+            exposed.retain(|tool| {
+                matches!(
+                    tool.effect,
+                    ToolEffect::GoalOpenPlanning
+                        | ToolEffect::ConversationHistory
+                        | ToolEffect::RunProjection
+                )
+            });
+        }
+        let goal_control_only = session.trigger_origin == TriggerOrigin::GoalContinuation
+            && (goal_correction_attempted
+                || deps
+                    .max_steps_per_turn
+                    .saturating_sub(session.current_turn_steps)
+                    <= 2
+                || crate::focus_epoch::MAX_FOCUS_EPOCH_STEPS
+                    .saturating_sub(session.focus_epoch.steps_used)
+                    <= 2);
+        if goal_control_only {
+            exposed.retain(|tool| tool.effect == ToolEffect::GoalControl);
+            if exposed.is_empty() {
+                return Err(AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: "goal control tool is unavailable for the claimed segment".into(),
+                    retryable: false,
+                    safe_for_model: false,
+                    error_code: None,
+                });
+            }
+        }
         // The model can consume the preceding screenshot in this request.
         // Only targeting in the screenshot-producing batch is fenced below.
         let raw_provider_exposed = exposed
@@ -1862,27 +2197,30 @@ async fn run_inner_impl(
             })
             .map(|tool| (*tool).clone())
             .collect::<Vec<_>>();
-        let inferred_permission_candidates = if deps.capability_permission_candidates.is_empty() {
-            deps.registry
-                .iter()
-                .filter(|tool| {
-                    deps.provider_registry
-                        .is_some_and(|registry| registry.capability_for_tool(tool.name()).is_some())
-                        && !raw_provider_exposed
+        let inferred_permission_candidates =
+            if planning_goal.is_none() && deps.capability_permission_candidates.is_empty() {
+                deps.registry
+                    .iter()
+                    .filter(|tool| {
+                        deps.provider_registry.is_some_and(|registry| {
+                            registry.capability_for_tool(tool.name()).is_some()
+                        }) && !raw_provider_exposed
                             .iter()
                             .any(|exposed| exposed.name() == tool.name())
-                        && step_inventory.as_deref().is_some_and(|inventory| {
-                            inventory
-                                .iter()
-                                .any(|item| item.tool_name == tool.name() && item.callable())
-                        })
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let permission_candidates = if deps.capability_permission_candidates.is_empty() {
+                            && step_inventory.as_deref().is_some_and(|inventory| {
+                                inventory
+                                    .iter()
+                                    .any(|item| item.tool_name == tool.name() && item.callable())
+                            })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+        let permission_candidates = if planning_goal.is_some() {
+            &[][..]
+        } else if deps.capability_permission_candidates.is_empty() {
             inferred_permission_candidates.as_slice()
         } else {
             deps.capability_permission_candidates
@@ -1912,17 +2250,15 @@ async fn run_inner_impl(
         pinned_context.preserve_history = session.surface == AgentSessionSurface::AiAssistant;
         let mut definition_registry = deps.registry.to_vec();
         if disclosure_enabled && let Some(providers) = deps.provider_registry {
-            for tool in providers.registered_tools() {
-                if session
-                    .capability_disclosure
-                    .advertised_tool_names
+            for name in &session.capability_disclosure.advertised_tool_names {
+                if definition_registry
                     .iter()
-                    .any(|name| name == tool.name())
-                    && !definition_registry
-                        .iter()
-                        .any(|candidate| candidate.name() == tool.name())
+                    .any(|candidate| candidate.name() == name)
                 {
-                    definition_registry.push(tool);
+                    continue;
+                }
+                if let Some(capability) = providers.capability_for_tool(name) {
+                    definition_registry.push(capability.registered_tool());
                 }
             }
         }
@@ -1968,6 +2304,21 @@ async fn run_inner_impl(
             // Definition state participates in the same fenced session contract.
             deps.session_seam.save(session).await?;
         }
+        if goal_control_only {
+            // Capability disclosure can re-add Provider definitions after the
+            // initial filter. The reserved final steps must remain control-only.
+            exposed.retain(|tool| tool.effect == ToolEffect::GoalControl);
+        }
+        if planning_goal.is_some() {
+            exposed.retain(|tool| {
+                matches!(
+                    tool.effect,
+                    ToolEffect::GoalOpenPlanning
+                        | ToolEffect::ConversationHistory
+                        | ToolEffect::RunProjection
+                )
+            });
+        }
         // Approval cannot override execution-state or scope restrictions. Keep
         // recovery tools available if none of the approved tools can run.
         let permission_continuation_blocked = permission_continuation_pending
@@ -1999,6 +2350,7 @@ async fn run_inner_impl(
             let fresh = crate::permission_tools::capability_authorization_prompt(
                 grants,
                 &session.permission_requests,
+                &session.permission_decisions,
                 current_unix_ms(deps.clock)?,
                 session.input_revision,
                 snapshot.readiness_revision,
@@ -2508,6 +2860,138 @@ async fn run_inner_impl(
             messages.extend(context_view.messages);
             messages.extend(runtime_messages);
         }
+        if session.trigger_origin == TriggerOrigin::GoalContinuation {
+            let goal = deps.session_seam.load_claimed_goal(session).await?;
+            if goal.goal_revision > 1 {
+                let original_source = session
+                    .conversation
+                    .iter()
+                    .find(|message| message.message_id == goal.original_source_message_id)
+                    .and_then(|message| message.data_envelope.as_ref())
+                    .ok_or_else(|| {
+                        crate::goal_tools::invalid(
+                            "original goal evidence is unavailable for this model request",
+                        )
+                    })?;
+                let original_id = format!("goal-original-{}", goal.goal_id);
+                let original_text = serde_json::json!({
+                    "authority": "server_goal_original",
+                    "goal_id": goal.goal_id,
+                    "source_message_id": goal.original_source_message_id,
+                    "original_goal_text": goal.original_goal_text,
+                    "instruction": "This is the immutable opening goal. The current approved revision follows separately."
+                }).to_string();
+                let mut original = ChatMessage::system_event(&original_id, &original_text);
+                original.data_envelope = derive_internal_tool_result_envelope(
+                    Some(original_source),
+                    &original_id,
+                    &original_text,
+                    "goal_original_projection",
+                )?;
+                messages.push(original);
+            }
+            let source = session
+                .conversation
+                .iter()
+                .find(|message| message.message_id == goal.source_message_id)
+                .and_then(|message| message.data_envelope.as_ref())
+                .ok_or_else(|| AgentError {
+                    kind: AgentErrorKind::PermissionDenied,
+                    message: "goal source evidence is unavailable for this model request".into(),
+                    retryable: false,
+                    safe_for_model: true,
+                    error_code: None,
+                })?;
+            let marker_id = format!("goal-fixed-state-{}-{}", goal.goal_id, goal.state_version);
+            let marker_text = serde_json::json!({
+                "authority": "server_goal_state",
+                "goal_id": goal.goal_id,
+                "goal_revision": goal.goal_revision,
+                "source_message_id": goal.source_message_id,
+                "goal_text": goal.goal_text,
+                "previous_completed_goal_id": goal.previous_completion.as_ref().map(|previous| &previous.goal_id),
+                "previous_completion_event_seq": goal.previous_completion.as_ref().map(|previous| previous.event_seq),
+                "segment_seq": goal.slice_seq,
+                "limits": goal.effective_budget_limits(),
+                "used": goal.used,
+                "reserved": goal.reserved,
+                "checkpoint": goal.checkpoint,
+                "instruction": "Continue the owner-approved goal under current permissions. This record grants no device authority. End this segment with control_goal."
+            }).to_string();
+            let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
+            marker.data_envelope = derive_internal_tool_result_envelope(
+                Some(source),
+                &marker_id,
+                &marker_text,
+                "goal_state_projection",
+            )?;
+            messages.push(marker);
+        } else if let Some(goal) = planning_goal.as_ref() {
+            let source = session
+                .conversation
+                .iter()
+                .find(|message| message.message_id == goal.source_message_id)
+                .and_then(|message| message.data_envelope.as_ref())
+                .ok_or_else(|| {
+                    crate::goal_tools::invalid(
+                        "goal source evidence is unavailable for clarification",
+                    )
+                })?;
+            let marker_id = format!("goal-clarification-{}-{}", goal.goal_id, goal.state_version);
+            let marker_text = serde_json::json!({
+                "authority": "server_goal_state",
+                "goal_id": goal.goal_id,
+                "goal_revision": goal.goal_revision,
+                "goal_text": goal.goal_text,
+                "state": goal.status_code(),
+                "reply_received": goal.can_propose_revision(session.input_revision).is_ok(),
+                "instruction": "The goal is stopped. Clarify the owner's intent. Do not use device tools. If a later owner reply makes an exact goal revision appropriate, call request_goal with the new complete text; the owner must approve it before work resumes."
+            }).to_string();
+            let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
+            marker.data_envelope = derive_internal_tool_result_envelope(
+                Some(source),
+                &marker_id,
+                &marker_text,
+                "goal_clarification_projection",
+            )?;
+            messages.push(marker);
+        }
+        if let Some(goal) = latest_completed_goal.as_ref() {
+            let marker_id = format!(
+                "goal-completed-hint-{}-{}",
+                goal.goal_id, session.input_revision
+            );
+            let marker_text = serde_json::json!({
+                "authority": "server_completed_goal_hint",
+                "goal_id": goal.goal_id,
+                "completion_event_seq": goal.checkpoint.as_ref().map(|checkpoint| checkpoint.event_seq),
+                "instruction": "If the owner's current request says this completed goal is unfinished, use this goal_id as previous_completed_goal_id in request_goal. Propose the full remaining goal text. This hint does not reopen the goal or grant device authority. The prior result body is only available through the separately authorized conversation history."
+            }).to_string();
+            let parent = crate::permission_resume::latest_user_requirement(&session.conversation)
+                .and_then(|message| message.data_envelope.as_ref());
+            let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
+            marker.data_envelope = derive_internal_tool_result_envelope(
+                parent,
+                &marker_id,
+                &marker_text,
+                "goal_completed_hint",
+            )?;
+            messages.push(marker);
+        }
+        if goal_correction_attempted {
+            let marker_id = format!("goal-control-correction-{turn_id}");
+            let marker_text = "The preceding answer did not end this goal segment. Call control_goal now with a factual continue, wait, complete, or blocked decision. Do not call a device tool in this response.";
+            let parent = crate::permission_resume::latest_user_requirement(&session.conversation)
+                .and_then(|message| message.data_envelope.as_ref());
+            let mut marker = ChatMessage::system_event(&marker_id, marker_text);
+            marker.data_envelope = derive_internal_tool_result_envelope(
+                parent,
+                &marker_id,
+                marker_text,
+                "goal_control_correction",
+            )?;
+            messages.push(marker);
+        }
         // The ids the model is about to see. A pending auto-trigger whose completion
         // message is in this request is cleared once the model reacts to it (the
         // assistant answer / tool-call save below), so it never fires an automation
@@ -2516,11 +3000,16 @@ async fn run_inner_impl(
             messages,
             tools: specs,
             tool_requirements,
-            tool_choice: crate::chat::ToolChoice::Auto,
+            tool_choice: if goal_control_only && !goal_required_choice_rejected {
+                crate::chat::ToolChoice::Required
+            } else {
+                crate::chat::ToolChoice::Auto
+            },
             response_format: deps.response_format.clone(),
             use_case: crate::model_profile::ModelUseCase::Agent,
             previous_cache_projection: session.cache_projection.clone(),
-            caller_output_hard_cap: None,
+            caller_output_hard_cap: (session.trigger_origin == TriggerOrigin::GoalContinuation)
+                .then_some(8_192),
         };
         let request = if let Some(event_id) = deps.model.command_completion_event_id() {
             crate::command_completion::project_request(request, session, event_id)?
@@ -2655,13 +3144,105 @@ async fn run_inner_impl(
         projection_rebuilds = 0;
         // Interpretation is published only after protocol and safety validation.
         let completion_only = deps.model.command_completion_event_id().is_some();
-        let turn = if completion_only {
+        let goal_budget = if session.trigger_origin == TriggerOrigin::GoalContinuation {
+            let upper = crate::goal::GoalUsage {
+                // A byte-level tokenization cannot exceed the serialized input
+                // byte count. Cache read/write and uncached input share this
+                // one envelope; output is separately capped above.
+                input_tokens: u64::try_from(assembled_request_cost)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(8_192),
+                model_calls: 1,
+                active_time_ms: 600_000,
+                ..crate::goal::GoalUsage::default()
+            };
+            let goal = deps.session_seam.load_claimed_goal(session).await?;
+            match goal.available_for(upper) {
+                Ok(()) => {}
+                Err(crate::goal::GoalError::BudgetExceeded) => {
+                    return Ok(LoopOutcome::GoalBudgetReached);
+                }
+                Err(error) => {
+                    return Err(AgentError {
+                        kind: AgentErrorKind::Internal,
+                        message: format!("invalid goal model budget: {error:?}"),
+                        retryable: false,
+                        safe_for_model: false,
+                        error_code: None,
+                    });
+                }
+            }
+            let identity = format!(
+                "model:{turn_id}:{}",
+                session.current_turn_steps.saturating_add(1)
+            );
+            if let Err(error) = deps
+                .session_seam
+                .reserve_goal_budget(session, &identity, upper, &(deps.clock)())
+                .await
+            {
+                let latest = deps.session_seam.load_claimed_goal(session).await?;
+                if latest.available_for(upper) == Err(crate::goal::GoalError::BudgetExceeded) {
+                    return Ok(LoopOutcome::GoalBudgetReached);
+                }
+                return Err(error);
+            }
+            Some((identity, upper, std::time::Instant::now()))
+        } else {
+            None
+        };
+        let dial_result = if completion_only {
             deps.model
                 .call(request, &mut crate::seam::NullTurnSink)
-                .await?
+                .await
         } else {
-            deps.model.call(request, sink).await?
+            deps.model.call(request, sink).await
         };
+        if let Some((identity, upper, started)) = goal_budget {
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let actual = match &dial_result {
+                Ok(turn) => match (turn.usage.input_tokens, turn.usage.output_tokens) {
+                    (Some(input), Some(output)) if input >= 0 && output >= 0 => {
+                        crate::goal::GoalUsage {
+                            input_tokens: input as u64,
+                            output_tokens: output as u64,
+                            cache_read_tokens: turn.usage.cache_read_tokens.unwrap_or(0).max(0)
+                                as u64,
+                            cache_write_tokens: turn.usage.cache_write_tokens.unwrap_or(0).max(0)
+                                as u64,
+                            model_calls: 1,
+                            active_time_ms: elapsed_ms,
+                            ..crate::goal::GoalUsage::default()
+                        }
+                    }
+                    _ => crate::goal::GoalUsage {
+                        active_time_ms: elapsed_ms,
+                        ..upper
+                    },
+                },
+                Err(_) => crate::goal::GoalUsage {
+                    active_time_ms: elapsed_ms,
+                    ..upper
+                },
+            };
+            deps.session_seam
+                .settle_goal_budget(session, &identity, actual, &(deps.clock)())
+                .await?;
+        }
+        if goal_control_only
+            && !goal_required_choice_rejected
+            && dial_result
+                .as_ref()
+                .err()
+                .is_some_and(rejects_required_tool_choice)
+        {
+            // Some compatible gateways reject `required`. Keep the single
+            // control tool exposed and retry once with normal tool selection;
+            // this failed request has already been conservatively charged.
+            goal_required_choice_rejected = true;
+            continue;
+        }
+        let turn = dial_result?;
         if let Some(current_input_revision) = input_revision_advanced(deps, session).await? {
             return Ok(LoopOutcome::Superseded {
                 previous_input_revision: session.input_revision,
@@ -2847,6 +3428,15 @@ async fn run_inner_impl(
                 // whose completion it saw here so it does not also fire a turn.
                 session.clear_reacted_auto_triggers(&request_message_ids);
                 deps.session_seam.save(session).await?;
+                if session.trigger_origin == TriggerOrigin::GoalContinuation
+                    && !goal_correction_attempted
+                    && !session.turn_step_budget_exhausted(deps.max_steps_per_turn)
+                    && !session.focus_epoch.step_budget_exhausted()
+                {
+                    goal_correction_attempted = true;
+                    sink.on_partial_committed();
+                    continue;
+                }
                 sink.on_answer_committed(&turn.text);
                 return Ok(LoopOutcome::Answered(turn.text));
             }
@@ -2886,6 +3476,95 @@ async fn run_inner_impl(
                 deps.session_seam.save(session).await?;
                 if deps.content_safety.is_enforced() {
                     sink.on_partial_committed();
+                }
+
+                if session.trigger_origin == TriggerOrigin::GoalContinuation {
+                    let tool_calls =
+                        u32::try_from(turn.tool_calls.len()).map_err(|_| AgentError {
+                            kind: AgentErrorKind::OutputLimitExceeded,
+                            message: "goal tool call batch is too large".into(),
+                            retryable: false,
+                            safe_for_model: true,
+                            error_code: None,
+                        })?;
+                    let charge = crate::goal::GoalUsage {
+                        tool_calls,
+                        ..crate::goal::GoalUsage::default()
+                    };
+                    let goal = deps.session_seam.load_claimed_goal(session).await?;
+                    let mut budget_reached = match goal.available_for(charge) {
+                        Ok(()) => false,
+                        Err(crate::goal::GoalError::BudgetExceeded) => true,
+                        Err(error) => {
+                            return Err(AgentError {
+                                kind: AgentErrorKind::Internal,
+                                message: format!("invalid goal tool budget: {error:?}"),
+                                retryable: false,
+                                safe_for_model: false,
+                                error_code: None,
+                            });
+                        }
+                    };
+                    if !budget_reached {
+                        let identity = format!("tools:{turn_id}:{}", session.current_turn_steps);
+                        if let Err(error) = deps
+                            .session_seam
+                            .reserve_goal_budget(session, &identity, charge, &(deps.clock)())
+                            .await
+                        {
+                            let latest = deps.session_seam.load_claimed_goal(session).await?;
+                            if latest.available_for(charge)
+                                != Err(crate::goal::GoalError::BudgetExceeded)
+                            {
+                                return Err(error);
+                            }
+                            budget_reached = true;
+                        } else {
+                            deps.session_seam
+                                .settle_goal_budget(session, &identity, charge, &(deps.clock)())
+                                .await?;
+                        }
+                    }
+                    if budget_reached {
+                        for call in &turn.tool_calls {
+                            append_internal_tool_result(
+                                session,
+                                turn.provider_meta.data_envelope.as_ref(),
+                                mint(),
+                                &call.id,
+                                "not executed: the total goal tool-call budget is exhausted".into(),
+                                "goal_tool_budget_reached",
+                            )?;
+                        }
+                        deps.session_seam.save(session).await?;
+                        for call in &turn.tool_calls {
+                            finish_tool(session, &call.id, false, sink);
+                        }
+                        return Ok(LoopOutcome::GoalBudgetReached);
+                    }
+                }
+
+                if turn.tool_calls.len() != 1
+                    && turn.tool_calls.iter().any(|call| {
+                        call.name == crate::goal_tools::CONTROL_GOAL_TOOL_NAME
+                            || call.name == crate::goal_tools::REQUEST_GOAL_TOOL_NAME
+                    })
+                {
+                    for call in &turn.tool_calls {
+                        append_internal_tool_result(
+                            session,
+                            turn.provider_meta.data_envelope.as_ref(),
+                            mint(),
+                            &call.id,
+                            "not executed: goal control or goal opening must be the only tool in its model response".into(),
+                            "goal_control_batch_rejected",
+                        )?;
+                    }
+                    deps.session_seam.save(session).await?;
+                    for call in &turn.tool_calls {
+                        finish_tool(session, &call.id, false, sink);
+                    }
+                    continue;
                 }
 
                 // Mutating tools in one turn run serially; once one is rejected,
@@ -3015,11 +3694,12 @@ async fn run_inner_impl(
                             &call.id,
                             if crate::permission_tools::latest_tool_request_denied(
                                 &session.permission_requests,
+                                &session.permission_decisions,
                                 &call.name,
                                 session.input_revision,
                             ) {
                                 format!(
-                                    "permission_denied: the latest permission request for `{}` was explicitly denied. Stop that operation and report the refusal; do not retry, resubmit, or widen its target unless the user changes the request.",
+                                    "permission_denied: the latest permission request for `{}` was denied, so this call was not dispatched. Do not retry or rename the same denied action. If the independent AI reviewer denied it, use its recorded reason to plan a materially different, narrower action and request that action separately; if the owner denied it, wait for a new owner instruction before requesting it again.",
                                     call.name
                                 )
                             } else {
@@ -3109,6 +3789,7 @@ async fn run_inner_impl(
                             Some(
                                 if crate::permission_tools::latest_tool_request_denied(
                                     &session.permission_requests,
+                                    &session.permission_decisions,
                                     &call.name,
                                     session.input_revision,
                                 ) {
@@ -3132,7 +3813,7 @@ async fn run_inner_impl(
                                 mint(),
                                 &call.id,
                                 format!(
-                                    "{reason}: the schema is visible but this invocation is not currently eligible. Read the latest authorization and readiness state; no action was dispatched. Do not retry a denied operation."
+                                    "{reason}: the schema is visible but this invocation is not currently eligible. Read the latest authorization and readiness state; no action was dispatched. Never retry the same denied action. A materially narrower action after an AI review denial needs a new permission request; an owner denial requires new owner input."
                                 ),
                                 reason,
                             )?;
@@ -3375,6 +4056,69 @@ async fn run_inner_impl(
                                 return Ok(outcome);
                             }
                         }
+                        ToolEffect::GoalControl => {
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            match crate::goal_tools::parse(call) {
+                                Ok(control) => {
+                                    let claimed_goal =
+                                        deps.session_seam.load_claimed_goal(session).await?;
+                                    append_internal_tool_result(
+                                        session,
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        mint(),
+                                        &call.id,
+                                        serde_json::json!({
+                                            "status":"accepted_for_atomic_settlement",
+                                            "goal_id": claimed_goal.goal_id,
+                                        })
+                                        .to_string(),
+                                        crate::goal_tools::CONTROL_GOAL_TOOL_NAME,
+                                    )?;
+                                    let summary = match &control {
+                                        crate::goal::GoalControl::Continue { progress, .. } => {
+                                            progress
+                                        }
+                                        crate::goal::GoalControl::Wait { reference_id, .. } => {
+                                            reference_id
+                                        }
+                                        crate::goal::GoalControl::Complete { summary, .. } => {
+                                            summary
+                                        }
+                                        crate::goal::GoalControl::Blocked { reason } => reason,
+                                    };
+                                    let mut message = ChatMessage::text(
+                                        mint(),
+                                        ChatRole::Assistant,
+                                        summary.clone(),
+                                    )
+                                    .with_turn_id(
+                                        session.current_turn_id.clone().unwrap_or_default(),
+                                    );
+                                    message.data_envelope =
+                                        turn.provider_meta.data_envelope.clone();
+                                    session.conversation.push(message);
+                                    return Ok(LoopOutcome::GoalControlled {
+                                        control,
+                                        call_id: call.id.clone(),
+                                    });
+                                }
+                                Err(error) => {
+                                    append_internal_tool_result(
+                                        session,
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        mint(),
+                                        &call.id,
+                                        crate::model_input::describe_error(
+                                            &call.name,
+                                            &error.message,
+                                        ),
+                                        crate::goal_tools::CONTROL_GOAL_TOOL_NAME,
+                                    )?;
+                                    deps.session_seam.save(session).await?;
+                                    finish_tool(session, &call.id, false, sink);
+                                }
+                            }
+                        }
                         ToolEffect::RunProjection => {
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
                             let updated_at = (deps.clock)();
@@ -3477,6 +4221,164 @@ async fn run_inner_impl(
                                         ChatMessage::tool_result(mint(), &call.id, content);
                                     message.data_envelope = envelope;
                                     session.conversation.push(message);
+                                    deps.session_seam.save(session).await?;
+                                    finish_tool(session, &call.id, false, sink);
+                                }
+                            }
+                        }
+                        ToolEffect::GoalOpenPlanning => {
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            let prepared = (|| -> Result<_, AgentError> {
+                                if session.surface != AgentSessionSurface::AiAssistant
+                                    || session.trigger_origin != TriggerOrigin::User
+                                {
+                                    return Err(crate::goal_tools::unavailable());
+                                }
+                                let proposal = crate::goal_tools::parse_open(call)?;
+                                let user = crate::permission_resume::latest_user_requirement(
+                                    &session.conversation,
+                                )
+                                .ok_or_else(|| {
+                                    crate::goal_tools::invalid(
+                                        "a current owner request is required to propose a goal",
+                                    )
+                                })?;
+                                let policy = deps
+                                    .model
+                                    .model_egress_policy()?
+                                    .ok_or_else(crate::goal_tools::unavailable)?;
+                                let model_binding =
+                                    crate::goal::GoalModelBinding::from_destination(
+                                        &policy.destination,
+                                    )
+                                    .map_err(|_| {
+                                        crate::goal_tools::invalid(
+                                            "current model cannot be bound to a goal",
+                                        )
+                                    })?;
+                                let created_at = (deps.clock)();
+                                let now_unix_ms = u64::try_from(
+                                    chrono::DateTime::parse_from_rfc3339(&created_at)
+                                        .map_err(|_| {
+                                            crate::goal_tools::invalid("invalid goal clock")
+                                        })?
+                                        .timestamp_millis(),
+                                )
+                                .map_err(|_| crate::goal_tools::invalid("invalid goal clock"))?;
+                                let event_seq =
+                                    session.last_event_seq.checked_add(1).ok_or_else(|| {
+                                        crate::goal_tools::invalid("goal event sequence exhausted")
+                                    })?;
+                                let request_id = stable_lineage_id(
+                                    "goal-open-request",
+                                    &format!(
+                                        "{}:{}:{}:{}",
+                                        session.conversation_id,
+                                        session.input_revision,
+                                        event_seq,
+                                        call.id,
+                                    ),
+                                );
+                                let mut request = if let Some(goal) = planning_goal.as_ref() {
+                                    if proposal.previous_completed_goal_id.is_some() {
+                                        return Err(crate::goal_tools::invalid("a revision cannot reference a completed goal"));
+                                    }
+                                    crate::goal::GoalOpenRequest::new_revision(
+                                        request_id, goal, user.message_id.clone(),
+                                        session.input_revision, proposal.goal_text, model_binding,
+                                        now_unix_ms,
+                                    )
+                                } else {
+                                    crate::goal::GoalOpenRequest::new(
+                                        request_id,
+                                        session.conversation_id.clone(),
+                                        session.actor_id.clone(),
+                                        session.device_id.clone(),
+                                        user.message_id.clone(),
+                                        session.input_revision,
+                                        proposal.goal_text,
+                                        crate::goal::GoalLimits::default(),
+                                        model_binding,
+                                        now_unix_ms,
+                                    )
+                                }.map_err(|_| crate::goal_tools::invalid("goal proposal requires a later owner reply and a stopped goal"))?;
+                                request.previous_completed_goal_id =
+                                    proposal.previous_completed_goal_id;
+                                request.validate().map_err(|_| {
+                                    crate::goal_tools::invalid("invalid previous completed goal ID")
+                                })?;
+                                let event = crate::goal::GoalOpenRequestEvent::new(
+                                    &request,
+                                    crate::dynamic_run::AgentRunEventKind::GoalOpenRequested,
+                                    event_seq,
+                                    created_at,
+                                )
+                                .map_err(|_| {
+                                    crate::goal_tools::invalid("invalid goal proposal event")
+                                })?;
+                                Ok(event)
+                            })();
+                            match prepared {
+                                Ok(event) => {
+                                    let before = session.clone();
+                                    let content = serde_json::json!({
+                                        "status": "pending_user_decision",
+                                        "request_id": &event.request.request_id,
+                                        "goal_text": &event.request.goal_text,
+                                        "previous_completed_goal_id": &event.request.previous_completed_goal_id,
+                                        "executed": false,
+                                    })
+                                    .to_string();
+                                    append_internal_tool_result(
+                                        session,
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        mint(),
+                                        &call.id,
+                                        content,
+                                        "goal_open_pending",
+                                    )?;
+                                    session.last_event_seq = event.event.event_seq;
+                                    match deps
+                                        .session_seam
+                                        .save_goal_open_request(session, &event)
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            finish_tool(session, &call.id, true, sink);
+                                            return Ok(LoopOutcome::GoalOpenRequested {
+                                                request_id: event.request.request_id,
+                                            });
+                                        }
+                                        Err(error) => {
+                                            *session = before;
+                                            append_internal_tool_result(
+                                                session,
+                                                turn.provider_meta.data_envelope.as_ref(),
+                                                mint(),
+                                                &call.id,
+                                                crate::model_input::describe_error(
+                                                    &call.name,
+                                                    &error.message,
+                                                ),
+                                                "goal_open_failed",
+                                            )?;
+                                            deps.session_seam.save(session).await?;
+                                            finish_tool(session, &call.id, false, sink);
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    append_internal_tool_result(
+                                        session,
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        mint(),
+                                        &call.id,
+                                        crate::model_input::describe_error(
+                                            &call.name,
+                                            &error.message,
+                                        ),
+                                        "goal_open_failed",
+                                    )?;
                                     deps.session_seam.save(session).await?;
                                     finish_tool(session, &call.id, false, sink);
                                 }
@@ -3741,6 +4643,30 @@ async fn run_inner_impl(
                                     .validate_task_permission_request(session, &request)
                                     .await
                                     .map(|()| request),
+                                Err(error) => Err(error),
+                            };
+                            let request = match request {
+                                Ok(request) => {
+                                    if let Some((denied_request, denied_item)) =
+                                        crate::permission_tools::unchanged_ai_denied_item(
+                                            &session.permission_requests,
+                                            &session.permission_decisions,
+                                            &request,
+                                        )
+                                    {
+                                        Err(AgentError {
+                                            kind: AgentErrorKind::InvalidInput,
+                                            message: format!(
+                                                "permission_denied: this action is unchanged from AI-denied item `{denied_item}` in request `{denied_request}`. Do not rename or repeat it on the same owner input. Narrow the actual action or ask the owner about this specific rejected operation."
+                                            ),
+                                            retryable: false,
+                                            safe_for_model: true,
+                                            error_code: None,
+                                        })
+                                    } else {
+                                        Ok(request)
+                                    }
+                                }
                                 Err(error) => Err(error),
                             };
                             match request {
@@ -5512,8 +6438,8 @@ async fn run_mutating<F: FnMut() -> String>(
         }
         Ok(ExecOutcome::Rejected { reason }) => {
             let text = match reason {
-                Some(r) => format!("the operator rejected this command: {r}"),
-                None => "the operator rejected this command".to_string(),
+                Some(r) => format!("the command was rejected: {r}"),
+                None => "the command was rejected".to_string(),
             };
             append_mutating_result(
                 deps,

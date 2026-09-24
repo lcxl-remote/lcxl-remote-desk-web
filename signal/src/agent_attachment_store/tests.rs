@@ -17,6 +17,9 @@ async fn local_attachments_are_durable_scoped_atomic_and_do_not_resurrect() {
     db.execute(&schema.create_table_from_entity(agent_session::Entity))
         .await
         .unwrap();
+    db.execute(&schema.create_table_from_entity(crate::entity::agent_goal_run::Entity))
+        .await
+        .unwrap();
     db.execute(&schema.create_table_from_entity(attachment::Entity))
         .await
         .unwrap();

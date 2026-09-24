@@ -144,7 +144,10 @@ pub(in crate::capability_grant_store) async fn close_on(
             )
             .await?;
         }
-        (CAPABILITY_WORK_SUPERSEDED | CAPABILITY_WORK_REVOKED, RESERVATION_STATUS_RELEASED) => {}
+        (
+            CAPABILITY_WORK_SUPERSEDED | CAPABILITY_WORK_REVOKED | CAPABILITY_WORK_REVIEW_CLOSED,
+            RESERVATION_STATUS_RELEASED,
+        ) => {}
         _ => return Err(invalid()),
     }
     if append {

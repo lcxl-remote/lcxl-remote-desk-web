@@ -15,7 +15,7 @@ pub struct Model {
     pub actor_id: String,
     pub device_id: String,
     pub input_revision: i64,
-    /// pending / started / settled / superseded.
+    /// pending / started / settled / superseded / goal_handled.
     pub state: String,
     pub turn_id: Option<String>,
     pub version: i64,

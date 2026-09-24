@@ -453,6 +453,31 @@ impl SignalAgentExecStore {
         else {
             return Ok(true);
         };
+        if let Some(goal) = crate::agent_goal_store::load_latest_for_subject(
+            &self.db,
+            &task.conversation_id,
+            &session.actor_id,
+            &session.device_id,
+        )
+        .await
+        .map_err(|error| internal(format!("load completion goal: {error}")))?
+        {
+            if !goal.state.is_terminal() {
+                // The goal scanner will consume this durable completion.
+                return Ok(false);
+            }
+            if goal.owns_waited_work(&task.exec_request_id) {
+                // Cancellation or expiry does not turn a goal-owned result
+                // into a new ordinary automation turn. The receipt stays in
+                // the conversation; only its auto-trigger is consumed.
+                return Ok(!matches!(
+                    sessions
+                        .prune_auto_trigger(&task.conversation_id, &task.event_id, now)
+                        .await?,
+                    EventAppend::Busy
+                ));
+            }
+        }
         let expired = session
             .scope_snapshot
             .expires_at

@@ -119,6 +119,7 @@ pub async fn resume_fresh_task(
         ask,
         None,
         Some(prepared),
+        None,
     )
     .await?
     .ok_or_else(|| transport_error("fresh task preflight did not complete"))

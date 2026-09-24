@@ -492,7 +492,11 @@ async fn acceptance_captured_model_cannot_self_execute() {
         .iter()
         .find(|m| m.role == ChatRole::Tool)
         .expect("a tool result");
-    assert!(tool_msg.text.contains("operator rejected"));
+    assert!(
+        tool_msg
+            .text
+            .contains("the command was rejected: operator declined")
+    );
     assert_eq!(s.execution_state, ExecutionState::None);
 }
 

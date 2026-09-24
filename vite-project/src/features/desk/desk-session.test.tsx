@@ -103,6 +103,10 @@ vi.mock('@/services/hooks/connectionController/useListConnections', () => ({
   useListConnections: () => ({ data: [] }),
 }));
 
+vi.mock('@/services/hooks/systemController/useQueryServerInfo', () => ({
+  useQueryServerInfo: () => ({ data: { data: { ai_assistant: null } } }),
+}));
+
 // Mock hooks
 vi.mock('./use-desk-signaling', () => ({
   useDeskSignaling: () => ({

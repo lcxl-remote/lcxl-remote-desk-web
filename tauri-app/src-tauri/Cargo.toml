@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 lcxl-remote-desk-server = { workspace = true }
+desk-signal = { workspace = true }
 desk-signal-facade = { workspace = true }
 desk-utils = { workspace = true }
 desk-input-injection = { workspace = true }

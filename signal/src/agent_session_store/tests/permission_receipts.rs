@@ -93,6 +93,40 @@ async fn decide(
     decide_expected(store, decisions, ready, None).await
 }
 
+#[tokio::test]
+async fn owner_scoped_decision_projection_keeps_the_recorded_source_and_items() {
+    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    decide(&store, &decisions, true).await.unwrap();
+    let subject = PermissionDecisionSubject {
+        conversation_id: "conversation-1",
+        actor_id: "1",
+        device_id: "device-1",
+    };
+    let event = store
+        .permission_decision_event(subject, "permission-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.items, decisions);
+    assert!(matches!(
+        event.decision_source,
+        desk_diagnose_core::dynamic_run::PermissionDecisionSource::UserDecision
+    ));
+    assert!(
+        store
+            .permission_decision_event(
+                PermissionDecisionSubject {
+                    conversation_id: "conversation-1",
+                    actor_id: "another-owner",
+                    device_id: "device-1",
+                },
+                "permission-1"
+            )
+            .await
+            .is_err()
+    );
+}
+
 async fn decide_expected(
     store: &SignalAgentSessionStore,
     decisions: &[PermissionDecisionItem],

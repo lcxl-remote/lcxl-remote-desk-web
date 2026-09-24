@@ -1,4 +1,4 @@
-//! Publish an exact, undispatched scheduled operation for owner approval.
+//! Publish an exact, undispatched operation for owner approval.
 use super::*;
 
 pub(super) async fn pause<F: FnMut() -> String>(
@@ -16,7 +16,7 @@ pub(super) async fn pause<F: FnMut() -> String>(
     let session = &mut staged;
     let invalid = || AgentError {
         kind: AgentErrorKind::Internal,
-        message: "invalid scheduled permission candidate".into(),
+        message: "invalid exact permission candidate".into(),
         retryable: false,
         safe_for_model: false,
         error_code: None,

@@ -157,6 +157,7 @@ impl FromStr for OutputLimitField {
 pub enum ModelUseCase {
     Probe,
     Safety,
+    Approval,
     Agent,
     Completion,
     FleetNaturalLanguage,

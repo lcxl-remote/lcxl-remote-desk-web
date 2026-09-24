@@ -18,14 +18,140 @@ use crate::{
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_agent_protocol::{
     capability_grant::{
-        CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant, CapabilityGrantIssuer,
-        CapabilityGrantLimits, CapabilityGrantUsePolicy,
+        AiApprovalGrantProvenance, CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant,
+        CapabilityGrantIssuer, CapabilityGrantLimits, CapabilityGrantUsePolicy,
     },
     capability_provider::{AuthorizationResourceKind, CapabilityDataCategory, ProductSurface},
     computer_use::{ObjectKind, ObjectRef},
     data_lineage::DestinationIdentity,
 };
 use sha2::{Digest, Sha256};
+
+/// Bind grants compiled from a complete AI-reviewed permission decision to the
+/// current owner delegation. The caller must commit the decision, review rows,
+/// grants and resume in one fenced transaction. The generic grant matcher will
+/// reject these grants until that transaction's dispatch path rechecks the
+/// current delegation and review provenance.
+#[allow(clippy::too_many_arguments)]
+pub fn bind_ai_permission_grants(
+    session: &PersistedAgentSession,
+    request: &crate::dynamic_run::PermissionRequest,
+    decided: &crate::dynamic_run::PermissionDecidedEvent,
+    delegation: &crate::approval_delegation::ApprovalDelegation,
+    current_model_config_revision: u64,
+    current_goal: Option<(&str, u64)>,
+    now_unix_ms: u64,
+    grants: &mut Vec<CapabilityGrant>,
+) -> Result<(), AgentError> {
+    use crate::dynamic_run::{PermissionDecisionSource, PermissionItemDecision};
+    if session.surface != crate::session::AgentSessionSurface::AiAssistant {
+        return Err(internal(
+            "AI permission grant requires an AI Assistant session",
+        ));
+    }
+    decided
+        .validate()
+        .map_err(|_| internal("invalid AI permission decision"))?;
+    request
+        .validate()
+        .map_err(|_| internal("invalid AI permission request"))?;
+    delegation
+        .require_current(
+            &session.conversation_id,
+            &session.actor_id,
+            &session.device_id,
+        )
+        .map_err(|_| internal("AI approval delegation is no longer current"))?;
+    if decided.event.run_id != session.conversation_id
+        || decided.request_id != request.request_id
+        || decided.request_input_revision != session.input_revision
+        || decided.request_input_revision != request.input_revision
+        || decided.items.len() != request.items.len()
+    {
+        return Err(internal(
+            "AI permission decision no longer matches its request",
+        ));
+    }
+    let PermissionDecisionSource::AiApproval {
+        delegation_id,
+        delegation_revision,
+        reviews,
+    } = &decided.decision_source
+    else {
+        return Err(internal("permission decision is not an AI review"));
+    };
+    if delegation_id != &delegation.delegation_id || *delegation_revision != delegation.revision {
+        return Err(internal("AI permission decision uses another delegation"));
+    }
+    let mut replay = request.clone();
+    let state = replay
+        .apply_user_decision(&decided.items)
+        .map_err(|_| internal("AI permission decision widens the request"))?;
+    if state != decided.resulting_state {
+        return Err(internal("AI permission decision state is inconsistent"));
+    }
+    let approved_count = decided
+        .items
+        .iter()
+        .filter(|item| matches!(item.decision, PermissionItemDecision::Approve { .. }))
+        .count();
+    if grants.len() != approved_count {
+        return Err(internal("AI permission grant count is inconsistent"));
+    }
+    let mut staged = grants.clone();
+    let mut seen_items = std::collections::BTreeSet::new();
+    for grant in &mut staged {
+        let mut matches = request.items.iter().filter(|item| {
+            permission_item_grant_id(&session.conversation_id, request, &item.item_id)
+                == grant.grant_id
+        });
+        let item = matches
+            .next()
+            .ok_or_else(|| internal("AI grant has no reviewed item"))?;
+        if matches.next().is_some()
+            || !seen_items.insert(item.item_id.as_str())
+            || !decided.items.iter().any(|decision| {
+                decision.item_id == item.item_id
+                    && matches!(decision.decision, PermissionItemDecision::Approve { .. })
+            })
+            || !matches!(grant.issued_by, CapabilityGrantIssuer::UserDecision)
+            || grant.actor_id != session.actor_id
+            || grant.run_id != session.conversation_id
+            || grant.target_device_id != session.device_id
+            || grant.input_revision != request.input_revision
+            || grant.policy_revision != session.policy_revision
+            || grant.provider_id != item.provider_id
+            || grant.tool_name != item.tool_name
+            || grant.effect != item.expected_effect
+        {
+            return Err(internal("AI grant is not bound to this reviewed item"));
+        }
+        let review = reviews
+            .iter()
+            .find(|review| review.item_id == item.item_id)
+            .ok_or_else(|| internal("AI grant has no review evidence"))?;
+        if review.candidate_expires_at_unix_ms <= now_unix_ms {
+            return Err(internal("AI review candidate has expired"));
+        }
+        grant.expires_at_unix_ms = grant
+            .expires_at_unix_ms
+            .min(review.candidate_expires_at_unix_ms);
+        grant.issued_by = CapabilityGrantIssuer::AiApproval(AiApprovalGrantProvenance {
+            delegation_id: delegation.delegation_id.clone(),
+            delegation_revision: delegation.revision,
+            model_config_revision: current_model_config_revision,
+            candidate_id: review.candidate_id.clone(),
+            decision_event_id: decided.event.event_id.clone(),
+            goal_id: current_goal.map(|(id, _)| id.to_owned()),
+            goal_revision: current_goal.map(|(_, revision)| revision),
+        });
+        grant
+            .validate()
+            .map_err(|_| internal("invalid AI-issued grant"))?;
+    }
+    *grants = staged;
+    Ok(())
+}
 
 pub fn requires_original_read_context(
     request: &crate::dynamic_run::PermissionRequest,
@@ -473,7 +599,6 @@ pub fn build_permission_grants(
         } else {
             resource_scope.clone()
         };
-        let operation_scope = operation_scope.clone();
         let risk_tier = classify_capability_risk(
             capability.wire.effect,
             CapabilityRiskSignals {
@@ -553,7 +678,7 @@ pub fn build_permission_grants(
             effect: capability.wire.effect,
             risk_tier,
             resource_scope,
-            operation_scope,
+            operation_scope: operation_scope.clone(),
             export_destinations,
             allowed_envelope_ids: Vec::new(),
             allowed_content_digests_sha256: Vec::new(),
@@ -657,7 +782,7 @@ pub fn permission_reason_for_grant<'a>(
     })
 }
 
-fn permission_item_grant_id(
+pub fn permission_item_grant_id(
     run_id: &str,
     request: &crate::dynamic_run::PermissionRequest,
     item_id: &str,

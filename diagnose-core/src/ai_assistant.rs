@@ -18,6 +18,7 @@ use desk_agent_protocol::computer_use::{
 };
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
 use serde_json::json;
+use std::sync::LazyLock;
 
 use crate::agentic_prompt::AGENTIC_SYSTEM_MESSAGE_ID;
 use crate::chat::{ChatMessage, ChatRole, ToolCall, ToolSpec};
@@ -2373,6 +2374,19 @@ fn configure_macos_only(descriptor: &mut ProviderDescriptor) {
 /// The current first-party Provider inventory for the AI Assistant surface.
 /// Registration is explicit and contains no runtime discovery or code loading.
 pub fn ai_assistant_provider_registry() -> ProviderRegistry {
+    ai_assistant_provider_registry_ref().clone()
+}
+
+static AI_ASSISTANT_PROVIDER_REGISTRY: LazyLock<ProviderRegistry> =
+    LazyLock::new(build_ai_assistant_provider_registry);
+
+/// The immutable compiled inventory can be reused by validation paths that
+/// run deep inside an async agent loop.
+pub fn ai_assistant_provider_registry_ref() -> &'static ProviderRegistry {
+    &AI_ASSISTANT_PROVIDER_REGISTRY
+}
+
+fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     let mut reads = ai_assistant_read_tool_registry()
         .into_iter()
         .map(|tool| (tool.name().to_string(), tool))
@@ -3364,56 +3378,63 @@ pub fn ai_assistant_provider_registry() -> ProviderRegistry {
         preview_tool(),
     );
 
-    ProviderRegistryBuilder::new()
-        .register(session)
-        .register(system_info)
-        .register(system_process)
-        .register(system_network)
-        .register(system_service)
-        .register(system_log)
-        .register(system_container)
-        .register(system_command)
-        .register(application_catalog)
-        .register(application_launch)
-        .register(ui)
-        .register(ui_action)
-        .register(background_input)
-        .register(raw_input)
-        .register(office)
-        .register(spreadsheet_live)
-        .register(document_live)
-        .register(presentation_live)
-        .register(windows_office::provider())
-        .register(windows_word::provider())
-        .register(windows_excel::provider())
-        .register(files)
-        .register(file_content)
-        .register(spreadsheet_file)
-        .register(spreadsheet_merge)
-        .register(spreadsheet_artifact)
-        .register(spreadsheet_formula_artifact)
-        .register(word_document)
-        .register(web_research)
-        .register(web_search)
-        .register(file_artifact)
-        .register(text_files)
-        .register(local_communication_draft)
-        .register(outlook_new_handoff)
-        .register(gmail_web_handoff)
-        .register(slack_web_handoff)
-        .register(gmail_web_send)
-        .register(slack_web_send)
-        .register(terminal)
-        .register(current_screen)
-        .register(browser_open)
-        .register(browser_navigate)
-        .register(browser_snapshot)
-        .register(browser_wait)
-        .register(browser_fill)
-        .register(browser_activate)
-        .register(document_preview)
-        .register(document_conversion)
-        .register(preview)
+    // Keep registration iterative: a long by-value builder chain holds many
+    // intermediate descriptors on the stack in debug builds.
+    let mut builder = ProviderRegistryBuilder::new();
+    for provider in [
+        session,
+        system_info,
+        system_process,
+        system_network,
+        system_service,
+        system_log,
+        system_container,
+        system_command,
+        application_catalog,
+        application_launch,
+        ui,
+        ui_action,
+        background_input,
+        raw_input,
+        office,
+        spreadsheet_live,
+        document_live,
+        presentation_live,
+        windows_office::provider(),
+        windows_word::provider(),
+        windows_excel::provider(),
+        files,
+        file_content,
+        spreadsheet_file,
+        spreadsheet_merge,
+        spreadsheet_artifact,
+        spreadsheet_formula_artifact,
+        word_document,
+        web_research,
+        web_search,
+        file_artifact,
+        text_files,
+        local_communication_draft,
+        outlook_new_handoff,
+        gmail_web_handoff,
+        slack_web_handoff,
+        gmail_web_send,
+        slack_web_send,
+        terminal,
+        current_screen,
+        browser_open,
+        browser_navigate,
+        browser_snapshot,
+        browser_wait,
+        browser_fill,
+        browser_activate,
+        document_preview,
+        document_conversion,
+        preview,
+    ] {
+        builder = builder.register(provider);
+    }
+    builder
         .build()
         .expect("static AI Assistant Provider registry must be valid")
 }

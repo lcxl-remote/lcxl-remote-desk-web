@@ -1,0 +1,1 @@
+{"type":"object","required":["connection","delegationId","ownerDecisionId"],"properties":{"connection":{"type":"string"},"conversation":{"type":["string","null"]},"delegationId":{"type":"string"},"ownerDecisionId":{"type":"string"},"session":{"type":["string","null"]}},"x-readme-ref-name":"ApprovalDelegationCloseBody"}

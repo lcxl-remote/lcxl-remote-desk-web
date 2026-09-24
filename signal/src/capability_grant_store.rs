@@ -1,5 +1,6 @@
 //! OSS SQLite CapabilityGrant issuance and atomic Prepare/DispatchIntent transactions.
 
+mod concrete_review;
 mod task_authority;
 pub(crate) mod task_grant;
 
@@ -44,6 +45,7 @@ pub const CAPABILITY_WORK_FAILED: &str = "capability_failed";
 pub const CAPABILITY_WORK_OUTCOME_UNKNOWN: &str = "capability_outcome_unknown";
 pub const CAPABILITY_WORK_SUPERSEDED: &str = "capability_superseded_before_intent";
 pub const CAPABILITY_WORK_REVOKED: &str = "capability_revoked_before_intent";
+pub const CAPABILITY_WORK_REVIEW_CLOSED: &str = "capability_review_closed_before_intent";
 pub const DISPATCH_OUTBOX_PENDING: &str = "pending";
 pub const DISPATCH_OUTBOX_SENDING: &str = "sending";
 pub const DISPATCH_OUTBOX_COMPLETED: &str = "completed";
@@ -307,6 +309,64 @@ impl SignalCapabilityGrantStore {
             return Ok(None);
         };
         Ok(Some(decode_prepared_payload(&work)?.grant_id))
+    }
+
+    pub(crate) async fn prepared_has_dispatch_intent(
+        &self,
+        call_id: &str,
+        work_id: i64,
+    ) -> Result<bool, DbErr> {
+        Ok(agent_capability_dispatch_outbox::Entity::find()
+            .filter(agent_capability_dispatch_outbox::Column::CallId.eq(call_id))
+            .filter(agent_capability_dispatch_outbox::Column::WorkId.eq(work_id))
+            .one(&self.db)
+            .await?
+            .is_some())
+    }
+
+    /// A reviewer denial or human handoff has no dispatch intent. Release its
+    /// reserved grant use and close the stable call so another call must carry
+    /// a new identity and receive its own review.
+    pub(crate) async fn close_prepared_after_review(
+        &self,
+        call_id: &str,
+        work_id: i64,
+        now_unix_ms: u64,
+        resolution: &str,
+    ) -> Result<(), DbErr> {
+        if !matches!(resolution, "ai_review_denied" | "ai_review_unavailable") {
+            return Err(DbErr::Custom("invalid concrete review closure".into()));
+        }
+        let txn = crate::db::begin_write(&self.db, agent_action_item::Entity).await?;
+        let (reservation, work) = load_prepared(&txn, call_id)
+            .await?
+            .ok_or_else(|| DbErr::Custom("prepared capability call is missing".into()))?;
+        if work.id != work_id
+            || work.kind != CAPABILITY_WORK_KIND
+            || work.action_request_id != call_id
+            || reservation.state != RESERVATION_STATUS_RESERVED
+            || work.status != CAPABILITY_WORK_PREPARED
+            || agent_capability_dispatch_outbox::Entity::find()
+                .filter(agent_capability_dispatch_outbox::Column::CallId.eq(call_id))
+                .one(&txn)
+                .await?
+                .is_some()
+        {
+            return Err(DbErr::Custom(
+                "capability call is no longer unstarted".into(),
+            ));
+        }
+        release_before_intent(
+            &txn,
+            &reservation,
+            &work,
+            now_unix_ms,
+            CAPABILITY_WORK_REVIEW_CLOSED,
+            resolution,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(())
     }
 
     pub async fn revoke(
@@ -680,6 +740,14 @@ impl SignalCapabilityGrantStore {
                     "reserved capability grant no longer matches call: {reason:?}"
                 ))
             })?;
+        concrete_review::require_approved_on(
+            &txn,
+            &grant,
+            request.call_id,
+            &prepared_payload.canonical_input_json,
+            request.call.now_unix_ms,
+        )
+        .await?;
         desk_diagnose_core::file_scope::validate_artifact_scope(
             &session,
             &grant.tool_name,
@@ -1512,7 +1580,7 @@ async fn release_before_intent<C: sea_orm::ConnectionTrait>(
     Ok(())
 }
 
-fn decode_prepared_payload(
+pub(crate) fn decode_prepared_payload(
     work: &agent_action_item::Model,
 ) -> Result<PreparedCapabilityPayload, DbErr> {
     serde_json::from_str(&work.payload_json).map_err(json_error)
@@ -1711,8 +1779,8 @@ mod tests {
     use desk_agent_protocol::{
         AgentScope, ExecutionMode,
         capability_grant::{
-            CapabilityGrantIssuer, CapabilityGrantLimits, CapabilityGrantUsePolicy,
-            CapabilityRiskTier,
+            AiApprovalGrantProvenance, CapabilityGrantIssuer, CapabilityGrantLimits,
+            CapabilityGrantUsePolicy, CapabilityRiskTier,
         },
         capability_provider::{CapabilityEffect, ProductSurface},
     };
@@ -1777,6 +1845,9 @@ mod tests {
             schema.create_table_from_entity(agent_capability_dispatch_outbox::Entity),
             schema.create_table_from_entity(agent_action_item::Entity),
             schema.create_table_from_entity(agent_session::Entity),
+            schema.create_table_from_entity(crate::entity::agent_goal_run::Entity),
+            schema.create_table_from_entity(crate::entity::agent_goal_open_request::Entity),
+            schema.create_table_from_entity(crate::entity::agent_approval_review::Entity),
         ] {
             db.execute(&statement).await.unwrap();
         }
@@ -1814,6 +1885,102 @@ mod tests {
         .insert(db)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ai_ui_scope_requires_matching_approved_concrete_review_at_intent() {
+        use crate::entity::agent_approval_review as review_row;
+        use desk_diagnose_core::approval_review::{
+            ApprovalReviewDecision, ApprovalVerdict, concrete_call_review_identity,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let db = file_db(&directory.path().join("concrete-review.db")).await;
+        let mut issued = grant(1);
+        issued.tool_name = "execute_ui_actions".into();
+        issued.issued_by = CapabilityGrantIssuer::AiApproval(AiApprovalGrantProvenance {
+            delegation_id: "delegation-1".into(),
+            delegation_revision: 1,
+            model_config_revision: 1,
+            candidate_id: "scope-candidate".into(),
+            decision_event_id: "scope-decision".into(),
+            goal_id: None,
+            goal_revision: None,
+        });
+        let action = r#"{"steps":[{"action":"invoke"}]}"#;
+        let txn = db.begin().await.unwrap();
+        assert!(
+            concrete_review::require_approved_on(&txn, &issued, "call-1", action, 500,)
+                .await
+                .is_err()
+        );
+        let identity = concrete_call_review_identity(&issued, "call-1", action)
+            .unwrap()
+            .unwrap();
+        let decision = ApprovalReviewDecision {
+            candidate_id: identity.candidate_id.clone(),
+            verdict: ApprovalVerdict::Approve,
+            reason_code: "safe_action".into(),
+            reason: "The exact action is within the owner request.".into(),
+            evidence_event_ids: vec!["owner-message".into()],
+        };
+        review_row::ActiveModel {
+            candidate_id: Set(identity.candidate_id.clone()),
+            conversation_id: Set(issued.run_id.clone()),
+            actor_id: Set(issued.actor_id.clone()),
+            device_id: Set(issued.target_device_id.clone()),
+            delegation_id: Set("delegation-1".into()),
+            model_config_revision: Set(1),
+            source_kind: Set("concrete_call".into()),
+            source_id: Set("call-1".into()),
+            action_sha256: Set(identity.action_sha256.clone()),
+            context_hmac_sha256: Set("binding".into()),
+            decision_json: Set(Some(serde_json::to_string(&decision).unwrap())),
+            status: Set("approved".into()),
+            lease_epoch: Set(1),
+            lease_owner: Set(None),
+            lease_deadline: Set(None),
+            reserved_tokens: Set(1),
+            reserved_cost_micros: Set(1),
+            expires_at: Set(1_000),
+            created_at: Set(400),
+            updated_at: Set(450),
+            ..Default::default()
+        }
+        .insert(&txn)
+        .await
+        .unwrap();
+        assert!(
+            concrete_review::require_approved_on(&txn, &issued, "call-1", action, 500,)
+                .await
+                .is_ok()
+        );
+        assert!(
+            concrete_review::require_approved_on(&txn, &issued, "call-2", action, 500,)
+                .await
+                .is_err()
+        );
+        assert!(
+            concrete_review::require_approved_on(
+                &txn,
+                &issued,
+                "call-1",
+                r#"{"steps":[{"action":"toggle"}]}"#,
+                500,
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            concrete_review::require_approved_on(&txn, &issued, "call-1", action, 1_000,)
+                .await
+                .is_err()
+        );
+        issued.issued_by = CapabilityGrantIssuer::UserDecision;
+        assert!(
+            concrete_review::require_approved_on(&txn, &issued, "call-1", action, 500,)
+                .await
+                .is_ok()
+        );
     }
 
     async fn advance_session_input(db: &DatabaseConnection, input_revision: u64, input_seq: u64) {

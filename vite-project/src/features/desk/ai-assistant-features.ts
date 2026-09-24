@@ -4,6 +4,7 @@ export type AiAssistantFeatureProfile = {
     capability_inventory: boolean;
     full_session_snapshot: boolean;
     permission_decision: boolean;
+    approval_delegation: boolean;
     grant_revoke: boolean;
     background_task_cancel: boolean;
     object_context: boolean;
@@ -16,6 +17,7 @@ export const OSS_AI_ASSISTANT_FEATURES: AiAssistantFeatureProfile = {
     capability_inventory: true,
     full_session_snapshot: true,
     permission_decision: true,
+    approval_delegation: true,
     grant_revoke: true,
     background_task_cancel: true,
     object_context: true,

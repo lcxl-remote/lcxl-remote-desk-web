@@ -10,6 +10,34 @@ const tool: AiAssistantToolActivity = {
 };
 
 describe('tool call transcript', () => {
+    it('labels a permission-paused sibling as historically skipped, not an active denial', () => {
+        render(<AssistantToolCall running={false} tool={{ ...tool,
+            name: 'describe_tools', status: 'failed',
+            output: 'not executed: waiting for user permission decision',
+        }} />);
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.skippedForPermission' })).toBeTruthy();
+        expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.failure' })).toBeNull();
+        fireEvent.click(screen.getByText(/describe_tools/));
+        expect(screen.getByText('pages.aiAssistant.historicalPermissionSkip')).toBeTruthy();
+    });
+
+    it('labels a sibling skipped for an existing pending request the same way', () => {
+        render(<AssistantToolCall running={false} tool={{ ...tool,
+            name: 'describe_tools', status: 'failed',
+            output: 'not executed: waiting for the existing user permission decision',
+        }} />);
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.skippedForPermission' })).toBeTruthy();
+    });
+
+    it('labels the pending permission tool result as its submission-time receipt', () => {
+        render(<AssistantToolCall running={false} tool={{ ...tool,
+            name: 'request_permissions', status: 'ok',
+            output: JSON.stringify({ status: 'pending_user_decision', request_id: 'request-1', authority: 'none', item_count: 1 }),
+        }} />);
+        fireEvent.click(screen.getByText(/request_permissions/));
+        expect(screen.getByText('pages.aiAssistant.permissionSubmissionReceipt')).toBeTruthy();
+    });
+
     it('shows an associated unknown file result while folded without calling it success or ordinary failure', () => {
         const output = { work_id: 'work', action_request_id: tool.callId, execution_generation: 'generation',
             result: 'outcome_unknown', facts: [{ index: 0, changed: true, verified: false }], output: null };

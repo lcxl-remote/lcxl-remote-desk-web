@@ -1,0 +1,1 @@
+{"type":"object","required":["connection","requestId","approve"],"properties":{"approve":{"type":"boolean"},"connection":{"type":"string"},"conversation":{"type":["string","null"]},"requestId":{"type":"string"},"session":{"type":["string","null"]}},"x-readme-ref-name":"AiAssistantGoalOpenDecisionBody"}

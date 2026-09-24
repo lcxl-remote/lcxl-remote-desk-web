@@ -50,9 +50,12 @@ pub struct CapabilityCatalogMetrics {
 ///
 /// Permission decisions are durable run events rather than conversation text,
 /// so an older assistant message may still say that a request was pending.
-/// Re-projecting grants on every turn gives the model current authority facts
-/// without exposing grant ids or trusting model-maintained history. Actual
-/// dispatch still has to pass the grant matcher and transactional reservation.
+/// Re-projecting grants and per-item decisions on every turn gives the model
+/// current authority facts without exposing grant ids or trusting
+/// model-maintained history. Callers must supply the session's decision
+/// projection so a partially approved batch cannot be flattened into a
+/// tool-wide refusal. Actual dispatch still has to pass the grant matcher and
+/// transactional reservation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityAuthorizationPrompt {
     pub text: String,
@@ -63,6 +66,7 @@ pub struct CapabilityAuthorizationPrompt {
 
 pub(crate) fn latest_tool_request_denied(
     requests: &[PermissionRequest],
+    decisions: &[crate::dynamic_run::PermissionDecisionProjection],
     tool: &str,
     revision: u64,
 ) -> bool {
@@ -73,12 +77,63 @@ pub(crate) fn latest_tool_request_denied(
             request.input_revision == revision
                 && request.items.iter().any(|item| item.tool_name == tool)
         })
-        .is_some_and(|request| request.state == PermissionRequestState::Denied)
+        .is_some_and(|request| {
+            decisions
+                .iter()
+                .find(|decision| decision.request_id == request.request_id)
+                .map_or(
+                    request.state == PermissionRequestState::Denied,
+                    |decision| {
+                        // A mixed decision is not a refusal of the entire tool.
+                        request
+                            .items
+                            .iter()
+                            .filter(|item| item.tool_name == tool)
+                            .all(|item| {
+                                decision.items.iter().any(|outcome| {
+                                    outcome.item_id == item.item_id && !outcome.approved
+                                })
+                            })
+                    },
+                )
+        })
+}
+
+/// Reject an unchanged AI-denied item even if the model changes item ids,
+/// explanatory prose, or requested grant lifetime. A narrower scope or a
+/// different concrete input is a new action that can receive a new review.
+pub(crate) fn unchanged_ai_denied_item<'a>(
+    requests: &'a [PermissionRequest],
+    decisions: &[crate::dynamic_run::PermissionDecisionProjection],
+    proposed: &PermissionRequest,
+) -> Option<(&'a str, &'a str)> {
+    requests
+        .iter()
+        .filter(|request| request.input_revision == proposed.input_revision)
+        .find_map(|request| {
+            let decision = decisions.iter().find(|decision| {
+                decision.request_id == request.request_id
+                    && decision.actor == crate::dynamic_run::PermissionDecisionActor::AiApproval
+            })?;
+            request.items.iter().find_map(|old| {
+                let denied = decision
+                    .items
+                    .iter()
+                    .any(|item| item.item_id == old.item_id && !item.approved);
+                (denied
+                    && proposed
+                        .items
+                        .iter()
+                        .any(|new| same_permission_action(old, new)))
+                .then_some((request.request_id.as_str(), old.item_id.as_str()))
+            })
+        })
 }
 
 pub fn capability_authorization_prompt(
     grants: &[CapabilityGrant],
     permission_requests: &[PermissionRequest],
+    decisions: &[crate::dynamic_run::PermissionDecisionProjection],
     now_unix_ms: u64,
     current_input_revision: u64,
     current_readiness_revision: u64,
@@ -194,15 +249,61 @@ pub fn capability_authorization_prompt(
         .map(|item| item.tool_name.as_str())
         .collect();
     for tool in tools {
-        if latest_tool_request_denied(permission_requests, tool, current_input_revision) {
+        let latest = permission_requests.iter().rev().find(|request| {
+            request.input_revision == current_input_revision
+                && request.items.iter().any(|item| item.tool_name == tool)
+        });
+        let has_item_projection = latest.is_some_and(|request| {
+            decisions
+                .iter()
+                .any(|decision| decision.request_id == request.request_id)
+        });
+        if !has_item_projection
+            && latest_tool_request_denied(
+                permission_requests,
+                decisions,
+                tool,
+                current_input_revision,
+            )
+        {
             entries.push(
                 json!({"tool_name":tool,"state":"denied","input_revision":current_input_revision}),
             );
         }
     }
+    for decision in decisions
+        .iter()
+        .filter(|decision| decision.input_revision == current_input_revision)
+    {
+        if let Some(request) = permission_requests
+            .iter()
+            .find(|request| request.request_id == decision.request_id)
+        {
+            for outcome in decision.items.iter().filter(|item| !item.approved) {
+                if let Some(item) = request
+                    .items
+                    .iter()
+                    .find(|item| item.item_id == outcome.item_id)
+                {
+                    entries.push(json!({
+                        "tool_name": item.tool_name,
+                        "state": "denied_item",
+                        "request_id": request.request_id,
+                        "item_id": item.item_id,
+                        "decision_actor": match decision.actor {
+                            crate::dynamic_run::PermissionDecisionActor::Owner => "owner",
+                            crate::dynamic_run::PermissionDecisionActor::AiApproval => "ai_approval",
+                            crate::dynamic_run::PermissionDecisionActor::System => "system_review_unavailable",
+                        },
+                        "input_revision": current_input_revision,
+                    }));
+                }
+            }
+        }
+    }
     CapabilityAuthorizationPrompt {
         text: format!(
-            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON the owner approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, use its application_id in the approved UI or background-input tool, use current observed target IDs and an approved action; do not request another exact permission for each control within that scope. A state=denied entry means the latest request for that tool in this user input was explicitly refused, not pending or ineffective. Stop that denied operation and report the refusal. Do not resubmit it or switch from a denied window capture to a broader display capture unless the user changes the request. Other previously approved scopes remain independently valid. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
+            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON that was approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, use its application_id in the approved UI or background-input tool, use current observed target IDs and an approved action; do not request another exact permission for each control within that scope. A state=denied_item entry identifies one denied item, not every use of that tool; any other active grant remains independently valid. Do not retry an unchanged denied action. A narrower action after an AI approval denial requires a new permission request, while an owner denial requires new owner input. A legacy state=denied entry reports an entire refused request. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
             serde_json::to_string(&entries).expect("authorization projection is serializable")
         ),
         approved_exact_input_expires_at_unix_ms,
@@ -1251,6 +1352,21 @@ pub(crate) fn equivalent_permission_request(
     })
 }
 
+fn same_permission_action(
+    left: &crate::dynamic_run::GrantRequestItem,
+    right: &crate::dynamic_run::GrantRequestItem,
+) -> bool {
+    left.provider_id == right.provider_id
+        && left.tool_name == right.tool_name
+        && left.expected_effect == right.expected_effect
+        && left.resource_scope == right.resource_scope
+        && left.operation_scope == right.operation_scope
+        && left.export_destinations == right.export_destinations
+        && left.canonical_input_digest_sha256 == right.canonical_input_digest_sha256
+        && left.command_confirmation == right.command_confirmation
+        && left.launch_confirmation == right.launch_confirmation
+}
+
 fn normalize_scope(values: Vec<String>) -> Vec<String> {
     let mut values = values
         .into_iter()
@@ -1265,6 +1381,9 @@ fn normalize_scope(values: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dynamic_run::{
+        PermissionDecisionActor, PermissionDecisionProjection, PermissionItemDisposition,
+    };
     use desk_agent_protocol::capability_provider::CapabilityBlockedReason;
 
     fn call(arguments_json: &str) -> ToolCall {
@@ -1283,12 +1402,13 @@ mod tests {
             &registry, "permission-denied".into(), 3, "2026-09-17T00:00:00Z".into(),
         ).unwrap();
         request.state = PermissionRequestState::Denied;
-        let prompt = capability_authorization_prompt(&[], &[request.clone()], 500, 3, 1);
+        let prompt = capability_authorization_prompt(&[], &[request.clone()], &[], 500, 3, 1);
         assert!(prompt.text.contains("\"state\":\"denied\""));
         assert!(!prompt.text.contains("private-display"));
         assert!(!prompt.text.contains("private-reason"));
         assert!(!latest_tool_request_denied(
             &[request.clone()],
+            &[],
             "read_current_screen",
             4
         ));
@@ -1296,20 +1416,88 @@ mod tests {
         newer.state = PermissionRequestState::Approved;
         assert!(!latest_tool_request_denied(
             &[request.clone(), newer.clone()],
+            &[],
             "read_current_screen",
             3
         ));
         newer.state = PermissionRequestState::PartiallyApproved;
         assert!(!latest_tool_request_denied(
             &[newer],
+            &[],
             "read_current_screen",
             3
         ));
         assert!(latest_tool_request_denied(
             &[request],
+            &[],
             "read_current_screen",
             3
         ));
+    }
+
+    #[test]
+    fn partial_ai_decision_projects_only_the_denied_item() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let mut request = build_permission_request(
+            &call(r#"{"items":[{"item_id":"first","tool_name":"read_current_screen","exact_input":{"display":"private-display"},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"private-reason"}]}"#),
+            &registry, "permission-partial".into(), 3, "2026-09-17T00:00:00Z".into(),
+        ).unwrap();
+        let mut second = request.items[0].clone();
+        second.item_id = "second".into();
+        request.items.push(second);
+        request.state = PermissionRequestState::PartiallyApproved;
+        let decision = PermissionDecisionProjection {
+            request_id: request.request_id.clone(),
+            input_revision: request.input_revision,
+            actor: PermissionDecisionActor::AiApproval,
+            items: vec![
+                PermissionItemDisposition {
+                    item_id: "first".into(),
+                    approved: true,
+                },
+                PermissionItemDisposition {
+                    item_id: "second".into(),
+                    approved: false,
+                },
+            ],
+        };
+        decision.validate_for(&request).unwrap();
+        let projection = capability_authorization_prompt(
+            &[],
+            &[request.clone()],
+            &[decision.clone()],
+            500,
+            3,
+            1,
+        );
+        assert!(projection.text.contains("\"state\":\"denied_item\""));
+        assert!(projection.text.contains("\"item_id\":\"second\""));
+        assert!(!projection.text.contains("\"item_id\":\"first\""));
+        assert!(!projection.text.contains("\"state\":\"denied\""));
+        assert!(!projection.text.contains("private-display"));
+        assert!(!projection.text.contains("private-reason"));
+        assert!(!latest_tool_request_denied(
+            &[request.clone()],
+            &[decision.clone()],
+            "read_current_screen",
+            3,
+        ));
+
+        let mut retry = request.clone();
+        retry.request_id = "permission-retry".into();
+        retry.items = vec![request.items[1].clone()];
+        retry.items[0].item_id = "renamed".into();
+        retry.items[0].reason = "new explanation".into();
+        retry.items[0].suggested_ttl_seconds = 60;
+        assert_eq!(
+            unchanged_ai_denied_item(&[request.clone()], &[decision.clone()], &retry),
+            Some(("permission-partial", "second")),
+        );
+        retry.items[0].resource_scope = vec!["specific-resource".into()];
+        assert_eq!(
+            unchanged_ai_denied_item(&[request], &[decision], &retry),
+            None
+        );
     }
 
     #[test]
@@ -2247,7 +2435,8 @@ mod tests {
             revoked_at_unix_ms: None,
             revoked_reason: None,
         };
-        let prompt = capability_authorization_prompt(std::slice::from_ref(&grant), &[], 500, 1, 1);
+        let prompt =
+            capability_authorization_prompt(std::slice::from_ref(&grant), &[], &[], 500, 1, 1);
         assert!(prompt.text.contains("\"state\":\"active\""));
         assert!(prompt.text.contains("inspect_office_selection"));
         assert!(!prompt.text.contains("secret-grant-id"));
@@ -2260,11 +2449,12 @@ mod tests {
 
         let mut expired = grant.clone();
         expired.expires_at_unix_ms = 200;
-        let compact = capability_authorization_prompt(&[expired.clone(), expired], &[], 500, 1, 1);
+        let compact =
+            capability_authorization_prompt(&[expired.clone(), expired], &[], &[], 500, 1, 1);
         assert!(compact.text.contains("\"grant_count\":2"));
         assert!(!compact.text.contains("target:current_device"));
         assert!(!compact.text.contains("expires_at_unix_ms"));
-        let stale_focus = capability_authorization_prompt(&[grant], &[], 500, 2, 1);
+        let stale_focus = capability_authorization_prompt(&[grant], &[], &[], 500, 2, 1);
         assert!(stale_focus.text.contains("inspect_office_selection"));
         assert_eq!(stale_focus.approved_exact_input_expires_at_unix_ms, None);
     }
@@ -2342,6 +2532,7 @@ mod tests {
         let active = capability_authorization_prompt(
             std::slice::from_ref(&grant),
             std::slice::from_ref(&request),
+            &[],
             500,
             1,
             1,
@@ -2377,6 +2568,7 @@ mod tests {
         let reusable = capability_authorization_prompt(
             &[reusable_exact],
             std::slice::from_ref(&request),
+            &[],
             500,
             1,
             1,
@@ -2411,6 +2603,7 @@ mod tests {
             let projection = capability_authorization_prompt(
                 std::slice::from_ref(&inactive),
                 std::slice::from_ref(&request),
+                &[],
                 500,
                 1,
                 1,
@@ -2434,6 +2627,7 @@ mod tests {
         let stale = capability_authorization_prompt(
             &[stale_readiness],
             std::slice::from_ref(&request),
+            &[],
             500,
             1,
             1,
@@ -2455,7 +2649,7 @@ mod tests {
         legacy_request.items[0].canonical_input_json = Some(legacy_flat.into());
         legacy_request.items[0].canonical_input_digest_sha256 = Some(legacy_digest);
         let incompatible =
-            capability_authorization_prompt(&[legacy_grant], &[legacy_request], 500, 1, 1);
+            capability_authorization_prompt(&[legacy_grant], &[legacy_request], &[], 500, 1, 1);
         assert!(
             incompatible
                 .text

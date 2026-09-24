@@ -2868,6 +2868,86 @@ impl SignalAiAssistantTools {
                 return Ok(ExecOutcome::PermissionRequired { request });
             }
         };
+        if matches!(
+            call.name.as_str(),
+            EXECUTE_CONFIRMED_UI_ACTION_TOOL | EXECUTE_BACKGROUND_INPUT_TOOL
+        ) && !store
+            .prepared_has_dispatch_intent(&server_call_id, prepared.work_id)
+            .await
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::SessionUnavailable,
+                    "unable to determine the original UI dispatch state",
+                    false,
+                    false,
+                )
+            })?
+        {
+            let review = crate::agent_approval_concrete::review_prepared_call(
+                &self.db,
+                &self.provider_registry,
+                &crate::agent_approval_concrete::ConcreteSubject {
+                    work_id: prepared.work_id,
+                    server_call_id: &server_call_id,
+                    turn_id: &self.turn_id,
+                    conversation_id: &self.run_id,
+                    actor_id: &self.actor_id,
+                    device_id: &self.target_device_id,
+                    canonical_input_json: &canonical_input_json,
+                    call,
+                },
+            )
+            .await
+            .unwrap_or(crate::agent_approval_concrete::ConcreteReviewResult::Unavailable);
+            let closure = match &review {
+                crate::agent_approval_concrete::ConcreteReviewResult::NotRequired
+                | crate::agent_approval_concrete::ConcreteReviewResult::Approved => None,
+                crate::agent_approval_concrete::ConcreteReviewResult::Denied(_) => {
+                    Some("ai_review_denied")
+                }
+                crate::agent_approval_concrete::ConcreteReviewResult::Unavailable => {
+                    Some("ai_review_unavailable")
+                }
+            };
+            if let Some(resolution) = closure {
+                let review_now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
+                    .map_err(|_| {
+                        error(
+                            AgentErrorKind::SessionUnavailable,
+                            "unable to date the completed UI review",
+                            false,
+                            false,
+                        )
+                    })?;
+                store
+                    .close_prepared_after_review(
+                        &server_call_id,
+                        prepared.work_id,
+                        review_now_unix_ms,
+                        resolution,
+                    )
+                    .await
+                    .map_err(|_| {
+                        error(
+                            AgentErrorKind::SessionUnavailable,
+                            "concrete UI review could not prove the action was unstarted",
+                            false,
+                            false,
+                        )
+                    })?;
+                return Ok(match review {
+                    crate::agent_approval_concrete::ConcreteReviewResult::Denied(reason) =>
+                        ExecOutcome::Rejected {
+                            reason: Some(format!("independent AI review denied this exact UI action: {reason}")),
+                        },
+                    crate::agent_approval_concrete::ConcreteReviewResult::Unavailable =>
+                        ExecOutcome::Rejected {
+                            reason: Some("independent AI review was unavailable; this UI action was not executed. Retry later or ask the owner for another safe approach".into()),
+                        },
+                    _ => unreachable!("only denied or unavailable review closes prepared UI work"),
+                });
+            }
+        }
         let dispatch_id =
             match store
                 .record_dispatch_intent(prepare())

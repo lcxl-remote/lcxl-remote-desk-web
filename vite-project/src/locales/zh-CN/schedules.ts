@@ -194,6 +194,7 @@ export default {
     "schedules.runIssue.misfire": "已错过计划执行时间。",
     "schedules.runIssue.device_offline_timeout": "设备离线，已超过最晚开始时间。",
     "schedules.runIssue.queue_timeout": "任务未能在最晚开始时间前启动。",
+    "schedules.runIssue.active_goal_conflict": "当前会话存在进行中的 AI 助手目标，定时任务未能在最晚开始时间前启动。",
     "schedules.runIssue.executor_interrupted": "执行在本轮完成前中断。",
     "schedules.runIssue.outcome_unknown": "执行结果需要对账确认后才能继续。",
     "schedules.runIssue.unavailable": "原因暂不可用。",

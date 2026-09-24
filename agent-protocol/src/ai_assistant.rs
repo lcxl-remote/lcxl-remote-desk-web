@@ -12,6 +12,8 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::computer_use::{ObjectKind, ObjectRef};
 
+pub mod goal_budget;
+
 /// Device-owned product switch projected to trusted central orchestrators.
 ///
 /// The device is the only authority for this value. Central services may cache
@@ -77,6 +79,12 @@ pub struct AiAssistantAsk {
     /// ObjectRef directly from model arguments.
     #[serde(default)]
     pub selected_attachment_ids: Vec<String>,
+    /// The owner explicitly asks the server to open a durable, bounded goal
+    /// with server-selected limits. This is not permission for device actions.
+    #[serde(default)]
+    pub start_goal: bool,
+    /// Explicitly continue one completed goal. Valid only with start_goal.
+    pub previous_completed_goal_id: Option<String>,
 }
 
 /// Browser to central brain: independently reconcile the durable context
@@ -284,6 +292,12 @@ impl AiAssistantAsk {
             &self.client_message_id,
             "invalid AI Assistant client message id",
         )?;
+        if let Some(goal_id) = &self.previous_completed_goal_id {
+            if !self.start_goal {
+                return Err("previous completed goal requires start_goal");
+            }
+            validate_wire_id(goal_id, "invalid previous completed goal id")?;
+        }
         validate_selected_capability_ids(&self.selected_capability_ids)
             .and_then(|_| validate_attachment_ids(&self.selected_attachment_ids))
     }
@@ -340,12 +354,45 @@ mod tests {
             locale: Some("en-US".into()),
             selected_capability_ids: vec!["desktop.session.inspect".into()],
             selected_attachment_ids: Vec::new(),
+            start_goal: false,
+            previous_completed_goal_id: None,
         };
         let value = serde_json::to_value(&ask).unwrap();
         assert!(value.get("action").is_none());
         assert!(value.get("approval").is_none());
         let back: AiAssistantAsk = serde_json::from_value(value).unwrap();
         assert_eq!(back, ask);
+    }
+
+    #[test]
+    fn explicit_goal_intent_is_distinct_from_tool_approval() {
+        let mut ask: AiAssistantAsk = serde_json::from_value(serde_json::json!({
+            "question": "Keep working on the report",
+            "client_message_id": "message-2"
+        }))
+        .unwrap();
+        assert!(!ask.start_goal);
+        ask.start_goal = true;
+        let wire = serde_json::to_value(&ask).unwrap();
+        assert_eq!(wire["start_goal"], true);
+        assert!(wire.get("approval").is_none());
+        assert_eq!(serde_json::from_value::<AiAssistantAsk>(wire).unwrap(), ask);
+    }
+
+    #[test]
+    fn previous_completed_goal_requires_explicit_goal_start() {
+        let mut ask = AiAssistantAsk {
+            question: "Continue unfinished work".into(),
+            client_message_id: "message-1".into(),
+            previous_completed_goal_id: Some("goal-1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ask.validate(),
+            Err("previous completed goal requires start_goal")
+        );
+        ask.start_goal = true;
+        assert!(ask.validate().is_ok());
     }
 
     #[test]

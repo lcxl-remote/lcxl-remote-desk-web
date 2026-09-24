@@ -32,6 +32,7 @@ pub(crate) async fn restore_completed_calls(
                 | CAPABILITY_WORK_PREPARED
                 | CAPABILITY_WORK_SUPERSEDED
                 | CAPABILITY_WORK_REVOKED
+                | CAPABILITY_WORK_REVIEW_CLOSED
                 | CAPABILITY_WORK_OUTCOME_UNKNOWN
         )
     }) {
@@ -45,7 +46,10 @@ pub(crate) async fn restore_completed_calls(
     for row in &rows {
         if !matches!(
             row.status.as_str(),
-            CAPABILITY_WORK_PREPARED | CAPABILITY_WORK_SUPERSEDED | CAPABILITY_WORK_REVOKED
+            CAPABILITY_WORK_PREPARED
+                | CAPABILITY_WORK_SUPERSEDED
+                | CAPABILITY_WORK_REVOKED
+                | CAPABILITY_WORK_REVIEW_CLOSED
         ) {
             continue;
         }
@@ -122,6 +126,7 @@ pub(crate) async fn restore_completed_calls(
                 CAPABILITY_WORK_PREPARED
                     | CAPABILITY_WORK_SUPERSEDED
                     | CAPABILITY_WORK_REVOKED
+                    | CAPABILITY_WORK_REVIEW_CLOSED
                     | CAPABILITY_WORK_OUTCOME_UNKNOWN
             ) {
                 continue;

@@ -1169,9 +1169,16 @@ pub enum AgentErrorKind {
     /// retry.
     Cancelled,
     OutputLimitExceeded,
+    /// A conversation cannot store another attachment without evicting a
+    /// currently protected goal dependency. The active goal must pause.
+    AttachmentCapacity,
     InvalidInput,
     RedactionFailed,
     TransportError,
+    /// A model-provider request failed transiently before a usable response.
+    ModelUnavailable,
+    /// The model provider rejected the request or its configuration.
+    ModelRejected,
     /// A closed content-policy decision rejected the request or model turn.
     /// Waiting cannot make the same content permissible.
     ContentBlocked,

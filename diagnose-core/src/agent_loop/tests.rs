@@ -21,6 +21,174 @@ mod original_results;
 mod version_handoff;
 
 #[test]
+fn goal_progress_uses_original_result_digest_and_ignores_skipped_calls() {
+    let mut session =
+        PersistedAgentSession::new("run", "owner", "device", 1, scope(), "2026-09-23T00:00:00Z");
+    let registry = vec![read_tool("inspect", Capability::SystemInfo)];
+    let original_sha256 = format!("{:x}", Sha256::digest(b"same original content"));
+    let mut fingerprints = Vec::new();
+    for index in 0..2 {
+        let call_id = format!("call-{index}");
+        session.conversation.push(ChatMessage::assistant_tool_calls(
+            format!("assistant-{index}"),
+            "",
+            vec![ToolCallRef {
+                id: call_id.clone(),
+                name: "inspect".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        let mut result = ChatMessage::tool_result(
+            format!("result-{index}"),
+            &call_id,
+            format!("attachment-{index}"),
+        );
+        result.raw_result = Some(Box::new(
+            crate::conversation_attachment::delivery::RawResult {
+                original_sha256: original_sha256.clone(),
+                original_envelope: None,
+                restorable: true,
+                template: None,
+                slots: vec![],
+                sha256: original_sha256.clone(),
+                envelope: None,
+            },
+        ));
+        session.conversation.push(result);
+        fingerprints.push(settled_goal_result_fingerprints(
+            &session,
+            &registry,
+            &HashSet::new(),
+        ));
+    }
+    assert_eq!(fingerprints[0], fingerprints[1]);
+    session.conversation.push(ChatMessage::assistant_tool_calls(
+        "assistant-skipped",
+        "",
+        vec![ToolCallRef {
+            id: "skipped".into(),
+            name: "inspect".into(),
+            arguments_json: "{}".into(),
+        }],
+    ));
+    session.conversation.push(ChatMessage::tool_result(
+        "result-skipped",
+        "skipped",
+        "not executed: waiting for user permission decision",
+    ));
+    assert_eq!(
+        settled_goal_result_fingerprints(&session, &registry, &HashSet::new()),
+        fingerprints[0]
+    );
+}
+
+#[test]
+fn goal_progress_deduplicates_volatile_json_but_preserves_resource_and_version() {
+    fn fingerprint(arguments_json: &str, result_json: &str) -> Vec<String> {
+        let mut session = PersistedAgentSession::new(
+            "run",
+            "owner",
+            "device",
+            1,
+            scope(),
+            "2026-09-23T00:00:00Z",
+        );
+        session.conversation.push(ChatMessage::assistant_tool_calls(
+            "assistant",
+            "",
+            vec![ToolCallRef {
+                id: "call".into(),
+                name: "inspect".into(),
+                arguments_json: arguments_json.into(),
+            }],
+        ));
+        session
+            .conversation
+            .push(ChatMessage::tool_result("result", "call", result_json));
+        settled_goal_result_fingerprints(
+            &session,
+            &[read_tool("inspect", Capability::SystemInfo)],
+            &HashSet::new(),
+        )
+    }
+
+    let first = fingerprint(
+        r#"{"resource":"a"}"#,
+        r#"{"observed_at":"one","items":[{"id":"b"},{"id":"a"}],"version":1}"#,
+    );
+    let same_fact = fingerprint(
+        r#"{"resource":"a"}"#,
+        r#"{"version":1,"items":[{"id":"a"},{"id":"b"}],"observed_at":"two","elapsed_ms":25}"#,
+    );
+    assert_eq!(first, same_fact);
+    assert_ne!(
+        first,
+        fingerprint(
+            r#"{"resource":"a"}"#,
+            r#"{"items":[{"id":"a"},{"id":"b"}],"version":2}"#,
+        )
+    );
+    assert_ne!(
+        first,
+        fingerprint(
+            r#"{"resource":"b"}"#,
+            r#"{"items":[{"id":"a"},{"id":"b"}],"version":1}"#,
+        )
+    );
+}
+
+#[test]
+fn unstored_attachment_capacity_receipt_is_not_goal_progress() {
+    let mut session =
+        PersistedAgentSession::new("run", "owner", "device", 1, scope(), "2026-09-23T00:00:00Z");
+    session.conversation.push(ChatMessage::assistant_tool_calls(
+        "assistant",
+        "",
+        vec![ToolCallRef {
+            id: "call".into(),
+            name: "inspect".into(),
+            arguments_json: "{}".into(),
+        }],
+    ));
+    session.conversation.push(ChatMessage::tool_result(
+        "result",
+        "call",
+        r#"{"status":"attachment_capacity","result_stored":false,"original_result_sha256":"abc"}"#,
+    ));
+    assert!(
+        settled_goal_result_fingerprints(
+            &session,
+            &[read_tool("inspect", Capability::SystemInfo)],
+            &HashSet::new(),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn goal_required_tool_choice_fallback_only_accepts_explicit_gateway_rejection() {
+    let error = |kind, message: &str| AgentError {
+        kind,
+        message: message.into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    };
+    assert!(rejects_required_tool_choice(&error(
+        AgentErrorKind::ModelRejected,
+        "tool_choice required is not supported",
+    )));
+    assert!(!rejects_required_tool_choice(&error(
+        AgentErrorKind::ModelRejected,
+        "invalid model name",
+    )));
+    assert!(!rejects_required_tool_choice(&error(
+        AgentErrorKind::ModelUnavailable,
+        "tool_choice required is not supported",
+    )));
+}
+
+#[test]
 fn interactive_home_is_a_short_lived_sensitive_model_projection() {
     use desk_agent_protocol::data_lineage::{
         ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DestinationIdentity,
@@ -192,9 +360,17 @@ struct MemSession {
     fail_save_at: Option<usize>,
     fail_save_with_message_id: Option<&'static str>,
     supersede_on_save_failure: bool,
+    latest_completed_goal: Option<crate::goal::GoalRun>,
 }
 #[async_trait(?Send)]
 impl SessionSeam for MemSession {
+    async fn load_latest_completed_goal(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<Option<crate::goal::GoalRun>, AgentError> {
+        Ok(self.latest_completed_goal.clone())
+    }
+
     async fn permission_request_can_renew(
         &self,
         _session: &PersistedAgentSession,
@@ -1229,6 +1405,89 @@ async fn ai_assistant_request_ends_with_server_input_watermark() {
     assert_eq!(marker.role, ChatRole::SystemEvent);
     assert!(marker.text.contains("input_revision=3"));
     assert!(marker.text.contains("newest user message"));
+}
+
+#[tokio::test]
+async fn completed_goal_hint_exposes_identity_without_laundering_prior_result() {
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    seeded.surface = AgentSessionSurface::AiAssistant;
+    seeded.input_revision = 3;
+    seeded.latest_input_seq = 3;
+    let mut previous = crate::goal::GoalRun::new(
+        "prior-goal".into(),
+        "conv".into(),
+        "actor".into(),
+        "device".into(),
+        "Private previous request".into(),
+        "old-input".into(),
+        crate::goal::GoalOpening::OwnerRequest,
+        crate::goal::GoalModelBinding {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            profile_revision: 1,
+            model_id: "model".into(),
+        },
+        1,
+        1_000,
+        crate::goal::GoalLimits::default(),
+    )
+    .unwrap();
+    previous.claim_slice(1_001).unwrap();
+    previous
+        .finish_slice(
+            1,
+            1,
+            1,
+            &crate::goal::GoalControl::Complete {
+                summary: "Private completed result".into(),
+                evidence_ids: vec!["receipt".into()],
+            },
+            true,
+            true,
+            4,
+            vec![],
+            1_002,
+        )
+        .unwrap();
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        latest_completed_goal: Some(previous),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([answer("done")].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    run_agent_turn(
+        &deps(&sess, &model, &tools, &[], &clock),
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "That goal is unfinished"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    let requests = requests.borrow();
+    let hint = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.text.contains("server_completed_goal_hint"))
+        .expect("server-completed goal hint");
+    assert!(hint.text.contains("prior-goal"));
+    assert!(!hint.text.contains("Private previous request"));
+    assert!(!hint.text.contains("Private completed result"));
 }
 
 #[tokio::test]

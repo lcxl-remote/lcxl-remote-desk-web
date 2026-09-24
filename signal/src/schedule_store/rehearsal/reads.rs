@@ -278,7 +278,11 @@ impl ScheduleStore {
                     != desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner
                 || grant.policy_revision != work.policy_revision
                 || !authority.is_within_grant(&grant)
-                || matches!(grant.issued_by, CapabilityGrantIssuer::TaskAuthorization(_))
+                || matches!(
+                    grant.issued_by,
+                    CapabilityGrantIssuer::TaskAuthorization(_)
+                        | CapabilityGrantIssuer::AiApproval(_)
+                )
                 || u64::try_from(work.created_at.timestamp_millis())
                     .ok()
                     .is_none_or(|at| at < grant.issued_at_unix_ms || at >= grant.expires_at_unix_ms)

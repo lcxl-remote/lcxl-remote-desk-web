@@ -10,13 +10,17 @@ use desk_diagnose_core::chat::{ChatMessage, ChatRole};
 use desk_diagnose_core::dynamic_run::{
     AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEvent, AgentRunEventKind, UserFollowupEvent,
 };
+use desk_diagnose_core::goal::{
+    GoalLedgerEvent, GoalLimits, GoalModelBinding, GoalOpenRequestEvent, GoalOpenRequestState,
+    GoalOpening, GoalRun,
+};
 use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, Set, TransactionTrait,
 };
 
-use crate::entity::{agent_run_event, agent_session};
+use crate::entity::{agent_goal_open_request, agent_goal_run, agent_run_event, agent_session};
 
 const APPEND_ATTEMPTS: usize = 5;
 
@@ -33,6 +37,13 @@ pub struct AppendUserFollowupParams {
     pub read_context: Option<ReadContextSelection>,
     pub message: ChatMessage,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartUserGoal {
+    pub goal_id: String,
+    pub previous_completed_goal_id: Option<String>,
+    pub model_binding: GoalModelBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +72,24 @@ impl SignalAgentRunEventStore {
     pub async fn append_user_followup(
         &self,
         params: AppendUserFollowupParams,
+    ) -> Result<UserFollowupAck, AgentError> {
+        self.append_user_followup_inner(params, None).await
+    }
+
+    /// The first user message, queued goal, and both ledger events become
+    /// visible together. The caller performs model/export preflight first.
+    pub async fn append_user_goal(
+        &self,
+        params: AppendUserFollowupParams,
+        goal: StartUserGoal,
+    ) -> Result<UserFollowupAck, AgentError> {
+        self.append_user_followup_inner(params, Some(goal)).await
+    }
+
+    async fn append_user_followup_inner(
+        &self,
+        params: AppendUserFollowupParams,
+        goal_start: Option<StartUserGoal>,
     ) -> Result<UserFollowupAck, AgentError> {
         validate_append_params(&params)?;
         for _ in 0..APPEND_ATTEMPTS {
@@ -96,6 +125,28 @@ impl SignalAgentRunEventStore {
                 let session =
                     input_context::decode_session(&session_row, InputSubject::from(&params))?;
                 let ack = ack_from_existing(&existing, &params, &session)?;
+                if let Some(start) = &goal_start {
+                    let row = agent_goal_run::Entity::find()
+                        .filter(agent_goal_run::Column::GoalId.eq(&start.goal_id))
+                        .filter(agent_goal_run::Column::ConversationId.eq(&params.run_id))
+                        .one(&txn)
+                        .await
+                        .map_err(|error| internal(format!("load idempotent goal: {error}")))?
+                        .ok_or_else(|| internal("goal input event has no goal"))?;
+                    let goal = crate::agent_goal_store::decode(&row)
+                        .map_err(|error| internal(format!("decode idempotent goal: {error}")))?;
+                    if goal.source_message_id != params.message.message_id
+                        || goal.opening != GoalOpening::OwnerRequest
+                        || goal
+                            .previous_completion
+                            .as_ref()
+                            .map(|previous| previous.goal_id.as_str())
+                            != start.previous_completed_goal_id.as_deref()
+                        || goal.model_binding != start.model_binding
+                    {
+                        return Err(internal("idempotent goal input changed"));
+                    }
+                }
                 txn.commit().await.map_err(|error| {
                     internal(format!("commit idempotent user follow-up: {error}"))
                 })?;
@@ -195,11 +246,160 @@ impl SignalAgentRunEventStore {
                 actor_id: params.actor_id.clone(),
                 input_seq: session.latest_input_seq,
                 message_id: params.message.message_id.clone(),
-                message_envelope: envelope,
+                message_envelope: envelope.clone(),
             };
             followup
                 .validate()
                 .map_err(|error| internal(format!("validate user follow-up event: {error}")))?;
+
+            let active_goal_row = agent_goal_run::Entity::find()
+                .filter(agent_goal_run::Column::ConversationId.eq(&params.run_id))
+                .filter(agent_goal_run::Column::Status.is_not_in([
+                    "completed",
+                    "failed",
+                    "cancelled",
+                ]))
+                .one(&txn)
+                .await
+                .map_err(|error| internal(format!("load active goal: {error}")))?;
+            let opened_goal = if let Some(start) = &goal_start {
+                if params
+                    .client_conversation_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("rehearsal_"))
+                    || active_goal_row.is_some()
+                {
+                    return Err(internal("this conversation already has an active goal"));
+                }
+                let opened_at = u64::try_from(now.timestamp_millis())
+                    .map_err(|_| internal("invalid goal opening time"))?;
+                let mut goal = GoalRun::new(
+                    start.goal_id.clone(),
+                    params.run_id.clone(),
+                    params.actor_id.clone(),
+                    params.device_id.clone(),
+                    params.message.text.clone(),
+                    params.message.message_id.clone(),
+                    GoalOpening::OwnerRequest,
+                    start.model_binding.clone(),
+                    session.input_revision,
+                    opened_at,
+                    GoalLimits::default(),
+                )
+                .map_err(|error| internal(format!("invalid goal opening: {error:?}")))?;
+                goal.apply_budget_policy(
+                    &crate::goal_budget_policy::read(&txn)
+                        .await
+                        .map_err(|error| internal(format!("read goal budget policy: {error}")))?,
+                )
+                .map_err(|error| internal(format!("apply goal budget policy: {error:?}")))?;
+                if let Some(previous_id) = &start.previous_completed_goal_id {
+                    let previous = crate::agent_goal_store::load_completed_on(
+                        &txn,
+                        previous_id,
+                        &params.run_id,
+                        &params.actor_id,
+                        &params.device_id,
+                    )
+                    .await
+                    .map_err(|_| internal("previous completed goal is unavailable"))?;
+                    goal = goal
+                        .with_previous_completed(&previous)
+                        .map_err(|_| internal("previous completed goal is invalid"))?;
+                }
+                session.last_event_seq = session
+                    .last_event_seq
+                    .checked_add(1)
+                    .ok_or_else(|| internal("goal opening event sequence exhausted"))?;
+                Some(goal)
+            } else {
+                None
+            };
+            let revised_goal = if goal_start.is_none() {
+                if let Some(row) = active_goal_row.as_ref() {
+                    let mut goal = crate::agent_goal_store::decode(row)
+                        .map_err(|error| internal(format!("decode active goal: {error}")))?;
+                    if goal.owner_id != params.actor_id || goal.device_id != params.device_id {
+                        return Err(internal("active goal subject mismatch"));
+                    }
+                    let prior = (goal.state_version, goal.lease_epoch);
+                    let now_ms = u64::try_from(now.timestamp_millis())
+                        .map_err(|_| internal("invalid goal revision time"))?
+                        .max(goal.updated_at_unix_ms);
+                    goal.revise_input(session.input_revision, now_ms)
+                        .map_err(|error| {
+                            internal(format!("revise goal for new input: {error:?}"))
+                        })?;
+                    session.last_event_seq = session
+                        .last_event_seq
+                        .checked_add(1)
+                        .ok_or_else(|| internal("goal revision event sequence exhausted"))?;
+                    Some((goal, prior))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let goal_event_seq = session.last_event_seq;
+            let closed_request = if let Some(pending_row) = agent_goal_open_request::Entity::find()
+                .filter(agent_goal_open_request::Column::ConversationId.eq(&params.run_id))
+                .filter(agent_goal_open_request::Column::Status.eq("pending"))
+                .one(&txn)
+                .await
+                .map_err(|error| internal(format!("load pending goal request: {error}")))?
+            {
+                let mut pending = crate::agent_goal_open_store::decode(&pending_row)
+                    .map_err(|error| internal(format!("decode pending goal request: {error}")))?;
+                if pending.owner_id != params.actor_id || pending.device_id != params.device_id {
+                    return Err(internal("pending goal request subject mismatch"));
+                }
+                let now_ms = u64::try_from(now.timestamp_millis())
+                    .map_err(|_| internal("invalid goal request clock"))?
+                    .max(pending.created_at_unix_ms);
+                let state = if now_ms >= pending.expires_at_unix_ms {
+                    GoalOpenRequestState::Expired
+                } else {
+                    GoalOpenRequestState::Withdrawn
+                };
+                let decision_event_id = GoalOpenRequestEvent::id_for(
+                    &pending.request_id,
+                    state,
+                    AgentRunEventKind::GoalOpenDecided,
+                )
+                .map_err(|error| internal(format!("identify closed goal request: {error:?}")))?;
+                pending
+                    .close(state, decision_event_id, now_ms)
+                    .map_err(|error| {
+                        internal(format!("close superseded goal request: {error:?}"))
+                    })?;
+                if !crate::agent_goal_open_store::replace_pending_on(&txn, &pending)
+                    .await
+                    .map_err(|error| internal(format!("save superseded goal request: {error}")))?
+                {
+                    return Err(internal(
+                        "pending goal request changed while accepting input",
+                    ));
+                }
+                session.last_event_seq = session
+                    .last_event_seq
+                    .checked_add(1)
+                    .ok_or_else(|| internal("goal request decision event sequence exhausted"))?;
+                Some(
+                    GoalOpenRequestEvent::new(
+                        &pending,
+                        AgentRunEventKind::GoalOpenDecided,
+                        session.last_event_seq,
+                        params.created_at.clone(),
+                    )
+                    .map_err(|error| {
+                        internal(format!("create goal request decision event: {error:?}"))
+                    })?,
+                )
+            } else {
+                None
+            };
 
             session.version = if existing_row_id.is_some() {
                 old_version
@@ -280,6 +480,135 @@ impl SignalAgentRunEventStore {
             if event_row.insert(&txn).await.is_err() {
                 txn.rollback().await.ok();
                 continue;
+            }
+            if let Some(goal) = &opened_goal {
+                crate::agent_goal_store::insert_on(&txn, goal)
+                    .await
+                    .map_err(|error| internal(format!("insert opened goal: {error}")))?;
+                let mut opened = GoalLedgerEvent::new(
+                    goal,
+                    AgentRunEventKind::GoalOpened,
+                    goal_event_seq,
+                    params.created_at.clone(),
+                )
+                .map_err(|error| internal(format!("create goal opening event: {error:?}")))?;
+                opened
+                    .event
+                    .source_envelope_ids
+                    .push(envelope.envelope_id.clone());
+                opened
+                    .validate_for(goal)
+                    .map_err(|error| internal(format!("validate goal opening event: {error:?}")))?;
+                agent_run_event::ActiveModel {
+                    event_id: Set(opened.event.event_id.clone()),
+                    run_id: Set(opened.event.run_id.clone()),
+                    event_seq: Set(to_i64("goal_event_seq", opened.event.event_seq)?),
+                    input_revision: Set(to_i64(
+                        "goal_input_revision",
+                        opened.event.input_revision,
+                    )?),
+                    kind: Set(opened.event.kind.as_str().into()),
+                    correlation_id: Set(opened.event.correlation_id.clone()),
+                    input_seq: Set(None),
+                    actor_id: Set(Some(params.actor_id.clone())),
+                    source_envelope_ids_json: Set(serde_json::to_string(
+                        &opened.event.source_envelope_ids,
+                    )
+                    .map_err(|error| internal(format!("encode goal source envelopes: {error}")))?),
+                    result_envelope_ids_json: Set("[]".into()),
+                    payload_json: Set(serde_json::to_string(&opened).map_err(|error| {
+                        internal(format!("encode goal opening event: {error}"))
+                    })?),
+                    payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
+                    created_at: Set(now),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await
+                .map_err(|error| internal(format!("append goal opening event: {error}")))?;
+            }
+            if let Some((goal, (prior_version, prior_epoch))) = &revised_goal {
+                if !crate::agent_goal_store::replace_on(
+                    &txn,
+                    goal,
+                    *prior_version,
+                    *prior_epoch,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|error| internal(format!("save revised goal: {error}")))?
+                {
+                    txn.rollback().await.ok();
+                    continue;
+                }
+                let mut revised = GoalLedgerEvent::new(
+                    goal,
+                    AgentRunEventKind::GoalInputReceived,
+                    goal_event_seq,
+                    params.created_at.clone(),
+                )
+                .map_err(|error| internal(format!("create goal revision event: {error:?}")))?;
+                revised
+                    .event
+                    .source_envelope_ids
+                    .push(envelope.envelope_id.clone());
+                revised.validate_for(goal).map_err(|error| {
+                    internal(format!("validate goal revision event: {error:?}"))
+                })?;
+                agent_run_event::ActiveModel {
+                    event_id: Set(revised.event.event_id.clone()),
+                    run_id: Set(revised.event.run_id.clone()),
+                    event_seq: Set(to_i64("goal_event_seq", revised.event.event_seq)?),
+                    input_revision: Set(to_i64(
+                        "goal_input_revision",
+                        revised.event.input_revision,
+                    )?),
+                    kind: Set(revised.event.kind.as_str().into()),
+                    correlation_id: Set(revised.event.correlation_id.clone()),
+                    input_seq: Set(None),
+                    actor_id: Set(Some(params.actor_id.clone())),
+                    source_envelope_ids_json: Set(serde_json::to_string(
+                        &revised.event.source_envelope_ids,
+                    )
+                    .map_err(|error| internal(format!("encode goal revision source: {error}")))?),
+                    result_envelope_ids_json: Set("[]".into()),
+                    payload_json: Set(serde_json::to_string(&revised).map_err(|error| {
+                        internal(format!("encode goal revision event: {error}"))
+                    })?),
+                    payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
+                    created_at: Set(now),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await
+                .map_err(|error| internal(format!("append goal revision event: {error}")))?;
+            }
+            if let Some(decision) = &closed_request {
+                agent_run_event::ActiveModel {
+                    event_id: Set(decision.event.event_id.clone()),
+                    run_id: Set(decision.event.run_id.clone()),
+                    event_seq: Set(to_i64("goal_open_decision_seq", decision.event.event_seq)?),
+                    input_revision: Set(to_i64(
+                        "goal_open_input_revision",
+                        decision.event.input_revision,
+                    )?),
+                    kind: Set(decision.event.kind.as_str().into()),
+                    correlation_id: Set(decision.event.correlation_id.clone()),
+                    input_seq: Set(None),
+                    actor_id: Set(Some(params.actor_id.clone())),
+                    source_envelope_ids_json: Set("[]".into()),
+                    result_envelope_ids_json: Set("[]".into()),
+                    payload_json: Set(serde_json::to_string(decision).map_err(|error| {
+                        internal(format!("encode goal request decision: {error}"))
+                    })?),
+                    payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
+                    created_at: Set(now),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await
+                .map_err(|error| internal(format!("append goal request decision: {error}")))?;
             }
             txn.commit()
                 .await
@@ -535,5 +864,423 @@ mod tests {
         assert_eq!(session.conversation.len(), 2);
         reopened.close().await.unwrap();
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_goal_input_and_opening_are_one_idempotent_transaction() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let mut configured = crate::goal_budget_policy::read(&db).await.unwrap().limits;
+        configured.model_calls = Some(4);
+        crate::goal_budget_policy::update(
+            &db,
+            &desk_agent_protocol::ai_assistant::goal_budget::UpdateGoalBudgetPolicy {
+                expected_revision: 0,
+                limits: configured,
+            },
+        )
+        .await
+        .unwrap();
+        let store = SignalAgentRunEventStore::new(db.clone());
+        let start = StartUserGoal {
+            goal_id: "goal-1".into(),
+            previous_completed_goal_id: None,
+            model_binding: GoalModelBinding {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                profile_revision: 1,
+                model_id: "model".into(),
+            },
+        };
+        let first = store
+            .append_user_goal(
+                params("event-goal-input", "message-goal", "Finish the report"),
+                start.clone(),
+            )
+            .await
+            .unwrap();
+        let retry = store
+            .append_user_goal(
+                params("event-goal-input", "message-goal", "Finish the report"),
+                start.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(first.newly_appended);
+        assert!(!retry.newly_appended);
+        assert_eq!(first.input_revision, retry.input_revision);
+        let goal = crate::agent_goal_store::load_for_subject(&db, "run-1", "actor-1", "device-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(goal.source_message_id, "message-goal");
+        assert_eq!(goal.state, desk_diagnose_core::goal::GoalState::Queued);
+        assert_eq!(goal.limits.model_calls, 4);
+        let mut extended = configured;
+        extended.deadline_ms = Some(desk_diagnose_core::goal::DEFAULT_DEADLINE_MS + 86_400_000);
+        extended.model_calls = Some(1);
+        crate::goal_budget_policy::update(
+            &db,
+            &desk_agent_protocol::ai_assistant::goal_budget::UpdateGoalBudgetPolicy {
+                expected_revision: 1,
+                limits: extended,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::agent_goal_store::queued_candidates(&db, goal.deadline_unix_ms + 1, 8,)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let retry_after_policy_change = store
+            .append_user_goal(
+                params("event-goal-input", "message-goal", "Finish the report"),
+                start,
+            )
+            .await
+            .unwrap();
+        assert!(!retry_after_policy_change.newly_appended);
+        let events = agent_run_event::Entity::find()
+            .filter(agent_run_event::Column::RunId.eq("run-1"))
+            .order_by_asc(agent_run_event::Column::EventSeq)
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user_followup", "goal_opened"]
+        );
+        let paused = crate::agent_goal_store::apply_owner_action(
+            &db,
+            "run-1",
+            "actor-1",
+            "device-1",
+            &goal.goal_id,
+            goal.state_version,
+            desk_diagnose_core::goal::GoalOwnerAction::Pause,
+            chrono::DateTime::from_timestamp_millis(
+                i64::try_from(goal.created_at_unix_ms + 1_000).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(paused.limits.model_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn reopened_goal_links_only_to_a_completed_goal_in_the_same_conversation() {
+        use desk_diagnose_core::goal::GoalControl;
+        use sea_orm::TransactionTrait;
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let store = SignalAgentRunEventStore::new(db.clone());
+        store
+            .append_user_followup(params("event-1", "message-1", "Original goal"))
+            .await
+            .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-25T00:00:00Z")
+            .unwrap()
+            .timestamp_millis() as u64;
+        let model_binding = GoalModelBinding {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            profile_revision: 1,
+            model_id: "model".into(),
+        };
+        let mut previous = GoalRun::new(
+            "old-goal".into(),
+            "run-1".into(),
+            "actor-1".into(),
+            "device-1".into(),
+            "Original goal".into(),
+            "message-1".into(),
+            GoalOpening::OwnerRequest,
+            model_binding.clone(),
+            1,
+            now,
+            GoalLimits::default(),
+        )
+        .unwrap();
+        previous.claim_slice(now + 1).unwrap();
+        previous
+            .finish_slice(
+                1,
+                1,
+                1,
+                &GoalControl::Complete {
+                    summary: "Partial result".into(),
+                    evidence_ids: vec!["receipt-1".into()],
+                },
+                true,
+                true,
+                2,
+                vec![],
+                now + 2,
+            )
+            .unwrap();
+        let txn = db.begin().await.unwrap();
+        crate::agent_goal_store::insert_on(&txn, &previous)
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        let latest = crate::agent_goal_store::load_latest_completed_for_subject(
+            &db, "run-1", "actor-1", "device-1",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(latest.goal_id, "old-goal");
+
+        let start = StartUserGoal {
+            goal_id: "new-goal".into(),
+            previous_completed_goal_id: Some("old-goal".into()),
+            model_binding,
+        };
+        let input = params("event-2", "message-2", "Finish the original goal");
+        store
+            .append_user_goal(input.clone(), start.clone())
+            .await
+            .unwrap();
+        let new_goal =
+            crate::agent_goal_store::load_for_subject(&db, "run-1", "actor-1", "device-1")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            new_goal.previous_completion.as_ref().unwrap().summary,
+            "Partial result"
+        );
+        assert_eq!(
+            new_goal.previous_completion.as_ref().unwrap().evidence_ids,
+            vec!["receipt-1"]
+        );
+        assert_eq!(new_goal.used.slices, 0);
+        let old = crate::agent_goal_store::load_completed_on(
+            &db.begin().await.unwrap(),
+            "old-goal",
+            "run-1",
+            "actor-1",
+            "device-1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(old.used.slices, 1);
+        let mut altered = start;
+        altered.previous_completed_goal_id = None;
+        assert!(store.append_user_goal(input, altered).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn owner_goal_controls_are_fenced_and_durable() {
+        use desk_diagnose_core::goal::{GoalOwnerAction, GoalState};
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let store = SignalAgentRunEventStore::new(db.clone());
+        store
+            .append_user_goal(
+                params(
+                    "event-control-input",
+                    "message-control",
+                    "Finish the report",
+                ),
+                StartUserGoal {
+                    goal_id: "goal-control".into(),
+                    previous_completed_goal_id: None,
+                    model_binding: GoalModelBinding {
+                        connection_id: "gateway".into(),
+                        connection_revision: 1,
+                        profile_revision: 1,
+                        model_id: "model".into(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let opened = crate::agent_goal_store::load_for_subject(&db, "run-1", "actor-1", "device-1")
+            .await
+            .unwrap()
+            .unwrap();
+        let at = |seconds: u32| {
+            chrono::DateTime::parse_from_rfc3339(&format!("2026-08-25T00:00:{seconds:02}Z"))
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let paused = crate::agent_goal_store::apply_owner_action(
+            &db,
+            "run-1",
+            "actor-1",
+            "device-1",
+            &opened.goal_id,
+            opened.state_version,
+            GoalOwnerAction::Pause,
+            at(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(paused.state, GoalState::Paused(_)));
+        assert!(
+            crate::agent_goal_store::apply_owner_action(
+                &db,
+                "run-1",
+                "actor-1",
+                "device-1",
+                &opened.goal_id,
+                opened.state_version,
+                GoalOwnerAction::Cancel,
+                at(2),
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let resumed = crate::agent_goal_store::apply_owner_action(
+            &db,
+            "run-1",
+            "actor-1",
+            "device-1",
+            &opened.goal_id,
+            paused.state_version,
+            GoalOwnerAction::Resume,
+            at(3),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(resumed.state, GoalState::Queued);
+        let persisted =
+            crate::agent_goal_store::load_for_subject(&db, "run-1", "actor-1", "device-1")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(persisted.state_version, resumed.state_version);
+        assert_eq!(persisted.limits, opened.limits);
+    }
+
+    #[tokio::test]
+    async fn later_input_revises_goal_and_original_goal_input_stays_idempotent() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let store = SignalAgentRunEventStore::new(db.clone());
+        let start = StartUserGoal {
+            goal_id: "goal-1".into(),
+            previous_completed_goal_id: None,
+            model_binding: GoalModelBinding {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                profile_revision: 1,
+                model_id: "model".into(),
+            },
+        };
+        let original = params("event-goal", "message-goal", "Finish the report");
+        let first = store
+            .append_user_goal(original.clone(), start.clone())
+            .await
+            .unwrap();
+        let mut next = params("event-revision", "message-revision", "Use the new figures");
+        next.created_at = "2026-08-25T00:01:00Z".into();
+        let revised = store.append_user_followup(next).await.unwrap();
+        let replay = store.append_user_goal(original, start).await.unwrap();
+        assert_eq!(first.input_revision, 1);
+        assert_eq!(revised.input_revision, 2);
+        assert!(!replay.newly_appended);
+        let goal = crate::agent_goal_store::load_for_subject(&db, "run-1", "actor-1", "device-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(goal.input_revision, 2);
+        assert_eq!(goal.goal_revision, 1);
+        assert_eq!(
+            goal.state,
+            desk_diagnose_core::goal::GoalState::Waiting(
+                desk_diagnose_core::goal::GoalWaitReason::User,
+            )
+        );
+        let events = agent_run_event::Entity::find()
+            .filter(agent_run_event::Column::RunId.eq("run-1"))
+            .order_by_asc(agent_run_event::Column::EventSeq)
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "user_followup",
+                "goal_opened",
+                "user_followup",
+                "goal_input_received"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_user_input_withdraws_an_ai_goal_proposal_atomically() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let store = SignalAgentRunEventStore::new(db.clone());
+        store
+            .append_user_followup(params("first-event", "first-message", "Work on a report"))
+            .await
+            .unwrap();
+        let now_ms = chrono::DateTime::parse_from_rfc3339("2026-08-25T00:00:00Z")
+            .unwrap()
+            .timestamp_millis() as u64;
+        let pending = desk_diagnose_core::goal::GoalOpenRequest::new(
+            "proposal".into(),
+            "run-1".into(),
+            "actor-1".into(),
+            "device-1".into(),
+            "first-message".into(),
+            1,
+            "Finish the report".into(),
+            GoalLimits::default(),
+            GoalModelBinding {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                profile_revision: 1,
+                model_id: "model".into(),
+            },
+            now_ms,
+        )
+        .unwrap();
+        let txn = db.begin().await.unwrap();
+        crate::agent_goal_open_store::insert_on(&txn, &pending)
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        let mut next = params("next-event", "next-message", "Changed requirements");
+        next.created_at = "2026-08-25T00:01:00Z".into();
+        let accepted = store.append_user_followup(next).await.unwrap();
+        let row = crate::entity::agent_goal_open_request::Entity::find()
+            .filter(crate::entity::agent_goal_open_request::Column::RequestId.eq("proposal"))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = crate::agent_goal_open_store::decode(&row).unwrap();
+        assert_eq!(stored.state, GoalOpenRequestState::Withdrawn);
+        assert_ne!(
+            stored.decision_event_id.as_deref(),
+            Some(accepted.event_id.as_str())
+        );
+        let decision = agent_run_event::Entity::find()
+            .filter(agent_run_event::Column::EventId.eq(stored.decision_event_id.clone().unwrap()))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decision.kind, "goal_open_decided");
     }
 }

@@ -487,6 +487,7 @@ async fn exercise_with_restart(
             },
             None,
             Some(prepared),
+            None,
         ),
     )
     .await

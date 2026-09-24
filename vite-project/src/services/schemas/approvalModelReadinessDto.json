@@ -1,0 +1,1 @@
+{"type":"object","required":["available"],"properties":{"available":{"type":"boolean"},"reason":{"type":["string","null"]}},"x-readme-ref-name":"ApprovalModelReadinessDto"}

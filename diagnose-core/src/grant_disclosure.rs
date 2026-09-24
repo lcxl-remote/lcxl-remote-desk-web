@@ -311,6 +311,7 @@ pub(crate) mod tests {
         let prompt = crate::permission_tools::capability_authorization_prompt(
             &snapshot.grants,
             &[],
+            &[],
             500,
             2,
             1,

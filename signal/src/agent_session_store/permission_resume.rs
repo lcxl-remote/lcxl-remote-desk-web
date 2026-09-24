@@ -80,7 +80,7 @@ async fn record(
                 .with_timezone(&Utc)
         || row.version < 1
         || !match (row.state.as_str(), row.turn_id.as_deref()) {
-            ("pending" | "superseded", None) => true,
+            ("pending" | "superseded" | "goal_handled", None) => true,
             ("started" | "settled", Some(id)) => {
                 id == row.permission_id
                     || (session.trigger_origin == TriggerOrigin::ScheduledTask

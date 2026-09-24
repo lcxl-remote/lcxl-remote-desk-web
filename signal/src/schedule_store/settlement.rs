@@ -1,7 +1,7 @@
 //! Fenced finalization atomically settles the active slot and failure policy.
 use super::queue::database_now;
 use super::{ScheduleStore, ScheduleStoreError, entity, json};
-use crate::entity::agent_schedule_run as run;
+use crate::entity::{agent_goal_run as goal_row, agent_schedule_run as run};
 use desk_agent_protocol::schedule::ScheduledRunStatus;
 use desk_diagnose_core::schedule::lifecycle::FailureState;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
@@ -77,8 +77,17 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        let offline = work.status == "waiting_device";
-        let error = if offline {
+        let goal_conflict = goal_row::Entity::find()
+            .filter(goal_row::Column::ConversationId.eq(&work.conversation_id))
+            .filter(goal_row::Column::ActorId.eq(work.owner_user_id.to_string()))
+            .filter(goal_row::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
+            .one(&txn)
+            .await?
+            .is_some();
+        let offline = work.status == "waiting_device" && !goal_conflict;
+        let error = if goal_conflict {
+            "active_goal_conflict"
+        } else if offline {
             "device_offline_timeout"
         } else {
             "queue_timeout"

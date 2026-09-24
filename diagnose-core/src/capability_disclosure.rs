@@ -219,6 +219,7 @@ fn invalid(error: CapabilityDisclosureError) -> AgentError {
                 "request_permissions"
                     | "describe_tools"
                     | "update_task_status"
+                    | "control_goal"
                     | "load_conversation_history"
                     | "read_conversation_attachment"
                     | "request_directory"

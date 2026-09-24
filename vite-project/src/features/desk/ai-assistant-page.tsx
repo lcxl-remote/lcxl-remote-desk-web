@@ -2,9 +2,10 @@ import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel 
 import { AssistantAttachments, AssistantResultAttachments } from './assistant-attachments';
 import { requireRecoveryZip } from '@/lib/file-recovery-error';
 import { Textarea } from '@/components/ui/textarea';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Disclosure } from '@/components/ui/disclosure';
 import { AssistantObservationResult } from './assistant-observation-result';
-import { AssistantToolCall } from './assistant-tool-call';
+import { AssistantToolCall, isHistoricalPermissionSkip } from './assistant-tool-call';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
 import './assistant-responsive.css';
 import { AssistantSchedules } from './assistant-schedules';
@@ -40,6 +41,7 @@ import { MarkdownContent } from '@/components/markdown-content';
 import { useListConnections } from '@/services/hooks/connectionController/useListConnections';
 import { useGetModelProvider } from '@/services/hooks/modelProviderController/useGetModelProvider';
 import { useGetBrowserExtensionPairing } from '@/services/hooks/browserExtensionController/useGetBrowserExtensionPairing';
+import { useQueryServerInfo } from '@/services/hooks/systemController/useQueryServerInfo';
 import { useRestrictedSession } from './restricted-session';
 import { useDeskSignaling } from './use-desk-signaling';
 import { isAiAssistantEnabled } from './ai-assistant-switch';
@@ -52,6 +54,7 @@ import {
     useAiAssistantObservation,
 } from './use-ai-assistant-observation';
 import { useAiAssistantChat, type RehearsalConversation } from './use-ai-assistant-chat';
+import { fetchGoalBudgetPolicy, type GoalBudgetPolicy } from '../settings/goal-budget-policy-settings';
 import { AiAssistantRehearsalGate } from './ai-assistant-rehearsal-gate';
 import { SessionTargetDialog } from './session-target-selection';
 import { useAiAssistantCapabilities } from './use-ai-assistant-capabilities';
@@ -62,7 +65,6 @@ import { useConfirmExec } from '../exec/use-confirm-exec';
 import { ExecLifecycle } from '../exec/exec-lifecycle';
 import {
     type AiAssistantFeatureProfile,
-    OSS_AI_ASSISTANT_FEATURES,
     hasAiAssistantBrowserEntry,
 } from './ai-assistant-features';
 import {
@@ -71,6 +73,26 @@ import {
 } from './ai-assistant-external-send';
 
 const CURRENT_SCREEN_CAPABILITY_ID = 'screen.capture.current';
+
+function GoalLimitsSummary({
+    policy,
+}: {
+    policy: GoalBudgetPolicy;
+}) {
+    const { t } = useTranslation();
+    const items = [
+        ['goalBudgetActiveHours', policy.limits.activeTimeMs, 3_600_000],
+        ['goalBudgetDeadlineDays', policy.limits.deadlineMs, 86_400_000],
+        ['goalBudgetTokens', policy.limits.modelTokens, 1],
+        ['goalBudgetModelCalls', policy.limits.modelCalls, 1],
+        ['goalBudgetToolCalls', policy.limits.toolCalls, 1],
+        ['goalBudgetSlices', policy.limits.slices, 1],
+        ['goalBudgetStalledSlices', policy.limits.stalledSlices, 1],
+    ] as const;
+    return <p className="mt-1 text-xs text-muted-foreground">{items.map(([label, value, scale]) =>
+        `${t(`pages.aiAssistant.${label}`)}: ${value === null ? t('pages.aiAssistant.goalBudgetDisabled') : (value / scale).toLocaleString()}`,
+    ).join(' · ')}</p>;
+}
 
 function ObservationCard({
     title,
@@ -206,6 +228,7 @@ function ObservationCard({
 
 export function AiAssistantWorkspace({
     rehearsal,
+    initialConversationId,
     deskId,
     stableDeviceId,
     localPairingAvailable,
@@ -214,6 +237,7 @@ export function AiAssistantWorkspace({
     backTo,
 }: {
     rehearsal?: RehearsalConversation;
+    initialConversationId?: string | null;
     deskId: string;
     stableDeviceId: string;
     localPairingAvailable: boolean;
@@ -234,6 +258,7 @@ export function AiAssistantWorkspace({
     const setupOrigin = useLocation();
     const chat = useAiAssistantChat({
         rehearsal,
+        initialConversationId,
         deskId,
         connected: isConnected,
         conversationStorageScope: stableDeviceId,
@@ -288,6 +313,36 @@ export function AiAssistantWorkspace({
     }, [pendingDirectoryKey, permissionHistoryKey]);
     useEffect(() => { setPermissionHistorySession(null); }, [permissionHistoryKey]);
     const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
+    const [startGoal, setStartGoal] = useState(false);
+    const [goalBudgetPolicy, setGoalBudgetPolicy] = useState<GoalBudgetPolicy | null>(null);
+    useEffect(() => {
+        if (!startGoal && !chat.pendingGoalOpenRequest && !chat.goal) return;
+        let current = true;
+        setGoalBudgetPolicy(null);
+        const reload = () => { void fetchGoalBudgetPolicy()
+            .then(value => { if (current) setGoalBudgetPolicy(value); })
+            .catch(() => { if (current) setGoalBudgetPolicy(null); }); };
+        reload();
+        const timer = window.setInterval(reload, 15_000);
+        return () => { current = false; window.clearInterval(timer); };
+    }, [startGoal, chat.pendingGoalOpenRequest?.requestId, chat.goal?.goalId]);
+    const [previousCompletedGoalId, setPreviousCompletedGoalId] = useState<string | null>(null);
+    const [offPageReminderAvailable, setOffPageReminderAvailable] = useState(() => {
+        try { return sessionStorage.getItem('lcxl.tauriShell') === '1'; }
+        catch { return false; }
+    });
+    useEffect(() => {
+        const abort = new AbortController();
+        void fetch('/api/my/ai-assistant-attention?limit=1', {
+            credentials: 'include', headers: { Accept: 'application/json' }, signal: abort.signal,
+        }).then(response => response.ok ? response.json() : null)
+            .then(body => {
+                if (!abort.signal.aborted && body?.data?.offPageReminderAvailable === true) {
+                    setOffPageReminderAvailable(true);
+                }
+            }).catch(() => {});
+        return () => abort.abort();
+    }, []);
 
     const contextCapabilities = featureProfile.object_context
         ? (capabilities.snapshot?.entries ?? []).filter((entry) => entry.context_selectable)
@@ -341,20 +396,24 @@ export function AiAssistantWorkspace({
         const accepted = chat.acceptedInput;
         if (!accepted) return;
         setQuestion(current => current.trim() === accepted.question ? '' : current);
+        setStartGoal(false);
+        setPreviousCompletedGoalId(null);
         setSelectedCapabilityIds(current => current.filter(id => id !== CURRENT_SCREEN_CAPABILITY_ID));
     }, [chat.acceptedInput]);
 
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (chat.turnRunning || chat.deliveryState) return;
-        if (!assistantEnabled || !rehearsalCanStart) return;
+        if (!assistantEnabled || !rehearsalCanStart || (startGoal && !goalBudgetPolicy)) return;
         const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
-        chat.start(question, i18n.language, selectedContext);
+        chat.start(question, i18n.language, selectedContext, startGoal, previousCompletedGoalId);
     };
 
     const resetConversation = () => {
         chat.reset();
         setSelectedCapabilityIds([]);
+        setStartGoal(false);
+        setPreviousCompletedGoalId(null);
     };
 
     const detailsContent = (
@@ -704,6 +763,7 @@ export function AiAssistantWorkspace({
             )}
             {[
                 featureProfile.permission_decision,
+                featureProfile.approval_delegation,
                 featureProfile.grant_revoke,
                 featureProfile.background_task_cancel,
                 featureProfile.object_context,
@@ -765,6 +825,146 @@ export function AiAssistantWorkspace({
                     </CardDescription>
                 </CardHeader>
                 <CardContent className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3 pt-0">
+                    {chat.pendingGoalOpenRequest && (
+                        <div data-testid="ai-assistant-goal-open-request" className="shrink-0 rounded-md border border-amber-500/50 bg-amber-500/5 px-3 py-2 text-xs">
+                            <p className="font-medium">{t(chat.pendingGoalOpenRequest.targetGoalId
+                                ? 'pages.aiAssistant.goalRevisionTitle'
+                                : 'pages.aiAssistant.goalProposalTitle')}</p>
+                            <p className="mt-1 whitespace-pre-wrap break-words">{chat.pendingGoalOpenRequest.goalText}</p>
+                            {chat.pendingGoalOpenRequest.previousCompletedGoalId && <p className="mt-1 text-muted-foreground">
+                                {t('pages.aiAssistant.goalContinuesPrevious', { goalId: chat.pendingGoalOpenRequest.previousCompletedGoalId })}
+                            </p>}
+                            <p className="mt-1 text-muted-foreground">
+                                {t(chat.pendingGoalOpenRequest.targetGoalId
+                                    ? 'pages.aiAssistant.goalRevisionDetails'
+                                    : 'pages.aiAssistant.goalProposalDetails', {
+                                    device: chat.pendingGoalOpenRequest.deviceId,
+                                    revision: chat.pendingGoalOpenRequest.targetGoalRevision,
+                                    expiry: new Date(chat.pendingGoalOpenRequest.expiresAtUnixMs).toLocaleString(),
+                                })}
+                            </p>
+                            {!chat.pendingGoalOpenRequest.targetGoalId && goalBudgetPolicy && <GoalLimitsSummary policy={goalBudgetPolicy} />}
+                            <p className="mt-1 text-muted-foreground">{t(chat.pendingGoalOpenRequest.targetGoalId
+                                ? 'pages.aiAssistant.goalRevisionBoundary'
+                                : 'pages.aiAssistant.goalProposalBoundary')}</p>
+                            {!offPageReminderAvailable && <p className="mt-1 text-amber-700 dark:text-amber-300">
+                                {t('pages.aiAssistant.goalNoOffPageReminder')}
+                            </p>}
+                            <div className="mt-2 flex gap-2">
+                                <Button size="sm" disabled={chat.goalOpenUpdating || chat.turnRunning
+                                    || (!chat.pendingGoalOpenRequest.targetGoalId && !goalBudgetPolicy)
+                                    || chat.pendingGoalOpenRequest.expiresAtUnixMs <= Date.now()}
+                                    onClick={() => void chat.decideGoalOpen(true)}>
+                                    {t(chat.pendingGoalOpenRequest.targetGoalId
+                                        ? 'pages.aiAssistant.goalRevisionApprove'
+                                        : 'pages.aiAssistant.goalProposalApprove')}
+                                </Button>
+                                <Button size="sm" variant="outline" disabled={chat.goalOpenUpdating || chat.turnRunning
+                                    || chat.pendingGoalOpenRequest.expiresAtUnixMs <= Date.now()}
+                                    onClick={() => void chat.decideGoalOpen(false)}>
+                                    {t('pages.aiAssistant.goalProposalDeny')}
+                                </Button>
+                            </div>
+                        </div>
+                    )}
+                    {chat.goal && (
+                        <div data-testid="ai-assistant-goal" className="shrink-0 rounded-md border bg-muted/30 px-3 py-2 text-xs">
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="min-w-0 truncate font-medium" title={chat.goal.goalText}>{chat.goal.goalText}</span>
+                                <Badge variant="outline">{t(`pages.aiAssistant.goalStates.${chat.goal.state}`)}</Badge>
+                            </div>
+                            <p className="mt-1 text-muted-foreground">
+                                {t('pages.aiAssistant.goalUsage', {
+                                    slices: chat.goal.usedSlices,
+                                    sliceLimit: goalBudgetPolicy?.limits.slices === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.slices ?? '…',
+                                    tokens: chat.goal.usedModelTokens,
+                                    tokenLimit: goalBudgetPolicy?.limits.modelTokens === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.modelTokens ?? '…',
+                                })}
+                            </p>
+                            <p className="mt-1 text-muted-foreground">
+                                {t('pages.aiAssistant.goalBudgetUsage', {
+                                    modelCalls: chat.goal.usedModelCalls,
+                                    modelCallLimit: goalBudgetPolicy?.limits.modelCalls === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.modelCalls ?? '…',
+                                    toolCalls: chat.goal.usedToolCalls,
+                                    toolCallLimit: goalBudgetPolicy?.limits.toolCalls === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.toolCalls ?? '…',
+                                    activeMinutes: Math.floor(chat.goal.usedActiveTimeMs / 60_000),
+                                    activeMinuteLimit: goalBudgetPolicy?.limits.activeTimeMs === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.activeTimeMs ? Math.floor(goalBudgetPolicy.limits.activeTimeMs / 60_000) : '…',
+                                })}
+                            </p>
+                            <p className="mt-1 text-muted-foreground">
+                                {t('pages.aiAssistant.goalIdentity', {
+                                    revision: chat.goal.goalRevision,
+                                    device: chat.goal.deviceId,
+                                    deadline: goalBudgetPolicy?.limits.deadlineMs === null ? t('pages.aiAssistant.goalBudgetDisabled')
+                                        : goalBudgetPolicy?.limits.deadlineMs ? new Date(chat.goal.createdAtUnixMs + goalBudgetPolicy.limits.deadlineMs).toLocaleString() : '…',
+                                })}
+                            </p>
+                            {goalBudgetPolicy && <GoalLimitsSummary policy={goalBudgetPolicy} />}
+                            {chat.goal.checkpointSummary && <p className="mt-1 line-clamp-2">{t('pages.aiAssistant.goalCheckpoint', { summary: chat.goal.checkpointSummary })}</p>}
+                            {chat.goal.previousCompletedGoalId && <p className="mt-1 text-muted-foreground">
+                                {t('pages.aiAssistant.goalContinuesPrevious', { goalId: chat.goal.previousCompletedGoalId })}
+                                {chat.goal.previousCompletionSummary && ` · ${chat.goal.previousCompletionSummary}`}
+                            </p>}
+                            {chat.goal.statusReason && <p className="mt-1 text-muted-foreground">{t(`pages.aiAssistant.goalReasons.${chat.goal.statusReason}`, { defaultValue: chat.goal.statusReason })}</p>}
+                            {chat.goal.nextAttemptUnixMs && <p className="mt-1 text-muted-foreground">
+                                {t('pages.aiAssistant.goalNextAttempt', { time: new Date(chat.goal.nextAttemptUnixMs).toLocaleString() })}
+                            </p>}
+                            {!['completed', 'failed', 'cancelled'].includes(chat.goal.state) && (
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                    {['paused', 'waiting_user'].includes(chat.goal.state)
+                                        ? <Button size="sm" variant="outline" disabled={chat.goalUpdating || chat.turnRunning || Boolean(chat.pendingGoalOpenRequest)}
+                                            onClick={() => void chat.controlGoal(chat.goal?.pauseReason === 'stalled' ? 'retry_stalled' : 'resume')}>
+                                            {t(chat.goal.pauseReason === 'stalled' ? 'pages.aiAssistant.goalRetry' : 'pages.aiAssistant.goalResume')}
+                                        </Button>
+                                        : <Button size="sm" variant="outline" disabled={chat.goalUpdating || chat.turnRunning}
+                                            onClick={() => void chat.controlGoal('pause')}>
+                                            {t('pages.aiAssistant.goalPause')}
+                                        </Button>}
+                                    <Button size="sm" variant="destructive" disabled={chat.goalUpdating || chat.turnRunning}
+                                        onClick={() => void chat.controlGoal('cancel')}>
+                                        {t('pages.aiAssistant.goalCancel')}
+                                    </Button>
+                                </div>
+                            )}
+                            {chat.goal.state === 'completed' && !chat.pendingGoalOpenRequest && <Button type="button" size="sm" variant="outline" className="mt-2"
+                                disabled={chat.turnRunning || !!chat.deliveryState}
+                                onClick={() => {
+                                    setStartGoal(true);
+                                    setPreviousCompletedGoalId(chat.goal?.goalId ?? null);
+                                    const draft = t('pages.aiAssistant.goalStillIncompletePrompt', { goal: chat.goal?.goalText ?? '' });
+                                    setQuestion(new TextEncoder().encode(draft).length <= 16_384
+                                        ? draft : t('pages.aiAssistant.goalStillIncompletePromptShort'));
+                                }}>
+                                {t('pages.aiAssistant.goalStillIncomplete')}
+                            </Button>}
+                        </div>
+                    )}
+                    {!rehearsal && featureProfile.approval_delegation && chat.conversationId && (
+                        <div data-testid="ai-assistant-automatic-approval" className="shrink-0 rounded-md border px-3 py-2 text-xs">
+                            <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                    <p className="flex items-center gap-2 font-medium"><ShieldCheck className="h-4 w-4" />{t('pages.aiAssistant.autoApprovalTitle')}</p>
+                                    <p className="mt-1 text-muted-foreground">{t('pages.aiAssistant.autoApprovalDescription')}</p>
+                                </div>
+                                <Button size="sm" variant="outline"
+                                    disabled={!assistantEnabled || chat.hydrating || chat.approvalUpdating
+                                        || (!(chat.approvalDelegation?.status === 'active')
+                                            && (!chat.approvalModelReadiness?.available || chat.turnRunning))}
+                                    onClick={() => void chat.setAutomaticApproval(chat.approvalDelegation?.status !== 'active')}>
+                                    {chat.approvalDelegation?.status === 'active'
+                                        ? t('pages.aiAssistant.autoApprovalDisable') : t('pages.aiAssistant.autoApprovalEnable')}
+                                </Button>
+                            </div>
+                            {chat.approvalDelegation?.status === 'active'
+                                ? <p className="mt-1 text-muted-foreground">{t('pages.aiAssistant.autoApprovalUsage', {
+                                    reviews: chat.approvalDelegation.reviewsUsed,
+                                    tokens: chat.approvalDelegation.tokensUsed,
+                                })}</p>
+                                : chat.approvalModelReadiness && !chat.approvalModelReadiness.available
+                                    ? <p className="mt-1 text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.autoApprovalUnavailable')}: {t(`pages.aiAssistant.approvalModelReason.${chat.approvalModelReadiness.reason ?? 'unknown'}`)}</p>
+                                    : null}
+                        </div>
+                    )}
                     <div className="relative min-h-0 flex-1">
                     <div ref={scrollRef} onScroll={onScroll} data-testid="assistant-scroll-area"
                         className="assistant-scrollbar h-full overflow-y-auto overscroll-contain [overflow-wrap:anywhere]">
@@ -801,7 +1001,12 @@ export function AiAssistantWorkspace({
                                         : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
                                 }`}
                             >
-                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <><p className="mb-2 text-sm">{message.permissionReason && t('pages.aiAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p><AssistantCommandResult text={message.text} tool={chat.tools.find(tool => tool.callId === message.toolCallId)} onLocateCall={message.toolCallId ? () => { const target = document.getElementById(`assistant-call-${message.toolCallId}`); target?.scrollIntoView({ block: 'center', behavior: 'smooth' }); target?.focus({ preventScroll: true }); } : undefined} onExportBackup={exportBackup} /><AssistantResultAttachments sessionId={chat.sessionId} text={message.text} /></> : message.role === 'assistant'
+                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <>
+                                    {message.permissionReason && <p className="mb-2 text-sm">{t('pages.aiAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p>}
+                                    {isHistoricalPermissionSkip(message.text) && <p className="mb-2 text-sm text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.historicalPermissionSkip')}</p>}
+                                    <AssistantCommandResult text={message.text} tool={chat.tools.find(tool => tool.callId === message.toolCallId)} onLocateCall={message.toolCallId ? () => { const target = document.getElementById(`assistant-call-${message.toolCallId}`); target?.scrollIntoView({ block: 'center', behavior: 'smooth' }); target?.focus({ preventScroll: true }); } : undefined} onExportBackup={exportBackup} />
+                                    <AssistantResultAttachments sessionId={chat.sessionId} text={message.text} />
+                                </> : message.role === 'assistant'
                                     ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
                                     : <p className="whitespace-pre-wrap">{message.text}</p>}
                             </div>
@@ -914,6 +1119,28 @@ export function AiAssistantWorkspace({
                                 count: new Set([...selectedCapabilityIds, ...chat.attachments.filter((item) => item.state === 'active').map((item) => item.capabilityId)]).size,
                             })}</span>
                         </div>
+                        {!rehearsal && (
+                            <label className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm">
+                                <Checkbox checked={startGoal} onCheckedChange={(checked) => {
+                                    setStartGoal(checked === true);
+                                    setPreviousCompletedGoalId(null);
+                                }}
+                                    disabled={!assistantEnabled || chat.turnRunning || !!chat.deliveryState} />
+                                <span className="space-y-0.5">
+                                    <span className="block font-medium">{t('pages.aiAssistant.goalStart')}</span>
+                                    <span className="block text-xs text-muted-foreground">{t('pages.aiAssistant.goalStartDescription')}</span>
+                                </span>
+                            </label>
+                        )}
+                        {!rehearsal && startGoal && !offPageReminderAvailable && (
+                            <p className="text-xs text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.goalNoOffPageReminder')}</p>
+                        )}
+                        {!rehearsal && startGoal && goalBudgetPolicy && <GoalLimitsSummary policy={goalBudgetPolicy} />}
+                        {!rehearsal && startGoal && previousCompletedGoalId && (
+                            <p className="text-xs text-muted-foreground">
+                                {t('pages.aiAssistant.goalContinuesPrevious', { goalId: previousCompletedGoalId })}
+                            </p>
+                        )}
                         <Textarea
                             value={question}
                             readOnly={!!rehearsal}
@@ -940,7 +1167,7 @@ export function AiAssistantWorkspace({
                                     <span className="assistant-action-label">{t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')}</span>
                                 </Button>
                             ) : (
-                                <Button type="submit" className="assistant-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')} disabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}>
+                                <Button type="submit" className="assistant-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')} disabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model || (startGoal && !goalBudgetPolicy)}>
                                     <Send className="h-4 w-4 shrink-0" />
                                     <span className="assistant-action-label">{t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')}</span>
                                 </Button>
@@ -956,16 +1183,24 @@ export function AiAssistantWorkspace({
 }
 
 export default function AiAssistantPage({
-    featureProfile = OSS_AI_ASSISTANT_FEATURES,
+    featureProfile: suppliedFeatureProfile,
 }: {
     featureProfile?: AiAssistantFeatureProfile | null;
 }) {
     const { id: deskId } = useParams<{ id: string }>();
     const [searchParams] = useSearchParams();
     const { t } = useTranslation();
+    const serverInfo = useQueryServerInfo({ query: { enabled: suppliedFeatureProfile === undefined } });
+    const featureProfile = suppliedFeatureProfile === undefined
+        ? serverInfo.data?.data?.ai_assistant ?? null
+        : suppliedFeatureProfile;
     const restricted = useRestrictedSession(deskId);
     const { data: connections, isLoading } = useListConnections();
     const connection = connections?.find((item: any) => item.connection_id === deskId);
+
+    if (suppliedFeatureProfile === undefined && serverInfo.isLoading) {
+        return <div className="p-6"><Skeleton className="h-64 w-full" /></div>;
+    }
 
     if (!hasAiAssistantBrowserEntry(featureProfile)) {
         return (
@@ -1025,6 +1260,7 @@ export default function AiAssistantPage({
             </AiAssistantRehearsalGate> : (
                 <AiAssistantWorkspace
                     backTo={`/desk/${encodeURIComponent(deskId)}`}
+                    initialConversationId={searchParams.get('conversation')}
                     deskId={deskId}
                     stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
                     localPairingAvailable={!connection.device_id}

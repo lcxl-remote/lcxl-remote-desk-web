@@ -314,6 +314,11 @@ pub enum ContextCompressionAuditOutcome {
 /// (text + tool calls + stop reason + usage).
 #[async_trait(?Send)]
 pub trait ModelSeam {
+    /// An absolute server-parsed Retry-After hint from the most recent failed
+    /// provider call. It is never inferred from provider error-body text.
+    fn retry_after_unix_ms(&self) -> Option<u64> {
+        None
+    }
     /// One server-validated command completion, interpreted without old history
     /// or checkpoint compression. The transport must revalidate durable authority.
     fn command_completion_event_id(&self) -> Option<&str> {
@@ -939,6 +944,36 @@ pub trait SessionSeam {
         Err(crate::schedule::proposal::unavailable())
     }
 
+    /// Persist an AI-proposed goal and its run event with the held conversation
+    /// version. This creates only an owner-reviewable request, never a GoalRun.
+    async fn save_goal_open_request(
+        &self,
+        _session: &mut PersistedAgentSession,
+        _event: &crate::goal::GoalOpenRequestEvent,
+    ) -> Result<(), AgentError> {
+        Err(crate::goal_tools::unavailable())
+    }
+
+    /// Read an active goal for a user-authored clarification turn. This is
+    /// advisory context; saving a proposal rechecks the state under the store
+    /// fence before it becomes owner-reviewable.
+    async fn load_goal_for_planning(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<Option<crate::goal::GoalRun>, AgentError> {
+        Ok(None)
+    }
+
+    /// Provide the latest completed goal identity to a new owner turn so an
+    /// explicit "unfinished" reply can form a linked proposal after history
+    /// compression. The model still needs the owner's current request.
+    async fn load_latest_completed_goal(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<Option<crate::goal::GoalRun>, AgentError> {
+        Ok(None)
+    }
+
     /// Persist a model proposal under the exact held session version/lease and
     /// advance only this transaction's state, never adopt another writer's state.
     async fn propose_directory(
@@ -980,6 +1015,73 @@ pub trait SessionSeam {
     /// (the lease was taken over by another owner) or a version conflict fails the
     /// save — the loop ends the turn rather than overwriting the new owner's work.
     async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError>;
+
+    /// Settle a claimed goal segment together with its session and append-only
+    /// event. Durable runtimes must perform all three writes in one transaction;
+    /// the ordinary session `save` is not a substitute for this fence.
+    async fn settle_goal_slice(
+        &self,
+        _session: &mut PersistedAgentSession,
+        _end: &crate::goal::GoalSegmentEnd,
+        _result_fingerprints: &[String],
+        _now: &str,
+    ) -> Result<(), AgentError> {
+        Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "durable goal settlement is unavailable".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })
+    }
+
+    /// Read the current fenced goal state before every model request. The
+    /// returned text and checkpoint are the fixed context, never a summary
+    /// guessed from the mutable conversation tail.
+    async fn load_claimed_goal(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<crate::goal::GoalRun, AgentError> {
+        Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "claimed goal context is unavailable".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })
+    }
+
+    async fn reserve_goal_budget(
+        &self,
+        _session: &PersistedAgentSession,
+        _identity: &str,
+        _upper: crate::goal::GoalUsage,
+        _now: &str,
+    ) -> Result<(), AgentError> {
+        Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "goal budget reservation is unavailable".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })
+    }
+
+    async fn settle_goal_budget(
+        &self,
+        _session: &PersistedAgentSession,
+        _identity: &str,
+        _actual: crate::goal::GoalUsage,
+        _now: &str,
+    ) -> Result<(), AgentError> {
+        Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "goal budget settlement is unavailable".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        })
+    }
 
     /// Persist a task-status projection and its append-only run event. Durable
     /// runtimes override this to commit both atomically; simple in-memory seams

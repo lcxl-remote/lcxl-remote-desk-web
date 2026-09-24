@@ -1,3 +1,4 @@
+mod ai_attention_notification;
 mod error;
 mod external_link;
 mod host_access_status;
@@ -1111,6 +1112,13 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                             std::thread::sleep(std::time::Duration::from_millis(500));
                         }
                     }
+                }
+
+                if system_initialized {
+                    ai_attention_notification::start(
+                        handle_for_window.clone(),
+                        format!("http://{frontend_host_port}/ai-assistant/attention"),
+                    );
                 }
 
                 // Wait for the auto-login token from ipc_client (60s budget after

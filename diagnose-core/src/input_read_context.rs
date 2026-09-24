@@ -57,14 +57,13 @@ impl ReadContextSelection {
     pub fn validate(&self) -> Result<(), AgentError> {
         validate_objects(&self.object_attachments)?;
         live_read::validate_targets(self)?;
-        let providers = crate::ai_assistant::ai_assistant_provider_registry();
-        let compiled = providers.registered_tools();
+        let providers = crate::ai_assistant::ai_assistant_provider_registry_ref();
         if self.tool_names.len() > MAX_READ_TOOLS
             || self.tool_names.windows(2).any(|pair| pair[0] >= pair[1])
             || self.tool_names.iter().any(|name| {
-                !compiled
-                    .iter()
-                    .any(|tool| tool.name() == name && tool.effect == ToolEffect::ReadOnly)
+                providers
+                    .capability_for_tool(name)
+                    .is_none_or(|capability| capability.wire.effect.is_side_effecting())
             })
             || self
                 .expires_at

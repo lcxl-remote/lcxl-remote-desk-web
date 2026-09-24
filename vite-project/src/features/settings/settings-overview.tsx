@@ -130,6 +130,14 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
+                        <Link to="/system/goal-budget" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <CardTitle className="text-lg">{t('pages.aiAssistant.goalBudgetPolicyTitle')}</CardTitle>
+                                    <CardDescription>{t('pages.aiAssistant.goalBudgetPolicyDescription')}</CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
                         <Link to="/system/context-management" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>

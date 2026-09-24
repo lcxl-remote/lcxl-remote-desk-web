@@ -3,7 +3,9 @@ mod fresh;
 use crate::owned_task;
 use crate::{
     ai_assistant_gate::AiAssistantGate,
-    ai_assistant_orchestrator::{claim_scheduled_permission, resume_scheduled_turn},
+    ai_assistant_orchestrator::{
+        claim_scheduled_permission, resume_queued_goal, resume_scheduled_turn,
+    },
     entity::{agent_schedule_run as run, agent_session},
     schedule_store::{
         ClaimedContinuation, ContinuationClaim, ContinuationLease, ScheduleStore,
@@ -17,7 +19,13 @@ use desk_signal_facade::model::{
 };
 use futures_util::{StreamExt, stream};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::Duration,
+};
 
 const BATCH_SIZE: u64 = 32;
 const LOCAL_CONCURRENCY: usize = 4;
@@ -32,6 +40,10 @@ pub struct ContinuationScanReport {
     pub deferred: usize,
     pub needs_reconciliation: usize,
     pub next_cursor: Option<i64>,
+    pub goal_scanned: usize,
+    pub goal_settled: usize,
+    pub goal_deferred: usize,
+    pub review_expired: u64,
 }
 
 #[derive(Clone)]
@@ -39,6 +51,7 @@ pub struct SignalScheduleExecutor {
     db: DatabaseConnection,
     connections: web::Data<SharedConnectionMap>,
     gate: Arc<AiAssistantGate>,
+    approval_cursor: Arc<AtomicI64>,
 }
 
 enum DispatchResult {
@@ -58,6 +71,7 @@ impl SignalScheduleExecutor {
             db,
             connections,
             gate,
+            approval_cursor: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -76,6 +90,12 @@ impl SignalScheduleExecutor {
                 .then(|| candidates.last().unwrap().id),
             ..Default::default()
         };
+        report.review_expired = crate::agent_approval_store::expire_review_leases(
+            &self.db,
+            u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+            BATCH_SIZE,
+        )
+        .await?;
         let mut tasks = stream::iter(
             candidates
                 .into_iter()
@@ -91,7 +111,176 @@ impl SignalScheduleExecutor {
                 DispatchResult::Reconcile => report.needs_reconciliation += 1,
             }
         }
+        crate::agent_goal_open_store::expire_due(&self.db, chrono::Utc::now(), BATCH_SIZE as u64)
+            .await?;
+        crate::agent_goal_store::expire_due(&self.db, chrono::Utc::now(), BATCH_SIZE as u64)
+            .await?;
+        let mut goal_candidates = crate::agent_goal_store::queued_candidates(
+            &self.db,
+            u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+            BATCH_SIZE,
+        )
+        .await?;
+        goal_candidates.extend(
+            crate::agent_goal_store::waiting_device_candidates(
+                &self.db,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+                BATCH_SIZE,
+            )
+            .await?,
+        );
+        goal_candidates.extend(
+            crate::agent_goal_store::waiting_model_candidates(
+                &self.db,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+                BATCH_SIZE,
+            )
+            .await?,
+        );
+        goal_candidates.extend(
+            crate::agent_goal_store::waiting_work_candidates(
+                &self.db,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+                BATCH_SIZE,
+            )
+            .await?,
+        );
+        report.goal_scanned = goal_candidates.len();
+        let mut goals = stream::iter(
+            goal_candidates
+                .into_iter()
+                .map(|goal| Box::pin(self.process_goal(goal))),
+        )
+        .buffer_unordered(LOCAL_CONCURRENCY);
+        while let Some(settled) = goals.next().await {
+            if settled {
+                report.goal_settled += 1;
+            } else {
+                report.goal_deferred += 1;
+            }
+        }
         Ok(report)
+    }
+
+    async fn process_goal(&self, goal: desk_diagnose_core::goal::GoalRun) -> bool {
+        use desk_diagnose_core::goal::{GoalState, GoalWaitReason};
+
+        if !matches!(
+            goal.state,
+            GoalState::Queued
+                | GoalState::Waiting(GoalWaitReason::Device)
+                | GoalState::Waiting(GoalWaitReason::Model)
+                | GoalState::Waiting(GoalWaitReason::Work)
+        ) {
+            return false;
+        }
+        if goal.state == GoalState::Waiting(GoalWaitReason::Work) {
+            let _ = crate::agent_goal_store::wake_for_work_completion(
+                &self.db,
+                &goal,
+                chrono::Utc::now(),
+            )
+            .await;
+            return false;
+        }
+        if goal.state == GoalState::Waiting(GoalWaitReason::Model) {
+            let _ =
+                crate::agent_goal_store::wake_model_due(&self.db, &goal, chrono::Utc::now()).await;
+            return false;
+        }
+        let target = {
+            let map = self.connections.read().await;
+            let mut targets = map.values().filter(|target| {
+                target.auth_context.auth_kind == AuthKind::TokenAuth
+                    && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
+                    && target.model.version_info.client_id.as_deref()
+                        == Some(goal.device_id.as_str())
+            });
+            let first = targets
+                .next()
+                .map(|target| target.model.connection_id.clone());
+            if targets.next().is_some() {
+                None
+            } else {
+                first
+            }
+        };
+        let available = target.as_deref().is_some_and(|connection_id| {
+            crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(connection_id, chrono::Utc::now())
+                .is_some()
+        });
+        if !available || goal.state == GoalState::Waiting(GoalWaitReason::Device) {
+            if let Err(error) = crate::agent_goal_store::update_device_availability(
+                &self.db,
+                &goal,
+                available,
+                chrono::Utc::now(),
+            )
+            .await
+            {
+                log::warn!("[goal-executor] device wait transition failed: {error}");
+            }
+            return false;
+        }
+        match crate::agent_goal_store::pause_if_missing_attachments(
+            &self.db,
+            &goal,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Ok(Some(_)) => return false,
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("[goal-executor] attachment preflight failed: {error}");
+                return false;
+            }
+        }
+        let connections = self.connections.clone();
+        let db = self.db.clone();
+        let gate = self.gate.clone();
+        let observed_goal = goal.clone();
+        match owned_task::run(async move { resume_queued_goal(connections, db, &gate, goal).await })
+            .await
+        {
+            Ok(Ok(LoopOutcome::TurnBusy)) => {
+                let _ = crate::agent_goal_store::pause_if_unresolved_work(
+                    &self.db,
+                    &observed_goal,
+                    chrono::Utc::now(),
+                )
+                .await;
+                false
+            }
+            Ok(Ok(_)) => true,
+            Ok(Err(error)) => {
+                log::warn!(
+                    "[goal-executor] queued goal could not continue: {}",
+                    error.message
+                );
+                if error.retryable
+                    && error.kind == desk_agent_protocol::AgentErrorKind::ModelUnavailable
+                {
+                    let _ = crate::agent_goal_store::wait_for_model(
+                        &self.db,
+                        &observed_goal,
+                        None,
+                        chrono::Utc::now(),
+                    )
+                    .await;
+                } else if error.kind == desk_agent_protocol::AgentErrorKind::ModelRejected {
+                    let _ = crate::agent_goal_store::block_model_before_claim(
+                        &self.db,
+                        &observed_goal,
+                        chrono::Utc::now(),
+                    )
+                    .await;
+                }
+                false
+            }
+            Err(_) => false,
+        }
     }
 
     async fn claim_initial(&self, candidate: &run::Model) -> Option<(String, ClaimedContinuation)> {
@@ -261,6 +450,7 @@ impl SignalScheduleExecutor {
     }
 
     pub async fn run(self) {
+        actix_web::rt::spawn(self.clone().run_approval_reviews());
         let mut cursor = 0;
         let mut rehearsal_cursor = 0;
         loop {
@@ -287,6 +477,41 @@ impl SignalScheduleExecutor {
                 Err(_) => {
                     rehearsal_cursor = 0;
                     log::warn!("[schedule-executor] rehearsal recovery unavailable; retrying");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    async fn run_approval_reviews(self) {
+        loop {
+            if self.gate.is_enabled() {
+                let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+                match crate::agent_approval_store::pending_permission_reviews(
+                    &self.db,
+                    self.approval_cursor.load(Ordering::Relaxed),
+                    BATCH_SIZE,
+                    now_unix_ms,
+                )
+                .await
+                {
+                    Ok((candidates, next_cursor)) => {
+                        self.approval_cursor
+                            .store(next_cursor.unwrap_or(0), Ordering::Relaxed);
+                        let mut approvals = stream::iter(candidates.into_iter().map(|candidate| {
+                            Box::pin(crate::approval_dispatch::process_pending_permission_review(
+                                self.db.clone(),
+                                self.connections.clone(),
+                                candidate,
+                            ))
+                        }))
+                        .buffer_unordered(LOCAL_CONCURRENCY);
+                        while approvals.next().await.is_some() {}
+                    }
+                    Err(error) => {
+                        self.approval_cursor.store(0, Ordering::Relaxed);
+                        log::warn!("[approval-executor] candidate scan unavailable: {error}");
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;

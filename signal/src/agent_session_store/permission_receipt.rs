@@ -189,6 +189,26 @@ pub(super) async fn replay_on(
 }
 
 impl SignalAgentSessionStore {
+    /// Read the validated decision for one owner-scoped request. A missing
+    /// receipt conveys no authority to resume or to describe an AI decision.
+    pub async fn permission_decision_event(
+        &self,
+        subject: PermissionDecisionSubject<'_>,
+        request_id: &str,
+    ) -> Result<Option<PermissionDecidedEvent>, AgentError> {
+        let row = find(&self.db, subject.conversation_id)
+            .await
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+        let session = session(
+            &row,
+            subject.conversation_id,
+            subject.actor_id,
+            subject.device_id,
+        )?;
+        decided_on(&self.db, &session, request_id).await
+    }
+
     /// Current caller/target authorization is the caller's responsibility. This
     /// reads an immutable receipt, not renewed authority or a new resume trigger.
     pub async fn replay_permission_decision(

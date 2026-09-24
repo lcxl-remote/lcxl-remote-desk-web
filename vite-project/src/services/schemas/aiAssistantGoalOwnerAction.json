@@ -1,0 +1,1 @@
+{"type":"string","enum":["pause","resume","retry_stalled","cancel"],"x-readme-ref-name":"AiAssistantGoalOwnerAction"}

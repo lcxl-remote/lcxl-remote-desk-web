@@ -519,6 +519,9 @@ async fn fixture(rule: ScheduleRule, next: i64) -> (ScheduleStore, entity::Model
     db.execute(&schema.create_table_from_entity(run::Entity))
         .await
         .unwrap();
+    db.execute(&schema.create_table_from_entity(crate::entity::agent_goal_run::Entity))
+        .await
+        .unwrap();
     for index in schema
         .create_index_from_entity(entity::Entity)
         .into_iter()

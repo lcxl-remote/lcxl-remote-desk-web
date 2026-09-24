@@ -65,7 +65,10 @@ pub(crate) async fn reconcile_on(
         }
         if matches!(
             row.status.as_str(),
-            CAPABILITY_WORK_PREPARED | CAPABILITY_WORK_SUPERSEDED | CAPABILITY_WORK_REVOKED
+            CAPABILITY_WORK_PREPARED
+                | CAPABILITY_WORK_SUPERSEDED
+                | CAPABILITY_WORK_REVOKED
+                | CAPABILITY_WORK_REVIEW_CLOSED
         ) {
             let call = prepared::close_on(txn, session, &row, now_ms).await?;
             if !matched.insert(call) {

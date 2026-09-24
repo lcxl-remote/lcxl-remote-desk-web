@@ -389,6 +389,9 @@ pub enum TriggerOrigin {
     /// A fresh occurrence of an explicitly published task. Current task authority
     /// and per-call grants remain mandatory; this origin is not a user decision.
     ScheduledTask,
+    /// A server-claimed slice of a persisted long-running goal. The coordinator
+    /// must claim the goal and session together before this origin is adopted.
+    GoalContinuation,
     /// A manager-fired automation turn reacting to a completed background command.
     /// Retained only to deserialize sessions written before generic work origins.
     ExecCompletion,
@@ -410,6 +413,18 @@ pub enum AgentSessionSurface {
 }
 
 impl TriggerOrigin {
+    /// A permission decision can lead to another legitimate request under the
+    /// same owner task. Completion and schedule origins never inherit the
+    /// session's AI-review delegation for new requests.
+    pub fn allows_delegated_review(self) -> bool {
+        matches!(
+            self,
+            TriggerOrigin::User
+                | TriggerOrigin::PermissionDecision
+                | TriggerOrigin::GoalContinuation
+        )
+    }
+
     /// Whether this origin may enter the ordinary mutation authorization path.
     /// User input, explicit permission decisions and confirmed continuations
     /// still require current policy and exact grants; completions cannot start
@@ -421,6 +436,7 @@ impl TriggerOrigin {
                 | TriggerOrigin::PermissionDecision
                 | TriggerOrigin::ScheduledContinuation
                 | TriggerOrigin::ScheduledTask
+                | TriggerOrigin::GoalContinuation
         )
     }
 }
@@ -605,6 +621,10 @@ pub struct PersistedAgentSession {
     /// moves unresolved requests to NeedsRevalidation before it is committed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_requests: Vec<crate::dynamic_run::PermissionRequest>,
+    /// Per-item decision metadata; the immutable event holds the detailed
+    /// rationale. This projection lets the loop distinguish a partial denial
+    /// from an unrelated approval in the same batch.
+    pub permission_decisions: Vec<crate::dynamic_run::PermissionDecisionProjection>,
 
     /// Lease fencing token. Rotated on every claim (and on lease takeover during
     /// recovery), it identifies the *current* turn owner. A [`SessionSeam::save`]
@@ -862,6 +882,31 @@ impl PersistedAgentSession {
                 ));
             }
         }
+        if session.permission_decisions.len() > session.permission_requests.len() {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "too many permission decision projections".into(),
+            ));
+        }
+        let mut decided_ids = std::collections::BTreeSet::new();
+        for decision in &session.permission_decisions {
+            let request = session
+                .permission_requests
+                .iter()
+                .find(|request| request.request_id == decision.request_id)
+                .ok_or_else(|| {
+                    SessionDecodeError::InvalidDynamicRun(
+                        "permission decision references a missing request".into(),
+                    )
+                })?;
+            decision
+                .validate_for(request)
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.to_string()))?;
+            if !decided_ids.insert(decision.request_id.as_str()) {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "duplicate permission decision projection".into(),
+                ));
+            }
+        }
         if session.pending_auto_triggers.len() > MAX_PENDING_AUTO_TRIGGERS {
             return Err(SessionDecodeError::InvalidDynamicRun(
                 "too many pending auto triggers".into(),
@@ -950,6 +995,7 @@ impl PersistedAgentSession {
             last_event_seq: 0,
             task_status_projection: None,
             permission_requests: Vec::new(),
+            permission_decisions: Vec::new(),
             lease_token: 0,
             current_turn_steps: 0,
             current_turn_tokens: TokenUsage::default(),
@@ -1010,6 +1056,42 @@ impl PersistedAgentSession {
             .sum())
     }
 
+    /// Rebuild only bounded working state when a persisted goal starts a new
+    /// segment under the same owner-authored input revision.
+    pub fn begin_goal_segment(
+        &mut self,
+        goal_id: &str,
+        source_message_id: &str,
+        segment_seq: u32,
+        goal_revision: u64,
+        lease_epoch: u64,
+    ) -> Result<(), &'static str> {
+        if self.surface != AgentSessionSurface::AiAssistant
+            || self.input_revision == 0
+            || self.focus_epoch.input_revision != self.input_revision
+            || self.focus_epoch.selected_attachment_ids.iter().any(|id| {
+                !self.context_attachments.iter().any(|attachment| {
+                    attachment.attachment_id == *id
+                        && matches!(attachment.state, AttachmentState::Active)
+                })
+            })
+        {
+            return Err("goal segment session context is unavailable");
+        }
+        self.focus_epoch.begin_goal_segment(
+            self.input_revision,
+            goal_id,
+            source_message_id,
+            segment_seq,
+            goal_revision,
+            lease_epoch,
+        )?;
+        self.capability_disclosure
+            .reset_for_input(self.input_revision);
+        self.pending_visual_verification = None;
+        Ok(())
+    }
+
     pub fn add_permission_request(
         &mut self,
         request: crate::dynamic_run::PermissionRequest,
@@ -1041,9 +1123,33 @@ impl PersistedAgentSession {
                     crate::dynamic_run::DynamicRunContractError::InvalidPermissionItemCount,
                 );
             };
-            self.permission_requests.remove(index);
+            let removed = self.permission_requests.remove(index);
+            self.permission_decisions
+                .retain(|decision| decision.request_id != removed.request_id);
         }
         self.permission_requests.push(request);
+        Ok(())
+    }
+
+    pub fn record_permission_decision(
+        &mut self,
+        event: &crate::dynamic_run::PermissionDecidedEvent,
+    ) -> Result<(), crate::dynamic_run::DynamicRunContractError> {
+        let projection = crate::dynamic_run::PermissionDecisionProjection::from_event(event)?;
+        let request = self
+            .permission_requests
+            .iter()
+            .find(|request| request.request_id == projection.request_id)
+            .ok_or(crate::dynamic_run::DynamicRunContractError::PermissionEventMismatch)?;
+        projection.validate_for(request)?;
+        if self
+            .permission_decisions
+            .iter()
+            .any(|existing| existing.request_id == projection.request_id)
+        {
+            return Err(crate::dynamic_run::DynamicRunContractError::PermissionEventMismatch);
+        }
+        self.permission_decisions.push(projection);
         Ok(())
     }
 
@@ -1326,6 +1432,9 @@ impl PersistedAgentSession {
             current_turn_id: self.current_turn_id.clone(),
             ..crate::model_context::ContextProtectionSet::default()
         };
+        if let Some(segment) = &self.focus_epoch.goal_segment {
+            protection.protect_message(segment.source_message_id.clone());
+        }
         for pending in &self.pending_auto_triggers {
             protection.protect_message(pending.event_id.clone());
             protection.protect_tool_call(pending.tool_call_id.clone());
@@ -1397,7 +1506,9 @@ impl PersistedAgentSession {
                 self.chain_id = turn_id.to_string();
                 self.automation_turns_used = 0;
             }
-            TriggerOrigin::PermissionDecision | TriggerOrigin::ScheduledContinuation => {}
+            TriggerOrigin::PermissionDecision
+            | TriggerOrigin::ScheduledContinuation
+            | TriggerOrigin::GoalContinuation => {}
             TriggerOrigin::ExecCompletion | TriggerOrigin::WorkCompletion { .. } => {
                 self.automation_turns_used = self.automation_turns_used.saturating_add(1);
             }
@@ -2354,6 +2465,41 @@ mod tests {
     }
 
     #[test]
+    fn goal_segment_preserves_pending_permissions_and_lifetime_usage() {
+        let mut value = session();
+        value.surface = AgentSessionSurface::AiAssistant;
+        value.input_revision = 1;
+        value.focus_epoch.input_revision = 1;
+        value.focus_epoch.record_step(TokenUsage {
+            input_tokens: Some(50),
+            ..Default::default()
+        });
+        value.lifetime_steps = 5;
+        value.lifetime_tokens.input_tokens = Some(500);
+        value
+            .add_permission_request(permission_request(1, PermissionRequestState::Pending))
+            .unwrap();
+        value
+            .begin_goal_segment("goal-1", "source-message", 1, 1, 1)
+            .unwrap();
+        assert_eq!(value.focus_epoch.steps_used, 0);
+        assert_eq!(
+            value.focus_epoch.goal_segment.as_ref().unwrap().segment_seq,
+            1
+        );
+        assert_eq!(value.lifetime_steps, 5);
+        assert_eq!(value.lifetime_tokens.input_tokens, Some(500));
+        assert_eq!(
+            value.permission_requests[0].state,
+            PermissionRequestState::Pending
+        );
+        assert_eq!(
+            value.begin_goal_segment("goal-1", "source-message", 1, 1, 1),
+            Err("invalid goal segment identity")
+        );
+    }
+
+    #[test]
     fn permission_projection_evicts_oldest_non_decidable_history_at_capacity() {
         let mut value = session();
         value.input_revision = 1;
@@ -2666,6 +2812,21 @@ mod tests {
         s.adopt_trigger(TriggerOrigin::User, "u2");
         assert_eq!(s.chain_id, "u2");
         assert_eq!(s.automation_turns_used, 0);
+    }
+
+    #[test]
+    fn delegated_review_continues_after_a_permission_decision_but_not_an_automation_trigger() {
+        assert!(TriggerOrigin::User.allows_delegated_review());
+        assert!(TriggerOrigin::PermissionDecision.allows_delegated_review());
+        assert!(TriggerOrigin::GoalContinuation.allows_delegated_review());
+        assert!(!TriggerOrigin::ScheduledContinuation.allows_delegated_review());
+        assert!(!TriggerOrigin::ScheduledTask.allows_delegated_review());
+        assert!(
+            !TriggerOrigin::WorkCompletion {
+                kind: WorkKind::AgentExec
+            }
+            .allows_delegated_review()
+        );
     }
 
     /// `finish_turn` settles only the turn machine; the execution machine is left

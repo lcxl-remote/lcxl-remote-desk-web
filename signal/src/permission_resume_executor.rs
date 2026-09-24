@@ -84,6 +84,28 @@ impl SignalPermissionResumeExecutor {
         else {
             return Ok(false);
         };
+        match crate::agent_goal_store::wake_for_permission_decision(
+            &self.db,
+            &session.conversation_id,
+            &session.actor_id,
+            &session.device_id,
+            &candidate.request_id,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Ok(desk_diagnose_core::goal::GoalPermissionWake::NoGoal) => {}
+            Ok(
+                desk_diagnose_core::goal::GoalPermissionWake::Queued
+                | desk_diagnose_core::goal::GoalPermissionWake::Held,
+            ) => return Ok(true),
+            Err(error) => {
+                log::warn!(
+                    "[ai-assistant-goal] durable permission decision routing deferred: {error}"
+                );
+                return Ok(false);
+            }
+        }
         let connection_id = {
             let map = self.connections.read().await;
             let mut targets = map.values().filter(|target| {

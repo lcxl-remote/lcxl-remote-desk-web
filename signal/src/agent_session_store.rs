@@ -19,8 +19,10 @@ use desk_diagnose_core::context_attachment::ContextAttachment;
 #[cfg(test)]
 use desk_diagnose_core::context_attachment::{AttachmentRuntimeBinding, AttachmentState};
 use desk_diagnose_core::dynamic_run::{
-    AGENT_RUN_EVENT_SCHEMA_VERSION, PermissionRequestedEvent, TaskStatusUpdatedEvent,
+    AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEventKind, PermissionRequestedEvent,
+    TaskStatusUpdatedEvent,
 };
+use desk_diagnose_core::goal::GoalLedgerEvent;
 pub use desk_diagnose_core::permission_grant::PermissionGrantIssuanceContext;
 use desk_diagnose_core::permission_grant::build_permission_grants;
 use desk_diagnose_core::seam::{ClaimError, ClaimTurnParams, SessionSeam};
@@ -35,10 +37,21 @@ use sea_orm::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::entity::{agent_capability_grant, agent_exec_task, agent_run_event, agent_session};
+use crate::entity::{
+    agent_capability_grant, agent_exec_task, agent_goal_run, agent_run_event, agent_session,
+};
 
 const LEASE_TTL_SECS: i64 = 90;
 const CLAIM_ATTEMPTS: usize = 5;
+
+enum PermissionDecisionAuthority<'a> {
+    Owner,
+    Ai {
+        candidates: &'a [desk_diagnose_core::approval_review::ApprovalReviewCandidate],
+        hmac_key: [u8; 32],
+    },
+    ReviewUnavailable,
+}
 
 #[derive(Clone)]
 pub struct SignalAgentSessionStore {
@@ -177,6 +190,7 @@ impl SignalAgentSessionStore {
             scope_snapshot: session.scope_snapshot,
             task_status_projection: session.task_status_projection,
             permission_requests: session.permission_requests,
+            permission_decisions: session.permission_decisions,
             visual_evidence: session.visual_evidence,
             messages: session
                 .conversation
@@ -228,6 +242,76 @@ impl SignalAgentSessionStore {
         now: &str,
         expected_run_request_id: Option<&str>,
     ) -> Result<PermissionDecisionOutcome, AgentError> {
+        self.decide_permission_request_with_authority(
+            subject,
+            request_id,
+            decisions,
+            grant_context,
+            now,
+            expected_run_request_id,
+            PermissionDecisionAuthority::Owner,
+        )
+        .await
+    }
+
+    /// The independent reviewer supplies immutable candidates, never owner
+    /// credentials or a browser approval. Their terminal rows are rechecked in
+    /// the same transaction that mints the decision, grants and resume.
+    pub async fn decide_permission_request_by_ai(
+        &self,
+        subject: PermissionDecisionSubject<'_>,
+        request_id: &str,
+        candidates: &[desk_diagnose_core::approval_review::ApprovalReviewCandidate],
+        grant_context: PermissionGrantIssuanceContext<'_>,
+        now: &str,
+    ) -> Result<PermissionDecisionOutcome, AgentError> {
+        let hmac_key = crate::approval_review_secret::load_or_create(&self.db)
+            .await
+            .map_err(|_| internal("load approval review audit key failed"))?;
+        self.decide_permission_request_with_authority(
+            subject,
+            request_id,
+            Vec::new(),
+            grant_context,
+            now,
+            None,
+            PermissionDecisionAuthority::Ai {
+                candidates,
+                hmac_key,
+            },
+        )
+        .await
+    }
+
+    pub async fn deny_unavailable_review(
+        &self,
+        subject: PermissionDecisionSubject<'_>,
+        request_id: &str,
+        grant_context: PermissionGrantIssuanceContext<'_>,
+        now: &str,
+    ) -> Result<PermissionDecisionOutcome, AgentError> {
+        self.decide_permission_request_with_authority(
+            subject,
+            request_id,
+            Vec::new(),
+            grant_context,
+            now,
+            None,
+            PermissionDecisionAuthority::ReviewUnavailable,
+        )
+        .await
+    }
+
+    async fn decide_permission_request_with_authority(
+        &self,
+        subject: PermissionDecisionSubject<'_>,
+        request_id: &str,
+        decisions: Vec<desk_diagnose_core::dynamic_run::PermissionDecisionItem>,
+        grant_context: PermissionGrantIssuanceContext<'_>,
+        now: &str,
+        expected_run_request_id: Option<&str>,
+        authority: PermissionDecisionAuthority<'_>,
+    ) -> Result<PermissionDecisionOutcome, AgentError> {
         let PermissionDecisionSubject {
             conversation_id,
             actor_id,
@@ -253,16 +337,18 @@ impl SignalAgentSessionStore {
             let mut session =
                 permission_receipt::session(&row, conversation_id, actor_id, device_id)?;
             permission_receipt::check_expected_request(&session, expected_run_request_id)?;
-            if let Some(state) =
-                permission_receipt::replay_on(&txn, &session, request_id, &decisions).await?
-            {
-                txn.commit()
-                    .await
-                    .map_err(|_| internal("read permission receipt transaction failed"))?;
-                return Ok(PermissionDecisionOutcome {
-                    state,
-                    newly_recorded: false,
-                });
+            if matches!(&authority, PermissionDecisionAuthority::Owner) {
+                if let Some(state) =
+                    permission_receipt::replay_on(&txn, &session, request_id, &decisions).await?
+                {
+                    txn.commit()
+                        .await
+                        .map_err(|_| internal("read permission receipt transaction failed"))?;
+                    return Ok(PermissionDecisionOutcome {
+                        state,
+                        newly_recorded: false,
+                    });
+                }
             }
             if session.turn_state.is_active() {
                 txn.rollback().await.ok();
@@ -285,6 +371,72 @@ impl SignalAgentSessionStore {
                     "permission request differs from its original event",
                 ));
             }
+            let reviewed = match &authority {
+                PermissionDecisionAuthority::Owner => None,
+                PermissionDecisionAuthority::Ai {
+                    candidates,
+                    hmac_key,
+                } => Some(
+                    crate::agent_approval_store::reviewed_permission_batch_on(
+                        &txn,
+                        &session,
+                        &requested,
+                        candidates,
+                        grant_context.registry,
+                        grant_context.surface,
+                        hmac_key,
+                        grant_context.readiness_revision,
+                        grant_context.now_unix_ms,
+                    )
+                    .await
+                    .map_err(|_| internal("AI permission reviews are no longer current"))?,
+                ),
+                PermissionDecisionAuthority::ReviewUnavailable => {
+                    if crate::agent_approval_store::has_live_permission_review_on(
+                        &txn,
+                        &session,
+                        &requested,
+                        grant_context.now_unix_ms,
+                    )
+                    .await
+                    .map_err(|_| internal("check in-flight AI permission review failed"))?
+                    {
+                        return Err(transport("AI permission review is still in progress"));
+                    }
+                    None
+                }
+            };
+            let (decision_items, decision_source) = match &authority {
+                PermissionDecisionAuthority::Owner => (
+                    decisions.clone(),
+                    desk_diagnose_core::dynamic_run::PermissionDecisionSource::UserDecision,
+                ),
+                PermissionDecisionAuthority::Ai { .. } => {
+                    let batch = reviewed
+                        .as_ref()
+                        .ok_or_else(|| internal("AI review batch is missing"))?;
+                    (batch.decisions.clone(), batch.source.clone())
+                }
+                PermissionDecisionAuthority::ReviewUnavailable => (
+                    requested
+                        .items
+                        .iter()
+                        .map(
+                            |item| desk_diagnose_core::dynamic_run::PermissionDecisionItem {
+                                item_id: item.item_id.clone(),
+                                decision:
+                                    desk_diagnose_core::dynamic_run::PermissionItemDecision::Deny,
+                            },
+                        )
+                        .collect(),
+                    desk_diagnose_core::dynamic_run::PermissionDecisionSource::ReviewUnavailable {
+                        reason_code: "approval_ai_fault".into(),
+                        reason:
+                            "Approval AI is unavailable; the requested actions were not executed"
+                                .into(),
+                    },
+                ),
+            };
             let request = &mut session.permission_requests[request_index];
             if request.input_revision != session.input_revision {
                 txn.rollback().await.ok();
@@ -292,11 +444,12 @@ impl SignalAgentSessionStore {
             }
             let request_input_revision = request.input_revision;
             let resulting_state = request
-                .apply_user_decision(&decisions)
+                .apply_user_decision(&decision_items)
                 .map_err(|error| internal(format!("invalid permission decision: {error}")))?;
             let original_reads =
                 if desk_diagnose_core::permission_grant::requires_original_read_context(
-                    &requested, &decisions,
+                    &requested,
+                    &decision_items,
                 ) {
                     crate::agent_run_event_store::input_context::original_on(&txn, &session).await?
                 } else {
@@ -305,7 +458,7 @@ impl SignalAgentSessionStore {
             let mut grants = build_permission_grants(
                 &session,
                 &requested,
-                &decisions,
+                &decision_items,
                 &grant_context,
                 original_reads.as_ref(),
             )?;
@@ -341,11 +494,32 @@ impl SignalAgentSessionStore {
                 request_id: request_id.to_string(),
                 request_input_revision,
                 resulting_state,
-                items: decisions.clone(),
+                items: decision_items.clone(),
+                decision_source,
             };
             event
                 .validate()
                 .map_err(|error| internal(format!("invalid permission decision event: {error}")))?;
+            session
+                .record_permission_decision(&event)
+                .map_err(|error| {
+                    internal(format!("invalid permission decision projection: {error}"))
+                })?;
+            if let Some(batch) = reviewed.as_ref() {
+                desk_diagnose_core::permission_grant::bind_ai_permission_grants(
+                    &session,
+                    &requested,
+                    &event,
+                    &batch.delegation,
+                    batch.model_config_revision,
+                    batch
+                        .goal_binding
+                        .as_ref()
+                        .map(|(id, revision)| (id.as_str(), *revision)),
+                    grant_context.now_unix_ms,
+                    &mut grants,
+                )?;
+            }
 
             let old_version = row.version;
             let new_version = old_version + 1;
@@ -596,6 +770,72 @@ impl SignalAgentSessionStore {
                 None => session.recover_session(RecoveryVerdict::NotExecuted, now_text),
             }
         }
+        let txn = crate::db::begin_write(&self.db, agent_session::Entity)
+            .await
+            .map_err(|e| internal(format!("begin lapsed session transaction: {e}")))?;
+        let Some(locked) = agent_session::Entity::find_by_id(row.id)
+            .filter(agent_session::Column::Version.eq(row.version))
+            .filter(agent_session::Column::StateJson.eq(&row.state_json))
+            .one(&txn)
+            .await
+            .map_err(|e| internal(format!("lock lapsed session: {e}")))?
+        else {
+            return Ok(false);
+        };
+        if locked.lease_token != row.lease_token
+            || locked
+                .lease_deadline
+                .is_some_and(|deadline| deadline >= now)
+        {
+            return Ok(false);
+        }
+        let recovered_goal = if session.trigger_origin
+            == desk_diagnose_core::session::TriggerOrigin::GoalContinuation
+        {
+            let goal_row = agent_goal_run::Entity::find()
+                .filter(agent_goal_run::Column::ConversationId.eq(&session.conversation_id))
+                .filter(agent_goal_run::Column::Status.eq("running"))
+                .one(&txn)
+                .await
+                .map_err(|e| internal(format!("load lapsed goal: {e}")))?
+                .ok_or_else(|| internal("lapsed goal is missing"))?;
+            let mut goal = crate::agent_goal_store::decode(&goal_row)
+                .map_err(|e| internal(format!("decode lapsed goal: {e}")))?;
+            let now_ms = u64::try_from(now.timestamp_millis())
+                .map_err(|_| internal("invalid lapsed goal clock"))?;
+            if goal.owner_id != session.actor_id
+                || goal.device_id != session.device_id
+                || goal.input_revision != session.input_revision
+                || goal_row
+                    .lease_deadline
+                    .is_some_and(|deadline| deadline > i64::try_from(now_ms).unwrap_or(i64::MAX))
+            {
+                return Ok(false);
+            }
+            let safe_to_resume = !matches!(
+                &session.execution_state,
+                ExecutionState::OutcomeUnknown { .. }
+            ) && !session.permission_requests.iter().any(|request| {
+                request.state == desk_diagnose_core::dynamic_run::PermissionRequestState::Pending
+            }) && session.pending_schedule_review.is_none();
+            let previous = (goal.state_version, goal.lease_epoch);
+            goal.recover_interrupted_slice(safe_to_resume, now_ms)
+                .map_err(|_| internal("invalid lapsed goal recovery"))?;
+            session.last_event_seq = session
+                .last_event_seq
+                .checked_add(1)
+                .ok_or_else(|| internal("lapsed goal event sequence exhausted"))?;
+            let ledger = GoalLedgerEvent::new(
+                &goal,
+                AgentRunEventKind::GoalSliceSettled,
+                session.last_event_seq,
+                now.to_rfc3339(),
+            )
+            .map_err(|_| internal("invalid lapsed goal event"))?;
+            Some((goal, previous, ledger))
+        } else {
+            None
+        };
         let new_version = row.version + 1;
         session.version = new_version;
         let state_json = session
@@ -612,10 +852,53 @@ impl SignalAgentSessionStore {
             .filter(agent_session::Column::Id.eq(row.id))
             .filter(agent_session::Column::Version.eq(row.version))
             .filter(agent_session::Column::StateJson.eq(&row.state_json))
-            .exec(&self.db)
+            .exec(&txn)
             .await
             .map_err(|e| internal(format!("settle lapsed agent session: {e}")))?;
-        Ok(result.rows_affected == 1)
+        if result.rows_affected != 1 {
+            return Ok(false);
+        }
+        if let Some((goal, (previous_version, previous_epoch), ledger)) = recovered_goal {
+            if !crate::agent_goal_store::replace_on(
+                &txn,
+                &goal,
+                previous_version,
+                previous_epoch,
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| internal(format!("settle lapsed goal: {e}")))?
+            {
+                return Err(internal("lapsed goal changed during recovery"));
+            }
+            agent_run_event::ActiveModel {
+                event_id: Set(ledger.event.event_id.clone()),
+                run_id: Set(goal.conversation_id.clone()),
+                event_seq: Set(i64::try_from(ledger.event.event_seq)
+                    .map_err(|_| internal("invalid goal event sequence"))?),
+                input_revision: Set(i64::try_from(goal.input_revision)
+                    .map_err(|_| internal("invalid goal input revision"))?),
+                kind: Set(ledger.event.kind.as_str().into()),
+                correlation_id: Set(Some(goal.goal_id.clone())),
+                input_seq: Set(None),
+                actor_id: Set(Some(goal.owner_id.clone())),
+                source_envelope_ids_json: Set("[]".into()),
+                result_envelope_ids_json: Set("[]".into()),
+                payload_json: Set(serde_json::to_string(&ledger)
+                    .map_err(|_| internal("invalid goal event payload"))?),
+                payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
+                created_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await
+            .map_err(|e| internal(format!("append lapsed goal event: {e}")))?;
+        }
+        txn.commit()
+            .await
+            .map_err(|e| internal(format!("commit lapsed session: {e}")))?;
+        Ok(true)
     }
 
     /// Append a host execution result without taking over an active model turn.
@@ -935,6 +1218,7 @@ pub struct SessionSnapshot {
     pub scope_snapshot: AgentScope,
     pub task_status_projection: Option<desk_diagnose_core::dynamic_run::TaskStatusProjection>,
     pub permission_requests: Vec<desk_diagnose_core::dynamic_run::PermissionRequest>,
+    pub permission_decisions: Vec<desk_diagnose_core::dynamic_run::PermissionDecisionProjection>,
     pub visual_evidence: Vec<desk_agent_protocol::visual_evidence::VisualEvidenceFrame>,
     pub messages: Vec<desk_diagnose_core::chat::ChatMessage>,
     pub context_notices: Vec<desk_diagnose_core::model_context::ContextNotice>,
@@ -985,6 +1269,7 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         scope_snapshot: session.scope_snapshot,
         task_status_projection: session.task_status_projection,
         permission_requests: session.permission_requests,
+        permission_decisions: session.permission_decisions,
         visual_evidence: session.visual_evidence,
         messages: session
             .conversation
@@ -1084,7 +1369,20 @@ impl SessionSeam for SignalAgentSessionStore {
     {
         crate::agent_attachment_store::store_batch(&self.db, session, attachments)
             .await
-            .map_err(|e| internal(format!("Attachment storage failed: {e}")))
+            .map_err(|e| match e {
+                sea_orm::DbErr::Custom(message)
+                    if message == desk_diagnose_core::conversation_attachment::batch::ATTACHMENT_QUOTA_ERROR =>
+                {
+                    AgentError {
+                        kind: AgentErrorKind::AttachmentCapacity,
+                        message,
+                        retryable: false,
+                        safe_for_model: true,
+                        error_code: None,
+                    }
+                }
+                other => internal(format!("Attachment storage failed: {other}")),
+            })
     }
     async fn list_attachments(
         &self,
@@ -1137,7 +1435,20 @@ impl SessionSeam for SignalAgentSessionStore {
     ) -> Result<bool, AgentError> {
         crate::agent_image_store::store(&self.db, session, attachment, pixels)
             .await
-            .map_err(|e| internal(format!("Screenshot storage failed: {e}")))?;
+            .map_err(|e| match e {
+                sea_orm::DbErr::Custom(message)
+                    if message == desk_diagnose_core::conversation_attachment::batch::ATTACHMENT_QUOTA_ERROR =>
+                {
+                    AgentError {
+                        kind: AgentErrorKind::AttachmentCapacity,
+                        message,
+                        retryable: false,
+                        safe_for_model: true,
+                        error_code: None,
+                    }
+                }
+                other => internal(format!("Screenshot storage failed: {other}")),
+            })?;
         Ok(true)
     }
     async fn list_images(
@@ -1232,11 +1543,13 @@ impl SessionSeam for SignalAgentSessionStore {
         &self,
         params: ClaimTurnParams,
     ) -> Result<PersistedAgentSession, ClaimError> {
-        if params.trigger_origin
-            == desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation
-        {
+        if matches!(
+            params.trigger_origin,
+            desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation
+                | desk_diagnose_core::session::TriggerOrigin::GoalContinuation
+        ) {
             return Err(ClaimError::Backend(internal(
-                "scheduled continuation requires its atomic occurrence claim",
+                "continuation requires its atomic source and session claim",
             )));
         }
         if params.trigger_origin == desk_diagnose_core::session::TriggerOrigin::PermissionDecision {
@@ -1254,6 +1567,26 @@ impl SessionSeam for SignalAgentSessionStore {
                 .map_err(|e| ClaimError::Backend(internal(format!("load agent session: {e}"))))?
             {
                 Some(row) => {
+                    if matches!(
+                        params.trigger_origin,
+                        desk_diagnose_core::session::TriggerOrigin::WorkCompletion { .. }
+                    ) && crate::agent_goal_store::load_latest_for_subject(
+                        &self.db,
+                        &params.conversation_id,
+                        &params.actor_id,
+                        &params.device_id,
+                    )
+                    .await
+                    .map_err(|e| {
+                        ClaimError::Backend(internal(format!("load goal for completion: {e}")))
+                    })?
+                    .is_some_and(|goal| !goal.state.is_terminal())
+                    {
+                        // Goal continuations own background results. Every goal
+                        // transition also changes the session version, so the
+                        // session CAS below closes the read/claim race.
+                        return Err(ClaimError::Busy);
+                    }
                     let mut session =
                         PersistedAgentSession::decode_json(&row.state_json).map_err(|e| {
                             ClaimError::Backend(internal(format!(
@@ -1505,6 +1838,91 @@ impl SessionSeam for SignalAgentSessionStore {
         Ok(())
     }
 
+    async fn settle_goal_slice(
+        &self,
+        session: &mut PersistedAgentSession,
+        end: &desk_diagnose_core::goal::GoalSegmentEnd,
+        result_fingerprints: &[String],
+        now: &str,
+    ) -> Result<(), AgentError> {
+        let now = chrono::DateTime::parse_from_rfc3339(now)
+            .map_err(|_| internal("invalid goal settlement clock"))?
+            .with_timezone(&Utc);
+        crate::agent_goal_store::settle_slice(&self.db, session, end, result_fingerprints, now)
+            .await
+            .map_err(|error| internal(format!("settle AI Assistant goal: {error}")))?;
+        Ok(())
+    }
+
+    async fn load_claimed_goal(
+        &self,
+        session: &PersistedAgentSession,
+    ) -> Result<desk_diagnose_core::goal::GoalRun, AgentError> {
+        crate::agent_goal_store::load_claimed(&self.db, session)
+            .await
+            .map_err(|error| internal(format!("load claimed AI Assistant goal: {error}")))
+    }
+
+    async fn load_goal_for_planning(
+        &self,
+        session: &PersistedAgentSession,
+    ) -> Result<Option<desk_diagnose_core::goal::GoalRun>, AgentError> {
+        crate::agent_goal_store::load_for_subject(
+            &self.db,
+            &session.conversation_id,
+            &session.actor_id,
+            &session.device_id,
+        )
+        .await
+        .map_err(|error| internal(format!("load AI Assistant goal: {error}")))
+    }
+
+    async fn load_latest_completed_goal(
+        &self,
+        session: &PersistedAgentSession,
+    ) -> Result<Option<desk_diagnose_core::goal::GoalRun>, AgentError> {
+        crate::agent_goal_store::load_latest_completed_for_subject(
+            &self.db,
+            &session.conversation_id,
+            &session.actor_id,
+            &session.device_id,
+        )
+        .await
+        .map_err(|error| internal(format!("load completed AI Assistant goal: {error}")))
+    }
+
+    async fn reserve_goal_budget(
+        &self,
+        session: &PersistedAgentSession,
+        identity: &str,
+        upper: desk_diagnose_core::goal::GoalUsage,
+        now: &str,
+    ) -> Result<(), AgentError> {
+        let now = chrono::DateTime::parse_from_rfc3339(now)
+            .map_err(|_| internal("invalid goal budget clock"))?
+            .with_timezone(&Utc);
+        crate::agent_goal_store::reserve_budget(&self.db, session, identity, upper, now)
+            .await
+            .map_err(|error| internal(format!("reserve AI Assistant goal budget: {error}")))?;
+        Ok(())
+    }
+
+    async fn settle_goal_budget(
+        &self,
+        session: &PersistedAgentSession,
+        identity: &str,
+        actual: desk_diagnose_core::goal::GoalUsage,
+        now: &str,
+    ) -> Result<(), AgentError> {
+        let now = chrono::DateTime::parse_from_rfc3339(now)
+            .map_err(|_| internal("invalid goal budget clock"))?
+            .with_timezone(&Utc);
+        crate::agent_goal_store::settle_budget(&self.db, session, identity, actual, now)
+            .await
+            .map_err(|error| internal(format!("settle AI Assistant goal budget: {error}")))?;
+        Ok(())
+    }
+
     async fn poll_directory_review(
         &self,
         session: &mut PersistedAgentSession,
@@ -1629,6 +2047,14 @@ impl SessionSeam for SignalAgentSessionStore {
                 message: "Permission request exceeds the current task contract or its authority has expired".into(),
                 retryable: false, safe_for_model: true, error_code: None,
             })
+    }
+
+    async fn save_goal_open_request(
+        &self,
+        session: &mut PersistedAgentSession,
+        event: &desk_diagnose_core::goal::GoalOpenRequestEvent,
+    ) -> Result<(), AgentError> {
+        crate::agent_goal_open_store::save_model_request(&self.db, session, event).await
     }
 
     async fn save_permission_request(
@@ -1946,6 +2372,19 @@ impl SessionSeam for SignalAgentSessionStore {
         lease_token: u64,
         now: &str,
     ) -> Result<(), AgentError> {
+        match crate::agent_goal_store::heartbeat_goal_if_running(
+            &self.db,
+            conversation_id,
+            lease_token,
+            now_from(now),
+        )
+        .await
+        .map_err(|e| internal(format!("renew AI Assistant goal: {e}")))?
+        {
+            Some(true) => return Ok(()),
+            Some(false) => return Err(internal("AI Assistant goal lease was lost")),
+            None => {}
+        }
         let deadline = now_from(now) + Duration::seconds(LEASE_TTL_SECS);
         let result = agent_session::Entity::update_many()
             .col_expr(
@@ -1954,6 +2393,7 @@ impl SessionSeam for SignalAgentSessionStore {
             )
             .filter(agent_session::Column::ConversationId.eq(conversation_id))
             .filter(agent_session::Column::LeaseToken.eq(lease_token as i64))
+            .filter(agent_session::Column::LeaseDeadline.gt(now_from(now)))
             .exec(&self.db)
             .await
             .map_err(|e| internal(format!("renew agent session: {e}")))?;
@@ -2245,6 +2685,14 @@ mod tests {
         db.execute(&schema.create_table_from_entity(agent_session::Entity))
             .await
             .unwrap();
+        db.execute(&schema.create_table_from_entity(agent_goal_run::Entity))
+            .await
+            .unwrap();
+        db.execute(
+            &schema.create_table_from_entity(crate::entity::agent_goal_open_request::Entity),
+        )
+        .await
+        .unwrap();
         db.execute(&schema.create_table_from_entity(agent_exec_task::Entity))
             .await
             .unwrap();
@@ -2273,7 +2721,7 @@ mod tests {
         };
         assert_eq!(
             error.message,
-            "scheduled continuation requires its atomic occurrence claim"
+            "continuation requires its atomic source and session claim"
         );
     }
 

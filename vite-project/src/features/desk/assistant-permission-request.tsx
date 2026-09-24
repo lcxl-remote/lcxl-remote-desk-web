@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
-import type { PermissionDecisionBody, PermissionRequestDto } from '@/services/types';
+import type { GrantRequestItemDto, PermissionDecisionBody, PermissionRequestDto } from '@/services/types';
 import { AssistantPermissionDisclosure } from './assistant-permission-disclosure';
 import { CommandConfirmationCard, validCommandReview } from './ai-assistant-command';
 import { LaunchConfirmationCard, validLaunchReview } from './ai-assistant-launch';
@@ -14,6 +14,11 @@ import { TextFileConfirmationCard, validTextFileReview, fileApprovalBlocked } fr
 
 function needsApplicationScope(tool: string) {
     return ['execute_ui_actions', 'send_background_input'].includes(tool);
+}
+
+function hasNativeUiAuthority(item: GrantRequestItemDto) {
+    return !needsApplicationScope(item.toolName)
+        || Boolean(item.applicationScope);
 }
 
 function formatByteCount(value: number) {
@@ -30,6 +35,11 @@ type PermissionItemEdit = {
     maxUses?: number;
 };
 
+type PermissionDecisionView = {
+    source: 'owner' | 'ai_approval' | 'review_unavailable';
+    items: { itemId: string; approved: boolean; reasonCode?: string | null; reason?: string | null }[];
+};
+
 export function AssistantPermissionRequest({ request, canDecide, disabled = false, busy = false, waitingForTurn = false, onDecide }: {
     request: PermissionRequestDto;
     canDecide: boolean;
@@ -39,6 +49,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
     onDecide: (request: PermissionRequestDto, items: PermissionDecisionBody['items']) => Promise<boolean>;
 }) {
     const { t } = useTranslation();
+    const decision = (request as PermissionRequestDto & { decision?: PermissionDecisionView | null }).decision;
     const [permissionSelections, setPermissionSelections] = useState<Record<string, string[]>>({});
     const [permissionEdits, setPermissionEdits] = useState<
         Record<string, Record<string, PermissionItemEdit>>
@@ -101,9 +112,14 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                 <span className="text-xs text-muted-foreground">
                     rev {request.inputRevision}
                 </span>
-                <Badge variant={request.state === 'pending' ? 'default' : 'outline'}>
-                    {t(`pages.aiAssistant.permissionState.${request.state}`)}
-                </Badge>
+                <div className="flex items-center gap-2">
+                    {decision && <span className="text-xs text-muted-foreground">
+                        {t(`pages.aiAssistant.permissionDecisionSource.${decision.source}`)}
+                    </span>}
+                    <Badge variant={request.state === 'pending' ? 'default' : 'outline'}>
+                        {t(`pages.aiAssistant.permissionState.${request.state}`)}
+                    </Badge>
+                </div>
             </div>
             {request.items.some((item) => ['execute_ui_actions', 'send_background_input', 'send_raw_input'].includes(item.toolName))
                 && ['inspect_desktop_session', 'inspect_desktop_ui'].every((name) => request.items.some((item) => item.toolName === name)) && (
@@ -111,6 +127,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
             )}
             <div className="space-y-2">
                 {request.items.map((item) => {
+                    const decidedItem = decision?.items.find((entry) => entry.itemId === item.itemId);
                     const reason = item.itemId === `included-${item.toolName}`
                         && ['inspect_desktop_session', 'inspect_desktop_ui'].includes(item.toolName)
                         ? t('pages.aiAssistant.permissionIncludedDesktopReadReason') : item.reason;
@@ -119,7 +136,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                             || Boolean(entry.externalSendConfirmation))
                             && (entry.toolName !== 'exec_command' || validCommandReview(entry.commandConfirmation))
                             && (entry.toolName !== 'launch_application' || validLaunchReview(entry.launchConfirmation))
-                            && (!needsApplicationScope(entry.toolName) || Boolean(entry.applicationScope))
+                            && hasNativeUiAuthority(entry)
                             && !fileApprovalBlocked(entry))
                         .map((entry) => entry.itemId);
                     const selected = permissionSelections[request.requestId]
@@ -130,7 +147,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     const commandConfirmation = item.commandConfirmation;
                     const commandBlocked = item.toolName === 'exec_command' && !validCommandReview(commandConfirmation);
                     const launchBlocked = item.toolName === 'launch_application' && !validLaunchReview(item.launchConfirmation);
-                    const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || launchBlocked || (needsApplicationScope(item.toolName) && !item.applicationScope) || fileApprovalBlocked(item);
+                    const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || launchBlocked || !hasNativeUiAuthority(item) || fileApprovalBlocked(item);
                     const edit = permissionEdits[request.requestId]?.[item.itemId]
                         ?? {};
                     const resourceScope = edit.resourceScope
@@ -157,6 +174,14 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                             )}
                             <div>
                                 <p className="text-sm font-medium">{reason}</p>
+                                {decidedItem && <div className="mt-2 space-y-1 text-xs">
+                                    <p className={decidedItem.approved ? 'text-emerald-700 dark:text-emerald-300' : 'text-red-700 dark:text-red-300'}>
+                                        {t(`pages.aiAssistant.permissionItemDecision.${decidedItem.approved ? 'approved' : 'denied'}`)}
+                                    </p>
+                                    {decidedItem.reason && <p className="whitespace-pre-wrap break-words text-muted-foreground">
+                                        {t('pages.aiAssistant.permissionAiReason')}: {decidedItem.reason}
+                                    </p>}
+                                </div>}
                                 <p className="mt-1 break-all text-xs text-muted-foreground">
                                     {permissionToolLabel(t, item.toolName)} · {permissionEffectLabel(t, item.expectedEffect)}
                                 </p>
@@ -211,7 +236,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 )}
                                 {approvalBlocked && (
                                     <p className="mt-2 text-xs font-medium text-red-700 dark:text-red-300">
-                                        {t(needsApplicationScope(item.toolName) && !item.applicationScope ? 'pages.aiAssistant.applicationUiScopeMissing' : fileApprovalBlocked(item) ? 'pages.aiAssistant.fileConfirmMissing'
+                                        {t(needsApplicationScope(item.toolName) && !hasNativeUiAuthority(item) ? 'pages.aiAssistant.applicationUiScopeMissing' : fileApprovalBlocked(item) ? 'pages.aiAssistant.fileConfirmMissing'
                                             : launchBlocked ? 'pages.aiAssistant.launchSummaryMissing' : commandBlocked ? 'pages.aiAssistant.commandSummaryMissing' : 'pages.aiAssistant.externalSendSummaryMissing')}
                                     </p>
                                 )}
@@ -246,7 +271,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                 ))}
                                             </div>
                                         )}
-                                        {needsApplicationScope(item.toolName) && <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.batchGrantUses')}</p>}
+                                        {item.applicationScope && <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.batchGrantUses')}</p>}
                                         {item.operationScope.length > 0 && (
                                             <div className="space-y-1">
                                                 <p className="text-xs font-medium">
@@ -368,7 +393,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                             || Boolean(entry.externalSendConfirmation))
                                             && (entry.toolName !== 'exec_command' || validCommandReview(entry.commandConfirmation))
                             && (entry.toolName !== 'launch_application' || validLaunchReview(entry.launchConfirmation))
-                                            && (!needsApplicationScope(entry.toolName) || Boolean(entry.applicationScope))
+                                            && hasNativeUiAuthority(entry)
                                             && !fileApprovalBlocked(entry))
                                         .map((entry) => entry.itemId);
                                 if (!selected.includes(item.itemId)
@@ -376,7 +401,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                         && !item.externalSendConfirmation)
                                     || (item.toolName === 'exec_command' && !validCommandReview(item.commandConfirmation))
                                     || (item.toolName === 'launch_application' && !validLaunchReview(item.launchConfirmation))
-                                    || fileApprovalBlocked(item) || (needsApplicationScope(item.toolName) && !item.applicationScope)) {
+                                    || fileApprovalBlocked(item) || !hasNativeUiAuthority(item)) {
                                     return {
                                         itemId: item.itemId,
                                         decision: 'deny' as const,

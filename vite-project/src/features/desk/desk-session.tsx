@@ -1,7 +1,8 @@
 import { AiAssistantWorkspace } from "./ai-assistant-page"
 import { DeskAssistantPanel } from "./desk-assistant-panel"
-import { OSS_AI_ASSISTANT_FEATURES, hasAiAssistantBrowserEntry, type AiAssistantFeatureProfile } from "./ai-assistant-features"
+import { hasAiAssistantBrowserEntry, type AiAssistantFeatureProfile } from "./ai-assistant-features"
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
+import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { isAiAssistantEnabled } from "./ai-assistant-switch"
 import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import { useParams, useNavigate } from "react-router-dom"
@@ -155,10 +156,14 @@ type DeskSessionProps = {
 export default function DeskSession({
     orgId,
     showAssistant = import.meta.env.BASE_URL !== "/console/",
-    assistantFeatureProfile = OSS_AI_ASSISTANT_FEATURES,
+    assistantFeatureProfile: suppliedAssistantFeatureProfile,
     preferenceOwnerKey,
     preferenceOwnerLoading = false,
 }: DeskSessionProps = {}) {
+    const serverInfo = useQueryServerInfo({ query: { enabled: suppliedAssistantFeatureProfile === undefined } })
+    const assistantFeatureProfile = suppliedAssistantFeatureProfile === undefined
+        ? serverInfo.data?.data?.ai_assistant ?? null
+        : suppliedAssistantFeatureProfile
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const [assistantOpen, setAssistantOpen] = useState(false)

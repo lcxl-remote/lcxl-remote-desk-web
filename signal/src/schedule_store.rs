@@ -387,6 +387,9 @@ mod tests {
         db.execute(&schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity))
             .await
             .unwrap();
+        db.execute(&schema.create_table_from_entity(crate::entity::agent_goal_run::Entity))
+            .await
+            .unwrap();
         db.execute(&schema.create_table_from_entity(entity::Entity))
             .await
             .unwrap();

@@ -67,7 +67,7 @@ fn model_bound_resume_message(
         (
             "permission-resume",
             "permission-decision-resume",
-            "the owner has decided the pending permission request. Re-read CURRENT AUTHORIZED GRANTS, do not ask for the same permission again, and continue the existing user requirement now. If a matching grant is active, call that tool; if denied or narrowed, adapt or report the blocker. Preserve the original tool inputs exactly.",
+            "a decision was recorded for the pending permission request. Re-read CURRENT AUTHORIZED GRANTS, do not ask for the same permission again, and continue the existing user requirement now. If a matching grant is active, call that tool; if denied or narrowed, adapt or report the blocker. Preserve the original tool inputs exactly.",
         )
     };
     let text = format!(

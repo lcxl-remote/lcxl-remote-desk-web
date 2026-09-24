@@ -96,12 +96,18 @@ use clap::Parser as _;
 use desk_signal::{
     controller::{
         ai_assistant_session::{
-            cancel_ai_assistant_background_task, decide_ai_assistant_permission,
-            delete_ai_assistant_session, delete_assistant_image, get_ai_assistant_session,
-            get_assistant_image, list_ai_assistant_sessions, list_assistant_images,
-            revoke_ai_assistant_capability_grant,
+            cancel_ai_assistant_background_task, close_ai_assistant_approval_delegation,
+            control_ai_assistant_goal, decide_ai_assistant_goal_open,
+            decide_ai_assistant_permission, delete_ai_assistant_session, delete_assistant_image,
+            get_ai_assistant_session, get_assistant_image, list_ai_assistant_attention,
+            list_ai_assistant_sessions, list_assistant_images,
+            open_ai_assistant_approval_delegation, revoke_ai_assistant_capability_grant,
         },
         ai_usage::get_model_usage,
+        approval_model_provider::{
+            get_approval_model_provider, test_approval_model_provider,
+            update_approval_model_provider,
+        },
         connection::list_connections,
         device_code::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
@@ -264,6 +270,7 @@ pub fn configure_api_surface(
                 if opts.include_signaling {
                     cfg.service(create_token)
                         .service(get_ai_assistant_session)
+                        .service(desk_signal::controller::goal_budget_policy::get_my_goal_budget_policy)
                         .service(list_assistant_images)
                         .service(desk_signal::controller::ai_assistant_session::list_assistant_attachments)
                         .service(desk_signal::controller::ai_assistant_session::get_assistant_attachment)
@@ -276,9 +283,14 @@ pub fn configure_api_surface(
                         .service(desk_signal::controller::file_recovery::retry_file_recovery_cleanup)
                         .service(desk_signal::controller::file_recovery::export_device_file_recovery)
                         .service(decide_ai_assistant_permission)
+                        .service(open_ai_assistant_approval_delegation)
+                        .service(close_ai_assistant_approval_delegation)
+                        .service(control_ai_assistant_goal)
+                        .service(decide_ai_assistant_goal_open)
                         .service(revoke_ai_assistant_capability_grant)
                         .service(cancel_ai_assistant_background_task)
                         .service(list_ai_assistant_sessions)
+                        .service(list_ai_assistant_attention)
                         .service(delete_ai_assistant_session);
                 }
             })
@@ -373,13 +385,18 @@ pub fn configure_api_surface(
                             .service(get_model_usage)
                             .service(get_model_provider)
                             .service(update_model_provider)
-                            .service(test_model_provider),
+                            .service(test_model_provider)
+                            .service(get_approval_model_provider)
+                            .service(update_approval_model_provider)
+                            .service(test_approval_model_provider),
                     )
                     .service(desk_signal::controller::web_search::get_web_search)
                     .service(desk_signal::controller::context_management::get_context_management)
                     .service(desk_signal::controller::context_management::update_context_management)
                     .service(desk_signal::controller::schedule_budget_policy::get_schedule_budget_policy)
                     .service(desk_signal::controller::schedule_budget_policy::update_schedule_budget_policy)
+                    .service(desk_signal::controller::goal_budget_policy::get_goal_budget_policy)
+                    .service(desk_signal::controller::goal_budget_policy::update_goal_budget_policy)
                     .service(desk_signal::controller::web_search::update_web_search)
                     .service(desk_signal::controller::web_search::test_web_search)
                     // Usage-retention windows govern both rollup tables; the row

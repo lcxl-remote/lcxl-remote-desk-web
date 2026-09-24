@@ -18,6 +18,7 @@ use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope, ExecutionMode};
 use desk_diagnose_core::agent_loop::{
     LoopDeps, LoopOutcome, resume_agent_turn_after_permission, run_agent_turn,
+    run_preclaimed_goal_slice,
 };
 use desk_diagnose_core::ai_assistant::{
     ACTION_PREVIEW_CAPABILITY_ID, WEB_RESEARCH_FETCH_CAPABILITY_ID,
@@ -36,6 +37,7 @@ use desk_diagnose_core::context_attachment::ContextAttachmentKind;
 use desk_diagnose_core::conversation_key::{
     derive_conversation_key, is_valid_client_conversation_id,
 };
+use desk_diagnose_core::goal::GoalModelBinding;
 use desk_diagnose_core::model_capability::{
     ModelCapabilities, apply_model_compatibility, filter_model_compatible_tools,
 };
@@ -50,11 +52,12 @@ use desk_diagnose_core::stream::StreamingTurnSink;
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use sea_orm::DatabaseConnection;
-#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 use crate::model_dial::SignalModelSeam;
 pub(crate) mod fresh;
+mod goal;
+pub use goal::resume_queued_goal;
 mod scheduled;
 mod scheduled_dispatch;
 pub use fresh::resume_fresh_task;
@@ -271,6 +274,16 @@ fn context_selection_claim(
 fn transport_error(message: impl Into<String>) -> AgentError {
     AgentError {
         kind: AgentErrorKind::TransportError,
+        message: message.into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    }
+}
+
+fn model_rejected(message: impl Into<String>) -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::ModelRejected,
         message: message.into(),
         retryable: false,
         safe_for_model: true,
@@ -803,6 +816,26 @@ pub async fn resume_after_permission_decision(
     permission_request_id: String,
     ask: AiAssistantAsk,
 ) {
+    match crate::agent_goal_store::wake_for_permission_decision(
+        &db,
+        &conversation_id,
+        &actor_user_id.to_string(),
+        &target_device_id,
+        &permission_request_id,
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        Ok(desk_diagnose_core::goal::GoalPermissionWake::NoGoal) => {}
+        Ok(
+            desk_diagnose_core::goal::GoalPermissionWake::Queued
+            | desk_diagnose_core::goal::GoalPermissionWake::Held,
+        ) => return,
+        Err(error) => {
+            log::warn!("[ai-assistant-goal] permission decision routing deferred: {error}");
+            return;
+        }
+    }
     run_turn_inner(
         connections,
         db,
@@ -849,6 +882,7 @@ async fn run_turn_inner(
         ask,
         resume_conversation_id,
         None,
+        None,
     )
     .await;
 }
@@ -867,6 +901,7 @@ fn compose_turn(
     ask: AiAssistantAsk,
     resume_conversation_id: Option<PermissionResume>,
     scheduled: Option<scheduled::PreparedResume>,
+    goal_resume: Option<desk_diagnose_core::goal::GoalRun>,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Option<LoopOutcome>, AgentError>>>>
 {
     Box::pin(compose_turn_inner(
@@ -880,6 +915,7 @@ fn compose_turn(
         ask,
         resume_conversation_id,
         scheduled,
+        goal_resume,
     ))
 }
 
@@ -895,6 +931,7 @@ async fn compose_turn_inner(
     ask: AiAssistantAsk,
     resume_conversation_id: Option<PermissionResume>,
     mut scheduled: Option<scheduled::PreparedResume>,
+    goal_resume: Option<desk_diagnose_core::goal::GoalRun>,
 ) -> Result<Option<LoopOutcome>, AgentError> {
     let cancel_registration = cancellation::register(actor_user_id, &request_id);
     stream_event(
@@ -907,6 +944,15 @@ async fn compose_turn_inner(
     let config = match crate::model_provider::load(&db).await {
         Ok(config) => config,
         Err(e) => {
+            if goal_resume.is_some() {
+                return Err(AgentError {
+                    kind: AgentErrorKind::ModelUnavailable,
+                    message: format!("failed to load model provider config: {e}"),
+                    retryable: true,
+                    safe_for_model: true,
+                    error_code: None,
+                });
+            }
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
@@ -926,6 +972,9 @@ async fn compose_turn_inner(
             .with_context_db(db.clone())
             .with_cancellation(model_cancel.clone()),
         Err(error) => {
+            if goal_resume.is_some() {
+                return Err(model_rejected(error.message));
+            }
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
@@ -938,6 +987,11 @@ async fn compose_turn_inner(
     let destination = match config.destination_identity() {
         Ok(destination) => destination,
         Err(error) => {
+            if goal_resume.is_some() {
+                return Err(model_rejected(format!(
+                    "failed to resolve model destination: {error}"
+                )));
+            }
             stream_event(
                 connections.as_ref(),
                 &browser_connection_id,
@@ -965,6 +1019,11 @@ async fn compose_turn_inner(
             resume_conversation_id
                 .as_ref()
                 .map(|resume| resume.conversation_id.clone())
+        })
+        .or_else(|| {
+            goal_resume
+                .as_ref()
+                .map(|goal| goal.conversation_id.clone())
         })
         .unwrap_or_else(|| {
             derive_conversation_key(
@@ -997,13 +1056,14 @@ async fn compose_turn_inner(
         }
     };
     let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
-    let client_conversation_id = if resume_conversation_id.is_some() || scheduled.is_some() {
-        snapshot
-            .as_ref()
-            .and_then(|session| session.client_conversation_id.clone())
-    } else {
-        client_conversation_id
-    };
+    let client_conversation_id =
+        if resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some() {
+            snapshot
+                .as_ref()
+                .and_then(|session| session.client_conversation_id.clone())
+        } else {
+            client_conversation_id
+        };
     let rehearsal_conversation = client_conversation_id
         .as_deref()
         .filter(|id| id.starts_with("rehearsal_"))
@@ -1017,6 +1077,13 @@ async fn compose_turn_inner(
     let selection = async {
         let original = if let Some(resume) = scheduled.as_ref() {
             resume.original.clone()
+        } else if goal_resume.is_some() {
+            let session = snapshot
+                .as_ref()
+                .ok_or_else(|| transport_error("goal session is missing"))?;
+            event_store
+                .original_read_context(subject, session.input_revision)
+                .await?
         } else if let Some(resume) = resume_conversation_id.as_ref() {
             let session = snapshot
                 .as_ref()
@@ -1042,21 +1109,22 @@ async fn compose_turn_inner(
         } else {
             None
         };
-        let objects = if resume_conversation_id.is_some() || scheduled.is_some() {
-            original
-                .as_ref()
-                .map(|selection| selection.object_attachments.clone())
-                .unwrap_or_default()
-        } else {
-            event_store
-                .select_objects(
-                    subject,
-                    &ask.client_message_id,
-                    &ask.selected_attachment_ids,
-                    now_unix_ms,
-                )
-                .await?
-        };
+        let objects =
+            if resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some() {
+                original
+                    .as_ref()
+                    .map(|selection| selection.object_attachments.clone())
+                    .unwrap_or_default()
+            } else {
+                event_store
+                    .select_objects(
+                        subject,
+                        &ask.client_message_id,
+                        &ask.selected_attachment_ids,
+                        now_unix_ms,
+                    )
+                    .await?
+            };
         Ok::<_, AgentError>((objects, original))
     }
     .await;
@@ -1073,7 +1141,7 @@ async fn compose_turn_inner(
         }
     };
     let mut ask = ask;
-    if resume_conversation_id.is_some() || scheduled.is_some() {
+    if resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some() {
         ask.question = snapshot
             .as_ref()
             .and_then(|session| {
@@ -1399,6 +1467,15 @@ async fn compose_turn_inner(
     let turn_id = scheduled
         .as_ref()
         .map(|resume| resume.claimed.run.turn_id.clone())
+        .or_else(|| {
+            goal_resume.as_ref().map(|goal| {
+                format!(
+                    "goal:{}:slice:{}",
+                    goal.goal_id,
+                    goal.slice_seq.saturating_add(1)
+                )
+            })
+        })
         .unwrap_or_else(|| {
             resume_conversation_id.as_ref().map_or_else(
                 || uuid::Uuid::new_v4().to_string(),
@@ -1410,11 +1487,12 @@ async fn compose_turn_inner(
                 },
             )
         });
-    let export_source = if resume_conversation_id.is_some() || scheduled.is_some() {
-        crate::assistant_model::ModelExportSource::Turn(&turn_id)
-    } else {
-        crate::assistant_model::ModelExportSource::Input(&ask.client_message_id)
-    };
+    let export_source =
+        if resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some() {
+            crate::assistant_model::ModelExportSource::Turn(&turn_id)
+        } else {
+            crate::assistant_model::ModelExportSource::Input(&ask.client_message_id)
+        };
     let export_authorization_id = crate::assistant_model::model_export_id(
         &actor_id,
         &target_device_id,
@@ -1639,10 +1717,15 @@ async fn compose_turn_inner(
         .as_ref()
         .map(|snapshot| snapshot.permission_requests.as_slice())
         .unwrap_or_default();
+    let permission_decisions = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.permission_decisions.as_slice())
+        .unwrap_or_default();
     let capability_authorization =
         desk_diagnose_core::permission_tools::capability_authorization_prompt(
             &capability_grants,
             permission_requests,
+            permission_decisions,
             now_unix_ms,
             snapshot
                 .as_ref()
@@ -1663,6 +1746,8 @@ async fn compose_turn_inner(
     // authority. It is always callable so the model can keep the user-visible
     // task assessment current even when no device context was selected.
     registry.extend(desk_diagnose_core::task_status_tools::task_status_tool_registry());
+    registry.extend(desk_diagnose_core::goal_tools::registry());
+    registry.extend(desk_diagnose_core::goal_tools::open_registry());
     registry.extend(desk_diagnose_core::directory_tools::registry());
     registry.extend(desk_diagnose_core::schedule::proposal::registry());
     // Permission planning is also internal run control. It can only create a
@@ -1858,7 +1943,7 @@ async fn compose_turn_inner(
         max_command_runtime_ms,
     )
     .with_model_egress_policy(model.model_egress_policy().expect("validated model policy"));
-    if (resume_conversation_id.is_some() || scheduled.is_some())
+    if (resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some())
         && let Some(original) = original_read_context
     {
         let result = async {
@@ -1900,15 +1985,61 @@ async fn compose_turn_inner(
             desk_diagnose_core::schedule::task_prompt::FRESH_TASK_INSTRUCTIONS,
         );
     }
-    if permission_decision_resume {
+    let goal_approval_request_id = goal_resume
+        .as_ref()
+        .and_then(|goal| goal.checkpoint.as_ref())
+        .and_then(|checkpoint| {
+            checkpoint.evidence_ids.iter().find(|reference| {
+                checkpoint.summary.strip_prefix("Waiting for ") == Some(reference.as_str())
+                    && snapshot.as_ref().is_some_and(|session| {
+                        session
+                            .permission_decisions
+                            .iter()
+                            .any(|decision| decision.request_id == reference.as_str())
+                    })
+            })
+        })
+        .map(String::as_str);
+    if permission_decision_resume || goal_approval_request_id.is_some() {
         desk_diagnose_core::runtime_context::append_instruction(
             &mut system_prompt,
-            "\n\nPERMISSION DECISION RESUME (server authoritative): the owner has just decided the pending permission request. Re-read CURRENT AUTHORIZED GRANTS above. Do not request or ask for the same permission again. If a matching active grant exists, continue the existing user requirement now and call the authorized tool. If the item was denied or narrowed so the call no longer matches, adapt the plan or explain the remaining blocker. This trigger adds no new user requirement and does not change the original tool inputs.",
+            "\n\nPERMISSION DECISION RESUME (server authoritative): a decision was recorded for the pending permission request. Re-read CURRENT AUTHORIZED GRANTS above. Do not request or ask for the same permission again. If a matching active grant exists, continue the existing user requirement now and call the authorized tool. If the item was denied or narrowed so the call no longer matches, adapt the plan or explain the remaining blocker. This trigger adds no new user requirement and does not change the original tool inputs.",
         );
     }
-    if let Some(expires_at_unix_ms) =
-        capability_authorization.approved_exact_input_expires_at_unix_ms
-    {
+    let mut projection_expiry = capability_authorization.approved_exact_input_expires_at_unix_ms;
+    let decision_request_id = resume_conversation_id
+        .as_ref()
+        .map(|resume| resume.permission_request_id.as_str())
+        .or_else(|| scheduled.as_ref()?.permission_request_id.as_deref())
+        .or(goal_approval_request_id);
+    if let Some(decision_request_id) = decision_request_id {
+        let decision = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+            .permission_decision_event(
+                crate::agent_session_store::PermissionDecisionSubject {
+                    conversation_id: &conversation_id,
+                    actor_id: &actor_id,
+                    device_id: &target_device_id,
+                },
+                decision_request_id,
+            )
+            .await?
+            .ok_or_else(|| transport_error("permission decision receipt is unavailable"))?;
+        if let Some(notice) =
+            desk_diagnose_core::approval_review::ai_review_denial_notice(&decision)
+                .map_err(|_| transport_error("AI approval denial receipt is invalid"))?
+        {
+            desk_diagnose_core::runtime_context::append_instruction(
+                &mut system_prompt,
+                &notice.text,
+            );
+            projection_expiry = Some(
+                projection_expiry.map_or(notice.expires_at_unix_ms, |expiry| {
+                    expiry.min(notice.expires_at_unix_ms)
+                }),
+            );
+        }
+    }
+    if let Some(expires_at_unix_ms) = projection_expiry {
         system_prompt = match bind_exact_authorization_system_message(
             system_prompt,
             destination.clone(),
@@ -1961,6 +2092,52 @@ async fn compose_turn_inner(
         clock: &clock,
         heartbeat: Some(heartbeat.as_ref()),
     };
+    if let Some(goal) = goal_resume {
+        let bound = GoalModelBinding::from_destination(&destination)
+            .map_err(|_| model_rejected("goal model binding is unavailable"))?;
+        if bound != goal.model_binding
+            || goal.conversation_id != conversation_id
+            || goal.owner_id != actor_id
+            || goal.device_id != target_device_id
+            || snapshot
+                .as_ref()
+                .is_none_or(|session| session.input_revision != goal.input_revision)
+        {
+            return Err(model_rejected(
+                "goal continuation is stale or its model changed",
+            ));
+        }
+        let claim = ClaimTurnParams {
+            conversation_id,
+            actor_id,
+            device_id: target_device_id,
+            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+            current_pdp_scope: scope,
+            turn_id: turn_id.clone(),
+            request_id: None,
+            connection_id: None,
+            trigger_origin: TriggerOrigin::GoalContinuation,
+            now: clock(),
+        };
+        let claimed = crate::agent_goal_store::claim_slice(
+            &db,
+            &claim,
+            &goal.goal_id,
+            Some(goal.state_version),
+            &turn_id,
+        )
+        .await
+        .map_err(|error| transport_error(format!("claim AI Assistant goal: {error}")))?;
+        let Some(claimed) = claimed else {
+            return Ok(Some(LoopOutcome::TurnBusy));
+        };
+        let mut sink = StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
+        sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
+        sink.turn_started(&turn_id);
+        let outcome = run_preclaimed_goal_slice(&deps, claimed.session, &mut sink).await?;
+        sink.finish_outcome(&outcome);
+        return Ok(Some(outcome));
+    }
     if let Some(resume) = scheduled {
         let mut sink = StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
         sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
@@ -2066,22 +2243,43 @@ async fn compose_turn_inner(
             return Ok(None);
         }
     };
-    let ack = match crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone())
-        .append_user_followup(crate::agent_run_event_store::AppendUserFollowupParams {
-            event_id: ask.client_message_id,
-            run_id: conversation_id.clone(),
-            client_conversation_id: client_conversation_id.clone(),
-            actor_id: actor_id.clone(),
-            device_id: target_device_id.clone(),
-            surface: AgentSessionSurface::AiAssistant,
-            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
-            current_scope: scope.clone(),
-            read_context: Some(read_context.clone()),
-            message: user.clone(),
-            created_at: accepted_at.clone(),
+    if !ask.start_goal && ask.previous_completed_goal_id.is_some() {
+        return Err(transport_error(
+            "previous completed goal requires start_goal",
+        ));
+    }
+    let goal_start = if ask.start_goal {
+        let model_binding = GoalModelBinding::from_destination(&destination)
+            .map_err(|_| transport_error("goal model binding is unavailable"))?;
+        let identity = format!("{}:{}", conversation_id, ask.client_message_id);
+        Some(crate::agent_run_event_store::StartUserGoal {
+            goal_id: format!("goal-{:x}", Sha256::digest(identity.as_bytes())),
+            previous_completed_goal_id: ask.previous_completed_goal_id.clone(),
+            model_binding,
         })
-        .await
-    {
+    } else {
+        None
+    };
+    let goal_id = goal_start.as_ref().map(|goal| goal.goal_id.clone());
+    let input = crate::agent_run_event_store::AppendUserFollowupParams {
+        event_id: ask.client_message_id,
+        run_id: conversation_id.clone(),
+        client_conversation_id: client_conversation_id.clone(),
+        actor_id: actor_id.clone(),
+        device_id: target_device_id.clone(),
+        surface: AgentSessionSurface::AiAssistant,
+        policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+        current_scope: scope.clone(),
+        read_context: Some(read_context.clone()),
+        message: user.clone(),
+        created_at: accepted_at.clone(),
+    };
+    let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
+    let append_result = match goal_start {
+        Some(goal) => event_store.append_user_goal(input, goal).await,
+        None => event_store.append_user_followup(input).await,
+    };
+    let ack = match append_result {
         Ok(ack) => ack,
         Err(error) => {
             stream_event(
@@ -2162,7 +2360,11 @@ async fn compose_turn_inner(
         turn_id: turn_id.clone(),
         request_id: Some(request_id.clone()),
         connection_id: Some(browser_connection_id.clone()),
-        trigger_origin: TriggerOrigin::User,
+        trigger_origin: if ask.start_goal {
+            TriggerOrigin::GoalContinuation
+        } else {
+            TriggerOrigin::User
+        },
         now: accepted_at,
     };
 
@@ -2186,6 +2388,33 @@ async fn compose_turn_inner(
         Some(chrono::Utc::now().to_rfc3339()),
     ));
     sink.turn_started(&turn_id);
+    if ask.start_goal {
+        let claimed = crate::agent_goal_store::claim_slice(
+            &db,
+            &claim,
+            goal_id
+                .as_deref()
+                .ok_or_else(|| transport_error("goal id is unavailable"))?,
+            None,
+            &turn_id,
+        )
+        .await
+        .map_err(|error| transport_error(format!("claim AI Assistant goal: {error}")))?;
+        match claimed {
+            Some(claimed) => {
+                match run_preclaimed_goal_slice(&deps, claimed.session, &mut sink).await {
+                    Ok(outcome) => sink.finish_outcome(&outcome),
+                    Err(error) => sink.error(error),
+                }
+            }
+            None => sink.on_answer_committed(
+                "The goal was queued and will resume when the session is available.",
+            ),
+        }
+        drop(sink);
+        let _ = forwarder.await;
+        return Ok(None);
+    }
     loop {
         match run_agent_turn(&deps, claim.clone(), user.clone(), &mut sink).await {
             Ok(LoopOutcome::TurnBusy) => {

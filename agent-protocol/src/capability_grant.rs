@@ -48,6 +48,46 @@ pub enum CapabilityGrantIssuer {
     PolicyAuto,
     UserDecision,
     TaskAuthorization(TaskGrantProvenance),
+    AiApproval(AiApprovalGrantProvenance),
+}
+
+/// Immutable review binding. The current delegation and decision must still
+/// be loaded under the dispatch transaction before this grant can be used.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct AiApprovalGrantProvenance {
+    pub delegation_id: String,
+    pub delegation_revision: u64,
+    pub model_config_revision: u64,
+    pub candidate_id: String,
+    pub decision_event_id: String,
+    pub goal_id: Option<String>,
+    pub goal_revision: Option<u64>,
+}
+
+impl AiApprovalGrantProvenance {
+    pub fn validate(&self) -> Result<(), CapabilityGrantError> {
+        for (field, value) in [
+            ("delegation_id", self.delegation_id.as_str()),
+            ("candidate_id", self.candidate_id.as_str()),
+            ("decision_event_id", self.decision_event_id.as_str()),
+        ] {
+            validate_id(field, value)?;
+        }
+        if self.delegation_revision == 0
+            || self.model_config_revision == 0
+            || self.goal_id.is_some() != self.goal_revision.is_some()
+            || self.goal_revision == Some(0)
+        {
+            return Err(CapabilityGrantError::InvalidLimitOrRevision);
+        }
+        if let Some(goal_id) = &self.goal_id {
+            validate_id("goal_id", goal_id)?;
+        }
+        Ok(())
+    }
 }
 
 /// Immutable parent binding. Current authority must still be loaded and checked at dispatch.
@@ -156,8 +196,10 @@ impl CapabilityGrant {
                 self.schema_version,
             ));
         }
-        if let CapabilityGrantIssuer::TaskAuthorization(parent) = &self.issued_by {
-            parent.validate()?;
+        match &self.issued_by {
+            CapabilityGrantIssuer::TaskAuthorization(parent) => parent.validate()?,
+            CapabilityGrantIssuer::AiApproval(parent) => parent.validate()?,
+            CapabilityGrantIssuer::PolicyAuto | CapabilityGrantIssuer::UserDecision => {}
         }
         for (field, value) in [
             ("grant_id", self.grant_id.as_str()),
@@ -364,6 +406,29 @@ mod task_tests {
         assert!(serde_json::from_value::<TaskGrantProvenance>(value).is_err());
     }
 
+    fn ai_parent() -> AiApprovalGrantProvenance {
+        AiApprovalGrantProvenance {
+            delegation_id: "delegation-1".into(),
+            delegation_revision: 2,
+            model_config_revision: 3,
+            candidate_id: "candidate-1".into(),
+            decision_event_id: "decision-1".into(),
+            goal_id: Some("goal-1".into()),
+            goal_revision: Some(4),
+        }
+    }
+
+    #[test]
+    fn ai_parent_requires_matching_goal_revision() {
+        let mut parent = ai_parent();
+        parent.validate().unwrap();
+        parent.goal_revision = None;
+        assert!(parent.validate().is_err());
+        parent = ai_parent();
+        parent.model_config_revision = 0;
+        assert!(parent.validate().is_err());
+    }
+
     #[test]
     fn grant_issuers_round_trip_with_distinct_authority_sources() {
         let cfg = wincode::config::Configuration::default();
@@ -371,6 +436,7 @@ mod task_tests {
             CapabilityGrantIssuer::PolicyAuto,
             CapabilityGrantIssuer::UserDecision,
             CapabilityGrantIssuer::TaskAuthorization(parent()),
+            CapabilityGrantIssuer::AiApproval(ai_parent()),
         ] {
             let bytes = wincode::config::serialize(&issuer, cfg).unwrap();
             let decoded: CapabilityGrantIssuer = wincode::config::deserialize(&bytes, cfg).unwrap();

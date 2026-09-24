@@ -355,8 +355,11 @@ impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
 pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
     let err = match outcome {
         LoopOutcome::Answered(_)
+        | LoopOutcome::GoalControlled { .. }
         | LoopOutcome::Superseded { .. }
-        | LoopOutcome::PermissionRequested { .. } => return None,
+        | LoopOutcome::PermissionRequested { .. }
+        | LoopOutcome::GoalOpenRequested { .. }
+        | LoopOutcome::GoalBudgetReached => return None,
         LoopOutcome::ContentRejected(_) => crate::content_safety::content_blocked_error(),
         LoopOutcome::ContentSafetyUnavailable(error) => error.clone(),
         LoopOutcome::Truncated => AgentError {

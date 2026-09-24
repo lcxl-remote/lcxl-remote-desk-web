@@ -15,6 +15,21 @@ const request = (items = [item()]): PermissionRequestDto => ({
 });
 const submit = () => screen.getByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' });
 describe('shared permission review', () => {
+    it('shows the independent reviewer source and a concrete item denial', () => {
+        const value = {
+            ...request(), state: 'denied',
+            decision: {
+                source: 'ai_approval', decidedAt: '2026-09-23T00:00:00Z',
+                items: [{ itemId: 'read', approved: false, reasonCode: 'scope_too_broad',
+                    reason: 'The request includes unrelated files.' }],
+            },
+        } as PermissionRequestDto;
+        render(<AssistantPermissionRequest request={value} canDecide={false} onDecide={vi.fn()} />);
+        fireEvent.click(screen.getByRole('button', { name: /inspect_desktop_session/ }));
+        expect(screen.getByText('pages.aiAssistant.permissionDecisionSource.ai_approval')).toBeInTheDocument();
+        expect(screen.getByText('pages.aiAssistant.permissionItemDecision.denied')).toBeInTheDocument();
+        expect(screen.getByText(/The request includes unrelated files/)).toBeInTheDocument();
+    });
     it.each([
         ['execute_ui_actions', 'ui:scroll'],
         ['send_background_input', 'background_input:scroll'],

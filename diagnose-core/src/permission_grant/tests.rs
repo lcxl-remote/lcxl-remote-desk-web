@@ -71,6 +71,104 @@ fn decision_fixture() -> (
 }
 
 #[test]
+fn ai_permission_grant_is_bound_to_review_expiry_without_switch_deadline() {
+    let (mut session, request, decisions) = decision_fixture();
+    session.surface = AgentSessionSurface::AiAssistant;
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    let capability = registry
+        .capability_for_tool(&request.items[0].tool_name)
+        .unwrap();
+    let inventory = vec![CapabilityAvailability {
+        provider_id: request.items[0].provider_id.clone(),
+        capability_id: capability.wire.capability_id.clone(),
+        tool_name: request.items[0].tool_name.clone(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let context = PermissionGrantIssuanceContext {
+        surface: ProductSurface::OssPersonalOwner,
+        registry: &registry,
+        inventory: &inventory,
+        readiness_revision: 1,
+        now_unix_ms: 2_000,
+        implicit_fresh_object_refs: &[],
+    };
+    let mut grants =
+        build_permission_grants(&session, &request, &decisions, &context, None).unwrap();
+    let original_expiry = grants[0].expires_at_unix_ms;
+    let delegation = crate::approval_delegation::ApprovalDelegation::new(
+        "delegation-1".into(),
+        session.conversation_id.clone(),
+        session.actor_id.clone(),
+        session.device_id.clone(),
+        "owner-open".into(),
+        1_000,
+    )
+    .unwrap();
+    let event = crate::dynamic_run::PermissionDecidedEvent {
+        event: crate::dynamic_run::AgentRunEvent {
+            schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
+            event_id: "decision-1".into(),
+            run_id: session.conversation_id.clone(),
+            event_seq: 1,
+            input_revision: request.input_revision,
+            kind: crate::dynamic_run::AgentRunEventKind::PermissionDecided,
+            correlation_id: Some(request.request_id.clone()),
+            source_envelope_ids: vec![],
+            result_envelope_ids: vec![],
+            created_at: "2026-09-23T00:00:01Z".into(),
+        },
+        request_id: request.request_id.clone(),
+        request_input_revision: request.input_revision,
+        resulting_state: PermissionRequestState::Approved,
+        items: decisions,
+        decision_source: crate::dynamic_run::PermissionDecisionSource::AiApproval {
+            delegation_id: delegation.delegation_id.clone(),
+            delegation_revision: delegation.revision,
+            reviews: vec![crate::dynamic_run::AiPermissionDecisionEvidence {
+                item_id: request.items[0].item_id.clone(),
+                candidate_id: "candidate-1".into(),
+                candidate_expires_at_unix_ms: 6_000,
+                reason_code: "within_scope".into(),
+                reason: "Only current device is read".into(),
+            }],
+        },
+    };
+    bind_ai_permission_grants(
+        &session,
+        &request,
+        &event,
+        &delegation,
+        1,
+        None,
+        2_000,
+        &mut grants,
+    )
+    .unwrap();
+    assert_eq!(grants[0].expires_at_unix_ms, original_expiry.min(6_000));
+    assert!(matches!(
+        grants[0].issued_by,
+        CapabilityGrantIssuer::AiApproval(_)
+    ));
+    assert!(
+        bind_ai_permission_grants(
+            &session,
+            &request,
+            &event,
+            &delegation,
+            2,
+            None,
+            2_000,
+            &mut grants,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn desktop_action_bundle_issues_only_owner_selected_bounded_reads_on_both_surfaces() {
     let (mut session, _, _) = decision_fixture();
     session.scope_snapshot.mode = ExecutionMode::ConfirmEachAction;
@@ -710,6 +808,7 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
         let prompt = crate::permission_tools::capability_authorization_prompt(
             &[old_grant.clone()],
             &[approved.clone()],
+            &[],
             now,
             session.input_revision,
             7,
@@ -947,6 +1046,7 @@ fn background_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
         let prompt = crate::permission_tools::capability_authorization_prompt(
             &[old_grant.clone()],
             &[approved.clone()],
+            &[],
             now,
             session.input_revision,
             7,

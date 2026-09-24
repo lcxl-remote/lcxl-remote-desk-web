@@ -2,6 +2,31 @@ _version: 2
 app_title:
   en: LCXL Remote Desktop
   zh-CN: LCXL 远程桌面
+ai_attention:
+  title:
+    en: AI Assistant
+    zh-CN: AI 助手
+  goal_open:
+    en: AI requested a goal approval
+    zh-CN: AI 申请开启目标，需要审批
+  permission:
+    en: AI requested a permission approval
+    zh-CN: AI 申请权限，需要审批
+  needs_input:
+    en: An AI goal needs your input
+    zh-CN: AI 目标需要补充信息
+  budget:
+    en: An AI goal needs more budget
+    zh-CN: AI 目标需要追加预算
+  stalled:
+    en: An AI goal is stalled
+    zh-CN: AI 目标已停滞
+  blocked:
+    en: An AI goal is blocked
+    zh-CN: AI 目标遇到阻碍
+  deadline:
+    en: An AI goal is nearing its deadline
+    zh-CN: AI 目标即将到期
 tray_active_sessions:
   en: "LCXL Remote Desktop — %{count} remote session(s) active"
   zh-CN: "LCXL 远程桌面 — %{count} 个远程会话正在进行"

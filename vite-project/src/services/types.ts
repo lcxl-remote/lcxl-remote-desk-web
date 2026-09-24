@@ -36,9 +36,12 @@ export const agentErrorKindEnum = {
     timeout: "timeout",
     cancelled: "cancelled",
     output_limit_exceeded: "output_limit_exceeded",
+    attachment_capacity: "attachment_capacity",
     invalid_input: "invalid_input",
     redaction_failed: "redaction_failed",
     transport_error: "transport_error",
+    model_unavailable: "model_unavailable",
+    model_rejected: "model_rejected",
     content_blocked: "content_blocked",
     content_safety_unavailable: "content_safety_unavailable",
     internal: "internal"
@@ -73,10 +76,93 @@ export type AgentError = {
     safe_for_model: boolean;
 };
 
+export const aiAssistantAttentionReasonEnum = {
+    goal_open_approval: "goal_open_approval",
+    permission_approval: "permission_approval",
+    goal_needs_input: "goal_needs_input",
+    goal_budget: "goal_budget",
+    goal_stalled: "goal_stalled",
+    goal_blocked: "goal_blocked",
+    goal_deadline_soon: "goal_deadline_soon"
+} as const;
+
+export type AiAssistantAttentionReasonEnumKey = (typeof aiAssistantAttentionReasonEnum)[keyof typeof aiAssistantAttentionReasonEnum];
+
+/**
+ * @description Durable owner action needed outside the currently open conversation. The\nidentifier changes with the authoritative state version, so clients can\ndeduplicate reminders without persisting a second copy of session content.
+*/
+export type AiAssistantAttentionReason = AiAssistantAttentionReasonEnumKey;
+
+export type AiAssistantAttentionItemDto = {
+    /**
+     * @type string
+    */
+    attentionId: string;
+    /**
+     * @type string,null
+    */
+    clientConversationId?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    deadlineUnixMs?: number | null;
+    /**
+     * @type string
+    */
+    deviceId: string;
+    /**
+     * @type string,null
+    */
+    goalId?: string | null;
+    /**
+     * @description Durable owner action needed outside the currently open conversation. The\nidentifier changes with the authoritative state version, so clients can\ndeduplicate reminders without persisting a second copy of session content.
+     * @type string
+    */
+    reason: AiAssistantAttentionReason;
+    /**
+     * @type string,null
+    */
+    requestId?: string | null;
+    /**
+     * @type string
+    */
+    sessionId: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    stateVersion: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    updatedAtUnixMs: number;
+};
+
+export type AiAssistantAttentionListDto = {
+    /**
+     * @type boolean
+    */
+    hasMore: boolean;
+    /**
+     * @type array
+    */
+    items: AiAssistantAttentionItemDto[];
+    /**
+     * @type boolean
+    */
+    offPageReminderAvailable: boolean;
+};
+
 /**
  * @description AI Assistant product features implemented by one server target.\n\nAuthentication, ownership, target readiness and grants remain request-time\nchecks. Clients gate every optional control independently and treat an absent\nprofile as unsupported.
 */
 export type AiAssistantClientCapabilities = {
+    /**
+     * @type boolean
+    */
+    approval_delegation: boolean;
     /**
      * @type boolean
     */
@@ -115,6 +201,268 @@ export type AiAssistantClientCapabilities = {
      * @type boolean
     */
     turn_stream: boolean;
+};
+
+export const aiAssistantGoalOwnerActionEnum = {
+    pause: "pause",
+    resume: "resume",
+    retry_stalled: "retry_stalled",
+    cancel: "cancel"
+} as const;
+
+export type AiAssistantGoalOwnerActionEnumKey = (typeof aiAssistantGoalOwnerActionEnum)[keyof typeof aiAssistantGoalOwnerActionEnum];
+
+export type AiAssistantGoalOwnerAction = AiAssistantGoalOwnerActionEnumKey;
+
+export type AiAssistantGoalControlBody = {
+    /**
+     * @type string
+    */
+    action: AiAssistantGoalOwnerAction;
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedStateVersion: number;
+    /**
+     * @type string
+    */
+    goalId: string;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+};
+
+export type AiAssistantGoalLimitsDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    activeTimeMs: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    modelCalls: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    modelTokens: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    slices: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    stalledSlices: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    toolCalls: number;
+};
+
+export type AiAssistantGoalDto = {
+    /**
+     * @type string,null
+    */
+    checkpointSummary?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    createdAtUnixMs: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    deadlineUnixMs: number;
+    /**
+     * @type string
+    */
+    deviceId: string;
+    /**
+     * @type string
+    */
+    goalId: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    goalRevision: number;
+    /**
+     * @type string
+    */
+    goalText: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    limitModelTokens: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    limitSlices: number;
+    /**
+     * @type object
+    */
+    limits: AiAssistantGoalLimitsDto;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    nextAttemptUnixMs?: number | null;
+    /**
+     * @type string,null
+    */
+    pauseReason?: string | null;
+    /**
+     * @type string,null
+    */
+    previousCompletedGoalId?: string | null;
+    /**
+     * @type string,null
+    */
+    previousCompletionSummary?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    sliceSeq: number;
+    /**
+     * @type string
+    */
+    state: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    stateVersion: number;
+    /**
+     * @type string,null
+    */
+    statusReason?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    updatedAtUnixMs: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    usedActiveTimeMs: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    usedModelCalls: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    usedModelTokens: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    usedSlices: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    usedToolCalls: number;
+};
+
+export type AiAssistantGoalOpenDecisionBody = {
+    /**
+     * @type boolean
+    */
+    approve: boolean;
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+};
+
+export type AiAssistantGoalOpenDecisionDto = {
+    goal?: (null | AiAssistantGoalDto);
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @type string
+    */
+    state: string;
+};
+
+export type AiAssistantGoalOpenRequestDto = {
+    /**
+     * @type string
+    */
+    deviceId: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expiresAtUnixMs: number;
+    /**
+     * @type string
+    */
+    goalText: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    inputRevision: number;
+    /**
+     * @type object
+    */
+    limits: AiAssistantGoalLimitsDto;
+    /**
+     * @type string,null
+    */
+    previousCompletedGoalId?: string | null;
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @type string,null
+    */
+    targetGoalId?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    targetGoalRevision?: number | null;
 };
 
 export type AiAssistantSessionSummaryDto = {
@@ -156,6 +504,48 @@ export type AiAssistantSessionListDto = {
      * @type array
     */
     sessions: AiAssistantSessionSummaryDto[];
+};
+
+export type ApprovalDelegationDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    costUsedMicros: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    createdAtUnixMs: number;
+    /**
+     * @type string
+    */
+    delegationId: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    reviewsUsed: number;
+    /**
+     * @type string
+    */
+    status: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    tokensUsed: number;
+};
+
+export type ApprovalModelReadinessDto = {
+    /**
+     * @type boolean
+    */
+    available: boolean;
+    /**
+     * @type string,null
+    */
+    reason?: string | null;
 };
 
 export const capabilityEffectEnum = {
@@ -686,6 +1076,50 @@ export type SnapshotMessageDto = {
     turnId?: string | null;
 };
 
+export type PermissionItemDecisionSummaryDto = {
+    /**
+     * @type boolean
+    */
+    approved: boolean;
+    /**
+     * @type string
+    */
+    itemId: string;
+    /**
+     * @type string,null
+    */
+    reason?: string | null;
+    /**
+     * @type string,null
+    */
+    reasonCode?: string | null;
+};
+
+export const permissionDecisionSourceDtoEnum = {
+    owner: "owner",
+    ai_approval: "ai_approval",
+    review_unavailable: "review_unavailable"
+} as const;
+
+export type PermissionDecisionSourceDtoEnumKey = (typeof permissionDecisionSourceDtoEnum)[keyof typeof permissionDecisionSourceDtoEnum];
+
+export type PermissionDecisionSourceDto = PermissionDecisionSourceDtoEnumKey;
+
+export type PermissionDecisionSummaryDto = {
+    /**
+     * @type string
+    */
+    decidedAt: string;
+    /**
+     * @type array
+    */
+    items: PermissionItemDecisionSummaryDto[];
+    /**
+     * @type string
+    */
+    source: PermissionDecisionSourceDto;
+};
+
 export const applicationActionKindEnum = {
     invoke: "invoke",
     select: "select",
@@ -1190,6 +1624,7 @@ export type PermissionRequestDto = {
      * @type string
     */
     createdAt: string;
+    decision?: (null | PermissionDecisionSummaryDto);
     /**
      * @minLength 0
      * @type integer, int64
@@ -1500,6 +1935,11 @@ export type AiAssistantSessionSnapshotDto = {
      * @type string,null
     */
     activeExecutionGeneration?: string | null;
+    approvalDelegation?: (null | ApprovalDelegationDto);
+    /**
+     * @type object
+    */
+    approvalModelReadiness: ApprovalModelReadinessDto;
     /**
      * @description Durable Provider executions that outlived their foreground wait.
      * @type array
@@ -1535,6 +1975,7 @@ export type AiAssistantSessionSnapshotDto = {
      * @type object
     */
     fileScope: FileScopeDto;
+    goal?: (null | AiAssistantGoalDto);
     /**
      * @minLength 0
      * @type integer, int64
@@ -1561,6 +2002,7 @@ export type AiAssistantSessionSnapshotDto = {
      * @type array
     */
     messages: SnapshotMessageDto[];
+    pendingGoalOpenRequest?: (null | AiAssistantGoalOpenRequestDto);
     /**
      * @description Model-proposed, server-normalized requests. Pending is approvable;\nNeedsRevalidation is display-only until the model replaces/reissues it.
      * @type array
@@ -1734,6 +2176,281 @@ export type ApprovalAckParams = {
      * @type string
     */
     req_id: string;
+};
+
+export type ApprovalDelegationCloseBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @type string
+    */
+    delegationId: string;
+    /**
+     * @type string
+    */
+    ownerDecisionId: string;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+};
+
+export type ApprovalDelegationOpenBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedInputRevision: number;
+    /**
+     * @description Client-generated operation identity recorded with the owner\'s decision.
+     * @type string
+    */
+    ownerAuthorizationId: string;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+};
+
+export type ApprovalModelProbeDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    latency_ms: number;
+    /**
+     * @type boolean
+    */
+    reasoning_observed: boolean;
+    /**
+     * @type integer,null, int64
+    */
+    reasoning_tokens?: number | null;
+    /**
+     * @type boolean
+    */
+    saved_as_current: boolean;
+    /**
+     * @type array
+    */
+    validated_capabilities: string[];
+};
+
+export type ApprovalModelProbeParams = {
+    /**
+     * @type string,null
+    */
+    api_key?: string | null;
+    /**
+     * @type string
+    */
+    base_url: string;
+    /**
+     * @type integer, int64
+    */
+    max_context_bytes: number;
+    /**
+     * @type string
+    */
+    model: string;
+    /**
+     * @type string
+    */
+    output_limit_field: string;
+    /**
+     * @type integer, int64
+    */
+    probe_max_output_tokens: number;
+    /**
+     * @type object
+    */
+    request_options: object;
+    /**
+     * @type integer, int64
+    */
+    runtime_max_output_tokens: number;
+    /**
+     * @type string
+    */
+    wire_protocol: string;
+};
+
+export type ModelProbeObservation = {
+    /**
+     * @type integer, int64
+    */
+    connection_revision: number;
+    /**
+     * @description Whether the observation still describes the currently saved connection\nand profile revisions. Stale observations remain visible as history but\nmust never be presented as current validation.
+     * @type boolean
+    */
+    current: boolean;
+    /**
+     * @type integer, int64
+    */
+    profile_revision: number;
+    /**
+     * @type boolean
+    */
+    reasoning_observed: boolean;
+    /**
+     * @type integer,null, int64
+    */
+    reasoning_tokens?: number | null;
+    /**
+     * @type string,null
+    */
+    stop_reason?: string | null;
+    /**
+     * @type string, date-time
+    */
+    tested_at: string;
+    /**
+     * @type object
+    */
+    validated_capabilities: object;
+};
+
+export type ApprovalModelPublic = {
+    /**
+     * @type boolean
+    */
+    api_key_set: boolean;
+    /**
+     * @type boolean
+    */
+    available: boolean;
+    /**
+     * @type string,null
+    */
+    base_url?: string | null;
+    /**
+     * @type integer, int64
+    */
+    configuration_revision: number;
+    /**
+     * @type integer, int64
+    */
+    connection_revision: number;
+    /**
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @type integer,null, int64
+    */
+    max_context_bytes?: number | null;
+    /**
+     * @type string,null
+    */
+    model?: string | null;
+    /**
+     * @type string
+    */
+    output_limit_field: string;
+    /**
+     * @type object,null
+    */
+    prices?: object | null;
+    /**
+     * @type integer, int64
+    */
+    probe_max_output_tokens: number;
+    probe_observation?: (null | ModelProbeObservation);
+    /**
+     * @type integer, int64
+    */
+    profile_revision: number;
+    /**
+     * @type object
+    */
+    request_options: object;
+    /**
+     * @type integer, int64
+    */
+    runtime_max_output_tokens: number;
+    /**
+     * @type string,null
+    */
+    unavailable_reason?: string | null;
+    /**
+     * @type string,null
+    */
+    wire_protocol?: string | null;
+};
+
+export type ApprovalModelUpdate = {
+    /**
+     * @description Write-only: absent means keep, empty means clear.
+     * @type string,null
+    */
+    api_key?: string | null;
+    /**
+     * @type string,null
+    */
+    base_url?: string | null;
+    /**
+     * @type boolean,null
+    */
+    enabled?: boolean | null;
+    /**
+     * @type integer, int64
+    */
+    expected_configuration_revision: number;
+    /**
+     * @type integer, int64
+    */
+    expected_connection_revision: number;
+    /**
+     * @type integer, int64
+    */
+    expected_profile_revision: number;
+    /**
+     * @type integer,null, int64
+    */
+    max_context_bytes?: number | null;
+    /**
+     * @type string,null
+    */
+    model?: string | null;
+    /**
+     * @type string,null
+    */
+    output_limit_field?: string | null;
+    /**
+     * @type object,null
+    */
+    prices?: object | null;
+    /**
+     * @type integer,null, int64
+    */
+    probe_max_output_tokens?: number | null;
+    /**
+     * @type object
+    */
+    request_options: object;
+    /**
+     * @type integer,null, int64
+    */
+    runtime_max_output_tokens?: number | null;
+    /**
+     * @type string,null
+    */
+    wire_protocol?: string | null;
 };
 
 /**
@@ -4139,6 +4856,65 @@ export type FileTransferMessage = ((DownloadRequest & {
     type: FileTransferMessageTypeEnum7Key;
 }));
 
+/**
+ * @description `None` disables only that goal budget. Transport, storage and permission\nsafety limits remain in force.
+*/
+export type GoalBudgetLimits = {
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    activeTimeMs: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    deadlineMs: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    modelCalls: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    modelTokens: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    slices: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    stalledSlices: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    toolCalls: number | null;
+};
+
+export type GoalBudgetPolicy = {
+    /**
+     * @description `None` disables only that goal budget. Transport, storage and permission\nsafety limits remain in force.
+     * @type object
+    */
+    limits: GoalBudgetLimits;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
+};
+
 export type InitParams = {
     /**
      * @description Deployment bootstrap token. Required only when the server process was\nstarted with `LRD_BOOTSTRAP_TOKEN`.
@@ -4585,42 +5361,6 @@ export type MediaPipelineStateData = {
     phase: MediaPipelinePhase;
     reason_code?: (null | DeskErrorCode);
     source_resolution?: (null | Resolution);
-};
-
-export type ModelProbeObservation = {
-    /**
-     * @type integer, int64
-    */
-    connection_revision: number;
-    /**
-     * @description Whether the observation still describes the currently saved connection\nand profile revisions. Stale observations remain visible as history but\nmust never be presented as current validation.
-     * @type boolean
-    */
-    current: boolean;
-    /**
-     * @type integer, int64
-    */
-    profile_revision: number;
-    /**
-     * @type boolean
-    */
-    reasoning_observed: boolean;
-    /**
-     * @type integer,null, int64
-    */
-    reasoning_tokens?: number | null;
-    /**
-     * @type string,null
-    */
-    stop_reason?: string | null;
-    /**
-     * @type string, date-time
-    */
-    tested_at: string;
-    /**
-     * @type object
-    */
-    validated_capabilities: object;
 };
 
 export const responseFormatModeEnum = {
@@ -5801,6 +6541,197 @@ export type RequestRemoteModel = {
     session_target_id?: string | null;
 };
 
+export type RestResponseAiAssistantAttentionListDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        hasMore: boolean;
+        /**
+         * @type array
+        */
+        items: AiAssistantAttentionItemDto[];
+        /**
+         * @type boolean
+        */
+        offPageReminderAvailable: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantGoalDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string,null
+        */
+        checkpointSummary?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        createdAtUnixMs: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        deadlineUnixMs: number;
+        /**
+         * @type string
+        */
+        deviceId: string;
+        /**
+         * @type string
+        */
+        goalId: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        goalRevision: number;
+        /**
+         * @type string
+        */
+        goalText: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        limitModelTokens: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        limitSlices: number;
+        /**
+         * @type object
+        */
+        limits: AiAssistantGoalLimitsDto;
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        nextAttemptUnixMs?: number | null;
+        /**
+         * @type string,null
+        */
+        pauseReason?: string | null;
+        /**
+         * @type string,null
+        */
+        previousCompletedGoalId?: string | null;
+        /**
+         * @type string,null
+        */
+        previousCompletionSummary?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        sliceSeq: number;
+        /**
+         * @type string
+        */
+        state: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        stateVersion: number;
+        /**
+         * @type string,null
+        */
+        statusReason?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        updatedAtUnixMs: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        usedActiveTimeMs: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        usedModelCalls: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        usedModelTokens: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        usedSlices: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        usedToolCalls: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantGoalOpenDecisionDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        goal?: (null | AiAssistantGoalDto);
+        /**
+         * @type string
+        */
+        requestId: string;
+        /**
+         * @type string
+        */
+        state: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseAiAssistantSessionListDto = {
     /**
      * @type integer, int32
@@ -5851,6 +6782,11 @@ export type RestResponseAiAssistantSessionSnapshotDto = {
          * @type string,null
         */
         activeExecutionGeneration?: string | null;
+        approvalDelegation?: (null | ApprovalDelegationDto);
+        /**
+         * @type object
+        */
+        approvalModelReadiness: ApprovalModelReadinessDto;
         /**
          * @description Durable Provider executions that outlived their foreground wait.
          * @type array
@@ -5886,6 +6822,7 @@ export type RestResponseAiAssistantSessionSnapshotDto = {
          * @type object
         */
         fileScope: FileScopeDto;
+        goal?: (null | AiAssistantGoalDto);
         /**
          * @minLength 0
          * @type integer, int64
@@ -5912,6 +6849,7 @@ export type RestResponseAiAssistantSessionSnapshotDto = {
          * @type array
         */
         messages: SnapshotMessageDto[];
+        pendingGoalOpenRequest?: (null | AiAssistantGoalOpenRequestDto);
         /**
          * @description Model-proposed, server-normalized requests. Pending is approvable;\nNeedsRevalidation is display-only until the model replaces/reissues it.
          * @type array
@@ -6029,6 +6967,180 @@ export type RestResponseAiExecutionPolicyPublic = {
          * @type integer, int32
         */
         max_concurrent_executions: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseApprovalDelegationDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        costUsedMicros: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        createdAtUnixMs: number;
+        /**
+         * @type string
+        */
+        delegationId: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        reviewsUsed: number;
+        /**
+         * @type string
+        */
+        status: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        tokensUsed: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseApprovalModelProbeDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        latency_ms: number;
+        /**
+         * @type boolean
+        */
+        reasoning_observed: boolean;
+        /**
+         * @type integer,null, int64
+        */
+        reasoning_tokens?: number | null;
+        /**
+         * @type boolean
+        */
+        saved_as_current: boolean;
+        /**
+         * @type array
+        */
+        validated_capabilities: string[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseApprovalModelPublic = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        api_key_set: boolean;
+        /**
+         * @type boolean
+        */
+        available: boolean;
+        /**
+         * @type string,null
+        */
+        base_url?: string | null;
+        /**
+         * @type integer, int64
+        */
+        configuration_revision: number;
+        /**
+         * @type integer, int64
+        */
+        connection_revision: number;
+        /**
+         * @type boolean
+        */
+        enabled: boolean;
+        /**
+         * @type integer,null, int64
+        */
+        max_context_bytes?: number | null;
+        /**
+         * @type string,null
+        */
+        model?: string | null;
+        /**
+         * @type string
+        */
+        output_limit_field: string;
+        /**
+         * @type object,null
+        */
+        prices?: object | null;
+        /**
+         * @type integer, int64
+        */
+        probe_max_output_tokens: number;
+        probe_observation?: (null | ModelProbeObservation);
+        /**
+         * @type integer, int64
+        */
+        profile_revision: number;
+        /**
+         * @type object
+        */
+        request_options: object;
+        /**
+         * @type integer, int64
+        */
+        runtime_max_output_tokens: number;
+        /**
+         * @type string,null
+        */
+        unavailable_reason?: string | null;
+        /**
+         * @type string,null
+        */
+        wire_protocol?: string | null;
     };
     /**
      * @type string,null
@@ -6853,6 +7965,41 @@ export type RestResponseFileRecoveryReply = {
         */
         os_user: string;
         outcome: FileRecoveryOutcome;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseGoalBudgetPolicy = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description `None` disables only that goal budget. Transport, storage and permission\nsafety limits remain in force.
+         * @type object
+        */
+        limits: GoalBudgetLimits;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        schemaVersion: number;
     };
     /**
      * @type string,null
@@ -11087,6 +12234,19 @@ export type UpdateCredentialsRequest = {
     new_username?: string | null;
 };
 
+export type UpdateGoalBudgetPolicy = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+    /**
+     * @description `None` disables only that goal budget. Transport, storage and permission\nsafety limits remain in force.
+     * @type object
+    */
+    limits: GoalBudgetLimits;
+};
+
 export type UpdateScheduleBudgetPolicy = {
     /**
      * @minLength 0
@@ -11213,6 +12373,27 @@ export type UpdateContextManagementMutationResponse = UpdateContextManagement200
 export type UpdateContextManagementMutation = {
     Response: UpdateContextManagement200;
     Request: UpdateContextManagementMutationRequest;
+    Errors: any;
+};
+
+export type GetGoalBudgetPolicy200 = RestResponseGoalBudgetPolicy;
+
+export type GetGoalBudgetPolicyQueryResponse = GetGoalBudgetPolicy200;
+
+export type GetGoalBudgetPolicyQuery = {
+    Response: GetGoalBudgetPolicy200;
+    Errors: any;
+};
+
+export type UpdateGoalBudgetPolicy200 = RestResponseGoalBudgetPolicy;
+
+export type UpdateGoalBudgetPolicyMutationRequest = UpdateGoalBudgetPolicy;
+
+export type UpdateGoalBudgetPolicyMutationResponse = UpdateGoalBudgetPolicy200;
+
+export type UpdateGoalBudgetPolicyMutation = {
+    Response: UpdateGoalBudgetPolicy200;
+    Request: UpdateGoalBudgetPolicyMutationRequest;
     Errors: any;
 };
 
@@ -12301,6 +13482,39 @@ export type InitRequirementsQuery = {
     Errors: any;
 };
 
+export type GetApprovalModelProvider200 = RestResponseApprovalModelPublic;
+
+export type GetApprovalModelProviderQueryResponse = GetApprovalModelProvider200;
+
+export type GetApprovalModelProviderQuery = {
+    Response: GetApprovalModelProvider200;
+    Errors: any;
+};
+
+export type UpdateApprovalModelProvider200 = RestResponseApprovalModelPublic;
+
+export type UpdateApprovalModelProviderMutationRequest = ApprovalModelUpdate;
+
+export type UpdateApprovalModelProviderMutationResponse = UpdateApprovalModelProvider200;
+
+export type UpdateApprovalModelProviderMutation = {
+    Response: UpdateApprovalModelProvider200;
+    Request: UpdateApprovalModelProviderMutationRequest;
+    Errors: any;
+};
+
+export type TestApprovalModelProvider200 = RestResponseApprovalModelProbeDto;
+
+export type TestApprovalModelProviderMutationRequest = ApprovalModelProbeParams;
+
+export type TestApprovalModelProviderMutationResponse = TestApprovalModelProvider200;
+
+export type TestApprovalModelProviderMutation = {
+    Response: TestApprovalModelProvider200;
+    Request: TestApprovalModelProviderMutationRequest;
+    Errors: any;
+};
+
 /**
  * @description Masked provider config (never carries the api_key)
 */
@@ -12372,6 +13586,31 @@ export type GetModelUsageQuery = {
     Errors: any;
 };
 
+export type ListAiAssistantAttentionQueryParams = {
+    /**
+     * @description Rows to skip
+     * @minLength 0
+     * @type integer | undefined
+    */
+    offset?: number;
+    /**
+     * @description Maximum rows, default 30 and capped at 100
+     * @minLength 0
+     * @type integer | undefined
+    */
+    limit?: number;
+};
+
+export type ListAiAssistantAttention200 = RestResponseAiAssistantAttentionListDto;
+
+export type ListAiAssistantAttentionQueryResponse = ListAiAssistantAttention200;
+
+export type ListAiAssistantAttentionQuery = {
+    Response: ListAiAssistantAttention200;
+    QueryParams: ListAiAssistantAttentionQueryParams;
+    Errors: any;
+};
+
 export type GetAiAssistantSessionQueryParams = {
     /**
      * @description Target connection id
@@ -12421,6 +13660,30 @@ export type GetAiAssistantSessionQueryResponse = GetAiAssistantSession200;
 export type GetAiAssistantSessionQuery = {
     Response: GetAiAssistantSession200;
     QueryParams: GetAiAssistantSessionQueryParams;
+    Errors: any;
+};
+
+export type CloseAiAssistantApprovalDelegation200 = RestResponseApprovalDelegationDto;
+
+export type CloseAiAssistantApprovalDelegationMutationRequest = ApprovalDelegationCloseBody;
+
+export type CloseAiAssistantApprovalDelegationMutationResponse = CloseAiAssistantApprovalDelegation200;
+
+export type CloseAiAssistantApprovalDelegationMutation = {
+    Response: CloseAiAssistantApprovalDelegation200;
+    Request: CloseAiAssistantApprovalDelegationMutationRequest;
+    Errors: any;
+};
+
+export type OpenAiAssistantApprovalDelegation200 = RestResponseApprovalDelegationDto;
+
+export type OpenAiAssistantApprovalDelegationMutationRequest = ApprovalDelegationOpenBody;
+
+export type OpenAiAssistantApprovalDelegationMutationResponse = OpenAiAssistantApprovalDelegation200;
+
+export type OpenAiAssistantApprovalDelegationMutation = {
+    Response: OpenAiAssistantApprovalDelegation200;
+    Request: OpenAiAssistantApprovalDelegationMutationRequest;
     Errors: any;
 };
 
@@ -12532,6 +13795,39 @@ export type DeleteAiAssistantSessionMutationResponse = DeleteAiAssistantSession2
 export type DeleteAiAssistantSessionMutation = {
     Response: DeleteAiAssistantSession200;
     Request: DeleteAiAssistantSessionMutationRequest;
+    Errors: any;
+};
+
+export type GetMyGoalBudgetPolicy200 = RestResponseGoalBudgetPolicy;
+
+export type GetMyGoalBudgetPolicyQueryResponse = GetMyGoalBudgetPolicy200;
+
+export type GetMyGoalBudgetPolicyQuery = {
+    Response: GetMyGoalBudgetPolicy200;
+    Errors: any;
+};
+
+export type ControlAiAssistantGoal200 = RestResponseAiAssistantGoalDto;
+
+export type ControlAiAssistantGoalMutationRequest = AiAssistantGoalControlBody;
+
+export type ControlAiAssistantGoalMutationResponse = ControlAiAssistantGoal200;
+
+export type ControlAiAssistantGoalMutation = {
+    Response: ControlAiAssistantGoal200;
+    Request: ControlAiAssistantGoalMutationRequest;
+    Errors: any;
+};
+
+export type DecideAiAssistantGoalOpen200 = RestResponseAiAssistantGoalOpenDecisionDto;
+
+export type DecideAiAssistantGoalOpenMutationRequest = AiAssistantGoalOpenDecisionBody;
+
+export type DecideAiAssistantGoalOpenMutationResponse = DecideAiAssistantGoalOpen200;
+
+export type DecideAiAssistantGoalOpenMutation = {
+    Response: DecideAiAssistantGoalOpen200;
+    Request: DecideAiAssistantGoalOpenMutationRequest;
     Errors: any;
 };
 

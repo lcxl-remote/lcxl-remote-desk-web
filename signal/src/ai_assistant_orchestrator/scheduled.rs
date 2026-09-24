@@ -67,6 +67,7 @@ pub async fn resume_scheduled_turn(
         ask,
         None,
         Some(prepared),
+        None,
     )
     .await?
     .ok_or_else(|| transport_error("scheduled continuation did not pass runtime preflight"))

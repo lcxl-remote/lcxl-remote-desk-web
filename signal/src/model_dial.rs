@@ -181,7 +181,7 @@ impl Dialect {
 
 fn config_error(message: impl Into<String>) -> AgentError {
     AgentError {
-        kind: AgentErrorKind::InvalidInput,
+        kind: AgentErrorKind::ModelRejected,
         message: message.into(),
         retryable: false,
         safe_for_model: true,
@@ -191,7 +191,7 @@ fn config_error(message: impl Into<String>) -> AgentError {
 
 fn transport_error(message: impl Into<String>) -> AgentError {
     AgentError {
-        kind: AgentErrorKind::TransportError,
+        kind: AgentErrorKind::ModelUnavailable,
         message: message.into(),
         retryable: true,
         safe_for_model: true,
@@ -200,11 +200,18 @@ fn transport_error(message: impl Into<String>) -> AgentError {
 }
 
 /// Signal's model seam over a single resolved provider.
+#[derive(Clone, Copy)]
+enum ModelConfigurationSource {
+    Agent,
+    Approval { configuration_revision: i64 },
+}
+
 pub struct SignalModelSeam {
     cancel: tokio_util::sync::CancellationToken,
     context_db: Option<sea_orm::DatabaseConnection>,
     context_policy: tokio::sync::OnceCell<desk_diagnose_core::model_context::PinnedContextPolicy>,
     compression_call_key: std::cell::RefCell<Option<String>>,
+    retry_after_unix_ms: std::cell::Cell<Option<u64>>,
     connection_revision: u64,
     dialect: Dialect,
     base_url: String,
@@ -214,12 +221,34 @@ pub struct SignalModelSeam {
     protocol: WireProtocol,
     profile: ModelRequestProfile,
     source_context_key: SourceContextKey,
+    configuration_source: ModelConfigurationSource,
 }
 
 impl SignalModelSeam {
     /// Build the seam from the configured provider, failing closed if a required
     /// field (model / base url / api key) is unset.
     pub fn from_config(config: &ModelProviderConfig) -> Result<Self, AgentError> {
+        Self::from_config_source(config, ModelConfigurationSource::Agent)
+    }
+
+    /// Resolve a separately configured approval model with its own replay and
+    /// current-configuration identity. It must never inherit the agent model's
+    /// source key or pass the agent model's admission recheck.
+    pub fn from_approval_config(
+        config: &crate::approval_model_provider::ApprovalModelConfig,
+    ) -> Result<Self, AgentError> {
+        Self::from_config_source(
+            &config.gateway,
+            ModelConfigurationSource::Approval {
+                configuration_revision: config.configuration_revision,
+            },
+        )
+    }
+
+    fn from_config_source(
+        config: &ModelProviderConfig,
+        configuration_source: ModelConfigurationSource,
+    ) -> Result<Self, AgentError> {
         let base_url = non_empty(config.base_url.as_deref())
             .ok_or_else(|| config_error("model provider base_url is not configured"))?;
         let api_key = non_empty(config.api_key.as_deref())
@@ -232,11 +261,17 @@ impl SignalModelSeam {
         let profile = config
             .request_profile()
             .map_err(|error| config_error(error.to_string()))?;
+        let (connection_id, model_id) = match configuration_source {
+            ModelConfigurationSource::Agent => ("oss-singleton:1", "oss-model:1"),
+            ModelConfigurationSource::Approval { .. } => {
+                ("oss-approval-gateway:1", "oss-approval-model:1")
+            }
+        };
         let source_context_key = SourceContextKey::derive_for_endpoint(
             protocol,
-            "oss-singleton:1",
+            connection_id,
             &base_url,
-            "oss-model:1",
+            model_id,
             &model,
         );
         Ok(Self {
@@ -244,6 +279,7 @@ impl SignalModelSeam {
             context_db: None,
             context_policy: tokio::sync::OnceCell::new(),
             compression_call_key: std::cell::RefCell::new(None),
+            retry_after_unix_ms: std::cell::Cell::new(None),
             connection_revision: u64::try_from(config.connection_revision)
                 .map_err(|_| config_error("invalid connection revision"))?,
             dialect: Dialect::from_protocol(protocol)?,
@@ -256,6 +292,7 @@ impl SignalModelSeam {
             protocol,
             profile,
             source_context_key,
+            configuration_source,
         })
     }
 
@@ -265,10 +302,31 @@ impl SignalModelSeam {
         &self,
         db: &C,
     ) -> Result<(), AgentError> {
-        let config = crate::model_provider::load(db)
-            .await
-            .map_err(|_| config_error("current model configuration is unavailable"))?;
-        let current = Self::from_config(&config)?;
+        let current = match self.configuration_source {
+            ModelConfigurationSource::Agent => {
+                let config = crate::model_provider::load(db)
+                    .await
+                    .map_err(|_| config_error("current model configuration is unavailable"))?;
+                Self::from_config(&config)?
+            }
+            ModelConfigurationSource::Approval {
+                configuration_revision,
+            } => {
+                let config = crate::approval_model_provider::load(db)
+                    .await
+                    .map_err(|_| {
+                        config_error("current approval model configuration is unavailable")
+                    })?;
+                if config.configuration_revision != configuration_revision
+                    || config.unavailable_reason().is_some()
+                {
+                    return Err(config_error(
+                        "approval model configuration changed or is unavailable; the pinned request cannot be sent",
+                    ));
+                }
+                Self::from_approval_config(&config)?
+            }
+        };
         if self.connection_revision != current.connection_revision
             || self.protocol != current.protocol
             || self.profile != current.profile
@@ -276,6 +334,7 @@ impl SignalModelSeam {
             || self.api_key != current.api_key
             || self.model != current.model
             || self.capabilities != current.capabilities
+            || self.source_context_key != current.source_context_key
         {
             return Err(config_error(
                 "model configuration changed; the pinned request cannot be sent",
@@ -296,11 +355,12 @@ impl SignalModelSeam {
         sink: &mut dyn TurnSink,
     ) -> Result<ModelTurn, AgentError> {
         use futures_util::StreamExt;
+        self.retry_after_unix_ms.set(None);
 
         let requirements = ModelRequirements::for_messages(&request.messages);
         if !self.capabilities.satisfies(requirements) {
             return Err(AgentError {
-                kind: AgentErrorKind::InvalidInput,
+                kind: AgentErrorKind::ModelRejected,
                 message: "The selected AI model does not support image input.".to_string(),
                 retryable: false,
                 safe_for_model: true,
@@ -316,7 +376,7 @@ impl SignalModelSeam {
                 .filter_map(|message| message.image_data_url.as_deref()),
         )
         .map_err(|error| AgentError {
-            kind: AgentErrorKind::InvalidInput,
+            kind: AgentErrorKind::ModelRejected,
             message: format!("invalid model image attachment: {error}"),
             retryable: false,
             safe_for_model: false,
@@ -332,7 +392,7 @@ impl SignalModelSeam {
             base_url_scheme_is_tls(&self.base_url),
             configured_enforce_public_tls(),
         )
-        .map_err(|e| transport_error(format!("model request failed: {e}")))?;
+        .map_err(|e| config_error(format!("model request failed: {e}")))?;
 
         // Guard the outbound dial with the transport resolver: every resolved IP is
         // validated just before connecting (authoritative anti-rebinding check),
@@ -404,17 +464,31 @@ impl SignalModelSeam {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|raw| {
+                    desk_diagnose_core::model_http_error::retry_after_unix_ms(
+                        raw,
+                        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default(),
+                    )
+                });
+            self.retry_after_unix_ms.set(retry_after);
             // The gateway's own error text never contains our api_key, so the
             // bounded body is safe to surface (a bad model name / auth failure).
             let err_body = response.body().limit(16 * 1024).await.unwrap_or_default();
             let detail = String::from_utf8_lossy(&err_body);
             let detail = detail.trim();
             log::warn!("[model-dial] gateway returned {status}: {detail}");
-            return Err(transport_error(if detail.is_empty() {
-                format!("model gateway returned status {status}")
-            } else {
-                format!("model gateway returned status {status}: {detail}")
-            }));
+            return Err(desk_diagnose_core::model_http_error::from_status(
+                status.as_u16(),
+                if detail.is_empty() {
+                    format!("model gateway returned status {status}")
+                } else {
+                    format!("model gateway returned status {status}: {detail}")
+                },
+            ));
         }
 
         // Pump the SSE byte stream: frame complete events, apply each to the
@@ -571,6 +645,9 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 
 #[async_trait(?Send)]
 impl ModelSeam for SignalModelSeam {
+    fn retry_after_unix_ms(&self) -> Option<u64> {
+        self.retry_after_unix_ms.get()
+    }
     async fn context_policy(
         &self,
         requirements: ModelRequirements,
@@ -1970,6 +2047,40 @@ mod tests {
         assert!(seam.validate_current_on(&txn).await.is_err());
         txn.rollback().await.unwrap();
         seam.validate_current_on(&db).await.unwrap();
+    }
+
+    #[test]
+    fn approval_model_has_a_distinct_source_context_from_the_agent_model() {
+        let gateway = ModelProviderConfig {
+            base_url: Some("https://model.example/v1".into()),
+            model: Some("same-model".into()),
+            api_key: Some("test-only".into()),
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        };
+        let agent = SignalModelSeam::from_config(&gateway).unwrap();
+        let approval = SignalModelSeam::from_approval_config(
+            &crate::approval_model_provider::ApprovalModelConfig {
+                enabled: true,
+                configuration_revision: 7,
+                gateway,
+                prices: None,
+                probe_observation: None,
+            },
+        )
+        .unwrap();
+        assert_ne!(agent.source_context_key, approval.source_context_key);
+        assert!(matches!(
+            agent.configuration_source,
+            ModelConfigurationSource::Agent
+        ));
+        assert!(matches!(
+            approval.configuration_source,
+            ModelConfigurationSource::Approval {
+                configuration_revision: 7
+            }
+        ));
     }
 
     #[test]

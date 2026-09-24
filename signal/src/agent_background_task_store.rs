@@ -808,6 +808,27 @@ impl SignalBackgroundTaskStore {
         else {
             return Ok(true);
         };
+        if let Some(goal) = crate::agent_goal_store::load_latest_for_subject(
+            &self.db,
+            &row.conversation_id,
+            &session.actor_id,
+            &session.device_id,
+        )
+        .await?
+        {
+            if !goal.state.is_terminal() {
+                return Ok(false);
+            }
+            if goal.owns_waited_work(&row.action_request_id) {
+                return Ok(!matches!(
+                    sessions
+                        .prune_auto_trigger(&row.conversation_id, &row.completion_event_id, now)
+                        .await
+                        .map_err(agent_error)?,
+                    EventAppend::Busy
+                ));
+            }
+        }
         let expired = session
             .scope_snapshot
             .expires_at
@@ -1144,6 +1165,7 @@ mod tests {
         for statement in [
             schema.create_table_from_entity(agent_action_item::Entity),
             schema.create_table_from_entity(agent_session::Entity),
+            schema.create_table_from_entity(crate::entity::agent_goal_run::Entity),
             schema.create_table_from_entity(agent_run_event::Entity),
         ] {
             db.execute(&statement).await.unwrap();

@@ -1,4 +1,4 @@
-import { BarChart3, CalendarClock, LifeBuoy, Monitor, Settings } from "lucide-react"
+import { BarChart3, Bell, CalendarClock, LifeBuoy, Monitor, Settings } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { startupModeEnum } from "@/services/types"
 import type { StartupMode } from "@/services/types"
@@ -51,6 +51,7 @@ export function buildNavItems({
     if (!isDeskServer) {
         items.push({ title: "menu.desk", url: "/desk/list", icon: Monitor })
         items.push({ title: "schedules.title", url: "/schedules", icon: CalendarClock })
+        items.push({ title: "pages.aiAssistantAttention.title", url: "/ai-assistant/attention", icon: Bell })
     }
 
     // Host-side "ask for remote help": a primary entry so non-technical users

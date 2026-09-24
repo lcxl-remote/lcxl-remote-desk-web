@@ -1,9 +1,9 @@
 //! Transactional attachment metadata with immutable, durably written local files.
-use crate::entity::{agent_attachment as attachment, agent_session};
+use crate::entity::{agent_attachment as attachment, agent_goal_run as goal_row, agent_session};
 use desk_diagnose_core::{
     conversation_attachment::{
         AttachmentMetadata, Availability,
-        batch::{PreparedAttachment, plan_batch},
+        batch::{PreparedAttachment, plan_batch, plan_batch_protecting},
     },
     session::PersistedAgentSession,
 };
@@ -112,7 +112,26 @@ pub async fn store_batch(
         .all(&txn)
         .await?;
     let existing = rows.iter().map(decode).collect::<Result<Vec<_>, _>>()?;
-    let plan = plan_batch(&existing, incoming).map_err(|e| DbErr::Custom(e.message))?;
+    let active_goal = goal_row::Entity::find()
+        .filter(goal_row::Column::ConversationId.eq(&session.conversation_id))
+        .filter(goal_row::Column::ActorId.eq(&session.actor_id))
+        .filter(goal_row::Column::DeviceId.eq(&session.device_id))
+        .filter(goal_row::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
+        .one(&txn)
+        .await?;
+    let mut protected = Vec::new();
+    if let Some(row) = active_goal {
+        let goal = crate::agent_goal_store::decode(&row)?;
+        protected.extend(session.focus_epoch.selected_attachment_ids.iter().cloned());
+        if let Some(checkpoint) = goal.checkpoint {
+            protected.extend(checkpoint.protected_attachment_ids);
+        }
+        if let Some(previous) = goal.previous_completion {
+            protected.extend(previous.protected_attachment_ids);
+        }
+    }
+    let plan = plan_batch_protecting(&existing, incoming, &protected)
+        .map_err(|e| DbErr::Custom(e.message))?;
     let time = database_time(&txn).await?;
     for id in &plan.evict_ids {
         let mut meta = existing

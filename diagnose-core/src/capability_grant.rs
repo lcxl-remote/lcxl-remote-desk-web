@@ -5,8 +5,8 @@
 
 use desk_agent_protocol::{
     capability_grant::{
-        CapabilityGrant, CapabilityGrantIssuer, CapabilityGrantUsePolicy, CapabilityRiskTier,
-        TaskGrantProvenance,
+        AiApprovalGrantProvenance, CapabilityGrant, CapabilityGrantIssuer,
+        CapabilityGrantUsePolicy, CapabilityRiskTier, TaskGrantProvenance,
     },
     capability_provider::{AuthorizationResourceKind, CapabilityEffect, ProductSurface},
     data_lineage::DestinationIdentity,
@@ -185,6 +185,7 @@ pub struct CapabilityGrantCall<'a> {
 pub enum GrantMismatch {
     InvalidGrant,
     TaskAuthorization,
+    ApprovalDelegation,
     Revoked,
     NotYetValid,
     Expired,
@@ -210,7 +211,7 @@ pub fn match_capability_grant(
     grant: &CapabilityGrant,
     call: &CapabilityGrantCall<'_>,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, true, None)
+    match_capability_grant_inner(grant, call, true, None, None)
 }
 
 /// Explain a rejected selection without granting authority or exposing inputs.
@@ -232,23 +233,25 @@ pub fn unavailable_grant_message(
     if differs_only_in_input {
         "approved_input_mismatch: an active grant exists, but these arguments differ from the approved exact input. No operation was performed. Copy approved_exact_input from the current authorization snapshot without changing fields; do not request duplicate permission. If its target reference is stale, inspect again and obtain authorization for the new target."
     } else {
-        "authorization_unavailable: no active capability grant matches this call's scope, limits and current authority. Check the current authorization snapshot; a denied request is a user refusal, not an approval propagation failure. Do not retry or widen the target to bypass a refusal."
+        "authorization_unavailable: no active capability grant matches this call's scope, limits and current authority. Check the current authorization snapshot. A denied request is an explicit decision, not an approval propagation failure; do not repeat the same rejected action or widen its target. A materially narrower action requires a new, independently reviewed request."
     }
 }
 
 /// Filter a stored candidate before the runtime opens its admission transaction.
-/// This checks scope only: a task's provenance is not current authority here.
+/// This checks scope only: a task or AI review provenance copied from the grant
+/// is not current authority here.
 /// Every selected candidate still requires current parent/session validation at
 /// reservation, intent and send claim; this result must never permit device I/O.
 pub fn is_capability_grant_candidate(
     grant: &CapabilityGrant,
     call: &CapabilityGrantCall<'_>,
 ) -> bool {
-    let parent = match &grant.issued_by {
-        CapabilityGrantIssuer::TaskAuthorization(parent) => Some(parent),
-        _ => None,
+    let (task, approval) = match &grant.issued_by {
+        CapabilityGrantIssuer::TaskAuthorization(parent) => (Some(parent), None),
+        CapabilityGrantIssuer::AiApproval(parent) => (None, Some(parent)),
+        CapabilityGrantIssuer::PolicyAuto | CapabilityGrantIssuer::UserDecision => (None, None),
     };
-    match_capability_grant_inner(grant, call, true, parent).is_ok()
+    match_capability_grant_inner(grant, call, true, task, approval).is_ok()
 }
 
 /// Revalidate a call that already owns a durable reservation. The reservation
@@ -258,7 +261,7 @@ pub fn match_reserved_capability_grant(
     grant: &CapabilityGrant,
     call: &CapabilityGrantCall<'_>,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, false, None)
+    match_capability_grant_inner(grant, call, false, None, None)
 }
 
 /// The expected binding must come from current authoritative task/authorization rows
@@ -269,7 +272,7 @@ pub fn match_task_capability_grant(
     call: &CapabilityGrantCall<'_>,
     current: &TaskGrantProvenance,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, true, Some(current))
+    match_capability_grant_inner(grant, call, true, Some(current), None)
 }
 
 pub fn match_reserved_task_capability_grant(
@@ -277,7 +280,25 @@ pub fn match_reserved_task_capability_grant(
     call: &CapabilityGrantCall<'_>,
     current: &TaskGrantProvenance,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, false, Some(current))
+    match_capability_grant_inner(grant, call, false, Some(current), None)
+}
+
+/// The caller must derive this binding from the current delegation and review
+/// rows under its transaction fence. A grant's own provenance is insufficient.
+pub fn match_ai_capability_grant(
+    grant: &CapabilityGrant,
+    call: &CapabilityGrantCall<'_>,
+    current: &AiApprovalGrantProvenance,
+) -> Result<(), GrantMismatch> {
+    match_capability_grant_inner(grant, call, true, None, Some(current))
+}
+
+pub fn match_reserved_ai_capability_grant(
+    grant: &CapabilityGrant,
+    call: &CapabilityGrantCall<'_>,
+    current: &AiApprovalGrantProvenance,
+) -> Result<(), GrantMismatch> {
+    match_capability_grant_inner(grant, call, false, None, Some(current))
 }
 
 fn match_capability_grant_inner(
@@ -285,14 +306,28 @@ fn match_capability_grant_inner(
     call: &CapabilityGrantCall<'_>,
     require_available_use: bool,
     current_task: Option<&TaskGrantProvenance>,
+    current_approval: Option<&AiApprovalGrantProvenance>,
 ) -> Result<(), GrantMismatch> {
     grant.validate().map_err(|_| GrantMismatch::InvalidGrant)?;
-    match (&grant.issued_by, current_task) {
-        (CapabilityGrantIssuer::TaskAuthorization(parent), Some(current)) if parent == current => {}
-        (CapabilityGrantIssuer::TaskAuthorization(_), _) | (_, Some(_)) => {
-            return Err(GrantMismatch::TaskAuthorization);
+    match &grant.issued_by {
+        CapabilityGrantIssuer::TaskAuthorization(parent) => {
+            if current_task != Some(parent) || current_approval.is_some() {
+                return Err(GrantMismatch::TaskAuthorization);
+            }
         }
-        (_, None) => {}
+        CapabilityGrantIssuer::AiApproval(parent) => {
+            if current_approval != Some(parent) || current_task.is_some() {
+                return Err(GrantMismatch::ApprovalDelegation);
+            }
+        }
+        CapabilityGrantIssuer::PolicyAuto | CapabilityGrantIssuer::UserDecision => {
+            if current_task.is_some() {
+                return Err(GrantMismatch::TaskAuthorization);
+            }
+            if current_approval.is_some() {
+                return Err(GrantMismatch::ApprovalDelegation);
+            }
+        }
     }
     if grant.revoked_at_unix_ms.is_some() {
         return Err(GrantMismatch::Revoked);
@@ -736,11 +771,64 @@ mod tests {
     }
 
     #[test]
+    fn ai_grants_require_current_review_binding_before_use() {
+        let resources = vec!["root:selected".into()];
+        let operations = vec!["create_new".into()];
+        let envelopes = vec!["envelope-1".into()];
+        let digests = vec![digest('b')];
+        let canonical = digest('a');
+        let current_call = call(&resources, &operations, &envelopes, &digests, &canonical);
+        let parent = AiApprovalGrantProvenance {
+            delegation_id: "delegation-1".into(),
+            delegation_revision: 1,
+            model_config_revision: 2,
+            candidate_id: "candidate-1".into(),
+            decision_event_id: "decision-1".into(),
+            goal_id: None,
+            goal_revision: None,
+        };
+        let mut granted = grant();
+        granted.issued_by = CapabilityGrantIssuer::AiApproval(parent.clone());
+        assert_eq!(
+            match_capability_grant(&granted, &current_call),
+            Err(GrantMismatch::ApprovalDelegation)
+        );
+        assert_eq!(
+            match_reserved_capability_grant(&granted, &current_call),
+            Err(GrantMismatch::ApprovalDelegation)
+        );
+        assert_eq!(
+            match_ai_capability_grant(&granted, &current_call, &parent),
+            Ok(())
+        );
+        let mut changed = parent.clone();
+        changed.delegation_revision += 1;
+        assert_eq!(
+            match_ai_capability_grant(&granted, &current_call, &changed),
+            Err(GrantMismatch::ApprovalDelegation)
+        );
+        granted.remaining_uses = 0;
+        assert_eq!(
+            match_reserved_ai_capability_grant(&granted, &current_call, &parent),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn all_grant_sources_require_the_current_schema() {
         for issuer in [
             CapabilityGrantIssuer::PolicyAuto,
             CapabilityGrantIssuer::UserDecision,
             CapabilityGrantIssuer::TaskAuthorization(task_parent()),
+            CapabilityGrantIssuer::AiApproval(AiApprovalGrantProvenance {
+                delegation_id: "delegation-1".into(),
+                delegation_revision: 1,
+                model_config_revision: 1,
+                candidate_id: "candidate-1".into(),
+                decision_event_id: "decision-1".into(),
+                goal_id: None,
+                goal_revision: None,
+            }),
         ] {
             let mut candidate = grant();
             candidate.issued_by = issuer;

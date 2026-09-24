@@ -20,6 +20,19 @@ import { deskErrorCodeEnum } from '@/services/types';
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
 
 describe('useAiAssistantChat', () => {
+    it('sends explicit goal intent with the completed goal being continued', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({
+            deskId: 'goal-intent', subscribe: () => () => undefined, sendMessage,
+        }));
+        act(() => { expect(result.current.start('Finish the report', 'zh', [], true, 'completed-goal')).toBe(true); });
+        expect(sendMessage.mock.calls.at(-1)?.[1]).toMatchObject({
+            start_goal: true,
+            previous_completed_goal_id: 'completed-goal',
+        });
+        unmount();
+    });
     it('does not send live desktop metadata as an explicit object attachment', async () => {
         localStorage.setItem('ai-assistant-conversation:delivery-kinds', 'conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
@@ -254,6 +267,25 @@ describe('useAiAssistantChat', () => {
         expect(fetch).toHaveBeenCalledWith(expect.stringContaining('conversation=old-conversation'), expect.anything());
         expect(localStorage.getItem('ai-assistant-conversation:desk-history')).toBe('old-conversation');
         expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('opens an attention deep link ahead of the last locally selected conversation', async () => {
+        localStorage.setItem('ai-assistant-conversation:attention-device', 'previous-conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            sessionId: 'attention-session', seq: 1, active: false, messages: [],
+        } }) }));
+        const sendMessage = vi.fn();
+        const { result, unmount } = renderHook(() => useAiAssistantChat({
+            deskId: 'current-connection', conversationStorageScope: 'attention-device',
+            initialConversationId: 'requested-conversation',
+            subscribe: () => () => undefined, sendMessage,
+        }));
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        expect(fetch).toHaveBeenCalledWith(
+            expect.stringContaining('conversation=requested-conversation'), expect.anything(),
+        );
+        expect(sendMessage).not.toHaveBeenCalled();
+        unmount();
     });
 
     it('switches and creates conversations while a previous turn keeps running', async () => {

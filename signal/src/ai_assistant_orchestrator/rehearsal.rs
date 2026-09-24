@@ -45,6 +45,7 @@ pub async fn run_rehearsal_turn(
         ask,
         None,
         None,
+        None,
     )
     .await
 }
