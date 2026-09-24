@@ -2,7 +2,6 @@ import { Textarea } from '@/components/ui/textarea';
 import { type PointerEvent as ReactPointerEvent, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-    Sparkles,
     X,
     Loader2,
     AlertCircle,
@@ -15,6 +14,7 @@ import {
     ArrowDown,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 import { Badge } from '@/components/ui/badge';
 import { AiGeneratedMark } from '@/components/ai-generated-mark';
 import { MarkdownContent } from '@/components/markdown-content';
@@ -317,7 +317,7 @@ export function TerminalAiAssistantPanel({
             />
             <div className="flex items-center justify-between border-b border-border px-3 py-2">
                 <div className="flex items-center gap-2 font-medium">
-                    <Sparkles className="h-4 w-4 text-primary" />
+                    <AiAssistantIcon className="h-4 w-4 text-violet-500" />
                     {t('pages.deskTerminal.assistant.title')}
                 </div>
                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose}>

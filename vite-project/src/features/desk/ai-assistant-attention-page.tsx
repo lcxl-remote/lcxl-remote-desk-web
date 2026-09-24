@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useListConnections } from '@/services/hooks/connectionController/useListConnections';
 import { assistantConnections } from '@/features/schedules/assistant-paths';
+import { AiAssistantHubLayout } from './ai-assistant-hub-layout';
 
 type AttentionReason =
     | 'goal_open_approval' | 'permission_approval' | 'goal_needs_input'
@@ -77,7 +78,7 @@ export default function AiAssistantAttentionPage() {
     }, [refresh]);
 
     return (
-        <div className="mx-auto w-full max-w-4xl space-y-4 p-4 md:p-6">
+        <AiAssistantHubLayout>
             <div className="flex items-center justify-between gap-3">
                 <div>
                     <h1 className="text-xl font-semibold">{t('pages.aiAssistantAttention.title')}</h1>
@@ -126,6 +127,6 @@ export default function AiAssistantAttentionPage() {
                 onClick={() => { setLoadingMore(true); void loadPage(items.length, true); }}>
                 {t('pages.aiAssistantAttention.moreItems')}
             </Button>}
-        </div>
+        </AiAssistantHubLayout>
     );
 }

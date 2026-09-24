@@ -1,5 +1,6 @@
-import { BarChart3, Bell, CalendarClock, LifeBuoy, Monitor, Settings } from "lucide-react"
+import { BarChart3, LifeBuoy, Monitor, Settings } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
+import { AiAssistantIcon } from "@/components/ai-assistant-icon"
 import { startupModeEnum } from "@/services/types"
 import type { StartupMode } from "@/services/types"
 
@@ -7,7 +8,7 @@ export type NavItem = {
     /** i18n key, resolved by the sidebar. */
     title: string
     url: string
-    icon: LucideIcon
+    icon: LucideIcon | typeof AiAssistantIcon
 }
 
 /** What the sidebar entries are derived from. */
@@ -50,8 +51,7 @@ export function buildNavItems({
 
     if (!isDeskServer) {
         items.push({ title: "menu.desk", url: "/desk/list", icon: Monitor })
-        items.push({ title: "schedules.title", url: "/schedules", icon: CalendarClock })
-        items.push({ title: "pages.aiAssistantAttention.title", url: "/ai-assistant/attention", icon: Bell })
+        items.push({ title: "pages.aiAssistant.title", url: "/ai-assistant", icon: AiAssistantIcon })
     }
 
     // Host-side "ask for remote help": a primary entry so non-technical users

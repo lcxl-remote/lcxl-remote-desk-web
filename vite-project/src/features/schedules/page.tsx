@@ -23,6 +23,7 @@ import { formatTime, ruleTimes, validTimezone, projectRule } from './time';
 import { RunHistory } from './run-history';
 import { RehearsalDetails } from './rehearsal-details';
 import { ContractReview } from './contract-review';
+import { AiAssistantHubLayout } from '@/features/desk/ai-assistant-hub-layout';
 
 export type ScheduleDevice = { id: string; name: string; connectionId?: string; assistantPath?: string };
 type ResumeSource = { conversation: string; device: string; revision: number };
@@ -113,9 +114,9 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
     const visible = tasks.filter(task => task.kind === tab);
     const allDevices = [...devices];
     for (const task of tasks) if (task.target_device_id && !allDevices.some(d => d.id === task.target_device_id)) allDevices.push({ id: task.target_device_id, name: task.target_device_id });
-    return <section className="mx-auto w-full max-w-5xl space-y-5 p-2 sm:p-4">
+    return <AiAssistantHubLayout>
         <div className="flex flex-wrap items-center justify-between gap-3">
-            <h1 className="text-2xl font-semibold">{t('schedules.title')}</h1>
+            <h1 className="text-xl font-semibold">{t('schedules.title')}</h1>
             <div className="flex flex-wrap gap-2">
                 <Button variant="outline" disabled={!available} onClick={() => void load()}><RefreshCw className="mr-2 h-4 w-4" />{t('schedules.refresh')}</Button>
                 {tab === 'conversation_resume' && <Button disabled={!available || loadingDevices || !allDevices.length} onClick={() => setChoosingConversation(true)}>{t('schedules.chooseConversation')}</Button>}
@@ -234,7 +235,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
             <DialogHeader><DialogTitle>{editor && t(editor.resume ? 'schedules.createResume' : `schedules.${editor.kind}`)}</DialogTitle></DialogHeader>
             {editor && <ScheduleEditor key={editor.key} editor={editor} devices={allDevices} zone={zone} disabled={!available || !validZone} client={client} submit={mutate} report={report} close={() => setEditor(null)} />}
         </DialogContent></Dialog>
-    </section>;
+    </AiAssistantHubLayout>;
 }
 
 function ScheduleEditor({ editor, devices, zone, disabled, client, submit, report, close }: { close: () => void; editor: Editor; devices: ScheduleDevice[]; zone: string; disabled: boolean; client: ScheduleClient; submit: (request: ScheduleManagementRequest) => Promise<void>; report: (error: unknown) => void }) {

@@ -1,7 +1,8 @@
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Activity, Bot, Archive } from "lucide-react";
+import { Activity, Archive } from "lucide-react";
+import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 
 export function UsageOverview() {
     const { t } = useTranslation();
@@ -30,7 +31,7 @@ export function UsageOverview() {
                         <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                             <CardHeader>
                                 <div className="flex items-center gap-2">
-                                    <Bot className="h-5 w-5 text-primary" />
+                                    <AiAssistantIcon className="h-5 w-5 text-violet-500" />
                                     <CardTitle className="text-lg">{t('menu.usage.model')}</CardTitle>
                                 </div>
                                 <CardDescription className="mt-2 line-clamp-2">

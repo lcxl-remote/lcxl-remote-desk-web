@@ -1268,6 +1268,8 @@ export default {
   'pages.deskDashboard.aiAssistantFeature3': '按需确认操作权限，查看执行过程和结果',
   'pages.deskDashboard.openAssistant': '打开AI助手',
   'pages.aiAssistant.title': 'AI助手',
+  'pages.aiAssistant.backToOverview': '返回AI助手',
+  'pages.aiAssistant.overview.schedulesDescription': '管理会话定时续跑和独立自动任务',
   'pages.aiAssistant.subtitle': '跨平台 AI Provider 与有界语义操作全链路',
   'pages.aiAssistant.disabledTitle': 'AI助手已关闭',
   'pages.aiAssistant.disabledDescription': '设备总开关已阻止新的提问、观察、授权和动作；历史记录、取消、撤销授权与未知结果处置仍然可用。',

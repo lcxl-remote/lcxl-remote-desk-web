@@ -1,4 +1,4 @@
-import { Sparkles } from 'lucide-react'
+import { AiAssistantIcon } from '@/components/ai-assistant-icon'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 
@@ -43,7 +43,7 @@ export function AiGeneratedMark({
                 className,
             )}
         >
-            <Sparkles className="h-3 w-3" aria-hidden="true" />
+            <AiAssistantIcon className="h-3 w-3" />
             {t('component.aiGenerated.label')}
         </span>
     )

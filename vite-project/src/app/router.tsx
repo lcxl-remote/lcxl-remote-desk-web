@@ -58,6 +58,10 @@ export const router = createBrowserRouter([
                 lazy: async () => ({ Component: (await import('@/features/schedules/oss-page')).default }),
             },
             {
+                path: 'ai-assistant',
+                lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-overview')).AiAssistantOverview }),
+            },
+            {
                 path: 'ai-assistant/attention',
                 lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-attention-page')).default }),
             },

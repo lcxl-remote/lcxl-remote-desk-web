@@ -1270,6 +1270,8 @@ export default {
   'pages.deskDashboard.aiAssistantFeature3': 'Approve permissions as needed and review actions and results',
   'pages.deskDashboard.openAssistant': 'Open Assistant',
   'pages.aiAssistant.title': 'AI Assistant',
+  'pages.aiAssistant.backToOverview': 'Back to AI Assistant',
+  'pages.aiAssistant.overview.schedulesDescription': 'Manage conversation continuations and independent automated tasks',
   'pages.aiAssistant.subtitle': 'Cross-platform AI Provider and bounded semantic-operation path',
   'pages.aiAssistant.disabledTitle': 'AI Assistant is off',
   'pages.aiAssistant.disabledDescription': 'New questions, observations, permissions, and actions are blocked by the device-owned switch. History, cancellation, grant revocation, and unknown-outcome controls remain available.',

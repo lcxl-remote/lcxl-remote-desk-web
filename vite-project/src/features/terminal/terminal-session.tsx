@@ -7,7 +7,6 @@ import { WebLinksAddon } from "@xterm/addon-web-links"
 import "@xterm/xterm/css/xterm.css"
 import { useTranslation } from "react-i18next"
 import { Loader2, TerminalSquare } from "lucide-react"
-import { Sparkles, WandSparkles } from "lucide-react"
 import { readSessionGrant } from "@/features/desk/session-grant"
 import { Button } from "@/components/ui/button"
 import { v4 } from "uuid"
@@ -599,7 +598,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                         }}
                         title={t('pages.deskTerminal.completion.toggleHint')}
                     >
-                        <WandSparkles className="h-4 w-4 mr-2" />
+                        <AiAssistantIcon className="h-4 w-4 mr-2" />
                         {t('pages.deskTerminal.completion.title')}
                     </Button>
                     <Button
@@ -608,7 +607,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                         className="opacity-50 hover:opacity-100 transition-opacity"
                         onClick={() => setShowAssistant((v) => !v)}
                     >
-                        <Sparkles className="h-4 w-4 mr-2" />
+                        <AiAssistantIcon className="h-4 w-4 mr-2" />
                         {t('pages.deskTerminal.assistant.title')}
                     </Button>
                     <Button
@@ -653,7 +652,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                 )}
                 {completionEnabled && ghost && (
                     <div className="absolute bottom-2 left-4 right-4 z-10 flex items-center gap-2 rounded bg-black/60 px-3 py-1.5 text-xs text-gray-300 pointer-events-none">
-                        <WandSparkles className="h-3.5 w-3.5 shrink-0 text-sky-400" />
+                        <AiAssistantIcon className="h-3.5 w-3.5 shrink-0 text-sky-400" />
                         <span className="font-mono text-gray-500 truncate">
                             {currentPrefixRef.current}
                             <span className="text-sky-300">{ghost.suffix}</span>

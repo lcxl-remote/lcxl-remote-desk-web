@@ -151,7 +151,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                                 </Collapsible>
                             ) : (
                                 <SidebarMenuItem key={item.title}>
-                                    <SidebarMenuButton asChild tooltip={t(item.title)} isActive={location.pathname === item.url}>
+                                    <SidebarMenuButton asChild tooltip={t(item.title)} isActive={location.pathname === item.url || (item.url === '/ai-assistant' && (location.pathname.startsWith('/ai-assistant/') || location.pathname === '/schedules'))}>
                                         <Link to={item.url}>
                                             <item.icon />
                                             <span>{t(item.title)}</span>

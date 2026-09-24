@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bot } from 'lucide-react';
+import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 
 import { useGetModelUsage } from '@/services/hooks/modelUsageController/useGetModelUsage';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -38,7 +38,7 @@ export function ModelUsagePage() {
             <Card>
                 <CardHeader>
                     <div className="flex items-center gap-2">
-                        <Bot className="h-5 w-5 text-primary" />
+                        <AiAssistantIcon className="h-5 w-5 text-violet-500" />
                         <CardTitle>{t('pages.modelUsage.title')}</CardTitle>
                     </div>
                     <CardDescription>{t('pages.modelUsage.description')}</CardDescription>
