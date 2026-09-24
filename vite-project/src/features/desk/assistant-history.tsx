@@ -1,7 +1,7 @@
 import { formatLocalTime } from '@/lib/local-time';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { History, Loader2, Trash2 } from 'lucide-react';
+import { History, Loader2, MessageSquarePlus, Trash2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
@@ -10,12 +10,13 @@ import { AssistantBackupCleanup } from './assistant-backup-cleanup';
 
 type Session = { sessionId: string; conversationId: string | null; firstQuestion: string | null; updatedAt: string; active?: boolean };
 
-export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDeleted }: {
+export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDeleted, onNew }: {
     deskId: string;
     deviceId?: string | null;
     disabled: boolean;
     onDeleted?: (conversationId: string | null) => void;
     onSelect: (conversationId: string) => boolean;
+    onNew?: () => void;
 }) {
     const { t } = useTranslation();
     const [open, setOpen] = useState(false);
@@ -78,10 +79,14 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
                     <SheetTitle>{t('pages.aiAssistant.history.title')}</SheetTitle>
                     <SheetDescription>{t('pages.aiAssistant.history.hint')}</SheetDescription>
                 </SheetHeader>
+                {onNew && <Button type="button" className="w-full justify-start gap-2" disabled={disabled}
+                    onClick={() => { onNew(); setOpen(false); }}>
+                    <MessageSquarePlus className="h-4 w-4" aria-hidden="true" />
+                    {t('pages.aiAssistant.newConversation')}
+                </Button>}
                 {disabled && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.history.busy')}</p>}
                 {cleanupPending && <p role="status" className="text-sm text-muted-foreground">{t('pages.fileRecovery.deletionPending')}</p>}
                 <div className="min-h-0 flex-1 space-y-2 overflow-y-auto py-4">
-                    <AssistantBackupCleanup />
                     {loading && <p role="status">{t('pages.aiAssistant.history.loading')}</p>}
                     {error && <div role="alert">
                         <p>{t('pages.aiAssistant.history.error')}</p>
@@ -101,6 +106,7 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
                             aria-label={t('pages.aiAssistant.history.delete')}
                             onClick={() => { setDeleting(session); setDeleteError(false); }}><Trash2 className="size-4" /></Button>
                     </div>)}
+                    <AssistantBackupCleanup />
                 </div>
             </SheetContent>
         </Sheet>

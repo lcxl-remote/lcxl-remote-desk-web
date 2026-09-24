@@ -45,7 +45,7 @@ function batchResult(tool: AiAssistantToolActivity) {
     return null;
 }
 
-export function AssistantToolCall({ tool, running }: { tool?: AiAssistantToolActivity; running: boolean }) {
+export function AssistantToolCall({ tool, running, displayName }: { tool?: AiAssistantToolActivity; running: boolean; displayName?: string }) {
     const { t } = useTranslation();
     const [open, setOpen] = useState(false);
     if (!tool) return null;
@@ -56,13 +56,13 @@ export function AssistantToolCall({ tool, running }: { tool?: AiAssistantToolAct
     const outcomeUnknown = hasUnknownActionResult(tool.output, tool.callId);
     const status = tool.status === 'running' && !running ? 'missing' : tool.status;
     const StatusIcon = permissionSkip || outcomeUnknown ? CircleHelp : status === 'ok' ? CheckCircle2 : status === 'failed' ? XCircle : status === 'running' ? Loader2 : CircleHelp;
-    const statusLabel = t(`${prefix}${permissionSkip ? 'skippedForPermission' : outcomeUnknown ? 'outcomeUnknown' : status === 'ok' ? 'success' : status === 'failed' ? 'failure' : status === 'running' ? 'waiting' : 'missing'}`);
+    const statusLabel = t(`${prefix}${permissionSkip ? 'skippedForPermission' : outcomeUnknown ? 'outcomeUnknown' : status === 'ok' ? 'success' : status === 'failed' ? 'failure' : status === 'running' ? 'waiting' : status === 'unknown' ? 'statusUnknown' : 'missing'}`);
     const statusClass = permissionSkip || outcomeUnknown ? 'text-amber-700 dark:text-amber-300' : status === 'ok' ? 'text-green-600 dark:text-green-400' : status === 'failed' ? 'text-destructive' : 'text-muted-foreground';
     return <Disclosure open={open} onOpenChange={setOpen} className="min-w-0 rounded-md border bg-muted/30 px-3 py-2" title={<>
             <span role="img" aria-label={statusLabel} title={statusLabel} className={`mr-2 inline-flex align-middle ${statusClass}`}>
                 <StatusIcon aria-hidden="true" className={`size-4 shrink-0${status === 'running' && !permissionSkip && !outcomeUnknown ? ' animate-spin motion-reduce:animate-none' : ''}`} />
             </span>
-            {t(`${prefix}title`)} · {tool.name === 'unknown' ? t(`${prefix}unknown`) : tool.name}
+            {t(`${prefix}title`)} · {tool.name === 'unknown' ? t(`${prefix}unknown`) : displayName ?? tool.name}
             {permissionSkip && <> · {statusLabel}</>}
             {outcomeUnknown && !batch && <> · {t(`${prefix}inspectBeforeRetry`)}</>}
             {batch && <> · {t(`${prefix}${batch.key}`, { count: batch.count })}</>}

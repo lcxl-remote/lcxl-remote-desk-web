@@ -57,11 +57,12 @@ function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; on
     </div>;
 }
 
-export function AssistantImages({ sessionId, evidence, messages, renderMessage }: {
+export function AssistantImages({ sessionId, evidence, messages, renderMessage, renderToolGroup }: {
     sessionId?: string;
     evidence: AiAssistantVisualEvidence[];
     messages?: AiAssistantMessage[];
     renderMessage?: (message: AiAssistantMessage) => ReactNode;
+    renderToolGroup?: (messages: AiAssistantMessage[]) => ReactNode;
 }) {
     const { t } = useTranslation();
     const [stored, setStored] = useState<AiAssistantVisualEvidence[]>([]);
@@ -70,7 +71,15 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage }
     const [cursor, setCursor] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [failed, setFailed] = useState(false);
+    const [unplacedOpen, setUnplacedOpen] = useState(false);
     const run = sessionId ?? evidence[0]?.conversation_id;
+    useEffect(() => {
+        setStored([]);
+        setDeleted(new Set());
+        setCursor(null);
+        setUnplacedOpen(false);
+        exhausted.current = false;
+    }, [run]);
     useEffect(() => {
         if (!run) return;
         const controller = new AbortController();
@@ -86,7 +95,8 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage }
     // The attachment index is authoritative for durable images. Session frames
     // may still mention a deleted attachment after reopening a conversation.
     const frames = useMemo(() => [...new Map([...evidence.filter((f) => f.content?.kind !== 'artifact'), ...stored].map((f) => [f.evidence_id, f])).values()]
-        .filter((f) => !deleted.has(f.evidence_id)).sort((a, b) => a.captured_at_unix_ms - b.captured_at_unix_ms), [evidence, stored, deleted]);
+        .filter((f) => f.conversation_id === run && !deleted.has(f.evidence_id))
+        .sort((a, b) => a.captured_at_unix_ms - b.captured_at_unix_ms), [evidence, stored, deleted, run]);
     const more = async () => {
         if (!run || !cursor) return;
         setLoading(true);
@@ -111,23 +121,61 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage }
     </>;
     if (messages && renderMessage) {
         // Link to the final record for the call, so its result precedes its images.
-        const anchors = new Map(messages.flatMap((message, index) => message.toolCallId ? [[message.toolCallId, index] as const] : []));
-        const earlier = frames.filter(frame => !anchors.has(frame.tool_call_id));
+        const callAnchors = new Map(messages.flatMap((message, index) => message.toolCallId ? [[message.toolCallId, index] as const] : []));
+        const turnAnchors = new Map(messages.flatMap((message, index) => message.turnId &&
+            (message.role === 'tool_call' || message.role === 'tool_result') ? [[message.turnId, index] as const] : []));
+        messages.forEach((message, index) => {
+            if (message.turnId && !turnAnchors.has(message.turnId)) turnAnchors.set(message.turnId, index);
+        });
+        const anchorFor = (frame: AiAssistantVisualEvidence) => frame.tool_call_id
+            ? callAnchors.get(frame.tool_call_id)
+            : turnAnchors.get(frame.turn_id);
+        const earlier = frames.filter(frame => anchorFor(frame) === undefined);
         const byMessage = new Map<number, AiAssistantVisualEvidence[]>();
         for (const frame of frames) {
-            const index = anchors.get(frame.tool_call_id);
+            const index = anchorFor(frame);
             if (index !== undefined) byMessage.set(index, [...(byMessage.get(index) ?? []), frame]);
         }
+        const timeline: ReactNode[] = [];
+        let group: AiAssistantMessage[] = [];
+        let groupEnd = -1;
+        const flushGroup = () => {
+            if (!group.length) return;
+            const members = group;
+            const end = groupEnd;
+            timeline.push(<Fragment key={`tool-group:${members[0].id}`}>
+                {renderToolGroup ? renderToolGroup(members) : members.map(renderMessage)}
+                {renderImages(byMessage.get(end) ?? [])}
+            </Fragment>);
+            group = [];
+            groupEnd = -1;
+        };
+        messages.forEach((message, index) => {
+            if (renderToolGroup && (message.role === 'tool_call' || message.role === 'tool_result')) {
+                if (group.length && group[0].turnId !== message.turnId) flushGroup();
+                group.push(message);
+                groupEnd = index;
+                if (byMessage.has(index)) flushGroup();
+                return;
+            }
+            flushGroup();
+            timeline.push(<Fragment key={message.id}>{renderMessage(message)}{renderImages(byMessage.get(index) ?? [])}</Fragment>);
+        });
+        flushGroup();
         return <>
             {controls}
-            {earlier.length > 0 && <div className="space-y-2">
-                <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.imageEarlier')}</p>
-                {renderImages(earlier)}
-            </div>}
-            {messages.map((message, index) => <Fragment key={message.id}>
-                {renderMessage(message)}
-                {renderImages(byMessage.get(index) ?? [])}
-            </Fragment>)}
+            {earlier.length > 0 && <>
+                <Button type="button" variant="ghost" size="sm" onClick={() => setUnplacedOpen(true)}>
+                    {t('pages.aiAssistant.imageEarlier')} · {earlier.length}
+                </Button>
+                <Dialog open={unplacedOpen} onOpenChange={setUnplacedOpen}>
+                    <DialogContent className="max-h-[85vh] max-w-[95vw] overflow-y-auto sm:max-w-2xl">
+                        <DialogTitle>{t('pages.aiAssistant.imageEarlier')}</DialogTitle>
+                        {renderImages(earlier)}
+                    </DialogContent>
+                </Dialog>
+            </>}
+            {timeline}
         </>;
     }
     if (!frames.length && !failed) return null;

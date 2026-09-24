@@ -1,5 +1,14 @@
 .assistant-composer, .assistant-header { container-type: inline-size; }
-.assistant-action { gap: 0.5rem; }
+.assistant-action { gap: 0.5rem; min-width: 44px; min-height: 44px; }
+
+@media (max-width: 767px) {
+    .assistant-header button,
+    .assistant-composer button,
+    .assistant-scrollbar button {
+        min-width: 44px;
+        min-height: 44px;
+    }
+}
 
 /* Include nested tool output and code blocks in the transcript. */
 .assistant-scrollbar,

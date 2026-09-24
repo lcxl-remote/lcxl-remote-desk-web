@@ -57,3 +57,14 @@ it('does not render completed timer approvals in the conversation', async () => 
     await waitFor(() => expect(request).toHaveBeenCalled());
     await waitFor(() => expect(container.textContent).toBe(''));
 });
+
+it('reports the refreshed server state without treating it as a new decision', async () => {
+    const task = { schedule_id: 'task', kind: 'conversation_resume', status: 'pending_review', title: 'Later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 60 } } };
+    const request = vi.fn(async () => ({ result: 'task', task }));
+    const loaded = vi.fn();
+    const changed = vi.fn();
+    render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC"
+        assistantPaths={{}} onLoaded={loaded} onChanged={changed} approvalCard />);
+    await waitFor(() => expect(loaded).toHaveBeenCalledWith(task));
+    expect(changed).not.toHaveBeenCalled();
+});

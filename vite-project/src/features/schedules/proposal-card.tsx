@@ -7,7 +7,7 @@ import { useDeskSignaling } from '@/features/desk/use-desk-signaling';
 import { ScheduleClient } from './client';
 import { ProposalReview } from './proposal-review';
 
-export function ScheduleProposalCards({ tools, running = false, deviceId, connectionId }: { tools: AiAssistantToolActivity[]; running?: boolean; deviceId: string; connectionId: string }) {
+export function ScheduleProposalCards({ tools, running = false, deviceId, connectionId, onPendingCountChange }: { tools: AiAssistantToolActivity[]; running?: boolean; deviceId: string; connectionId: string; onPendingCountChange?: (count: number) => void }) {
     const { t } = useTranslation();
     const { isConnected, subscribe, sendTracked, cancelQueued } = useDeskSignaling();
     const client = useMemo(() => new ScheduleClient(sendTracked, cancelQueued), [sendTracked, cancelQueued]);
@@ -15,8 +15,8 @@ export function ScheduleProposalCards({ tools, running = false, deviceId, connec
     const [ids, setIds] = useState<string[]>([]);
     const [review, setReview] = useState<string | null>(null);
     const seen = useRef(new Set<string>());
-    const queued = useRef<string[]>([]);
     const waiting = useRef(new Set<string>());
+    const checkedDrafts = useRef(new Set<string>());
     useEffect(() => {
         const unsubscribe = subscribe(client.receive);
         return () => { unsubscribe(); client.close(); };
@@ -24,7 +24,7 @@ export function ScheduleProposalCards({ tools, running = false, deviceId, connec
     useEffect(() => {
         const added: string[] = [];
         for (const tool of tools) {
-            if (tool.name !== 'request_scheduled_task' || tool.status !== 'ok' || !tool.output || tool.output.length > 8192) continue;
+            if (tool.name !== 'request_scheduled_task' || tool.status === 'failed' || !tool.output || tool.output.length > 8192) continue;
             try {
                 const value = JSON.parse(tool.output);
                 if (((value.state === 'draft' && value.kind === 'fresh_task') || (value.state === 'pending_review' && value.kind === 'conversation_resume'))
@@ -35,15 +35,32 @@ export function ScheduleProposalCards({ tools, running = false, deviceId, connec
                 }
             } catch { /* Non-proposal output stays in the ordinary activity view. */ }
         }
-        if (added.length) { setIds(previous => [...previous, ...added]); queued.current.push(...added.filter(id => !waiting.current.has(id))); }
-        if (!running && !review && queued.current.length) setReview(queued.current.shift()!);
-    }, [tools, running, review]);
+        if (added.length) setIds(previous => [...previous, ...added]);
+    }, [tools]);
+    useEffect(() => {
+        if (!isConnected) { checkedDrafts.current.clear(); return; }
+        for (const id of ids) {
+            if (waiting.current.has(id) || checkedDrafts.current.has(id)) continue;
+            checkedDrafts.current.add(id);
+            void client.request({ operation: 'get', schedule_id: id }).then(response => {
+                if (response.result === 'task' && response.task.schedule_id === id) {
+                    setDecisions(previous => ({ ...previous, [id]: response.task.status }));
+                }
+            }).catch(() => { checkedDrafts.current.delete(id); });
+        }
+    }, [client, ids, isConnected]);
+    useEffect(() => {
+        onPendingCountChange?.(ids.filter(id => ['draft', 'pending_review'].includes(decisions[id])).length);
+    }, [decisions, ids, onPendingCountChange]);
     return <>
-        {ids.filter(id => !decisions[id] || ['draft', 'pending_review'].includes(decisions[id])).map(id => <article key={id} className="space-y-2 rounded-md border border-amber-500/40 p-3 empty:hidden">
+        {ids.filter(id => !decisions[id] || ['draft', 'pending_review'].includes(decisions[id])).map(id => <article key={id}
+            data-assistant-pending={['draft', 'pending_review'].includes(decisions[id]) ? '' : undefined} tabIndex={-1}
+            className="space-y-2 rounded-md border border-amber-500/40 p-3 empty:hidden">
             {!waiting.current.has(id) && <><p className="text-sm font-medium">{t(decisions[id] === 'active' ? 'schedules.proposal.approved' : decisions[id] === 'deleted' ? 'schedules.proposal.rejected' : 'schedules.proposal.created')}</p>
             <p className="text-xs text-muted-foreground">{t('schedules.proposal.note')}</p></>}
             {waiting.current.has(id) ? <ProposalReview client={client} scheduleId={id} connected={isConnected}
                 zone={Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'} assistantPaths={{}} approvalCard
+                onLoaded={task => setDecisions(previous => ({ ...previous, [task.schedule_id]: task.status }))}
                 onChanged={task => setDecisions(previous => ({ ...previous, [task.schedule_id]: task.status }))} />
                 : <Button type="button" size="sm" variant="outline" onClick={() => setReview(id)}>{t('schedules.proposal.open')}</Button>}
         </article>)}

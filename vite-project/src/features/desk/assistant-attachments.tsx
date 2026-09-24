@@ -7,19 +7,27 @@ import { Textarea } from '@/components/ui/textarea';
 import { deleteAssistantAttachments, getAssistantAttachment, listAssistantAttachments, readAssistantAttachment } from '@/services/clients';
 import type { AttachmentDto, AttachmentListDto, AttachmentPageDto } from '@/services/types';
 
-export function AssistantAttachments({ sessionId, attachmentIds }: { sessionId?: string | null; attachmentIds?: string[] }) {
+export function AssistantAttachments({ sessionId, attachmentIds, open, onOpenChange, showTrigger = true }: {
+    sessionId?: string | null;
+    attachmentIds?: string[];
+    open?: boolean;
+    onOpenChange?: (open: boolean) => void;
+    showTrigger?: boolean;
+}) {
     const { t } = useTranslation();
-    const [open, setOpen] = useState(false);
+    const [internalOpen, setInternalOpen] = useState(false);
+    const visible = open ?? internalOpen;
+    const setVisible = onOpenChange ?? setInternalOpen;
     // Remount the panel for every subject change, including a cleared session.
-    return <Dialog open={open} onOpenChange={setOpen}>
-        <Button variant="ghost" size="sm" className="assistant-action" disabled={!sessionId}
-            aria-label={t('pages.aiAssistant.attachments.title')} onClick={() => setOpen(true)}>
+    return <Dialog open={visible} onOpenChange={setVisible}>
+        {showTrigger && <Button variant="ghost" size="sm" className="assistant-action" disabled={!sessionId}
+            aria-label={t('pages.aiAssistant.attachments.title')} onClick={() => setVisible(true)}>
             <Paperclip className="h-4 w-4 shrink-0" aria-hidden="true" />
             <span className="assistant-action-label">{t('pages.aiAssistant.attachments.title')}</span>
-        </Button>
+        </Button>}
         <DialogContent className="flex max-h-[85vh] max-w-4xl flex-col overflow-hidden">
             <DialogTitle>{t('pages.aiAssistant.attachments.title')}</DialogTitle>
-            {open && sessionId && <AttachmentPanel key={sessionId} sessionId={sessionId} attachmentIds={attachmentIds} />}
+            {visible && sessionId && <AttachmentPanel key={sessionId} sessionId={sessionId} attachmentIds={attachmentIds} />}
         </DialogContent>
     </Dialog>;
 }

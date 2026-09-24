@@ -44,6 +44,7 @@ describe('durable assistant images', () => {
         const view = render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
             { id: 'answer', role: 'assistant', text: 'Later reply' },
         ]} renderMessage={renderMessage} />);
+        fireEvent.click(await screen.findByRole('button', { name: /pages.aiAssistant.imageEarlier/ }));
         fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
         await screen.findByRole('img');
         expect(screen.getByText('pages.aiAssistant.imageEarlier')).toBeTruthy();
@@ -56,6 +57,30 @@ describe('durable assistant images', () => {
         expect(screen.getAllByRole('button', { name: 'pages.aiAssistant.imageOpen' })).toHaveLength(1);
         expect(screen.getByText('Earlier capture').compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(getAssistantImage).toHaveBeenCalledTimes(1);
+    });
+    it('uses the server turn when a screenshot has no tool call and splits adjacent turns', async () => {
+        const turnFrame = { ...frame, tool_call_id: '' };
+        vi.mocked(listAssistantImages).mockResolvedValue({ data: [turnFrame], success: true, code: 0 });
+        render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'first', role: 'tool_call', toolCallId: 'other-call', turnId: 'earlier-turn', text: 'First' },
+            { id: 'second', role: 'tool_call', toolCallId: 'another-call', turnId: 'turn', text: 'Second' },
+            { id: 'answer', role: 'assistant', turnId: 'turn', text: 'Answer' },
+        ]} renderMessage={message => <p>{message.text}</p>}
+            renderToolGroup={group => <p>{group.map(message => message.text).join(', ')}</p>} />);
+        expect(await screen.findByText('First')).toBeTruthy();
+        expect(screen.getByText('Second')).toBeTruthy();
+        expect(screen.queryByText('First, Second')).toBeNull();
+        expect(screen.queryByText('pages.aiAssistant.imageEarlier')).toBeNull();
+        const imageButton = screen.getByRole('button', { name: 'pages.aiAssistant.imageOpen' });
+        expect(screen.getByText('Second').compareDocumentPosition(imageButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(imageButton.compareDocumentPosition(screen.getByText('Answer')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+    it('keeps a screenshot with an unloaded explicit tool call in materials', async () => {
+        render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'second', role: 'tool_call', toolCallId: 'another-call', turnId: 'turn', text: 'Second' },
+        ]} renderMessage={message => <p>{message.text}</p>} />);
+        expect(await screen.findByRole('button', { name: /pages.aiAssistant.imageEarlier/ })).toBeTruthy();
+        expect(screen.queryByRole('button', { name: 'pages.aiAssistant.imageOpen' })).toBeNull();
     });
     it('loads persisted images without any live preview and releases pixel URLs', async () => {
         const view = render(<AssistantImages sessionId="stored-run" evidence={[]} />);

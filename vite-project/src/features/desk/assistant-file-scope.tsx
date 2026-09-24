@@ -21,7 +21,8 @@ export type AssistantDirectoryOperation =
     | { kind: 'decide_directory'; directory_request_id: string; approve: boolean; expected_revision: number }
     | { kind: 'revoke_directory'; directory_request_id: string; expected_revision: number };
 
-export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpdate, deskId, sessionTargetId }: {
+export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpdate, deskId, sessionTargetId,
+    showPendingActions = true, onPendingJump }: {
     deskId?: string;
     // undefined: unresolved; null: selected anonymous in-process worker.
     sessionTargetId?: string | null;
@@ -30,6 +31,8 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
     onOpenChange: (open: boolean) => void;
     disabled: boolean;
     onUpdate: (operation: AssistantDirectoryOperation, timeoutMessage: string) => boolean;
+    showPendingActions?: boolean;
+    onPendingJump?: (requestId: string) => void;
 }) {
     const { t } = useTranslation();
     const [browsing, setBrowsing] = useState(false);
@@ -58,12 +61,15 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
                     <p className="text-xs">{directory.state === 'pending' ? t('pages.aiAssistant.directories.pending')
                         : directory.state === 'approved' ? t('pages.aiAssistant.directories.approved') : directory.state}</p>
                     <div className="flex gap-2">
-                        {directory.state === 'pending' ? <>
+                        {directory.state === 'pending' && showPendingActions ? <>
                             <Button type="button" size="sm" disabled={disabled} onClick={() => {
                                 submit({ kind: 'decide_directory', directory_request_id: directory.requestId, approve: true, expected_revision: scope.revision });
                             }}>{t('pages.aiAssistant.directories.approve')}</Button>
                             <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => submit({ kind: 'decide_directory', directory_request_id: directory.requestId, approve: false, expected_revision: scope.revision })}>{t('pages.aiAssistant.directories.reject')}</Button>
-                        </> : directory.state === 'approved' && <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => submit({ kind: 'revoke_directory', directory_request_id: directory.requestId, expected_revision: scope.revision })}>{t('pages.aiAssistant.directories.remove')}</Button>}
+                        </> : directory.state === 'pending' && onPendingJump ? <Button type="button" size="sm" variant="outline"
+                            onClick={() => { onOpenChange(false); onPendingJump(directory.requestId); }}>
+                            {t('pages.aiAssistant.directories.returnToReview')}
+                        </Button> : directory.state === 'approved' && <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => submit({ kind: 'revoke_directory', directory_request_id: directory.requestId, expected_revision: scope.revision })}>{t('pages.aiAssistant.directories.remove')}</Button>}
                     </div>
                 </div>)}
             </div>

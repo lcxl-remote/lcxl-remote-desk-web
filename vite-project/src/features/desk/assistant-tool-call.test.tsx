@@ -69,6 +69,12 @@ describe('tool call transcript', () => {
         expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.success' })).toBeNull();
     });
 
+    it('does not label a persisted result as success without an explicit outcome', () => {
+        render(<AssistantToolCall tool={{ ...tool, status: 'unknown', output: 'observed' }} running={false} />);
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.statusUnknown' })).toBeTruthy();
+        expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.success' })).toBeNull();
+    });
+
     it('starts folded, lazily renders payloads, and keeps expansion when output arrives', async () => {
         const { container, rerender } = render(<AssistantToolCall tool={tool} running />);
         expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);

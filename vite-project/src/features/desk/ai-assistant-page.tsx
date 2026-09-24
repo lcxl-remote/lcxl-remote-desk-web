@@ -2,7 +2,6 @@ import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel 
 import { AssistantAttachments, AssistantResultAttachments } from './assistant-attachments';
 import { requireRecoveryZip } from '@/lib/file-recovery-error';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Disclosure } from '@/components/ui/disclosure';
 import { AssistantObservationResult } from './assistant-observation-result';
 import { AssistantToolCall, isHistoricalPermissionSkip } from './assistant-tool-call';
@@ -15,7 +14,8 @@ import { AssistantReasoning } from './assistant-reasoning';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
 import { AssistantContextMeter } from './assistant-context-meter';
-import { AssistantComposerTools } from './assistant-composer-tools';
+import { AssistantDirectoryApproval } from './assistant-directory-approval';
+import { AssistantToolGroup } from './assistant-tool-group';
 import { AssistantFileScope } from './assistant-file-scope';
 import { AssistantConnectionIcon } from './assistant-connection-icon';
 import { AssistantCommandResult } from './assistant-command-result';
@@ -25,11 +25,15 @@ import { AssistantContextNotices, noticeMessageId } from './assistant-context-no
 import { AssistantPermissionRequest } from './assistant-permission-request';
 import { AssistantPermissionRecords } from './assistant-permission-records';
 import { AssistantHistory } from './assistant-history';
+import { AssistantMoreMenu, type AssistantMoreSection } from './assistant-more-menu';
+import { useIsMobile } from '@/hooks/use-mobile';
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { capabilityDescriptionKey } from './assistant-capability-copy';
 import { Fragment, type FormEvent, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, MessageSquarePlus, Check, Copy, Eye, LoaderCircle, Monitor, Puzzle, RefreshCw, Send, ShieldCheck, X } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Check, Copy, Eye, FolderKey, ListTodo, LoaderCircle, Monitor, Paperclip, Plus, Puzzle, RefreshCw, Send, Settings2, ShieldCheck, X } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -53,7 +57,7 @@ import {
     ownerSelectableWindows,
     useAiAssistantObservation,
 } from './use-ai-assistant-observation';
-import { useAiAssistantChat, type RehearsalConversation } from './use-ai-assistant-chat';
+import { useAiAssistantChat, type AiAssistantMessage, type RehearsalConversation } from './use-ai-assistant-chat';
 import { fetchGoalBudgetPolicy, type GoalBudgetPolicy } from '../settings/goal-budget-policy-settings';
 import { AiAssistantRehearsalGate } from './ai-assistant-rehearsal-gate';
 import { SessionTargetDialog } from './session-target-selection';
@@ -247,6 +251,7 @@ export function AiAssistantWorkspace({
 }) {
     const { t } = useTranslation();
     const { i18n } = useTranslation();
+    const isMobile = useIsMobile();
     const { isConnected, subscribe, sendMessage } = useDeskSignaling();
     const { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds, applications, listApplications, applicationSelectionAvailable } = useAiAssistantObservation({
         deskId,
@@ -301,18 +306,32 @@ export function AiAssistantWorkspace({
     const rehearsalCanStart = !rehearsal || (rehearsal.status === 'pending' && !chat.running && !chat.messages.some(message => message.role === 'user'));
     const [schedulesOpen, setSchedulesOpen] = useState(false);
     const [taskPanelSession, setTaskPanelSession] = useState<string | null>(null);
+    const [attachmentsOpen, setAttachmentsOpen] = useState(false);
+    const [goalDetailsOpen, setGoalDetailsOpen] = useState(false);
+    const [approvalSettingsOpen, setApprovalSettingsOpen] = useState(false);
+    const [addContextOpen, setAddContextOpen] = useState(false);
+    const [pendingScheduleCount, setPendingScheduleCount] = useState(0);
+    const [deviceSettingsOpen, setDeviceSettingsOpen] = useState(false);
     const [panel, setPanel] = useState<AssistantPanelId | null>(null);
     const [permissionHistorySession, setPermissionHistorySession] = useState<string | null>(null);
     const [directorySession, setDirectorySession] = useState<string | null>(null);
     const permissionHistoryKey = `${deskId}:${chat.conversationId}`;
     const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(true, permissionHistoryKey);
-    const pendingDirectoryKey = chat.fileScope.directories.filter(directory => directory.state === 'pending')
-        .map(directory => directory.requestId).join(':');
-    useEffect(() => {
-        if (pendingDirectoryKey) setDirectorySession(permissionHistoryKey);
-    }, [pendingDirectoryKey, permissionHistoryKey]);
+    const pendingDirectories = chat.fileScope.directories.filter(directory => directory.state === 'pending');
+    const pendingPermissionCount = chat.permissionRequests.filter(request => request.state === 'pending').length;
+    const pendingCount = pendingDirectories.length + pendingPermissionCount + pendingScheduleCount + Number(Boolean(chat.pendingGoalOpenRequest));
+    const runningTaskCount = [...chat.commandTasks, ...chat.backgroundTasks]
+        .filter(task => ['running', 'cancel_requested'].includes(task.state)).length;
+    const jumpToPending = (id?: string) => {
+        const target = id ? document.getElementById(id) : document.querySelector<HTMLElement>('[data-assistant-pending]');
+        target?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        target?.focus({ preventScroll: true });
+    };
     useEffect(() => { setPermissionHistorySession(null); }, [permissionHistoryKey]);
+    useEffect(() => { setPendingScheduleCount(0); }, [permissionHistoryKey]);
     const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
+    const selectedContextCount = new Set([...selectedCapabilityIds,
+        ...chat.attachments.filter(item => item.state === 'active').map(item => item.capabilityId)]).size;
     const [startGoal, setStartGoal] = useState(false);
     const [goalBudgetPolicy, setGoalBudgetPolicy] = useState<GoalBudgetPolicy | null>(null);
     useEffect(() => {
@@ -416,8 +435,47 @@ export function AiAssistantWorkspace({
         setPreviousCompletedGoalId(null);
     };
 
+    const displayNameForTool = (name: string) => {
+        const key = capabilities.snapshot?.entries.find(entry => entry.capability.tool_name === name)?.capability.display_name_key;
+        return key ? t(key, { defaultValue: name }) : name;
+    };
+    const displayNameForCall = (callId?: string) => {
+        const name = chat.tools.find(tool => tool.callId === callId)?.name;
+        return name ? displayNameForTool(name) : undefined;
+    };
+
+    const renderTranscriptMessage = (message: AiAssistantMessage) => (
+                            <Fragment key={message.id}>
+                            <div
+                                key={message.id}
+                                id={message.role === 'tool_call' ? `assistant-call-${message.toolCallId}` : undefined}
+                                tabIndex={message.role === 'tool_call' ? -1 : undefined}
+                                className={`max-w-[90%] rounded-lg px-3 py-2 text-sm ${
+                                    message.role === 'user'
+                                        ? 'ml-auto bg-muted'
+                                        : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
+                                }`}
+                            >
+                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running}
+                                    displayName={displayNameForCall(message.toolCallId)} /> : message.role === 'tool_result' ? <>
+                                    {message.permissionReason && <p className="mb-2 text-sm">{t('pages.aiAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p>}
+                                    {isHistoricalPermissionSkip(message.text) && <p className="mb-2 text-sm text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.historicalPermissionSkip')}</p>}
+                                    <AssistantCommandResult text={message.text} tool={chat.tools.find(tool => tool.callId === message.toolCallId)} onLocateCall={message.toolCallId ? () => { const target = document.getElementById(`assistant-call-${message.toolCallId}`); target?.scrollIntoView({ block: 'center', behavior: 'smooth' }); target?.focus({ preventScroll: true }); } : undefined} onExportBackup={exportBackup} />
+                                    <AssistantResultAttachments sessionId={chat.sessionId} text={message.text} />
+                                </> : message.role === 'assistant'
+                                    ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
+                                    : <p className="whitespace-pre-wrap">{message.text}</p>}
+                            </div>
+                            <AssistantContextNotices notices={chat.contextNotices.filter(notice => noticeMessageId(notice, chat.messages) === message.id)} />
+                            </Fragment>
+                        );
+
     const detailsContent = (
         <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.providerBoundary', {
+                provider: providerConfig?.wire_protocol ?? t('pages.aiAssistant.providerUnknown'),
+                model: providerConfig?.model ?? t('pages.aiAssistant.providerUnknown'),
+            })}</p>
                                 {chat.taskStatusProjection && (
                         <div data-testid="ai-assistant-task-status" className="space-y-2 rounded-md border p-3">
                             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -550,6 +608,36 @@ export function AiAssistantWorkspace({
 
         </div>
     );
+
+    const moreSections: AssistantMoreSection[] = [
+        { label: t('pages.aiAssistant.workspace.resources'), actions: [
+            { label: t('pages.aiAssistant.attachments.title'), icon: Paperclip,
+                disabled: !chat.sessionId, onSelect: () => setAttachmentsOpen(true) },
+            { label: t('pages.aiAssistant.directories.title'), icon: FolderKey,
+                onSelect: () => setDirectorySession(permissionHistoryKey) },
+            { label: t('pages.aiAssistant.schedules.title'), icon: CalendarClock,
+                onSelect: () => setSchedulesOpen(true) },
+            ...(!rehearsal ? [{ label: t('schedules.createResume'), icon: CalendarClock,
+                disabled: !assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision,
+                onSelect: () => { if (chat.conversationId && chat.inputRevision) scheduleNavigate(`/schedules?${new URLSearchParams({
+                    resume_conversation: chat.conversationId, resume_device: stableDeviceId,
+                    resume_revision: String(chat.inputRevision),
+                })}`); } }] : []),
+        ] },
+        { label: t('pages.aiAssistant.workspace.manage'), actions: [
+            { label: `${t('pages.aiAssistant.tasks.title')}${runningTaskCount > 0 ? ` (${runningTaskCount})` : ''}`,
+                icon: ListTodo, onSelect: () => setTaskPanelSession(permissionHistoryKey) },
+            { label: t('pages.aiAssistant.permissionHistory'), icon: ShieldCheck,
+                onSelect: () => setPermissionHistorySession(permissionHistoryKey) },
+            ...(featureProfile.approval_delegation ? [{ label: t('pages.aiAssistant.autoApprovalTitle'), icon: ShieldCheck,
+                onSelect: () => setApprovalSettingsOpen(true) }] : []),
+            { label: t('pages.aiAssistant.workspace.deviceSettings'), icon: Settings2,
+                onSelect: () => setDeviceSettingsOpen(true) },
+        ] },
+        { label: t('pages.aiAssistant.workspace.troubleshoot'), actions: [
+            { label: t('pages.aiAssistant.workspace.details'), onSelect: () => setPanel('details') },
+        ] },
+    ];
 
     return (
         <>
@@ -758,7 +846,11 @@ export function AiAssistantWorkspace({
             {!assistantEnabled && (
                 <Alert data-testid="ai-assistant-disabled">
                     <AlertTitle>{t('pages.aiAssistant.disabledTitle')}</AlertTitle>
-                    <AlertDescription>{t('pages.aiAssistant.disabledDescription')}</AlertDescription>
+                    <AlertDescription>{t('pages.aiAssistant.disabledDescription')}
+                        <Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => setDeviceSettingsOpen(true)}>
+                            {t('pages.aiAssistant.workspace.deviceSettings')}
+                        </Button>
+                    </AlertDescription>
                 </Alert>
             )}
             {[
@@ -797,11 +889,12 @@ export function AiAssistantWorkspace({
                             )}
                             <CardTitle className="flex min-w-0 items-center gap-2 text-base">
                                 <AssistantConnectionIcon connected={isConnected} enabled={assistantEnabled} />
-                                <span title={chat.sessionTarget?.display_name} className="truncate">{t('pages.aiAssistant.chatTitle')}</span>
+                                <span title={recoveryConnections.data?.find(item => item.connection_id === deskId)?.version_info.display_name ?? deskId}
+                                    className="truncate">{recoveryConnections.data?.find(item => item.connection_id === deskId)?.version_info.display_name
+                                        || chat.sessionTarget?.display_name || t('pages.aiAssistant.chatTitle')}</span>
                             </CardTitle>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
-                            <AssistantAttachments sessionId={chat.sessionId} />
                             <AssistantHistory deskId={deskId} deviceId={recoveryConnections.data?.find(item => item.connection_id === deskId)?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
                                 onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
                                 onSelect={(id) => {
@@ -809,24 +902,91 @@ export function AiAssistantWorkspace({
                                     setQuestion('');
                                     setSelectedCapabilityIds([]);
                                     return true;
-                                }} />
-                            {!rehearsal && <Button variant="ghost" size="sm" className="assistant-action" aria-label={t('schedules.createResume')} title={t('schedules.createResume')} disabled={!assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision} onClick={() => { if (!chat.conversationId || !chat.inputRevision) return; scheduleNavigate(`/schedules?${new URLSearchParams({ resume_conversation: chat.conversationId, resume_device: stableDeviceId, resume_revision: String(chat.inputRevision) })}`); }}><CalendarClock className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('schedules.createResume')}</span></Button>}
-                            <Button variant="ghost" size="sm" className="assistant-action" aria-label={t('pages.aiAssistant.newConversation')} title={t('pages.aiAssistant.newConversation')} onClick={resetConversation} disabled={!!rehearsal || !assistantEnabled || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}>
-                                <MessageSquarePlus className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('pages.aiAssistant.newConversation')}</span>
-                            </Button>
+                                }} onNew={resetConversation} />
+                            <AssistantMoreMenu sections={moreSections} />
                         </div>
                     </div>
-
-                    <CardDescription>
-                        {t('pages.aiAssistant.providerBoundary', {
-                            provider: providerConfig?.wire_protocol ?? t('pages.aiAssistant.providerUnknown'),
-                            model: providerConfig?.model ?? t('pages.aiAssistant.providerUnknown'),
-                        })}
-                    </CardDescription>
                 </CardHeader>
                 <CardContent className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3 pt-0">
+                    {(pendingCount > 0 || runningTaskCount > 0 || chat.goal || chat.approvalDelegation?.status === 'active') && (
+                        <div className="flex w-full min-w-0 shrink-0 items-center gap-2 overflow-x-auto px-1 text-xs">
+                            {pendingCount > 0 && <Button type="button" size="sm" variant="outline" className="shrink-0 border-amber-500/50"
+                                onClick={() => jumpToPending()}>{t('pages.aiAssistant.workspace.pendingCount', { count: pendingCount })}</Button>}
+                            {runningTaskCount > 0 && <Button type="button" size="sm" variant="ghost" className="shrink-0" onClick={() => setTaskPanelSession(permissionHistoryKey)}>
+                                {t('pages.aiAssistant.workspace.runningTasks', { count: runningTaskCount })}</Button>}
+                            {chat.goal && <Button type="button" size="sm" variant="ghost" className="max-w-[min(70vw,22rem)] shrink-0 truncate" onClick={() => setGoalDetailsOpen(true)}>
+                                {t(`pages.aiAssistant.goalStates.${chat.goal.state}`)} · {chat.goal.goalText}</Button>}
+                            {chat.approvalDelegation?.status === 'active' && <Button type="button" size="sm" variant="ghost" className="shrink-0" onClick={() => setApprovalSettingsOpen(true)}>
+                                {t('pages.aiAssistant.workspace.autoApprovalActive')}</Button>}
+                        </div>
+                    )}
+                    <div className="relative min-h-0 flex-1">
+                    <div ref={scrollRef} onScroll={onScroll} data-testid="assistant-scroll-area"
+                        className="assistant-scrollbar h-full overflow-y-auto overscroll-contain [overflow-wrap:anywhere]">
+                    <div ref={contentRef} className="mx-auto w-full max-w-[840px] space-y-4 pb-4">
+                    <div data-testid="ai-assistant-transcript" className="min-h-48 space-y-5 py-4">
+                        {chat.hydrating && <Skeleton className="h-20 w-full" />}
+                        {chat.hasMoreMessages && (
+                            <div className="flex justify-center">
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="ghost"
+                                    disabled={chat.loadingOlderMessages}
+                                    onClick={() => void chat.loadOlderMessages()}
+                                >
+                                    {chat.loadingOlderMessages && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
+                                    {t('pages.aiAssistant.loadEarlierMessages')}
+                                </Button>
+                            </div>
+                        )}
+                        <AssistantDocumentPreviews previews={chat.documentPreviews}
+                            requestPage={chat.requestDocumentPreviewPage} />
+                        <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence}
+                            messages={chat.messages} renderMessage={renderTranscriptMessage}
+                            renderToolGroup={messages => <AssistantToolGroup messages={messages} tools={chat.tools}
+                                renderMessage={renderTranscriptMessage} displayNameForTool={displayNameForTool} />} />
+                        <AssistantContextNotices historical notices={chat.contextNotices.filter(notice => !noticeMessageId(notice, chat.messages))} />
+                        <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running}
+                            deviceId={stableDeviceId} connectionId={deskId} onPendingCountChange={setPendingScheduleCount} />
+                        {chat.partial && (
+                            <MarkdownContent disableLinks className="max-w-[90%] rounded-lg bg-muted px-3 py-2 text-sm">
+                                {chat.partial}
+                            </MarkdownContent>
+                        )}
+                    </div>
+
+                    {externalSendReceipts.length > 0 && (
+                        <div data-testid="ai-assistant-external-send-results" className="space-y-3">
+                            {externalSendReceipts.map(({ tool, receipt }) => (
+                                <div
+                                    key={tool.callId}
+                                    className={`space-y-1 rounded-md border p-3 ${
+                                        receipt.outcome === 'sent'
+                                            ? 'border-emerald-500/50 bg-emerald-500/5'
+                                            : receipt.outcome === 'outcome_unknown'
+                                                ? 'border-amber-500/50 bg-amber-500/5'
+                                                : 'border-slate-500/40 bg-muted/30'
+                                    }`}
+                                >
+                                    <p className="flex items-center gap-2 text-sm font-medium">
+                                        {receipt.outcome === 'outcome_unknown' && <AlertTriangle className="h-4 w-4" />}
+                                        {t(`pages.aiAssistant.externalSendResult.${receipt.outcome}`)}
+                                    </p>
+                                    <p className="text-xs text-muted-foreground">
+                                        {t('pages.aiAssistant.externalSendResultDescription.' + receipt.outcome)}
+                                    </p>
+                                    <p className="break-all text-xs text-muted-foreground">
+                                        {tool.name} · {new Date(receipt.observed_at_unix_ms).toLocaleString()}
+                                        {receipt.provider_receipt_id ? ` · ${receipt.provider_receipt_id}` : ''}
+                                    </p>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    <div data-assistant-pending={chat.pendingGoalOpenRequest ? '' : undefined} tabIndex={-1}>
                     {chat.pendingGoalOpenRequest && (
-                        <div data-testid="ai-assistant-goal-open-request" className="shrink-0 rounded-md border border-amber-500/50 bg-amber-500/5 px-3 py-2 text-xs">
+                        <div data-testid="ai-assistant-goal-open-request" className="rounded-md border border-amber-500/50 bg-amber-500/5 px-3 py-2 text-xs">
                             <p className="font-medium">{t(chat.pendingGoalOpenRequest.targetGoalId
                                 ? 'pages.aiAssistant.goalRevisionTitle'
                                 : 'pages.aiAssistant.goalProposalTitle')}</p>
@@ -867,8 +1027,168 @@ export function AiAssistantWorkspace({
                             </div>
                         </div>
                     )}
+                    </div>
+                    {pendingDirectories.map(directory => <div key={directory.requestId} data-assistant-pending tabIndex={-1}>
+                        <AssistantDirectoryApproval directory={directory} revision={chat.fileScope.revision}
+                            disabled={!assistantEnabled || !isConnected || chat.hydrating}
+                            busy={chat.contextUpdating} onUpdate={chat.updateDirectory} />
+                    </div>)}
+                    <AssistantBackgroundTasks key={`tasks:${permissionHistoryKey}`}
+                        open={taskPanelSession === permissionHistoryKey}
+                        onOpenChange={open => setTaskPanelSession(open ? permissionHistoryKey : null)}
+                        commands={chat.commandTasks} providers={chat.backgroundTasks} tools={chat.tools}
+                        connected={isConnected} canCancelProvider={featureProfile.background_task_cancel}
+                        cancelling={chat.taskCancelling} onCancel={chat.cancelTask} />
+                    <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope}
+                        deskId={deskId} sessionTargetId={chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
+                        open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
+                        disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory}
+                        showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />
+                    <div data-assistant-pending={pendingPermissionCount > 0 ? '' : undefined} tabIndex={-1}>
+                    <AssistantPermissionRecords key={permissionHistoryKey} requests={chat.permissionRequests}
+                        open={permissionHistorySession === permissionHistoryKey}
+                        onOpenChange={(open) => setPermissionHistorySession(open ? permissionHistoryKey : null)}>
+                            {(request) => (
+                                <AssistantPermissionRequest key={`${permissionHistoryKey}:${request.requestId}:${request.inputRevision}`}
+                                    request={request} canDecide={featureProfile.permission_decision && request.inputRevision === chat.inputRevision}
+                                    disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.turnRunning}
+                                    busy={chat.permissionUpdating} waitingForTurn={chat.turnRunning} onDecide={chat.decidePermissionItems} />
+                            )}
+                    </AssistantPermissionRecords>
+                    </div>
+                    {featureProfile.exec_pty && Object.entries(exec.entries).map(([row, entry]) => {
+                        const rowIndex = Number(row);
+                        return (
+                            <div key={row} data-testid="ai-assistant-exec">
+                                <ExecLifecycle
+                                    entry={entry}
+                                    onApprove={() => exec.approve(rowIndex)}
+                                    onReject={() => exec.reject(rowIndex)}
+                                    onCancel={() => exec.cancel(rowIndex)}
+                                    onDismiss={() => exec.dismiss(rowIndex)}
+                                    ptyClient={exec.ptyClient(rowIndex)}
+                                    approvalDisabled={!assistantEnabled}
+                                />
+                            </div>
+                        );
+                    })}
+                    {chat.error && (
+                        <Alert variant="destructive">
+                            <AlertTitle>{t('pages.aiAssistant.chatErrorTitle')}</AlertTitle>
+                            <AlertDescription>{chat.error === 'history_restore_failed' ? t('pages.aiAssistant.history.restoreError') : chat.error === 'selected_context_expired' ? t('pages.aiAssistant.selectedContextExpired') : chat.error}</AlertDescription>
+                        </Alert>
+                    )}
+                    {rehearsal && <Alert><AlertDescription>{t('schedules.rehearsal.executionNote')}</AlertDescription></Alert>}
+                    </div>
+                    </div>
+                    {showJumpToLatest && (
+                        <Button type="button" variant="outline" size="icon" onClick={jumpToLatest}
+                            className="absolute bottom-3 right-3 rounded-full bg-background shadow-md"
+                            aria-label={t('pages.aiAssistant.scrollToLatest')}
+                            title={t('pages.aiAssistant.scrollToLatest')}>
+                            <ArrowDown className="h-4 w-4" />
+                        </Button>
+                    )}
+                    </div>
+                    <form onSubmit={submit} className="assistant-composer mx-auto w-full max-w-[840px] shrink-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm">
+                        {chat.deliveryState && <div role="status" className="flex items-center justify-between gap-2 text-sm">
+                            <span>{t(chat.deliveryState === 'sending' ? 'pages.aiAssistant.deliverySending' : 'pages.aiAssistant.deliveryUnconfirmed')}</span>
+                            {chat.deliveryState === 'unconfirmed' && <Button type="button" size="sm" variant="outline"
+                                disabled={!isConnected || !chat.sessionTargetReady} onClick={() => void chat.retryDelivery()}>
+                                {t('pages.aiAssistant.deliveryRetry')}
+                            </Button>}
+                        </div>}
+                        {!rehearsal && startGoal && !offPageReminderAvailable && (
+                            <p className="text-xs text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.goalNoOffPageReminder')}</p>
+                        )}
+                        {!rehearsal && startGoal && previousCompletedGoalId && (
+                            <p className="text-xs text-muted-foreground">
+                                {t('pages.aiAssistant.goalContinuesPrevious', { goalId: previousCompletedGoalId })}
+                            </p>
+                        )}
+                        <Textarea
+                            value={question}
+                            readOnly={!!rehearsal}
+                            onChange={(event) => setQuestion(event.target.value)}
+                            placeholder={t('pages.aiAssistant.questionPlaceholder')}
+                            maxLength={16_384}
+                            disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}
+                            className="min-h-16 max-h-40 w-full resize-y rounded-md border-0 bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                        />
+                        <div className="flex min-w-0 items-center gap-1">
+                            {isMobile ? <>
+                                <Button type="button" variant="ghost" size="icon" className="h-11 w-11 shrink-0"
+                                    aria-label={t('pages.aiAssistant.workspace.addContext')} onClick={() => setAddContextOpen(true)}>
+                                    <Plus className="h-4 w-4" aria-hidden="true" />
+                                </Button>
+                                <Sheet open={addContextOpen} onOpenChange={setAddContextOpen}>
+                                    <SheetContent side="bottom" className="max-h-[85dvh] overflow-y-auto rounded-t-xl px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-5">
+                                        <SheetHeader><SheetTitle>{t('pages.aiAssistant.workspace.addContext')}</SheetTitle></SheetHeader>
+                                        <div className="mt-4 space-y-2">
+                                            <Button type="button" variant="ghost" className="min-h-11 w-full justify-start"
+                                                onClick={() => { setAddContextOpen(false); setPanel('context'); }}>
+                                                {t('pages.aiAssistant.workspace.addContext')}
+                                            </Button>
+                                            {!rehearsal && <Button type="button" variant="ghost" className="min-h-11 w-full justify-start gap-2"
+                                                aria-pressed={startGoal} disabled={!assistantEnabled || chat.turnRunning || !!chat.deliveryState}
+                                                onClick={() => { setStartGoal(!startGoal); setPreviousCompletedGoalId(null); }}>
+                                                <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">{startGoal && <Check className="h-4 w-4" aria-hidden="true" />}</span>
+                                                {t('pages.aiAssistant.goalStart')}
+                                            </Button>}
+                                            {!rehearsal && startGoal && goalBudgetPolicy && <GoalLimitsSummary policy={goalBudgetPolicy} />}
+                                        </div>
+                                    </SheetContent>
+                                </Sheet>
+                            </> : <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                    <Button type="button" variant="ghost" size="icon" className="h-11 w-11 shrink-0"
+                                        aria-label={t('pages.aiAssistant.workspace.addContext')}>
+                                        <Plus className="h-4 w-4" aria-hidden="true" />
+                                    </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="start" className="max-w-[min(90vw,20rem)]">
+                                    <DropdownMenuItem onSelect={() => setPanel('context')}>
+                                        {t('pages.aiAssistant.workspace.addContext')}
+                                    </DropdownMenuItem>
+                                    {!rehearsal && <DropdownMenuCheckboxItem checked={startGoal}
+                                        disabled={!assistantEnabled || chat.turnRunning || !!chat.deliveryState}
+                                        onCheckedChange={checked => { setStartGoal(checked); setPreviousCompletedGoalId(null); }}>
+                                        {t('pages.aiAssistant.goalStart')}
+                                    </DropdownMenuCheckboxItem>}
+                                    {!rehearsal && startGoal && goalBudgetPolicy && <div className="px-2 py-1"><GoalLimitsSummary policy={goalBudgetPolicy} /></div>}
+                                </DropdownMenuContent>
+                            </DropdownMenu>}
+                            {selectedContextCount > 0 && <Button type="button" size="sm" variant="secondary" className="min-w-0 max-w-[min(28vw,10rem)] truncate"
+                                onClick={() => setPanel('context')}>
+                                {t('pages.aiAssistant.workspace.contextCount', { count: selectedContextCount })}
+                            </Button>}
+                            {startGoal && <Button type="button" size="sm" variant="secondary" className="min-w-0 max-w-[min(28vw,10rem)] gap-1"
+                                onClick={() => { setStartGoal(false); setPreviousCompletedGoalId(null); }}>
+                                <span className="truncate">{t('pages.aiAssistant.goalStart')}</span><X className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                            </Button>}
+                            <div className="ml-auto flex shrink-0 items-center gap-1">
+                                <AssistantContextMeter usage={chat.contextUsage} draft={question} />
+                                {chat.turnRunning ? (
+                                    <Button type="button" className="assistant-action" aria-label={t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')} onClick={chat.stop} disabled={!chat.canStop || chat.stopping}>
+                                        <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" />
+                                        <span className="assistant-action-label">{t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')}</span>
+                                    </Button>
+                                ) : (
+                                    <Button type="submit" className="assistant-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')} disabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model || (startGoal && !goalBudgetPolicy)}>
+                                        <Send className="h-4 w-4 shrink-0" />
+                                        <span className="assistant-action-label">{t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')}</span>
+                                    </Button>
+                                )}
+                            </div>
+                        </div>
+                    </form>
+                    <AssistantAttachments sessionId={chat.sessionId} open={attachmentsOpen}
+                        onOpenChange={setAttachmentsOpen} showTrigger={false} />
+                    <Sheet open={goalDetailsOpen} onOpenChange={setGoalDetailsOpen}>
+                        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+                            <SheetHeader><SheetTitle>{t('pages.aiAssistant.goalStart')}</SheetTitle></SheetHeader>
                     {chat.goal && (
-                        <div data-testid="ai-assistant-goal" className="shrink-0 rounded-md border bg-muted/30 px-3 py-2 text-xs">
+                        <div data-testid="ai-assistant-goal" className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
                             <div className="flex items-center justify-between gap-2">
                                 <span className="min-w-0 truncate font-medium" title={chat.goal.goalText}>{chat.goal.goalText}</span>
                                 <Badge variant="outline">{t(`pages.aiAssistant.goalStates.${chat.goal.state}`)}</Badge>
@@ -939,8 +1259,13 @@ export function AiAssistantWorkspace({
                             </Button>}
                         </div>
                     )}
+                        </SheetContent>
+                    </Sheet>
+                    <Sheet open={approvalSettingsOpen} onOpenChange={setApprovalSettingsOpen}>
+                        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+                            <SheetHeader><SheetTitle>{t('pages.aiAssistant.autoApprovalTitle')}</SheetTitle></SheetHeader>
                     {!rehearsal && featureProfile.approval_delegation && chat.conversationId && (
-                        <div data-testid="ai-assistant-automatic-approval" className="shrink-0 rounded-md border px-3 py-2 text-xs">
+                        <div data-testid="ai-assistant-automatic-approval" className="rounded-md border px-3 py-2 text-xs">
                             <div className="flex items-center justify-between gap-3">
                                 <div className="min-w-0">
                                     <p className="flex items-center gap-2 font-medium"><ShieldCheck className="h-4 w-4" />{t('pages.aiAssistant.autoApprovalTitle')}</p>
@@ -965,216 +1290,17 @@ export function AiAssistantWorkspace({
                                     : null}
                         </div>
                     )}
-                    <div className="relative min-h-0 flex-1">
-                    <div ref={scrollRef} onScroll={onScroll} data-testid="assistant-scroll-area"
-                        className="assistant-scrollbar h-full overflow-y-auto overscroll-contain [overflow-wrap:anywhere]">
-                    <div ref={contentRef} className="space-y-4 pb-4">
-                    <div data-testid="ai-assistant-transcript" className="min-h-48 space-y-5 py-4">
-                        {chat.hydrating && <Skeleton className="h-20 w-full" />}
-                        {chat.hasMoreMessages && (
-                            <div className="flex justify-center">
-                                <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="ghost"
-                                    disabled={chat.loadingOlderMessages}
-                                    onClick={() => void chat.loadOlderMessages()}
-                                >
-                                    {chat.loadingOlderMessages && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
-                                    {t('pages.aiAssistant.loadEarlierMessages')}
-                                </Button>
-                            </div>
-                        )}
-                        <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running} deviceId={stableDeviceId} connectionId={deskId} />
-                        <AssistantDocumentPreviews previews={chat.documentPreviews}
-                            requestPage={chat.requestDocumentPreviewPage} />
-                        <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence}
-                            messages={chat.messages} renderMessage={(message) => (
-                            <Fragment key={message.id}>
-                            <div
-                                key={message.id}
-                                id={message.role === 'tool_call' ? `assistant-call-${message.toolCallId}` : undefined}
-                                tabIndex={message.role === 'tool_call' ? -1 : undefined}
-                                className={`max-w-[90%] rounded-lg px-3 py-2 text-sm ${
-                                    message.role === 'user'
-                                        ? 'ml-auto bg-muted'
-                                        : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
-                                }`}
-                            >
-                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running} /> : message.role === 'tool_result' ? <>
-                                    {message.permissionReason && <p className="mb-2 text-sm">{t('pages.aiAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p>}
-                                    {isHistoricalPermissionSkip(message.text) && <p className="mb-2 text-sm text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.historicalPermissionSkip')}</p>}
-                                    <AssistantCommandResult text={message.text} tool={chat.tools.find(tool => tool.callId === message.toolCallId)} onLocateCall={message.toolCallId ? () => { const target = document.getElementById(`assistant-call-${message.toolCallId}`); target?.scrollIntoView({ block: 'center', behavior: 'smooth' }); target?.focus({ preventScroll: true }); } : undefined} onExportBackup={exportBackup} />
-                                    <AssistantResultAttachments sessionId={chat.sessionId} text={message.text} />
-                                </> : message.role === 'assistant'
-                                    ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
-                                    : <p className="whitespace-pre-wrap">{message.text}</p>}
-                            </div>
-                            <AssistantContextNotices notices={chat.contextNotices.filter(notice => noticeMessageId(notice, chat.messages) === message.id)} />
-                            </Fragment>
-                        )} />
-                        <AssistantContextNotices historical notices={chat.contextNotices.filter(notice => !noticeMessageId(notice, chat.messages))} />
-                        {chat.partial && (
-                            <MarkdownContent disableLinks className="max-w-[90%] rounded-lg bg-muted px-3 py-2 text-sm">
-                                {chat.partial}
-                            </MarkdownContent>
-                        )}
-                    </div>
-
-                    {externalSendReceipts.length > 0 && (
-                        <div data-testid="ai-assistant-external-send-results" className="space-y-3">
-                            {externalSendReceipts.map(({ tool, receipt }) => (
-                                <div
-                                    key={tool.callId}
-                                    className={`space-y-1 rounded-md border p-3 ${
-                                        receipt.outcome === 'sent'
-                                            ? 'border-emerald-500/50 bg-emerald-500/5'
-                                            : receipt.outcome === 'outcome_unknown'
-                                                ? 'border-amber-500/50 bg-amber-500/5'
-                                                : 'border-slate-500/40 bg-muted/30'
-                                    }`}
-                                >
-                                    <p className="flex items-center gap-2 text-sm font-medium">
-                                        {receipt.outcome === 'outcome_unknown' && <AlertTriangle className="h-4 w-4" />}
-                                        {t(`pages.aiAssistant.externalSendResult.${receipt.outcome}`)}
-                                    </p>
-                                    <p className="text-xs text-muted-foreground">
-                                        {t('pages.aiAssistant.externalSendResultDescription.' + receipt.outcome)}
-                                    </p>
-                                    <p className="break-all text-xs text-muted-foreground">
-                                        {tool.name} · {new Date(receipt.observed_at_unix_ms).toLocaleString()}
-                                        {receipt.provider_receipt_id ? ` · ${receipt.provider_receipt_id}` : ''}
-                                    </p>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                    <AssistantBackgroundTasks key={`tasks:${permissionHistoryKey}`}
-                        open={taskPanelSession === permissionHistoryKey}
-                        onOpenChange={open => setTaskPanelSession(open ? permissionHistoryKey : null)}
-                        commands={chat.commandTasks} providers={chat.backgroundTasks} tools={chat.tools}
-                        connected={isConnected} canCancelProvider={featureProfile.background_task_cancel}
-                        cancelling={chat.taskCancelling} onCancel={chat.cancelTask} />
-                    <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope}
-                        deskId={deskId} sessionTargetId={chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
-                        open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
-                        disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory} />
-                    <AssistantPermissionRecords key={permissionHistoryKey} requests={chat.permissionRequests}
-                        open={permissionHistorySession === permissionHistoryKey}
-                        onOpenChange={(open) => setPermissionHistorySession(open ? permissionHistoryKey : null)}>
-                            {(request) => (
-                                <AssistantPermissionRequest key={`${permissionHistoryKey}:${request.requestId}:${request.inputRevision}`}
-                                    request={request} canDecide={featureProfile.permission_decision && request.inputRevision === chat.inputRevision}
-                                    disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.turnRunning}
-                                    busy={chat.permissionUpdating} waitingForTurn={chat.turnRunning} onDecide={chat.decidePermissionItems} />
-                            )}
-                    </AssistantPermissionRecords>
-                    {featureProfile.exec_pty && Object.entries(exec.entries).map(([row, entry]) => {
-                        const rowIndex = Number(row);
-                        return (
-                            <div key={row} data-testid="ai-assistant-exec">
-                                <ExecLifecycle
-                                    entry={entry}
-                                    onApprove={() => exec.approve(rowIndex)}
-                                    onReject={() => exec.reject(rowIndex)}
-                                    onCancel={() => exec.cancel(rowIndex)}
-                                    onDismiss={() => exec.dismiss(rowIndex)}
-                                    ptyClient={exec.ptyClient(rowIndex)}
-                                    approvalDisabled={!assistantEnabled}
-                                />
-                            </div>
-                        );
-                    })}
-                    {chat.error && (
-                        <Alert variant="destructive">
-                            <AlertTitle>{t('pages.aiAssistant.chatErrorTitle')}</AlertTitle>
-                            <AlertDescription>{chat.error === 'history_restore_failed' ? t('pages.aiAssistant.history.restoreError') : chat.error === 'selected_context_expired' ? t('pages.aiAssistant.selectedContextExpired') : chat.error}</AlertDescription>
-                        </Alert>
-                    )}
-                    {rehearsal && <Alert><AlertDescription>{t('schedules.rehearsal.executionNote')}</AlertDescription></Alert>}
-                    </div>
-                    </div>
-                    {showJumpToLatest && (
-                        <Button type="button" variant="outline" size="icon" onClick={jumpToLatest}
-                            className="absolute bottom-3 right-3 rounded-full bg-background shadow-md"
-                            aria-label={t('pages.aiAssistant.scrollToLatest')}
-                            title={t('pages.aiAssistant.scrollToLatest')}>
-                            <ArrowDown className="h-4 w-4" />
-                        </Button>
-                    )}
-                    </div>
-                    <form onSubmit={submit} className="assistant-composer shrink-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm">
-                        {chat.deliveryState && <div role="status" className="flex items-center justify-between gap-2 text-sm">
-                            <span>{t(chat.deliveryState === 'sending' ? 'pages.aiAssistant.deliverySending' : 'pages.aiAssistant.deliveryUnconfirmed')}</span>
-                            {chat.deliveryState === 'unconfirmed' && <Button type="button" size="sm" variant="outline"
-                                disabled={!isConnected || !chat.sessionTargetReady} onClick={() => void chat.retryDelivery()}>
-                                {t('pages.aiAssistant.deliveryRetry')}
-                            </Button>}
-                        </div>}
-                        <div className="flex flex-wrap items-center gap-2">
-                            <Button type="button" size="sm" variant="ghost" onClick={() => setPanel('context')}>
-                                {t('pages.aiAssistant.workspace.addContext')}
-                            </Button>
-                            <span className="text-xs text-muted-foreground">{t('pages.aiAssistant.workspace.contextCount', {
-                                count: new Set([...selectedCapabilityIds, ...chat.attachments.filter((item) => item.state === 'active').map((item) => item.capabilityId)]).size,
-                            })}</span>
-                        </div>
-                        {!rehearsal && (
-                            <label className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm">
-                                <Checkbox checked={startGoal} onCheckedChange={(checked) => {
-                                    setStartGoal(checked === true);
-                                    setPreviousCompletedGoalId(null);
-                                }}
-                                    disabled={!assistantEnabled || chat.turnRunning || !!chat.deliveryState} />
-                                <span className="space-y-0.5">
-                                    <span className="block font-medium">{t('pages.aiAssistant.goalStart')}</span>
-                                    <span className="block text-xs text-muted-foreground">{t('pages.aiAssistant.goalStartDescription')}</span>
-                                </span>
-                            </label>
-                        )}
-                        {!rehearsal && startGoal && !offPageReminderAvailable && (
-                            <p className="text-xs text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.goalNoOffPageReminder')}</p>
-                        )}
-                        {!rehearsal && startGoal && goalBudgetPolicy && <GoalLimitsSummary policy={goalBudgetPolicy} />}
-                        {!rehearsal && startGoal && previousCompletedGoalId && (
-                            <p className="text-xs text-muted-foreground">
-                                {t('pages.aiAssistant.goalContinuesPrevious', { goalId: previousCompletedGoalId })}
-                            </p>
-                        )}
-                        <Textarea
-                            value={question}
-                            readOnly={!!rehearsal}
-                            onChange={(event) => setQuestion(event.target.value)}
-                            placeholder={t('pages.aiAssistant.questionPlaceholder')}
-                            maxLength={16_384}
-                            disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}
-                            className="min-h-16 max-h-40 w-full resize-y rounded-md border-0 bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                        />
-                        <div className="flex flex-wrap items-center justify-between gap-1">
-                            <AssistantComposerTools
-                                meter={<AssistantContextMeter usage={chat.contextUsage} draft={question} />}
-                                onTasks={() => setTaskPanelSession(permissionHistoryKey)}
-                                runningTaskCount={[...chat.commandTasks, ...chat.backgroundTasks].filter(task => ['running', 'cancel_requested'].includes(task.state)).length}
-                                onDetails={() => setPanel('details')}
-                                onPermissionHistory={() => setPermissionHistorySession(permissionHistoryKey)}
-                                onDirectories={() => setDirectorySession(permissionHistoryKey)}
-                                onSchedules={() => setSchedulesOpen(true)}
-                            />
-                            <div className="ml-auto flex shrink-0 items-center gap-1">
-                            {chat.turnRunning ? (
-                                <Button type="button" className="assistant-action" aria-label={t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')} onClick={chat.stop} disabled={!chat.canStop || chat.stopping}>
-                                    <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" />
-                                    <span className="assistant-action-label">{t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')}</span>
-                                </Button>
-                            ) : (
-                                <Button type="submit" className="assistant-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')} disabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model || (startGoal && !goalBudgetPolicy)}>
-                                    <Send className="h-4 w-4 shrink-0" />
-                                    <span className="assistant-action-label">{t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')}</span>
-                                </Button>
-                            )}
-                        </div>
-                        </div>
-                    </form>
+                        </SheetContent>
+                    </Sheet>
+                    <Sheet open={deviceSettingsOpen} onOpenChange={setDeviceSettingsOpen}>
+                        <SheetContent className="w-full sm:max-w-md">
+                            <SheetHeader><SheetTitle>{t('pages.aiAssistant.workspace.deviceSettings')}</SheetTitle></SheetHeader>
+                            <p className="mt-4 text-sm">{t(assistantEnabled
+                                ? 'pages.aiAssistant.workspace.assistantOnDeviceEnabled'
+                                : 'pages.aiAssistant.workspace.assistantOnDeviceDisabled')}</p>
+                            <p className="mt-2 text-sm text-muted-foreground">{t('pages.aiAssistant.workspace.deviceSettingsOwnerOnly')}</p>
+                        </SheetContent>
+                    </Sheet>
                     <AssistantSchedules key={permissionHistoryKey} sessionId={chat.sessionId ?? null} open={schedulesOpen} onOpenChange={setSchedulesOpen} deviceId={stableDeviceId} />
                 </CardContent>
             </Card>

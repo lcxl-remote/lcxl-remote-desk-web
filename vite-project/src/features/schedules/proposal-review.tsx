@@ -9,9 +9,10 @@ import { ContractReview } from './contract-review';
 import { RehearsalDetails } from './rehearsal-details';
 import { formatTime, validTimezone } from './time';
 
-export function ProposalReview({ client, scheduleId, connected, zone, assistantPaths, onChanged, activationDisabled = false, approvalCard = false }: {
+export function ProposalReview({ client, scheduleId, connected, zone, assistantPaths, onChanged, onLoaded, activationDisabled = false, approvalCard = false }: {
     client: ScheduleClient; scheduleId: string; connected: boolean; zone: string;
     approvalCard?: boolean; activationDisabled?: boolean; assistantPaths: Record<string, string>; onChanged: (task: ScheduleView) => void;
+    onLoaded?: (task: ScheduleView) => void;
 }) {
     const { t, i18n } = useTranslation();
     const [task, setTask] = useState<ScheduleView | null>(null);
@@ -27,7 +28,7 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
         if (connected) void client.request({ operation: 'get', schedule_id: scheduleId }).then(response => {
             if (current !== epoch.current) return;
             if (response.result !== 'task' || response.task.schedule_id !== scheduleId) throw new ScheduleRequestError('invalid');
-            setTask(response.task);
+            setTask(response.task); onLoaded?.(response.task);
         }).catch(() => { if (current === epoch.current) setError(t('schedules.requestFailed')); })
             .finally(() => { if (current === epoch.current) setBusy(false); });
         return () => { ++epoch.current; };

@@ -45,6 +45,7 @@ export type AiAssistantMessage = {
     id: string;
     role: 'user' | 'assistant' | 'tool_result' | 'tool_call';
     toolCallId?: string;
+    turnId?: string | null;
     text: string;
     reasoning?: string | null;
     provenance?: AiProvenance | null;
@@ -54,7 +55,7 @@ export type AiAssistantToolActivity = {
     permissionReason?: string;
     callId: string;
     name: string;
-    status: 'running' | 'ok' | 'failed';
+    status: 'running' | 'ok' | 'failed' | 'unknown';
     argumentsJson: string;
     output: string | null;
 };
@@ -174,6 +175,7 @@ export type AiAssistantTaskStatusProjection = {
 type PersistedSnapshotMessage = {
     reasoning?: string | null;
     id: string;
+    turnId?: string | null;
     role: string;
     text: string;
     toolCallId?: string | null;
@@ -287,11 +289,12 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 id: message.id,
                 role: message.role,
                 text: message.text,
+                turnId: message.turnId,
                 reasoning: message.role === 'assistant' ? message.reasoning : undefined,
             });
         }
         for (const call of message.toolCalls ?? []) {
-            messages.push({ id: `tool-call-${call.id}`, role: 'tool_call', toolCallId: call.id, text: '', contextBoundaryIds: [message.id] });
+            messages.push({ id: `tool-call-${call.id}`, role: 'tool_call', toolCallId: call.id, turnId: message.turnId, text: '', contextBoundaryIds: [message.id] });
             tools = upsertTool(tools, {
                 callId: call.id,
                 name: call.name,
@@ -306,15 +309,17 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
         if ((message.role === 'tool' || message.role === 'untrusted_output') && message.toolCallId) {
             const existing = tools.find((tool) => tool.callId === message.toolCallId);
             if (!existing) {
-                messages.push({ id: `tool-call-${message.toolCallId}`, role: 'tool_call', toolCallId: message.toolCallId, text: '', contextBoundaryIds: [message.id] });
+                messages.push({ id: `tool-call-${message.toolCallId}`, role: 'tool_call', toolCallId: message.toolCallId, turnId: message.turnId, text: '', contextBoundaryIds: [message.id] });
             }
             let permissionReason: string | undefined;
             let nativeFailed = false;
+            let nativeVerified = false;
             let nativeFileResult = false;
             try {
                 const native = JSON.parse(message.text);
                 permissionReason = snapshot.actionPermissionReasons?.[String(native.work_id)];
-                nativeFailed = ['definitely_not_started', 'outcome_unknown', 'failed'].includes(native.result);
+                nativeFailed = ['definitely_not_started', 'failed'].includes(native.result);
+                nativeVerified = native.result === 'verified';
                 nativeFileResult = ['file_artifact', 'batch_document_artifact', 'text_file_mutation'].includes(native.output?.kind);
             } catch { /* Non-native results have no work binding. */ }
             const backgroundRunning = /"status"\s*:\s*"background_running"/.test(message.text);
@@ -323,12 +328,13 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 permissionReason,
                 name: existing?.name ?? 'unknown',
                 status: backgroundRunning ? 'running'
-                    : nativeFailed || /^(tool error:|not executed:|execution failed:|execution did not complete:)/i.test(message.text) ? 'failed' : 'ok',
+                    : nativeFailed || /^(tool error:|not executed:|execution failed:|execution did not complete:)/i.test(message.text) ? 'failed'
+                        : nativeVerified || (existing?.name === 'exec_command' && /^exit_code=0(?:\n|$)/.test(message.text)) ? 'ok' : 'unknown',
                 argumentsJson: existing?.argumentsJson ?? '{}',
                 output: message.text,
             });
             if (!backgroundRunning && message.text && (existing?.name === 'exec_command' || nativeFileResult || message.backgroundTaskId || (nativeFailed && permissionReason))) {
-                messages.push({ id: message.id, role: 'tool_result', toolCallId: message.toolCallId, text: message.text, permissionReason });
+                messages.push({ id: message.id, role: 'tool_result', toolCallId: message.toolCallId, turnId: message.turnId, text: message.text, permissionReason });
             }
         }
     }
@@ -498,6 +504,7 @@ export function useAiAssistantChat({
     } | null>(null);
     const olderRequest = useRef<object | null>(null);
     const lastSeq = useRef(-1);
+    const currentTurnId = useRef<string | null>(null);
     const previewArgs = useRef(new Map<string, string>());
     const sessionTargetRequest = useRef<string | null>(null);
 
@@ -781,6 +788,7 @@ export function useAiAssistantChat({
         setDeliveryState(null);
         setAcceptedInput(null);
         conversationId.current = stored;
+        currentTurnId.current = null;
         rehearsalSent.current = false;
         setMessages([]);
         setTools([]);
@@ -866,6 +874,7 @@ export function useAiAssistantChat({
             setMessagePage({ hasMore: false, nextBeforeMessageId: null });
             setLoadingOlderMessages(false);
             conversationId.current = event.newValue;
+            currentTurnId.current = null;
             lastSeq.current = -1;
             previewArgs.current.clear();
             setMessages([]);
@@ -986,7 +995,9 @@ export function useAiAssistantChat({
                 setPartial((current) => current + (event.partial_summary ?? ''));
                 break;
             case 'partial_committed':
+                break;
             case 'turn_started':
+                currentTurnId.current = event.turn_id ?? null;
                 break;
             case 'tool_started': {
                 const callId = event.tool_call_id ?? `tool-${event.seq}`;
@@ -1002,7 +1013,7 @@ export function useAiAssistantChat({
                     output: null,
                 }));
                 setMessages(current => current.some(message => message.toolCallId === callId) ? current : [...current, {
-                    id: `tool-call-${callId}`, role: 'tool_call', toolCallId: callId, text: '',
+                    id: `tool-call-${callId}`, role: 'tool_call', toolCallId: callId, turnId: currentTurnId.current, text: '',
                 }]);
                 setStatus('using_tool');
                 break;
@@ -1010,7 +1021,7 @@ export function useAiAssistantChat({
             case 'tool_finished': {
                 const callId = event.tool_call_id ?? `tool-${event.seq}`;
                 setMessages(current => current.some(message => message.toolCallId === callId) ? current : [...current, {
-                    id: `tool-call-${callId}`, role: 'tool_call', toolCallId: callId, text: '',
+                    id: `tool-call-${callId}`, role: 'tool_call', toolCallId: callId, turnId: currentTurnId.current, text: '',
                 }]);
                 setTools((current) => {
                     const existing = current.find((tool) => tool.callId === callId);
@@ -1581,6 +1592,7 @@ export function useAiAssistantChat({
         historyWindow.current = null;
         olderRequest.current = null;
         conversationId.current = null;
+        currentTurnId.current = null;
         lastSeq.current = -1;
         previewArgs.current.clear();
         setMessages([]);
