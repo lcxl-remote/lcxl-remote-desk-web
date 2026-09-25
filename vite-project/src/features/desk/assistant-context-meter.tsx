@@ -24,7 +24,7 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
     const bytes = (n: number) => t('pages.aiAssistant.contextMeter.bytes', { value: new Intl.NumberFormat(i18n.language).format(n) });
     const label = t(values ? 'pages.aiAssistant.contextMeter.percent' : 'pages.aiAssistant.contextMeter.unknown', { percent: values?.percent });
     return <Popover><PopoverTrigger asChild>
-        <Button variant="unstyled" type="button" aria-label={label} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <Button variant="unstyled" type="button" aria-label={label} className="assistant-context-meter flex h-11 w-11 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <svg viewBox="0 0 40 40" className="h-10 w-10" aria-hidden="true">
                 <circle cx="20" cy="20" r="17" fill="none" stroke="currentColor" strokeWidth="3" className="text-muted" />
                 {values && <circle cx="20" cy="20" r="17" fill="none" stroke="currentColor" strokeWidth="3"

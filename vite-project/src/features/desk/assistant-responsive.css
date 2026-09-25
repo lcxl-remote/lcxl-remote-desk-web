@@ -8,6 +8,45 @@
         min-width: 44px;
         min-height: 44px;
     }
+
+    .assistant-jump-action {
+        position: relative;
+    }
+
+    .assistant-jump-action::after {
+        content: '';
+        position: absolute;
+        inset: -4px;
+    }
+
+    .assistant-scrollbar .assistant-detail-icon {
+        position: relative;
+        isolation: isolate;
+        border-color: transparent;
+        background: transparent;
+        box-shadow: none;
+    }
+
+    .assistant-scrollbar .assistant-detail-icon:hover { background: transparent; }
+
+    .assistant-scrollbar .assistant-detail-icon::before {
+        content: '';
+        position: absolute;
+        z-index: -1;
+        top: 50%;
+        left: 50%;
+        width: 32px;
+        height: 32px;
+        transform: translate(-50%, -50%);
+        border-radius: var(--radius);
+    }
+
+    .assistant-scrollbar .assistant-detail-icon:hover::before { background: hsl(var(--accent)); }
+
+    .assistant-scrollbar .assistant-detail-icon-outline::before {
+        border: 1px solid hsl(var(--input));
+        background: hsl(var(--background));
+    }
 }
 
 /* Include nested tool output and code blocks in the transcript. */
@@ -68,4 +107,67 @@
 @container (max-width: 760px) {
     .assistant-action-label { display: none; }
     .assistant-action { padding-inline: 0.625rem; }
+
+    .assistant-header-actions { gap: 8px; }
+
+    .assistant-header-back,
+    .assistant-header-actions .assistant-action {
+        position: relative;
+        width: 36px;
+        height: 36px;
+        min-width: 36px;
+        min-height: 36px;
+        padding: 0;
+    }
+
+    .assistant-header-back::after,
+    .assistant-header-actions .assistant-action::after {
+        content: '';
+        position: absolute;
+        inset: -4px;
+    }
+
+    .assistant-composer :is(.assistant-primary-action, .assistant-add-action) {
+        position: relative;
+        isolation: isolate;
+        background: transparent;
+        box-shadow: none;
+    }
+
+    .assistant-composer :is(.assistant-primary-action, .assistant-add-action):hover {
+        background: transparent;
+    }
+
+    .assistant-composer :is(.assistant-primary-action, .assistant-add-action)::before {
+        content: '';
+        position: absolute;
+        z-index: -1;
+        top: 50%;
+        left: 50%;
+        width: 36px;
+        height: 36px;
+        transform: translate(-50%, -50%);
+        border-radius: var(--radius);
+    }
+
+    .assistant-composer .assistant-primary-action {
+        padding-inline: 0;
+    }
+
+    .assistant-composer .assistant-primary-action::before {
+        background: hsl(var(--primary));
+    }
+
+    .assistant-composer .assistant-primary-action:hover::before {
+        background: hsl(var(--primary) / 0.9);
+    }
+
+    .assistant-composer .assistant-add-action:hover::before {
+        background: hsl(var(--accent));
+    }
+
+    .assistant-composer .assistant-context-meter svg {
+        width: 36px;
+        height: 36px;
+    }
 }

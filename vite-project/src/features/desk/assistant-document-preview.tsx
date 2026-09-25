@@ -46,7 +46,7 @@ function PreviewCard({ preview, requestPage }: {
                         {t('pages.aiAssistant.documentPreview.title')}
                     </CardTitle>
                     <div className="flex items-center gap-1">
-                        <Button type="button" size="icon" variant="ghost" className="h-8 w-8"
+                        <Button type="button" size="icon" variant="ghost" className="assistant-detail-icon h-8 w-8"
                             aria-label={t('pages.aiAssistant.documentPreview.zoomOut')}
                             onClick={() => setScale(current => Math.max(25, (current ?? 100) - 25))}>
                             <ZoomOut className="h-4 w-4" />
@@ -54,17 +54,17 @@ function PreviewCard({ preview, requestPage }: {
                         <span className="min-w-12 text-center text-xs text-muted-foreground">
                             {scale === null ? t('pages.aiAssistant.documentPreview.fitWidth') : `${scale}%`}
                         </span>
-                        <Button type="button" size="icon" variant="ghost" className="h-8 w-8"
+                        <Button type="button" size="icon" variant="ghost" className="assistant-detail-icon h-8 w-8"
                             aria-label={t('pages.aiAssistant.documentPreview.zoomIn')}
                             onClick={() => setScale(current => Math.min(200, (current ?? 100) + 25))}>
                             <ZoomIn className="h-4 w-4" />
                         </Button>
-                        <Button type="button" size="icon" variant="ghost" className="h-8 w-8"
+                        <Button type="button" size="icon" variant="ghost" className="assistant-detail-icon h-8 w-8"
                             aria-label={t('pages.aiAssistant.documentPreview.fitWidth')}
                             onClick={() => setScale(null)}>
                             <Scan className="h-4 w-4" />
                         </Button>
-                        <Button type="button" size="icon" variant="ghost" className="h-8 w-8"
+                        <Button type="button" size="icon" variant="ghost" className="assistant-detail-icon h-8 w-8"
                             aria-label={t('pages.aiAssistant.documentPreview.fullscreen')}
                             onClick={() => setExpanded(true)}>
                             <Expand className="h-4 w-4" />
@@ -72,7 +72,7 @@ function PreviewCard({ preview, requestPage }: {
                     </div>
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Button type="button" size="icon" variant="outline" className="h-7 w-7"
+                    <Button type="button" size="icon" variant="outline" className="assistant-detail-icon assistant-detail-icon-outline h-7 w-7"
                         disabled={preview.loading || preview.page.page <= 1}
                         aria-label={t('pages.aiAssistant.documentPreview.previous')}
                         onClick={() => navigate(preview.page.page - 1)}>
@@ -85,7 +85,7 @@ function PreviewCard({ preview, requestPage }: {
                         onBlur={submitPage}
                         onKeyDown={event => { if (event.key === 'Enter') submitPage(); }} />
                     <span>/ {preview.descriptor.page_count}</span>
-                    <Button type="button" size="icon" variant="outline" className="h-7 w-7"
+                    <Button type="button" size="icon" variant="outline" className="assistant-detail-icon assistant-detail-icon-outline h-7 w-7"
                         disabled={preview.loading || preview.page.page >= preview.descriptor.page_count}
                         aria-label={t('pages.aiAssistant.documentPreview.next')}
                         onClick={() => navigate(preview.page.page + 1)}>

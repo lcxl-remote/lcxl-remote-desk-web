@@ -881,7 +881,7 @@ export function AiAssistantWorkspace({
                     <div data-testid="assistant-title-row" className="flex items-center justify-between gap-2">
                         <div className="flex min-w-0 flex-1 items-center gap-2">
                             {backTo && (
-                                <Button asChild variant="ghost" size="icon" className="h-8 w-8 shrink-0">
+                                <Button asChild variant="ghost" size="icon" className="assistant-header-back h-8 w-8 shrink-0">
                                     <Link to={backTo} aria-label={t('pages.aiAssistant.backToDevice')} title={t('pages.aiAssistant.backToDevice')}>
                                         <ArrowLeft className="h-4 w-4" aria-hidden="true" />
                                     </Link>
@@ -894,7 +894,7 @@ export function AiAssistantWorkspace({
                                         || chat.sessionTarget?.display_name || t('pages.aiAssistant.chatTitle')}</span>
                             </CardTitle>
                         </div>
-                        <div className="flex shrink-0 items-center gap-1">
+                        <div className="assistant-header-actions flex shrink-0 items-center gap-1">
                             <AssistantHistory deskId={deskId} deviceId={recoveryConnections.data?.find(item => item.connection_id === deskId)?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
                                 onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
                                 onSelect={(id) => {
@@ -944,7 +944,7 @@ export function AiAssistantWorkspace({
                             requestPage={chat.requestDocumentPreviewPage} />
                         <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence}
                             messages={chat.messages} renderMessage={renderTranscriptMessage}
-                            renderReasoning={message => <div className="max-w-[90%] px-3 py-2 text-sm">
+                            renderReasoning={message => <div className="w-full max-w-[90%] text-sm">
                                 <AssistantReasoning text={message.reasoning} />
                             </div>}
                             renderToolGroup={messages => <AssistantToolGroup messages={messages} tools={chat.tools}
@@ -1086,7 +1086,7 @@ export function AiAssistantWorkspace({
                     </div>
                     {showJumpToLatest && (
                         <Button type="button" variant="outline" size="icon" onClick={jumpToLatest}
-                            className="absolute bottom-3 right-3 rounded-full bg-background shadow-md"
+                            className="assistant-jump-action absolute bottom-3 right-3 rounded-full bg-background shadow-md"
                             aria-label={t('pages.aiAssistant.scrollToLatest')}
                             title={t('pages.aiAssistant.scrollToLatest')}>
                             <ArrowDown className="h-4 w-4" />
@@ -1120,7 +1120,7 @@ export function AiAssistantWorkspace({
                         />
                         <div className="flex min-w-0 items-center gap-1">
                             {isMobile ? <>
-                                <Button type="button" variant="ghost" size="icon" className="h-11 w-11 shrink-0"
+                                <Button type="button" variant="ghost" size="icon" className="assistant-add-action h-11 w-11 shrink-0"
                                     aria-label={t('pages.aiAssistant.workspace.addContext')} onClick={() => setAddContextOpen(true)}>
                                     <Plus className="h-4 w-4" aria-hidden="true" />
                                 </Button>
@@ -1144,7 +1144,7 @@ export function AiAssistantWorkspace({
                                 </Sheet>
                             </> : <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
-                                    <Button type="button" variant="ghost" size="icon" className="h-11 w-11 shrink-0"
+                                    <Button type="button" variant="ghost" size="icon" className="assistant-add-action h-11 w-11 shrink-0"
                                         aria-label={t('pages.aiAssistant.workspace.addContext')}>
                                         <Plus className="h-4 w-4" aria-hidden="true" />
                                     </Button>
@@ -1172,12 +1172,12 @@ export function AiAssistantWorkspace({
                             <div className="ml-auto flex shrink-0 items-center gap-1">
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />
                                 {chat.turnRunning ? (
-                                    <Button type="button" className="assistant-action" aria-label={t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')} onClick={chat.stop} disabled={!chat.canStop || chat.stopping}>
+                                    <Button type="button" className="assistant-action assistant-primary-action" aria-label={t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')} onClick={chat.stop} disabled={!chat.canStop || chat.stopping}>
                                         <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" />
                                         <span className="assistant-action-label">{t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')}</span>
                                     </Button>
                                 ) : (
-                                    <Button type="submit" className="assistant-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')} disabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model || (startGoal && !goalBudgetPolicy)}>
+                                    <Button type="submit" className="assistant-action assistant-primary-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')} disabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model || (startGoal && !goalBudgetPolicy)}>
                                         <Send className="h-4 w-4 shrink-0" />
                                         <span className="assistant-action-label">{t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')}</span>
                                     </Button>

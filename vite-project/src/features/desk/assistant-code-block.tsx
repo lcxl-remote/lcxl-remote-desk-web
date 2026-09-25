@@ -67,8 +67,8 @@ export function AssistantCodeBlock({ text, label, format = 'auto', testId }: {
                 <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">{value.json ? 'JSON' : t('pages.aiAssistant.codeBlock.text')}</span>
             </div>
             <div className="flex shrink-0 items-center gap-1">
-                <Button type="button" variant="ghost" size="icon" className="size-7" aria-label={wrapLabel} title={wrapLabel} aria-pressed={wrap} onClick={() => setWrap(!wrap)}><WrapText className="size-3.5" /></Button>
-                <Button type="button" variant="ghost" size="icon" className="size-7" aria-label={copyLabel} title={copyLabel} onClick={async () => {
+                <Button type="button" variant="ghost" size="icon" className="assistant-detail-icon size-7" aria-label={wrapLabel} title={wrapLabel} aria-pressed={wrap} onClick={() => setWrap(!wrap)}><WrapText className="size-3.5" /></Button>
+                <Button type="button" variant="ghost" size="icon" className="assistant-detail-icon size-7" aria-label={copyLabel} title={copyLabel} onClick={async () => {
                     try { await navigator.clipboard.writeText(text); setCopyState('copied'); }
                     catch { setCopyState('failed'); }
                 }}>{copyState === 'copied' ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}</Button>
