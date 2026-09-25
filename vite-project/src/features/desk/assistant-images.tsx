@@ -112,7 +112,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
         } catch { setFailed(true); } finally { setLoading(false); }
     };
     const renderImages = (items: AiAssistantVisualEvidence[]) => items.length > 0 ? (
-        <div data-testid="ai-assistant-visual-evidence" className="grid max-w-[90%] gap-3 sm:grid-cols-2">
+        <div data-testid="ai-assistant-visual-evidence" className="grid w-full max-w-full gap-3 sm:max-w-[90%] sm:grid-cols-2">
             {items.map((frame) => <StoredImage key={frame.evidence_id} frame={frame}
                 onDelete={(id) => setDeleted((previous) => new Set([...previous, id]))} />)}
         </div>
@@ -194,7 +194,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             if (previousBody && closedByBody && count > 1) {
                 folded.push(<Disclosure key={`activity:${pending[0].key}`}
                     title={t('pages.aiAssistant.activityGroup', { count })}
-                    className="max-w-[90%] rounded-lg border bg-muted/30 px-3 py-2 text-sm"
+                    className="w-full max-w-full rounded-lg border bg-muted/30 px-3 py-2 text-sm sm:max-w-[90%]"
                     summaryClassName="text-muted-foreground">
                     <div className="space-y-3 pt-3">{pending.map(entry => <Fragment key={entry.key}>{entry.content}</Fragment>)}</div>
                 </Disclosure>);

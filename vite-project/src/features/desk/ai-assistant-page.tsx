@@ -450,10 +450,10 @@ export function AiAssistantWorkspace({
                                 key={message.id}
                                 id={message.role === 'tool_call' ? `assistant-call-${message.toolCallId}` : undefined}
                                 tabIndex={message.role === 'tool_call' ? -1 : undefined}
-                                className={`max-w-[90%] rounded-lg px-3 py-2 text-sm ${
+                                className={`rounded-lg px-3 py-2 text-sm ${
                                     message.role === 'user'
-                                        ? 'ml-auto bg-muted'
-                                        : message.role === 'tool_result' ? 'w-full border bg-muted/30' : 'w-full bg-transparent'
+                                        ? 'ml-auto max-w-[90%] bg-muted'
+                                        : message.role === 'tool_result' ? 'w-full max-w-full border bg-muted/30 sm:max-w-[90%]' : 'w-full max-w-full bg-transparent sm:max-w-[90%]'
                                 }`}
                             >
                                 {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running}
@@ -944,7 +944,7 @@ export function AiAssistantWorkspace({
                             requestPage={chat.requestDocumentPreviewPage} />
                         <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence}
                             messages={chat.messages} renderMessage={renderTranscriptMessage}
-                            renderReasoning={message => <div className="w-full max-w-[90%] text-sm">
+                            renderReasoning={message => <div className="w-full max-w-full text-sm sm:max-w-[90%]">
                                 <AssistantReasoning text={message.reasoning} />
                             </div>}
                             renderToolGroup={messages => <AssistantToolGroup messages={messages} tools={chat.tools}
@@ -953,7 +953,7 @@ export function AiAssistantWorkspace({
                         <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running}
                             deviceId={stableDeviceId} connectionId={deskId} onPendingCountChange={setPendingScheduleCount} />
                         {chat.partial && (
-                            <MarkdownContent disableLinks className="max-w-[90%] rounded-lg bg-muted px-3 py-2 text-sm">
+                            <MarkdownContent disableLinks className="w-full max-w-full rounded-lg bg-muted px-3 py-2 text-sm sm:max-w-[90%]">
                                 {chat.partial}
                             </MarkdownContent>
                         )}

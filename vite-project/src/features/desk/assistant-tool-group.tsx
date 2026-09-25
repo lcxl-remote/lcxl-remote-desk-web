@@ -34,7 +34,7 @@ export function AssistantToolGroup({ messages, tools, renderMessage, displayName
     const firstFailureMessage = failureMessage(failed[0]?.output ?? null);
     const succeeded = entries.filter(tool => tool.status === 'ok').length;
     const unknown = entries.filter(tool => tool.status === 'unknown').length;
-    return <Disclosure className="w-full max-w-[90%] rounded-md border bg-muted/30 px-3 py-2"
+    return <Disclosure className="w-full max-w-full rounded-md border bg-muted/30 px-3 py-2 sm:max-w-[90%]"
         summaryClassName="cursor-pointer text-sm" title={<span className="space-y-1">
             <span className="block font-medium">{t('pages.aiAssistant.workspace.toolGroup', { count: callIds.length })}</span>
             {(succeeded > 0 || unknown > 0) && <span className="block text-xs text-muted-foreground">

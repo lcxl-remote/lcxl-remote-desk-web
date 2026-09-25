@@ -9,10 +9,6 @@
         min-height: 44px;
     }
 
-    .assistant-jump-action {
-        position: relative;
-    }
-
     .assistant-jump-action::after {
         content: '';
         position: absolute;
