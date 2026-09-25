@@ -2,7 +2,6 @@ import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel 
 import { AssistantAttachments, AssistantResultAttachments } from './assistant-attachments';
 import { requireRecoveryZip } from '@/lib/file-recovery-error';
 import { Textarea } from '@/components/ui/textarea';
-import { Disclosure } from '@/components/ui/disclosure';
 import { AssistantObservationResult } from './assistant-observation-result';
 import { AssistantToolCall, isHistoricalPermissionSkip } from './assistant-tool-call';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
@@ -577,15 +576,6 @@ export function AiAssistantWorkspace({
                         </div>
                     )}
 
-            {chat.tools.length === 0 && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.workspace.emptyActivity')}</p>}
-            {chat.tools.map((tool) => (
-                <Disclosure key={tool.callId} className="rounded-lg border p-3" title={<>{tool.name} · {t(`pages.aiAssistant.workspace.toolState.${tool.status}`)}</>} summaryClassName="cursor-pointer text-sm">
-
-                    <p className="mt-2 text-sm">{tool.permissionReason && t('pages.aiAssistant.permissionReasonLabel', { reason: tool.permissionReason })}</p>
-                    <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{tool.argumentsJson}</pre>
-                    {tool.output && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{tool.output}</pre>}
-                </Disclosure>
-            ))}
                                 {chat.draft && (
                         <Card data-testid="computer-action-draft-preview" className="border-violet-500/40">
                             <CardHeader>
@@ -1116,7 +1106,7 @@ export function AiAssistantWorkspace({
                             placeholder={t('pages.aiAssistant.questionPlaceholder')}
                             maxLength={16_384}
                             disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}
-                            className="min-h-16 max-h-40 w-full resize-y rounded-md border-0 bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                            className="min-h-16 max-h-40 w-full resize-y rounded-md border-0 bg-background px-3 py-2 shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                         />
                         <div className="flex min-w-0 items-center gap-1">
                             {isMobile ? <>
