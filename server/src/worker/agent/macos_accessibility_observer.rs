@@ -456,18 +456,30 @@ fn scan_protection_graph<T: Eq + std::hash::Hash>(
     Ok(false)
 }
 
-// The host's native menu bar may advertise AXChildren but fail both children
-// APIs with kAXErrorFailure. Skip only this known branch; scan other controls.
-fn ignore_host_menu_children_error(
+// Native host chrome can advertise AXChildren while both children APIs return
+// kAXErrorFailure. These controls cannot contain sensitive input; continue
+// scanning the rest of the window instead of rejecting the screenshot.
+fn ignore_host_chrome_children_error(
     is_host_application: bool,
     attribute: &str,
     status: i32,
     role: Option<&str>,
+    subrole: Option<&str>,
 ) -> bool {
     is_host_application
         && attribute == "AXChildren"
         && status == -25200
-        && role == Some("AXMenuBar")
+        && (role == Some("AXMenuBar")
+            || (role == Some("AXButton")
+                && matches!(
+                    subrole,
+                    Some(
+                        "AXFullScreenButton"
+                            | "AXCloseButton"
+                            | "AXMinimizeButton"
+                            | "AXZoomButton"
+                    )
+                )))
 }
 
 fn protection_attribute(
@@ -488,16 +500,21 @@ fn protection_attribute(
         -25205 | -25212 => Ok(None),
         _ => {
             log_protection_attribute_failure(element, name, status, elapsed, value.is_some());
-            if ignore_host_menu_children_error(
+            let role = attribute_string(element, "AXRole");
+            let subrole = attribute_string(element, "AXSubrole");
+            if ignore_host_chrome_children_error(
                 is_host_application,
                 name,
                 status,
-                attribute_string(element, "AXRole").as_deref(),
+                role.as_deref(),
+                subrole.as_deref(),
             ) {
                 tracing::warn!(
                     attribute = name,
                     ax_status = status,
-                    "skipping unavailable host application menu children during screenshot safety scan"
+                    role = ?role,
+                    subrole = ?subrole,
+                    "skipping unavailable host chrome children during screenshot safety scan"
                 );
                 return Ok(None);
             }
@@ -1954,22 +1971,45 @@ mod tests {
     }
 
     #[test]
-    fn host_menu_exception_does_not_hide_other_scan_failures() {
-        assert!(ignore_host_menu_children_error(
+    fn host_chrome_exception_does_not_hide_other_scan_failures() {
+        assert!(ignore_host_chrome_children_error(
             true,
             "AXChildren",
             -25200,
-            Some("AXMenuBar")
+            Some("AXMenuBar"),
+            None,
         ));
-        for (host, attribute, status, role) in [
-            (false, "AXChildren", -25200, Some("AXMenuBar")),
-            (true, "AXSubrole", -25200, Some("AXMenuBar")),
-            (true, "AXChildren", -25204, Some("AXMenuBar")),
-            (true, "AXChildren", -25200, Some("AXTextField")),
-            (true, "AXChildren", -25200, None),
+        assert!(ignore_host_chrome_children_error(
+            true,
+            "AXChildren",
+            -25200,
+            Some("AXButton"),
+            Some("AXFullScreenButton"),
+        ));
+        for (host, attribute, status, role, subrole) in [
+            (false, "AXChildren", -25200, Some("AXMenuBar"), None),
+            (true, "AXSubrole", -25200, Some("AXMenuBar"), None),
+            (true, "AXChildren", -25204, Some("AXMenuBar"), None),
+            (true, "AXChildren", -25200, Some("AXTextField"), None),
+            (true, "AXChildren", -25200, Some("AXButton"), None),
+            (
+                true,
+                "AXChildren",
+                -25200,
+                Some("AXButton"),
+                Some("AXUnknown"),
+            ),
+            (
+                false,
+                "AXChildren",
+                -25200,
+                Some("AXButton"),
+                Some("AXFullScreenButton"),
+            ),
+            (true, "AXChildren", -25200, None, None),
         ] {
-            assert!(!ignore_host_menu_children_error(
-                host, attribute, status, role
+            assert!(!ignore_host_chrome_children_error(
+                host, attribute, status, role, subrole
             ));
         }
     }

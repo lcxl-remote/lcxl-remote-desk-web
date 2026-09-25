@@ -404,7 +404,7 @@ For a macOS application screenshot, the assistant first searches the running app
 
 Failed macOS screenshot safety scans log a scan ID, PID, scan scope, node position, role/subrole, AX status and timing. Failure-only probes report whether the attribute is advertised and the child-count API result. Logs exclude control titles, values and calendar text; diagnostic probes do not bypass protection or retry capture.
 
-Window screenshots check the selected application and window rather than the unrelated foreground application. Full-display screenshots retain foreground checks. The host application menu bar’s `AXChildren` error `-25200` is logged and that branch is skipped; other controls remain scanned and other read failures still block capture.
+Window screenshots check the selected application and window rather than the unrelated foreground application. Full-display screenshots retain foreground checks. An `AXChildren` error `-25200` on the host application menu bar or a native window title-bar button is logged and that branch is skipped; other controls remain scanned and other read failures still block capture.
 
 Exact window screenshot approvals bind the observed window ID consistently before and after server reference resolution. Server-added reference metadata does not invalidate approval; another window, a different display selector, or full-display capture does not match that exact approval. Native object validity and current authorization remain checked at execution.
 
