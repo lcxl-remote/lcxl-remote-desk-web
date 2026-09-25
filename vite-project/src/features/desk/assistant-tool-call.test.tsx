@@ -69,9 +69,9 @@ describe('tool call transcript', () => {
         expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.success' })).toBeNull();
     });
 
-    it('does not label a persisted result as success without an explicit outcome', () => {
-        render(<AssistantToolCall tool={{ ...tool, status: 'unknown', output: 'observed' }} running={false} />);
-        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.statusUnknown' })).toBeTruthy();
+    it('labels a persisted result as returned without claiming tool success', () => {
+        render(<AssistantToolCall tool={{ ...tool, status: 'returned', output: 'observed' }} running={false} />);
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.returned' })).toBeTruthy();
         expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.success' })).toBeNull();
     });
 

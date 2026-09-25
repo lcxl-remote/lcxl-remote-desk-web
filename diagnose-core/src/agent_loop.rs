@@ -749,6 +749,9 @@ async fn drive_claimed_inner(
     // The ordinary save would expose an idle session while the goal is still
     // running after a process crash.
     let save = if session.trigger_origin == crate::session::TriggerOrigin::GoalContinuation {
+        if let Ok(LoopOutcome::GoalControlled { call_id, .. }) = &result {
+            record_tool_completion(&mut session, call_id, true);
+        }
         let result_fingerprints =
             settled_goal_result_fingerprints(&session, deps.registry, &prior_message_ids);
         let end = match &result {
@@ -800,7 +803,7 @@ async fn drive_claimed_inner(
         if settled.is_ok()
             && let Ok(LoopOutcome::GoalControlled { control, call_id }) = &result
         {
-            finish_tool(&session, call_id, true, sink);
+            finish_tool(&mut session, call_id, true, sink);
             let message = match control {
                 crate::goal::GoalControl::Continue { progress, .. } => progress,
                 crate::goal::GoalControl::Wait { reference_id, .. } => reference_id,
@@ -5816,11 +5819,12 @@ fn validate_permission_request_availability(
 /// appended to the conversation. Tool output reaches the UI through the same
 /// redacted, bounded path used for model context.
 fn finish_tool(
-    session: &crate::session::PersistedAgentSession,
+    session: &mut crate::session::PersistedAgentSession,
     call_id: &str,
     ok: bool,
     sink: &mut dyn TurnSink,
 ) {
+    record_tool_completion(session, call_id, ok);
     let result = session
         .conversation
         .iter()
@@ -5839,6 +5843,21 @@ fn finish_tool(
         sink.on_visual_evidence(evidence);
     }
     sink.on_tool_finished(call_id, ok, output, background_task_id);
+}
+
+fn record_tool_completion(
+    session: &mut crate::session::PersistedAgentSession,
+    call_id: &str,
+    ok: bool,
+) {
+    if let Some(message) = session
+        .conversation
+        .iter_mut()
+        .rev()
+        .find(|message| message.tool_call_id.as_deref() == Some(call_id))
+    {
+        message.tool_ok = Some(ok);
+    }
 }
 
 fn invalid_original_result() -> AgentError {

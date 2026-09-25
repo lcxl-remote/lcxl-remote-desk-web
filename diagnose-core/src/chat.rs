@@ -219,6 +219,11 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCallRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// The tool-call completion event's outcome, retained for transcript views.
+    /// This records call completion, not whether the application reached the
+    /// user's intended state. Provider dialects do not serialize this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ok: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_task_id: Option<String>,
     /// Present only on assistant tool-call messages. Opaque payloads are never
@@ -259,6 +264,7 @@ impl ChatMessage {
             image_data_url: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tool_ok: None,
             background_task_id: None,
             replay_disposition: None,
             data_envelope: None,
@@ -311,6 +317,7 @@ impl ChatMessage {
             image_data_url: None,
             tool_calls,
             tool_call_id: None,
+            tool_ok: None,
             background_task_id: None,
             replay_disposition: Some(replay_disposition),
             data_envelope: None,
@@ -354,6 +361,7 @@ impl ChatMessage {
             image_data_url: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
+            tool_ok: None,
             background_task_id: Some(background_task_id.into()),
             replay_disposition: None,
             data_envelope: None,
@@ -380,6 +388,7 @@ impl ChatMessage {
             image_data_url: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
+            tool_ok: None,
             background_task_id: None,
             replay_disposition: None,
             data_envelope: None,
@@ -410,6 +419,7 @@ impl ChatMessage {
             image_data_url: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
+            tool_ok: None,
             background_task_id: Some(background_task_id),
             replay_disposition: None,
             data_envelope: None,
@@ -803,6 +813,7 @@ mod tests {
         let user_json = serde_json::to_value(&user).unwrap();
         assert!(user_json.get("tool_calls").is_none());
         assert!(user_json.get("tool_call_id").is_none());
+        assert!(user_json.get("tool_ok").is_none());
         assert!(user_json.get("image_data_url").is_none());
 
         // The tool message carries its tool_call_id but no tool_calls.

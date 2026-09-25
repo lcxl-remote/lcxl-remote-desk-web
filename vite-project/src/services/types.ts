@@ -1071,6 +1071,10 @@ export type SnapshotMessageDto = {
     */
     toolCalls?: SnapshotToolCallDto[];
     /**
+     * @type boolean,null
+    */
+    toolOk?: boolean | null;
+    /**
      * @type string,null
     */
     turnId?: string | null;

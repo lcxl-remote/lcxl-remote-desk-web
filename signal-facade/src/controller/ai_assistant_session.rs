@@ -253,6 +253,8 @@ pub struct SnapshotMessageDto {
     pub tool_calls: Vec<SnapshotToolCallDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_ok: Option<bool>,
     /// Server-issued id that correlates a delayed background completion with
     /// the task originally returned by `exec_command`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -399,6 +401,7 @@ impl From<ChatMessage> for SnapshotMessageDto {
                 })
                 .collect(),
             tool_call_id: message.tool_call_id,
+            tool_ok: message.tool_ok,
             background_task_id: message.background_task_id,
         }
     }
@@ -2325,6 +2328,23 @@ mod reasoning_display_tests {
         let mut user = ChatMessage::text("user", ChatRole::User, "question");
         user.reasoning = Some("not assistant content".into());
         assert!(SnapshotMessageDto::from(user).reasoning.is_none());
+    }
+
+    #[test]
+    fn tool_completion_outcome_is_projected_without_inferencing_from_output() {
+        let mut completed = ChatMessage::tool_result("result", "call", "opaque result");
+        completed.tool_ok = Some(true);
+        let projected = SnapshotMessageDto::from(completed);
+        assert_eq!(projected.tool_ok, Some(true));
+        assert_eq!(serde_json::to_value(projected).unwrap()["toolOk"], true);
+
+        let old = SnapshotMessageDto::from(ChatMessage::tool_result(
+            "old-result",
+            "old-call",
+            "opaque result",
+        ));
+        assert!(old.tool_ok.is_none());
+        assert!(serde_json::to_value(old).unwrap().get("toolOk").is_none());
     }
 }
 

@@ -15,6 +15,11 @@ const request = (items = [item()]): PermissionRequestDto => ({
 });
 const submit = () => screen.getByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' });
 describe('shared permission review', () => {
+    it('shows a pending state only once in the review card', () => {
+        render(<AssistantPermissionRequest request={request()} canDecide onDecide={vi.fn()} />);
+        expect(screen.getAllByText('pages.aiAssistant.permissionState.pending')).toHaveLength(1);
+        expect(screen.queryByText('rev 1')).not.toBeInTheDocument();
+    });
     it('shows the independent reviewer source and a concrete item denial', () => {
         const value = {
             ...request(), state: 'denied',

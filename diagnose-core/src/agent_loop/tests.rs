@@ -2179,6 +2179,14 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
     let stored = sess.inner.borrow();
     let stored = stored.as_ref().unwrap();
     assert_eq!(
+        stored
+            .conversation
+            .iter()
+            .find(|message| { message.tool_call_id.as_deref() == Some("permission-call") })
+            .and_then(|message| message.tool_ok),
+        Some(true)
+    );
+    assert_eq!(
         stored.terminal_permission_request_id.as_deref(),
         Some(request_id.as_str())
     );
@@ -2189,6 +2197,14 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
     assert_eq!(
         round_trip.terminal_permission_request_id,
         stored.terminal_permission_request_id
+    );
+    assert_eq!(
+        round_trip
+            .conversation
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("permission-call"))
+            .and_then(|message| message.tool_ok),
+        Some(true)
     );
     assert_eq!(stored.permission_requests.len(), 1);
     assert_eq!(
@@ -6005,6 +6021,15 @@ async fn streams_read_tool_lifecycle_events() {
             "answer:done".to_string(),
         ]
     );
+    let saved = sess.inner.borrow();
+    let result = saved
+        .as_ref()
+        .unwrap()
+        .conversation
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("c1"))
+        .unwrap();
+    assert_eq!(result.tool_ok, Some(true));
 }
 
 #[tokio::test]

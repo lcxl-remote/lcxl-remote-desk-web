@@ -1,7 +1,7 @@
 import { AssistantCodeBlock } from './assistant-code-block';
 import { Disclosure } from '@/components/ui/disclosure';
 import { useState } from 'react';
-import { CheckCircle2, CircleHelp, Loader2, XCircle } from 'lucide-react';
+import { CheckCircle2, CircleDot, CircleHelp, Loader2, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { AiAssistantToolActivity } from './use-ai-assistant-chat';
 import { hasUnknownActionResult } from './action-result-status';
@@ -55,8 +55,8 @@ export function AssistantToolCall({ tool, running, displayName }: { tool?: AiAss
     const permissionSubmission = isPermissionSubmissionReceipt(tool);
     const outcomeUnknown = hasUnknownActionResult(tool.output, tool.callId);
     const status = tool.status === 'running' && !running ? 'missing' : tool.status;
-    const StatusIcon = permissionSkip || outcomeUnknown ? CircleHelp : status === 'ok' ? CheckCircle2 : status === 'failed' ? XCircle : status === 'running' ? Loader2 : CircleHelp;
-    const statusLabel = t(`${prefix}${permissionSkip ? 'skippedForPermission' : outcomeUnknown ? 'outcomeUnknown' : status === 'ok' ? 'success' : status === 'failed' ? 'failure' : status === 'running' ? 'waiting' : status === 'unknown' ? 'statusUnknown' : 'missing'}`);
+    const StatusIcon = permissionSkip || outcomeUnknown ? CircleHelp : status === 'ok' ? CheckCircle2 : status === 'failed' ? XCircle : status === 'running' ? Loader2 : status === 'returned' ? CircleDot : CircleHelp;
+    const statusLabel = t(`${prefix}${permissionSkip ? 'skippedForPermission' : outcomeUnknown ? 'outcomeUnknown' : status === 'ok' ? 'success' : status === 'failed' ? 'failure' : status === 'running' ? 'waiting' : status === 'returned' ? 'returned' : 'missing'}`);
     const statusClass = permissionSkip || outcomeUnknown ? 'text-amber-700 dark:text-amber-300' : status === 'ok' ? 'text-green-600 dark:text-green-400' : status === 'failed' ? 'text-destructive' : 'text-muted-foreground';
     return <Disclosure open={open} onOpenChange={setOpen} className="min-w-0 rounded-md border bg-muted/30 px-3 py-2" title={<>
             <span role="img" aria-label={statusLabel} title={statusLabel} className={`mr-2 inline-flex align-middle ${statusClass}`}>

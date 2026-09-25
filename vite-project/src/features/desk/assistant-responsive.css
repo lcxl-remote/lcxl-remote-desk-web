@@ -3,10 +3,14 @@
 
 @media (max-width: 767px) {
     .assistant-header button,
-    .assistant-composer button,
-    .assistant-scrollbar button {
+    .assistant-composer button {
         min-width: 44px;
         min-height: 44px;
+    }
+
+    .assistant-scrollbar button:not([role="checkbox"]) {
+        min-width: 32px;
+        min-height: 32px;
     }
 
     .assistant-jump-action::after {

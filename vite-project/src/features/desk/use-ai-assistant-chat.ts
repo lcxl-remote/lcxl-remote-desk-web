@@ -55,7 +55,7 @@ export type AiAssistantToolActivity = {
     permissionReason?: string;
     callId: string;
     name: string;
-    status: 'running' | 'ok' | 'failed' | 'unknown';
+    status: 'running' | 'ok' | 'failed' | 'returned';
     argumentsJson: string;
     output: string | null;
 };
@@ -179,6 +179,7 @@ type PersistedSnapshotMessage = {
     role: string;
     text: string;
     toolCallId?: string | null;
+    toolOk?: boolean | null;
     backgroundTaskId?: string | null;
     toolCalls?: PersistedToolCall[];
 };
@@ -318,7 +319,10 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
             try {
                 const native = JSON.parse(message.text);
                 permissionReason = snapshot.actionPermissionReasons?.[String(native.work_id)];
-                nativeFailed = ['definitely_not_started', 'failed'].includes(native.result);
+                nativeFailed = ['definitely_not_started', 'failed'].includes(native.result)
+                    || ['failed', 'error'].includes(native.status)
+                    || native.ok === false || native.success === false
+                    || Boolean(native.error);
                 nativeVerified = native.result === 'verified';
                 nativeFileResult = ['file_artifact', 'batch_document_artifact', 'text_file_mutation'].includes(native.output?.kind);
             } catch { /* Non-native results have no work binding. */ }
@@ -328,8 +332,10 @@ function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 permissionReason,
                 name: existing?.name ?? 'unknown',
                 status: backgroundRunning ? 'running'
-                    : nativeFailed || /^(tool error:|not executed:|execution failed:|execution did not complete:)/i.test(message.text) ? 'failed'
-                        : nativeVerified || (existing?.name === 'exec_command' && /^exit_code=0(?:\n|$)/.test(message.text)) ? 'ok' : 'unknown',
+                    : typeof message.toolOk === 'boolean' ? (message.toolOk ? 'ok' : 'failed')
+                    : nativeFailed || /^(tool error:|not executed:|execution failed:|execution did not complete:|wait error:)/i.test(message.text.trimStart())
+                        || (existing?.name === 'exec_command' && /^exit_code=(?!0(?:\n|$))\d+/i.test(message.text)) ? 'failed'
+                        : nativeVerified || (existing?.name === 'exec_command' && /^exit_code=0(?:\n|$)/.test(message.text)) ? 'ok' : 'returned',
                 argumentsJson: existing?.argumentsJson ?? '{}',
                 output: message.text,
             });

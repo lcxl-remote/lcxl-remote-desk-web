@@ -1804,3 +1804,67 @@ it('projects a failed native action with the reason bound to its work record', a
     localStorage.removeItem('ai-assistant-conversation:reason-device');
     vi.unstubAllGlobals();
 });
+
+it('distinguishes returned historical results from explicit tool errors', async () => {
+    localStorage.setItem('ai-assistant-conversation:tool-status-device', 'tool-status-conversation');
+    const calls = [
+        { id: 'read', name: 'inspect_desktop_ui', text: '{"ReadContext":{"DesktopUiInspect":{}}}' },
+        { id: 'permission', name: 'request_permissions', text: '{"status":"pending_user_decision","request_id":"request"}' },
+        { id: 'confirmed', name: 'inspect_desktop_ui', text: '{"ReadContext":{}}', toolOk: true },
+        { id: 'rejected', name: 'inspect_desktop_ui', text: '{"message":"request rejected"}', toolOk: false },
+        { id: 'error', name: 'inspect_desktop_ui', text: '{"status":"error","message":"device unavailable"}' },
+        { id: 'wait-error', name: 'wait_for_command', text: 'wait error: device disconnected' },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        sessionId: 'server-session', seq: 1, active: false,
+        messages: [
+            { id: 'assistant', role: 'assistant', text: '', toolCalls: calls.map(call => ({ id: call.id, name: call.name, argumentsJson: '{}' })) },
+            ...calls.map(call => ({ id: `result-${call.id}`, role: 'tool', toolCallId: call.id, text: call.text,
+                toolOk: 'toolOk' in call ? call.toolOk : undefined })),
+        ],
+    } }) })));
+    const { result, unmount } = renderHook(() => useAiAssistantChat({
+        deskId: 'tool-status-device', subscribe: () => () => {}, sendMessage: () => 'request',
+    }));
+    try {
+        await waitFor(() => expect(result.current.tools).toHaveLength(calls.length));
+        expect(Object.fromEntries(result.current.tools.map(tool => [tool.callId, tool.status]))).toEqual({
+            read: 'returned', permission: 'returned', confirmed: 'ok', rejected: 'failed',
+            error: 'failed', 'wait-error': 'failed',
+        });
+    } finally {
+        unmount();
+        localStorage.removeItem('ai-assistant-conversation:tool-status-device');
+        vi.unstubAllGlobals();
+    }
+});
+
+it('upgrades a returned tool result when a newer snapshot carries its durable outcome', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('ai-assistant-conversation:outcome-refresh-device', 'outcome-refresh-conversation');
+    let toolOk: boolean | undefined;
+    let seq = 1;
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        sessionId: 'server-session', seq, active: false,
+        messages: [
+            { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'call', name: 'inspect_desktop_ui', argumentsJson: '{}' }] },
+            { id: 'result', role: 'tool', toolCallId: 'call', text: '{"ReadContext":{}}', toolOk },
+        ],
+    } }) })));
+    const { result, unmount } = renderHook(() => useAiAssistantChat({
+        deskId: 'outcome-refresh-device', subscribe: () => () => {}, sendMessage: () => 'request',
+    }));
+    try {
+        await act(async () => { await Promise.resolve(); });
+        expect(result.current.tools[0]?.status).toBe('returned');
+        seq = 2;
+        toolOk = true;
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        expect(result.current.tools[0]?.status).toBe('ok');
+    } finally {
+        unmount();
+        localStorage.removeItem('ai-assistant-conversation:outcome-refresh-device');
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+    }
+});

@@ -2,7 +2,6 @@ import { permissionToolLabel, permissionEffectLabel, permissionResourceLabel, pe
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Check, X } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -108,19 +107,9 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
             {waitingForTurn && request.state === 'pending' && <p role="status" className="text-xs text-muted-foreground">
                 {t('pages.aiAssistant.permissionWaitingForTurn')}
             </p>}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs text-muted-foreground">
-                    rev {request.inputRevision}
-                </span>
-                <div className="flex items-center gap-2">
-                    {decision && <span className="text-xs text-muted-foreground">
-                        {t(`pages.aiAssistant.permissionDecisionSource.${decision.source}`)}
-                    </span>}
-                    <Badge variant={request.state === 'pending' ? 'default' : 'outline'}>
-                        {t(`pages.aiAssistant.permissionState.${request.state}`)}
-                    </Badge>
-                </div>
-            </div>
+            {decision && <p className="text-xs text-muted-foreground">
+                {t(`pages.aiAssistant.permissionDecisionSource.${decision.source}`)}
+            </p>}
             {request.items.some((item) => ['execute_ui_actions', 'send_background_input', 'send_raw_input'].includes(item.toolName))
                 && ['inspect_desktop_session', 'inspect_desktop_ui'].every((name) => request.items.some((item) => item.toolName === name)) && (
                 <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.permissionIncludedDesktopReads')}</p>
@@ -383,6 +372,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     <Button
                         type="button"
                         size="sm"
+                        className="gap-1.5 px-2.5"
                         disabled={disabled || busy || waitingForTurn}
                         onClick={() => void onDecide(
                             request,
@@ -426,17 +416,18 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                             }),
                         )}
                     >
-                        <Check className="mr-2 h-4 w-4" />
+                        <Check className="h-4 w-4" />
                         {t('pages.aiAssistant.permissionSubmitSelection')}
                     </Button>
                     <Button
                         type="button"
                         size="sm"
                         variant="outline"
+                        className="gap-1.5 px-2.5"
                         disabled={disabled || busy || waitingForTurn}
                         onClick={() => void onDecide(request, request.items.map(item => ({ itemId: item.itemId, decision: 'deny' })))}
                     >
-                        <X className="mr-2 h-4 w-4" />
+                        <X className="h-4 w-4" />
                         {t('pages.aiAssistant.permissionDeny')}
                     </Button>
                     </div>
