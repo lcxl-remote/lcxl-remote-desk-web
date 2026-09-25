@@ -1575,6 +1575,7 @@ export default {
   'pages.aiAssistant.toolCall.unknown': '工具名称未保留',
   'pages.aiAssistant.toolCall.missingInput': '入参未保留',
   'pages.aiAssistant.reasoning': '思考内容',
+  'pages.aiAssistant.activityGroup': '工作过程 · {{count}} 项',
   'pages.aiAssistant.stop': '停止',
   'pages.aiAssistant.stopping': '正在停止…',
   'pages.aiAssistant.send': '发送',

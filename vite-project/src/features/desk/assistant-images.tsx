@@ -3,6 +3,7 @@ import type { AiAssistantMessage } from './use-ai-assistant-chat';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { Disclosure } from '@/components/ui/disclosure';
 import { deleteAssistantImage, getAssistantImage, listAssistantImages } from '@/services/clients';
 import type { AiAssistantVisualEvidence } from './ai-assistant-event';
 
@@ -57,11 +58,12 @@ function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; on
     </div>;
 }
 
-export function AssistantImages({ sessionId, evidence, messages, renderMessage, renderToolGroup }: {
+export function AssistantImages({ sessionId, evidence, messages, renderMessage, renderReasoning, renderToolGroup }: {
     sessionId?: string;
     evidence: AiAssistantVisualEvidence[];
     messages?: AiAssistantMessage[];
     renderMessage?: (message: AiAssistantMessage) => ReactNode;
+    renderReasoning?: (message: AiAssistantMessage) => ReactNode;
     renderToolGroup?: (messages: AiAssistantMessage[]) => ReactNode;
 }) {
     const { t } = useTranslation();
@@ -136,17 +138,22 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             const index = anchorFor(frame);
             if (index !== undefined) byMessage.set(index, [...(byMessage.get(index) ?? []), frame]);
         }
-        const timeline: ReactNode[] = [];
+        type TimelineEntry = { key: string; kind: 'body' | 'boundary' | 'activity'; count: number; content: ReactNode };
+        const timeline: TimelineEntry[] = [];
         let group: AiAssistantMessage[] = [];
         let groupEnd = -1;
         const flushGroup = () => {
             if (!group.length) return;
             const members = group;
             const end = groupEnd;
-            timeline.push(<Fragment key={`tool-group:${members[0].id}`}>
-                {renderToolGroup ? renderToolGroup(members) : members.map(renderMessage)}
-                {renderImages(byMessage.get(end) ?? [])}
-            </Fragment>);
+            timeline.push({
+                key: `tool-group:${members[0].id}`,
+                kind: 'activity',
+                count: new Set(members.map(item => item.toolCallId).filter(Boolean)).size
+                    || members.filter(item => item.role === 'tool_call').length || members.length,
+                content: <>{renderToolGroup ? renderToolGroup(members) : members.map(renderMessage)}
+                    {renderImages(byMessage.get(end) ?? [])}</>,
+            });
             group = [];
             groupEnd = -1;
         };
@@ -159,9 +166,56 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
                 return;
             }
             flushGroup();
-            timeline.push(<Fragment key={message.id}>{renderMessage(message)}{renderImages(byMessage.get(index) ?? [])}</Fragment>);
+            if (message.role === 'assistant' && renderReasoning && message.reasoning?.trim()) {
+                timeline.push({ key: `reasoning:${message.id}`, kind: 'activity', count: 1,
+                    content: renderReasoning(message) });
+                if (message.text.trim()) {
+                    timeline.push({ key: message.id, kind: 'body', count: 0,
+                        content: <>{renderMessage({ ...message, reasoning: null })}{renderImages(byMessage.get(index) ?? [])}</> });
+                } else {
+                    timeline.push({ key: `reasoning-notices:${message.id}`, kind: 'activity', count: 0,
+                        content: <>{renderMessage({ ...message, reasoning: null })}{renderImages(byMessage.get(index) ?? [])}</> });
+                }
+            } else {
+                timeline.push({ key: message.id,
+                    kind: message.role === 'assistant' && message.text.trim() ? 'body'
+                        : message.role === 'user' ? 'boundary' : 'activity',
+                    count: message.role === 'tool_call' ? 1 : 0,
+                    content: <>{renderMessage(message)}{renderImages(byMessage.get(index) ?? [])}</> });
+            }
         });
         flushGroup();
+        const folded: ReactNode[] = [];
+        const pending: TimelineEntry[] = [];
+        let previousBody = false;
+        const flushPending = (closedByBody: boolean) => {
+            if (!pending.length) return;
+            const count = pending.reduce((sum, entry) => sum + entry.count, 0);
+            if (previousBody && closedByBody && count > 1) {
+                folded.push(<Disclosure key={`activity:${pending[0].key}`}
+                    title={t('pages.aiAssistant.activityGroup', { count })}
+                    className="max-w-[90%] rounded-lg border bg-muted/30 px-3 py-2 text-sm"
+                    summaryClassName="text-muted-foreground">
+                    <div className="space-y-3 pt-3">{pending.map(entry => <Fragment key={entry.key}>{entry.content}</Fragment>)}</div>
+                </Disclosure>);
+            } else {
+                folded.push(...pending.map(entry => <Fragment key={entry.key}>{entry.content}</Fragment>));
+            }
+            pending.length = 0;
+        };
+        for (const entry of timeline) {
+            if (entry.kind === 'body') {
+                flushPending(true);
+                folded.push(<Fragment key={entry.key}>{entry.content}</Fragment>);
+                previousBody = true;
+            } else if (entry.kind === 'boundary') {
+                flushPending(false);
+                folded.push(<Fragment key={entry.key}>{entry.content}</Fragment>);
+                previousBody = false;
+            } else if (previousBody) pending.push(entry);
+            else folded.push(<Fragment key={entry.key}>{entry.content}</Fragment>);
+        }
+        flushPending(false);
         return <>
             {controls}
             {earlier.length > 0 && <>
@@ -175,7 +229,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
                     </DialogContent>
                 </Dialog>
             </>}
-            {timeline}
+            {folded}
         </>;
     }
     if (!frames.length && !failed) return null;

@@ -446,7 +446,7 @@ export function AiAssistantWorkspace({
 
     const renderTranscriptMessage = (message: AiAssistantMessage) => (
                             <Fragment key={message.id}>
-                            <div
+                            {(message.role !== 'assistant' || message.text || message.reasoning) && <div
                                 key={message.id}
                                 id={message.role === 'tool_call' ? `assistant-call-${message.toolCallId}` : undefined}
                                 tabIndex={message.role === 'tool_call' ? -1 : undefined}
@@ -465,7 +465,7 @@ export function AiAssistantWorkspace({
                                 </> : message.role === 'assistant'
                                     ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
                                     : <p className="whitespace-pre-wrap">{message.text}</p>}
-                            </div>
+                            </div>}
                             <AssistantContextNotices notices={chat.contextNotices.filter(notice => noticeMessageId(notice, chat.messages) === message.id)} />
                             </Fragment>
                         );
@@ -944,6 +944,9 @@ export function AiAssistantWorkspace({
                             requestPage={chat.requestDocumentPreviewPage} />
                         <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence}
                             messages={chat.messages} renderMessage={renderTranscriptMessage}
+                            renderReasoning={message => <div className="max-w-[90%] px-3 py-2 text-sm">
+                                <AssistantReasoning text={message.reasoning} />
+                            </div>}
                             renderToolGroup={messages => <AssistantToolGroup messages={messages} tools={chat.tools}
                                 renderMessage={renderTranscriptMessage} displayNameForTool={displayNameForTool} />} />
                         <AssistantContextNotices historical notices={chat.contextNotices.filter(notice => !noticeMessageId(notice, chat.messages))} />

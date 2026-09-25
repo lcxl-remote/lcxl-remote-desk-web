@@ -4,7 +4,8 @@ import { AssistantImages } from './assistant-images';
 import { deleteAssistantImage, getAssistantImage, listAssistantImages } from '@/services/clients';
 import type { AiAssistantVisualEvidence } from './ai-assistant-event';
 vi.mock('@/services/clients', () => ({ deleteAssistantImage: vi.fn(), getAssistantImage: vi.fn(), listAssistantImages: vi.fn() }));
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, values?: { count?: number }) =>
+    values?.count === undefined ? key : `${key}:${values.count}` }) }));
 const frame: AiAssistantVisualEvidence = {
     content: { kind: 'artifact', artifact_id: 'visual-image', media_type: 'image/png', sha256: 'a'.repeat(64), size_bytes: 3 },
     schema_version: 1, evidence_id: 'visual-image', conversation_id: 'stored-run', focus_input_revision: 1,
@@ -114,5 +115,66 @@ describe('durable assistant images', () => {
         fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
         await screen.findByText('pages.aiAssistant.imageUnavailable');
         expect(screen.queryByRole('img')).toBeNull();
+    });
+});
+
+describe('assistant activity folding', () => {
+    const renderMessage = (message: { text: string }) => <p>{message.text}</p>;
+    const renderReasoning = (message: { reasoning?: string | null }) => <details><summary>Thinking</summary>{message.reasoning}</details>;
+    const renderToolGroup = (group: { text: string }[]) => <details><summary>Tools</summary>{group.map(item => <p key={item.text}>{item.text}</p>)}</details>;
+
+    it('folds multiple activities between assistant bodies and keeps nested disclosures independent', async () => {
+        render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'first', role: 'assistant', text: 'First answer' },
+            { id: 'capture', role: 'tool_call', turnId: 'turn', toolCallId: 'capture-call', text: 'Capture tool' },
+            { id: 'result', role: 'tool_result', turnId: 'turn', toolCallId: 'capture-call', text: 'Capture result' },
+            { id: 'second', role: 'assistant', text: 'Second answer', reasoning: 'Checked the image' },
+        ]} renderMessage={renderMessage} renderReasoning={renderReasoning} renderToolGroup={renderToolGroup} />);
+        const outer = screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:2' });
+        expect(outer.getAttribute('data-state')).toBe('closed');
+        expect(screen.queryByRole('button', { name: 'pages.aiAssistant.imageOpen' })).toBeNull();
+        fireEvent.click(outer);
+        expect(outer.getAttribute('data-state')).toBe('open');
+        expect(screen.getByText('Tools').closest('details')?.open).toBe(false);
+        expect(screen.getByText('Thinking').closest('details')?.open).toBe(false);
+        const imageButton = await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' });
+        expect(screen.getByText('Capture tool').compareDocumentPosition(imageButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(imageButton.compareDocumentPosition(screen.getByText('Checked the image')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(screen.getByText('Checked the image').compareDocumentPosition(screen.getByText('Second answer')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('keeps a single activity visible and folds two calls even when they share one tool group', () => {
+        vi.mocked(listAssistantImages).mockResolvedValue({ data: [], success: true, code: 0 });
+        const view = render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'first', role: 'assistant', text: 'First' },
+            { id: 'only-call', role: 'tool_call', turnId: 'one', toolCallId: 'one', text: 'One call' },
+            { id: 'second', role: 'assistant', text: 'Second' },
+        ]} renderMessage={renderMessage} renderToolGroup={renderToolGroup} />);
+        expect(screen.queryByRole('button', { name: /pages.aiAssistant.activityGroup/ })).toBeNull();
+        view.rerender(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'first', role: 'assistant', text: 'First' },
+            { id: 'call-one', role: 'tool_call', turnId: 'one', toolCallId: 'one', text: 'One call' },
+            { id: 'call-two', role: 'tool_call', turnId: 'one', toolCallId: 'two', text: 'Two calls' },
+            { id: 'second', role: 'assistant', text: 'Second' },
+        ]} renderMessage={renderMessage} renderToolGroup={renderToolGroup} />);
+        expect(screen.getAllByRole('button', { name: 'pages.aiAssistant.activityGroup:2' })).toHaveLength(1);
+    });
+
+    it('does not fold across a user message or hide unfinished activity', () => {
+        vi.mocked(listAssistantImages).mockResolvedValue({ data: [], success: true, code: 0 });
+        render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'early', role: 'tool_call', turnId: 'start', toolCallId: 'early', text: 'Early call' },
+            { id: 'first', role: 'assistant', text: 'First' },
+            { id: 'call-one', role: 'tool_call', turnId: 'one', toolCallId: 'one', text: 'First call' },
+            { id: 'question', role: 'user', text: 'New question' },
+            { id: 'call-two', role: 'tool_call', turnId: 'two', toolCallId: 'two', text: 'Second call' },
+            { id: 'second', role: 'assistant', text: 'Second' },
+            { id: 'call-three', role: 'tool_call', turnId: 'three', toolCallId: 'three', text: 'Unfinished call' },
+            { id: 'thought', role: 'assistant', text: '', reasoning: 'Still thinking' },
+        ]} renderMessage={renderMessage} renderReasoning={renderReasoning} renderToolGroup={renderToolGroup} />);
+        expect(screen.queryByRole('button', { name: /pages.aiAssistant.activityGroup/ })).toBeNull();
+        expect(screen.getByText('Early call')).toBeTruthy();
+        expect(screen.getByText('Unfinished call')).toBeTruthy();
+        expect(screen.getByText('Still thinking')).toBeTruthy();
     });
 });

@@ -1577,6 +1577,7 @@ export default {
   'pages.aiAssistant.toolCall.unknown': 'Tool name unavailable',
   'pages.aiAssistant.toolCall.missingInput': 'Input unavailable',
   'pages.aiAssistant.reasoning': 'Thinking',
+  'pages.aiAssistant.activityGroup': 'Work process · {{count}} items',
   'pages.aiAssistant.stop': 'Stop',
   'pages.aiAssistant.stopping': 'Stopping…',
   'pages.aiAssistant.send': 'Send',
