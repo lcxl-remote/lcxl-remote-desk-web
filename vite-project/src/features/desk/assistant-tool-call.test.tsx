@@ -75,6 +75,17 @@ describe('tool call transcript', () => {
         expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.success' })).toBeNull();
     });
 
+    it('does not label a verified non-send as a successful send', () => {
+        const hash = 'a'.repeat(64);
+        const output = JSON.stringify({ schema_version: 4, snapshot_id: 'snapshot',
+            snapshot_sha256: hash, idempotency_key: `send:v1:${hash}`,
+            outcome: 'definitely_not_sent', provider_receipt_id: null,
+            evidence: 'precondition_rejected_before_activation', observed_at_unix_ms: 1 });
+        render(<AssistantToolCall tool={{ ...tool, name: 'send_gmail_message', status: 'ok', output }} running={false} />);
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.toolCall.returned' })).toBeTruthy();
+        expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.success' })).toBeNull();
+    });
+
     it('starts folded, lazily renders payloads, and keeps expansion when output arrives', async () => {
         const { container, rerender } = render(<AssistantToolCall tool={tool} running />);
         expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);

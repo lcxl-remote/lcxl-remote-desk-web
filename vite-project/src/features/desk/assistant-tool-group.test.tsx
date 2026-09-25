@@ -15,6 +15,21 @@ describe('assistant tool activity summary', () => {
         expect(screen.queryByText('pages.aiAssistant.workspace.toolGroupSucceeded')).toBeNull();
     });
 
+    it('counts a confirmed non-send as returned, not as a successful send', () => {
+        const hash = 'a'.repeat(64);
+        const output = JSON.stringify({ schema_version: 4, snapshot_id: 'snapshot',
+            snapshot_sha256: hash, idempotency_key: `send:v1:${hash}`,
+            outcome: 'definitely_not_sent', provider_receipt_id: null,
+            evidence: 'precondition_rejected_before_activation', observed_at_unix_ms: 1 });
+        render(<AssistantToolGroup
+            messages={[{ id: 'call', role: 'tool_call', toolCallId: 'call-1', text: '' }]}
+            tools={[{ callId: 'call-1', name: 'send_gmail_message', status: 'ok',
+                argumentsJson: '{}', output }]}
+            renderMessage={() => <div>Details</div>} />);
+        expect(screen.getByText('pages.aiAssistant.workspace.toolGroupReturned')).toBeTruthy();
+        expect(screen.queryByText('pages.aiAssistant.workspace.toolGroupSucceeded')).toBeNull();
+    });
+
     it('keeps a genuinely unknown action result separate from a successful tool call', () => {
         const output = JSON.stringify({ work_id: 'work', action_request_id: 'call-1',
             execution_generation: 'generation', result: 'outcome_unknown', facts: [], output: null });

@@ -1681,7 +1681,7 @@ async fn ai_assistant_user_followup_reprojects_latest_browser_page_ref() {
     assert!(
         projection
             .text
-            .contains("do not claim that no BrowserPageRef exists")
+            .contains("do not claim that no browser page exists")
     );
     assert!(!projection.text.contains("raw page title"));
     assert!(
@@ -8098,6 +8098,24 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
     ));
 
     let conversation = vec![preview, search_call, search, browser, gmail, resume];
+    let mut projected_browser = conversation[4].clone();
+    crate::ui_model_ids::project_tool_message(&mut projected_browser);
+    let projected_value: serde_json::Value = serde_json::from_str(&projected_browser.text).unwrap();
+    assert_eq!(projected_value["page"]["page_id"], "page-gmail-1");
+    assert!(projected_value["page"].get("adapter").is_none());
+    assert_eq!(
+        projected_value["snapshot"]["elements"][0]["element_id"],
+        "gmail-to"
+    );
+    assert!(
+        projected_value["snapshot"]["elements"][0]
+            .get("page_incarnation")
+            .is_none()
+    );
+    assert_eq!(
+        projected_value["result_summary"]["output_type"],
+        "BrowserActionResult / ComputerActionCompleted<BrowserActionResult>"
+    );
     let projection = reusable_provider_result_projection(&conversation, "projection", 9_000)
         .unwrap()
         .unwrap();
@@ -8106,11 +8124,93 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
     assert!(projection.text.contains("Public benchmark"));
     assert!(projection.text.contains("https://example.com/benchmark"));
     assert!(projection.text.contains("page-slack-1"));
-    assert!(projection.text.contains("page-incarnation-1"));
+    assert!(!projection.text.contains("page-incarnation-1"));
     assert!(projection.text.contains("app.slack.com"));
     assert!(projection.text.contains("page-gmail-1"));
     assert!(projection.text.contains("To recipients"));
     assert!(projection.text.contains("Message Body"));
+    let wait_input = ToolCall {
+        id: "wait-model".into(),
+        name: "browser_wait_for".into(),
+        arguments_json: serde_json::json!({
+            "page_id":"page-gmail-1","element_id":"gmail-to","timeout_ms":500
+        })
+        .to_string(),
+    };
+    let resolved = crate::ui_model_ids::resolve_call(&wait_input, &conversation, 9_000).unwrap();
+    let resolved_value: serde_json::Value = serde_json::from_str(&resolved.arguments_json).unwrap();
+    assert_eq!(resolved_value["state"], "present");
+    assert_eq!(
+        resolved_value["page"]["adapter"]["profile_incarnation"],
+        "profile-incarnation-1"
+    );
+    assert_eq!(
+        resolved_value["element"]["accessible_name"],
+        "To recipients"
+    );
+    assert!(crate::ui_model_ids::same_call_input(
+        &wait_input.name,
+        &wait_input.arguments_json,
+        &resolved.arguments_json
+    ));
+    let unknown = ToolCall {
+        arguments_json: serde_json::json!({
+            "page_id":"page-gmail-1","element_id":"invented","timeout_ms":500
+        })
+        .to_string(),
+        ..wait_input.clone()
+    };
+    assert!(crate::ui_model_ids::resolve_call(&unknown, &conversation, 9_000).is_err());
+    assert!(crate::ui_model_ids::resolve_call(&wait_input, &conversation, 9_999).is_err());
+    let mut navigated: BrowserActionResult = serde_json::from_str(&conversation[4].text).unwrap();
+    navigated.call_id = "navigated-call".into();
+    navigated.outcome = BrowserActionOutcome::PageOpened;
+    navigated.page.origin.host_ascii = "app.slack.com".into();
+    navigated.page.page_incarnation = "new-incarnation".into();
+    navigated.page.document_revision = 1;
+    navigated.page.observed_at_unix_ms = 50;
+    navigated.snapshot = None;
+    navigated.completed_at_unix_ms = 51;
+    let mut after_navigation = conversation.clone();
+    let mut newer = ChatMessage::tool_result(
+        "navigated-result",
+        "navigated-call",
+        serde_json::to_string(&navigated).unwrap(),
+    );
+    newer.data_envelope = conversation[4].data_envelope.clone();
+    newer
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .provenance
+        .source_tool_name = "browser_navigate_page".into();
+    after_navigation.push(newer);
+    let snapshot_call = ToolCall {
+        name: "browser_take_snapshot".into(),
+        arguments_json: serde_json::json!({"page_id":"page-gmail-1","max_elements":20}).to_string(),
+        ..wait_input.clone()
+    };
+    let resolved_snapshot =
+        crate::ui_model_ids::resolve_call(&snapshot_call, &after_navigation, 9_000).unwrap();
+    let snapshot_value: serde_json::Value =
+        serde_json::from_str(&resolved_snapshot.arguments_json).unwrap();
+    assert_eq!(
+        snapshot_value["page"]["origin"]["host_ascii"],
+        "app.slack.com"
+    );
+    assert!(crate::ui_model_ids::resolve_call(&wait_input, &after_navigation, 9_000).is_err());
+    let permission = ToolCall {
+        id: "request-model".into(),
+        name: "request_permissions".into(),
+        arguments_json: serde_json::json!({"items":[{"tool_name":"browser_wait_for",
+            "exact_input":{"page_id":"page-gmail-1","element_id":"gmail-to","timeout_ms":500}}]})
+        .to_string(),
+    };
+    let resolved_permission =
+        crate::ui_model_ids::resolve_call(&permission, &conversation, 9_000).unwrap();
+    let permission_value: serde_json::Value =
+        serde_json::from_str(&resolved_permission.arguments_json).unwrap();
+    assert_eq!(permission_value["items"][0]["exact_input"], resolved_value);
     assert!(
         projection
             .text
@@ -8532,7 +8632,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
         mutating_tool("prepare_gmail_draft", Capability::ShellExecConfirmed),
         mutating_tool("prepare_slack_message", Capability::ShellExecConfirmed),
     ];
-    let clock = || "t".to_string();
+    let clock = || "2026-06-20T00:00:00Z".to_string();
     let outcome = run_agent_turn(
         &exec_deps(&sess, &model, &scripted, &registry, &clock),
         exec_claim(),

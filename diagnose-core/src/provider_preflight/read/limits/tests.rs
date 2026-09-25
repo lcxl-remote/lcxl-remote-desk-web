@@ -97,6 +97,9 @@ fn read_output_limits_count_wire_bytes_and_actual_projections() {
             entries: vec![projection.clone(), projection],
             directory_entries: vec![],
             truncated: false,
+            pagination_id: None,
+            pagination_consistency: None,
+            next_cursor: None,
         },
     ));
     let meta_call = call("inspect_files");

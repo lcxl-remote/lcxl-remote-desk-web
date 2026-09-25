@@ -33,6 +33,9 @@ const DURABLE_ARTIFACT_REGISTRY_VERSION: u32 = 2;
 const MAX_FILE_REFS: usize = 8_192;
 const MAX_SELECTED_ROOTS: usize = 32;
 const MAX_DIRECTORY_ENTRIES: usize = 256;
+const MAX_DIRECTORY_SCAN_ENTRIES: usize = 100_000;
+const MAX_DIRECTORY_PAGE_CURSORS: usize = 512;
+const DIRECTORY_PAGE_CURSOR_TTL_SECONDS: i64 = 120;
 const MAX_TEXT_READ_BYTES: u32 = 64 * 1024;
 #[cfg(target_os = "macos")]
 mod macos_publish;
@@ -59,6 +62,8 @@ mod windows_path_anchor;
 #[cfg(windows)]
 use windows_directory::enumerate_directory;
 #[cfg(windows)]
+use windows_directory::enumerate_directory_from;
+#[cfg(windows)]
 pub mod windows_publish;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +87,7 @@ struct StoreState {
     incarnation: String,
     sequence: u64,
     objects: HashMap<String, StoredFile>,
+    directory_page_cursors: HashMap<String, DirectoryPageCursor>,
     durable_registry_path: Option<PathBuf>,
     durable_registry_error: Option<String>,
 }
@@ -92,10 +98,19 @@ impl Default for StoreState {
             incarnation: uuid::Uuid::new_v4().to_string(),
             sequence: 0,
             objects: HashMap::new(),
+            directory_page_cursors: HashMap::new(),
             durable_registry_path: None,
             durable_registry_error: None,
         }
     }
+}
+
+#[derive(Clone)]
+struct DirectoryPageCursor {
+    params: FileMetadataInspectParams,
+    next_offset: usize,
+    pagination_id: String,
+    expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -457,6 +472,9 @@ pub fn inspect(
         ));
     }
     let directory_filter = ValidatedDirectoryFilter::from_params(params)?;
+    if params.paginate || params.cursor.is_some() {
+        return inspect_paginated(params, &directory_filter);
+    }
 
     let mut entries = Vec::new();
     let mut directory_entries = Vec::new();
@@ -547,12 +565,190 @@ pub fn inspect(
         entries,
         directory_entries,
         truncated,
+        pagination_id: None,
+        pagination_consistency: None,
+        next_cursor: None,
     })
+}
+
+fn inspect_paginated(
+    params: &FileMetadataInspectParams,
+    filter: &ValidatedDirectoryFilter,
+) -> Result<FileMetadataInspectOutput, AgentError> {
+    if !params.paginate
+        || !params.enumerate_directories
+        || params.roots.len() != 1
+        || params.roots[0].object_kind != ObjectKind::Directory
+        || params.max_entries < 2
+        || params.file_name.is_some()
+        || params
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 128 || !cursor.is_ascii())
+    {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "directory pagination requires one selected directory, room for a child, and an opaque cursor",
+            false,
+        ));
+    }
+    let mut binding = params.clone();
+    binding.cursor = None;
+    let prior = if let Some(cursor) = &params.cursor {
+        let state = store().lock().map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "file reference store is unavailable",
+                true,
+            )
+        })?;
+        Some(
+            state
+                .directory_page_cursors
+                .get(cursor)
+                .filter(|saved| saved.expires_at > Utc::now() && saved.params == binding)
+                .cloned()
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::InvalidInput,
+                        "directory page cursor is stale or mismatched",
+                        false,
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let stored = resolve(&params.roots[0])?;
+    let opened = open_verified_for_read(&stored.path)?;
+    if opened.identity != stored.identity || !opened.metadata.is_dir() {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "selected directory changed before pagination",
+            false,
+        ));
+    }
+    let offset = prior.as_ref().map_or(0, |saved| saved.next_offset);
+    let (listed, has_more, scan_limit_reached) = enumerate_directory_from(
+        &stored,
+        &opened,
+        offset,
+        params.max_entries as usize - 1,
+        filter,
+    )?;
+    if scan_limit_reached {
+        return Err(error(
+            AgentErrorKind::OutputLimitExceeded,
+            "directory exceeds the bounded pagination scan limit; narrow the file filters or use an exact name",
+            false,
+        ));
+    }
+    let root = FileMetadataProjection {
+        object_ref: params.roots[0].clone(),
+        display_name: stored
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().chars().take(512).collect())
+            .unwrap_or_else(|| stored.path.to_string_lossy().chars().take(512).collect()),
+        is_directory: true,
+        byte_len: None,
+        modified_at: opened
+            .metadata
+            .modified()
+            .ok()
+            .map(DateTime::<Utc>::from)
+            .map(|value| value.to_rfc3339()),
+    };
+    let pagination_id = prior.as_ref().map_or_else(
+        || format!("file-page-{}", uuid::Uuid::new_v4()),
+        |saved| saved.pagination_id.clone(),
+    );
+    let listed_len = listed.len();
+    let mut output = FileMetadataInspectOutput {
+        snapshot_id: format!("file-selection-{}", uuid::Uuid::new_v4()),
+        entries: vec![root],
+        directory_entries: listed,
+        truncated: false,
+        pagination_id: Some(pagination_id.clone()),
+        pagination_consistency: Some("best_effort".into()),
+        next_cursor: None,
+    };
+    let next_token = format!("file-page-cursor-{}", uuid::Uuid::new_v4());
+    loop {
+        output.truncated = has_more || output.directory_entries.len() < listed_len;
+        output.next_cursor = output.truncated.then(|| next_token.clone());
+        let encoded = serde_json::to_vec(&output).map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "cannot encode directory page",
+                false,
+            )
+        })?;
+        if encoded.len() <= params.max_bytes.saturating_sub(256) as usize {
+            break;
+        }
+        if output.directory_entries.pop().is_none() {
+            return Err(error(
+                AgentErrorKind::OutputLimitExceeded,
+                "directory page cannot fit the requested byte budget",
+                false,
+            ));
+        }
+    }
+    if output.truncated && output.directory_entries.is_empty() {
+        return Err(error(
+            AgentErrorKind::OutputLimitExceeded,
+            "directory page cannot fit one child in the requested byte budget",
+            false,
+        ));
+    }
+    let mut state = store().lock().map_err(|_| {
+        error(
+            AgentErrorKind::Internal,
+            "file reference store is unavailable",
+            true,
+        )
+    })?;
+    if let Some(cursor) = &params.cursor
+        && state.directory_page_cursors.remove(cursor).is_none()
+    {
+        return Err(error(
+            AgentErrorKind::InvalidInput,
+            "directory page cursor was already consumed",
+            false,
+        ));
+    }
+    if output.truncated {
+        state
+            .directory_page_cursors
+            .retain(|_, saved| saved.expires_at > Utc::now());
+        if state.directory_page_cursors.len() >= MAX_DIRECTORY_PAGE_CURSORS {
+            return Err(error(
+                AgentErrorKind::OutputLimitExceeded,
+                "directory pagination cursor store is full",
+                true,
+            ));
+        }
+        state.directory_page_cursors.insert(
+            next_token,
+            DirectoryPageCursor {
+                params: binding,
+                next_offset: offset + output.directory_entries.len(),
+                pagination_id,
+                expires_at: prior.as_ref().map_or_else(
+                    || Utc::now() + Duration::seconds(DIRECTORY_PAGE_CURSOR_TTL_SECONDS),
+                    |saved| saved.expires_at,
+                ),
+            },
+        );
+    }
+    Ok(output)
 }
 
 #[derive(Debug, Default)]
 struct ValidatedDirectoryFilter {
     file_extensions: Vec<String>,
+    file_name: Option<String>,
     min_file_bytes: Option<u64>,
     max_file_bytes: Option<u64>,
     modified_after: Option<DateTime<Utc>>,
@@ -583,6 +779,16 @@ impl ValidatedDirectoryFilter {
         }
         let modified_after = parse_filter_time(params.modified_after.as_deref())?;
         let modified_before = parse_filter_time(params.modified_before.as_deref())?;
+        if params.file_name.as_ref().is_some_and(|name| {
+            name.is_empty()
+                || name.chars().count() > 512
+                || matches!(name.as_str(), "." | "..")
+                || name
+                    .chars()
+                    .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+        }) {
+            return Err(invalid_file_filter());
+        }
         if params
             .min_file_bytes
             .zip(params.max_file_bytes)
@@ -595,6 +801,7 @@ impl ValidatedDirectoryFilter {
         }
         Ok(Self {
             file_extensions,
+            file_name: params.file_name.clone(),
             min_file_bytes: params.min_file_bytes,
             max_file_bytes: params.max_file_bytes,
             modified_after,
@@ -604,6 +811,7 @@ impl ValidatedDirectoryFilter {
 
     fn is_active(&self) -> bool {
         !self.file_extensions.is_empty()
+            || self.file_name.is_some()
             || self.min_file_bytes.is_some()
             || self.max_file_bytes.is_some()
             || self.modified_after.is_some()
@@ -616,6 +824,13 @@ impl ValidatedDirectoryFilter {
         byte_len: u64,
         modified_at: Option<DateTime<Utc>>,
     ) -> bool {
+        if self
+            .file_name
+            .as_deref()
+            .is_some_and(|requested| display_name != requested)
+        {
+            return false;
+        }
         if !self.file_extensions.is_empty()
             && !self.file_extensions.iter().any(|extension| {
                 display_name
@@ -665,7 +880,7 @@ fn parse_filter_time(value: Option<&str>) -> Result<Option<DateTime<Utc>>, Agent
 fn invalid_file_filter() -> AgentError {
     error(
         AgentErrorKind::InvalidInput,
-        "file metadata filter is outside the extension, size, or RFC3339 time bounds",
+        "file metadata filter is outside the name, extension, size, or RFC3339 time bounds",
         false,
     )
 }
@@ -686,6 +901,19 @@ fn enumerate_directory(
     max_entries: usize,
     filter: &ValidatedDirectoryFilter,
 ) -> Result<(Vec<DirectoryEntryProjection>, bool), AgentError> {
+    let (rows, more, limit_reached) =
+        enumerate_directory_from(stored, opened, 0, max_entries, filter)?;
+    Ok((rows, more || limit_reached))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn enumerate_directory_from(
+    stored: &StoredFile,
+    opened: &OpenedFile,
+    skip_matches: usize,
+    max_entries: usize,
+    filter: &ValidatedDirectoryFilter,
+) -> Result<(Vec<DirectoryEntryProjection>, bool, bool), AgentError> {
     use std::ffi::CStr;
     use std::os::fd::IntoRawFd;
 
@@ -712,6 +940,8 @@ fn enumerate_directory(
     }
     let stream = DirectoryStream(stream);
     let mut rows = Vec::new();
+    let mut scanned = 0;
+    let mut matched = 0;
     loop {
         clear_unix_errno();
         let entry = unsafe { libc::readdir(stream.0) };
@@ -720,10 +950,21 @@ fn enumerate_directory(
             if cause.raw_os_error().is_some_and(|code| code != 0) {
                 return Err(io_error("enumerate selected directory handle", cause));
             }
-            return Ok((rows, false));
+            return Ok((rows, false, false));
         }
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
         if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        if scanned >= MAX_DIRECTORY_SCAN_ENTRIES {
+            return Ok((rows, true, true));
+        }
+        scanned += 1;
+        if filter
+            .file_name
+            .as_deref()
+            .is_some_and(|requested| name.to_str().ok() != Some(requested))
+        {
             continue;
         }
         let child = match open_relative_unix(&opened.handle, name) {
@@ -749,9 +990,14 @@ fn enumerate_directory(
         if !matches {
             continue;
         }
-        if rows.len() >= max_entries {
-            return Ok((rows, true));
+        if matched < skip_matches {
+            matched += 1;
+            continue;
         }
+        if rows.len() >= max_entries {
+            return Ok((rows, true, false));
+        }
+        matched += 1;
         // macOS signs only the already-open immediate regular child. Future
         // reads reopen and compare this identity; neither a path nor metadata
         // alone grants content access. Do not follow links or mint directories.
@@ -806,6 +1052,21 @@ fn enumerate_directory(
     _max_entries: usize,
     _filter: &ValidatedDirectoryFilter,
 ) -> Result<(Vec<DirectoryEntryProjection>, bool), AgentError> {
+    Err(error(
+        AgentErrorKind::UnsupportedCapability,
+        "handle-relative directory enumeration is unavailable on this platform",
+        false,
+    ))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn enumerate_directory_from(
+    _stored: &StoredFile,
+    _opened: &OpenedFile,
+    _skip_matches: usize,
+    _max_entries: usize,
+    _filter: &ValidatedDirectoryFilter,
+) -> Result<(Vec<DirectoryEntryProjection>, bool, bool), AgentError> {
     Err(error(
         AgentErrorKind::UnsupportedCapability,
         "handle-relative directory enumeration is unavailable on this platform",
@@ -2516,6 +2777,9 @@ mod tests {
             max_bytes: 4096,
             enumerate_directories: false,
             file_extensions: vec![],
+            file_name: None,
+            paginate: false,
+            cursor: None,
             min_file_bytes: None,
             max_file_bytes: None,
             modified_after: None,
@@ -2534,6 +2798,9 @@ mod tests {
             max_bytes: 4096,
             enumerate_directories: false,
             file_extensions: vec![],
+            file_name: None,
+            paginate: false,
+            cursor: None,
             min_file_bytes: None,
             max_file_bytes: None,
             modified_after: None,
@@ -2559,6 +2826,9 @@ mod tests {
                 max_bytes: 4096,
                 enumerate_directories: false,
                 file_extensions: vec![],
+                file_name: None,
+                paginate: false,
+                cursor: None,
                 min_file_bytes: None,
                 max_file_bytes: None,
                 modified_after: None,
@@ -2661,6 +2931,9 @@ mod tests {
             max_bytes: 64 * 1024,
             enumerate_directories: true,
             file_extensions: vec![],
+            file_name: None,
+            paginate: false,
+            cursor: None,
             min_file_bytes: None,
             max_file_bytes: None,
             modified_after: None,
@@ -2765,6 +3038,9 @@ mod tests {
             max_bytes: 64 * 1024,
             enumerate_directories: true,
             file_extensions: vec![],
+            file_name: None,
+            paginate: false,
+            cursor: None,
             min_file_bytes: None,
             max_file_bytes: None,
             modified_after: None,
@@ -2790,6 +3066,9 @@ mod tests {
             max_bytes: 256 * 1024,
             enumerate_directories: true,
             file_extensions: vec![],
+            file_name: None,
+            paginate: false,
+            cursor: None,
             min_file_bytes: None,
             max_file_bytes: None,
             modified_after: None,
@@ -2805,6 +3084,118 @@ mod tests {
                 .directory_entries
                 .iter()
                 .all(|entry| entry.display_name.starts_with("entry-"))
+        );
+        let targeted = inspect(&FileMetadataInspectParams {
+            roots: vec![issue(temp.path()).unwrap()],
+            max_entries: 2,
+            max_bytes: 4096,
+            enumerate_directories: true,
+            file_extensions: vec![],
+            file_name: Some("entry-0599.txt".into()),
+            paginate: false,
+            cursor: None,
+            min_file_bytes: None,
+            max_file_bytes: None,
+            modified_after: None,
+            modified_before: None,
+        })
+        .unwrap();
+        assert_eq!(targeted.directory_entries.len(), 1);
+        assert_eq!(targeted.directory_entries[0].display_name, "entry-0599.txt");
+        assert!(!targeted.truncated);
+        assert!(targeted.directory_entries[0].object_ref.is_some());
+    }
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn directory_pagination_is_bounded_and_cursor_is_scope_bound() {
+        let _guard = file_store_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        for index in 0..310 {
+            std::fs::write(temp.path().join(format!("page-{index:04}.txt")), b"x").unwrap();
+        }
+        reset_worker_incarnation();
+        let mut params = FileMetadataInspectParams {
+            roots: vec![issue(temp.path()).unwrap()],
+            max_entries: 24,
+            max_bytes: 32 * 1024,
+            enumerate_directories: true,
+            file_extensions: vec![".txt".into()],
+            file_name: None,
+            paginate: true,
+            cursor: None,
+            min_file_bytes: None,
+            max_file_bytes: None,
+            modified_after: None,
+            modified_before: None,
+        };
+        let first = inspect(&params).unwrap();
+        assert_eq!(first.pagination_consistency.as_deref(), Some("best_effort"));
+        assert_eq!(first.directory_entries.len(), 23);
+        assert!(first.truncated);
+        let mut seen = std::collections::HashSet::new();
+        for entry in &first.directory_entries {
+            assert!(seen.insert(entry.display_name.clone()));
+            #[cfg(windows)]
+            assert!(entry.object_ref.is_some());
+        }
+        let initial_cursor = first.next_cursor.clone().unwrap();
+        params.cursor = Some(initial_cursor.clone());
+        params.max_entries = 25;
+        assert_eq!(
+            inspect(&params).unwrap_err().kind,
+            AgentErrorKind::InvalidInput
+        );
+        params.max_entries = 24;
+        let mut next = first.next_cursor;
+        let mut pages = 1;
+        while let Some(cursor) = next {
+            params.cursor = Some(cursor.clone());
+            let page = inspect(&params).unwrap();
+            assert_eq!(page.pagination_id, first.pagination_id);
+            assert_eq!(page.pagination_consistency.as_deref(), Some("best_effort"));
+            assert!(serde_json::to_vec(&page).unwrap().len() <= params.max_bytes as usize);
+            for entry in &page.directory_entries {
+                assert!(seen.insert(entry.display_name.clone()));
+            }
+            assert_eq!(page.truncated, page.next_cursor.is_some());
+            next = page.next_cursor;
+            pages += 1;
+            assert!(pages < 30);
+        }
+        assert_eq!(seen.len(), 310);
+        params.cursor = None;
+        params.max_bytes = 2048;
+        let small_first = inspect(&params).unwrap();
+        assert!(small_first.directory_entries.len() < 23);
+        assert!(small_first.next_cursor.is_some());
+        let first_names = small_first
+            .directory_entries
+            .iter()
+            .map(|entry| entry.display_name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        params.cursor = small_first.next_cursor;
+        let small_second = inspect(&params).unwrap();
+        assert!(
+            small_second
+                .directory_entries
+                .iter()
+                .all(|entry| !first_names.contains(&entry.display_name))
+        );
+        assert_eq!(small_second.pagination_id, small_first.pagination_id);
+        params.max_bytes = 32 * 1024;
+        params.cursor = Some(initial_cursor);
+        assert_eq!(
+            inspect(&params).unwrap_err().kind,
+            AgentErrorKind::InvalidInput
+        );
+        params.cursor = None;
+        let new_first = inspect(&params).unwrap();
+        params.cursor = new_first.next_cursor;
+        reset_worker_incarnation();
+        assert_eq!(
+            inspect(&params).unwrap_err().kind,
+            AgentErrorKind::InvalidInput
         );
     }
 
@@ -2904,6 +3295,9 @@ mod tests {
             max_bytes: 64 * 1024,
             enumerate_directories: true,
             file_extensions: vec![".csv".into()],
+            file_name: None,
+            paginate: false,
+            cursor: None,
             min_file_bytes: Some(4),
             max_file_bytes: Some(16),
             modified_after: Some((Utc::now() - Duration::days(1)).to_rfc3339()),
@@ -2927,9 +3321,30 @@ mod tests {
                 max_bytes: 64 * 1024,
                 enumerate_directories: true,
                 file_extensions: extensions,
+                file_name: None,
+                paginate: false,
+                cursor: None,
                 min_file_bytes: minimum,
                 max_file_bytes: maximum,
                 modified_after: after,
+                modified_before: None,
+            })
+            .unwrap_err();
+            assert_eq!(error.kind, AgentErrorKind::InvalidInput);
+        }
+        for name in ["", ".", "../c.csv", "nested\\c.csv", "bad\nname"] {
+            let error = inspect(&FileMetadataInspectParams {
+                roots: vec![directory.clone()],
+                max_entries: 256,
+                max_bytes: 64 * 1024,
+                enumerate_directories: true,
+                file_extensions: vec![],
+                file_name: Some(name.into()),
+                paginate: false,
+                cursor: None,
+                min_file_bytes: None,
+                max_file_bytes: None,
+                modified_after: None,
                 modified_before: None,
             })
             .unwrap_err();
@@ -3040,6 +3455,9 @@ mod tests {
             max_bytes: 64 * 1024,
             enumerate_directories: true,
             file_extensions: vec![],
+            file_name: None,
+            paginate: false,
+            cursor: None,
             min_file_bytes: None,
             max_file_bytes: None,
             modified_after: None,

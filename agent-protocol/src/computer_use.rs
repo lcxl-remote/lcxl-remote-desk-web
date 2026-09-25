@@ -606,6 +606,17 @@ pub struct FileMetadataInspectParams {
     pub modified_after: Option<String>,
     #[serde(default)]
     pub modified_before: Option<String>,
+    /// Match one immediate regular-file child by its exact leaf name. The
+    /// edge compares names from the pinned directory enumeration; this value
+    /// is never opened as a caller-supplied path.
+    #[serde(default)]
+    pub file_name: Option<String>,
+    /// Opt into bounded best-effort pagination of one selected directory.
+    #[serde(default)]
+    pub paginate: bool,
+    /// Device-issued opaque continuation, never a path or directory selector.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 #[derive(
@@ -644,6 +655,13 @@ pub struct FileMetadataInspectOutput {
     #[serde(default)]
     pub directory_entries: Vec<DirectoryEntryProjection>,
     pub truncated: bool,
+    /// Present on every best-effort page, including the final page.
+    #[serde(default)]
+    pub pagination_id: Option<String>,
+    #[serde(default)]
+    pub pagination_consistency: Option<String>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(

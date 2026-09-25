@@ -164,9 +164,10 @@ mod tests {
             Capability::PresentationLiveInspect
         );
         let spec = &capability.tool_spec.parameters_schema;
-        for field in ["path", "source", "target", "batch_file"] {
+        for field in ["path", "target", "batch_file"] {
             assert!(spec["properties"].get(field).is_none());
         }
+        assert!(spec["properties"].get("source").is_some());
         assert_eq!(spec["additionalProperties"], false);
         assert!(!crate::input_read_context::object_read::implicit_object_tool(INSPECT_TOOL, &[]));
         let _ = ai_assistant_edge_adapter_registry();

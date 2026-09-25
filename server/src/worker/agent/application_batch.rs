@@ -44,7 +44,7 @@ pub(crate) fn execute(
             }).to_string());
         }
     }
-    let mut receipt = json!({"status":"completed","completed_steps":steps.len(),"next":"Read the target UI/window screenshot and compare identifiable content before claiming success. If unchanged, reconsider the target position before increasing scroll distance."});
+    let mut receipt = json!({"status":"completed","execution_status":"dispatch_completed","verification_status":"unverified","completed_steps":steps.len(),"next":"Read the target UI/window screenshot and compare identifiable content before claiming success. If unchanged, reconsider the target position before increasing scroll distance."});
     if let Some(scroll) = last_scroll {
         receipt["last_scroll"] = scroll;
     }
@@ -98,20 +98,37 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&message).unwrap();
         assert_eq!(value["last_scroll"]["position"]["x"], 200);
         assert_eq!(value["completed_steps"], 3);
+        assert_eq!(value["execution_status"], "dispatch_completed");
+        assert_eq!(value["verification_status"], "unverified");
         assert!(value.get("application_state_verified").is_none());
         assert!(value.get("steps").is_none());
     }
     #[test]
     fn successful_batch_has_only_count_and_no_steps() {
         let mut calls = 0;
-        let (_, message) = execute(&steps(), |_| {
+        let (class, message) = execute(&steps(), |_| {
             calls += 1;
             Ok(None)
         });
         let value: serde_json::Value = serde_json::from_str(&message).unwrap();
         assert_eq!(calls, 3);
         assert_eq!(value["completed_steps"], 3);
+        assert_eq!(value["execution_status"], "dispatch_completed");
+        assert_eq!(value["verification_status"], "unverified");
         assert!(value.get("steps").is_none());
+        let completed = ComputerActionCompleted {
+            work_id: "work".into(),
+            action_request_id: "action".into(),
+            execution_generation: "generation".into(),
+            result: class,
+            facts: vec![],
+            output: None,
+            message: Some(message.clone()),
+        };
+        assert_eq!(
+            desk_diagnose_core::application_batch::completion_receipt(&completed, Some(3)).unwrap(),
+            Some((false, message))
+        );
     }
     #[test]
     fn first_failure_stops_remaining_steps_without_replay() {

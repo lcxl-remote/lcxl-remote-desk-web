@@ -472,7 +472,7 @@ fn browser_projection(
         canonical_input,
         completion,
     )? {
-        return serde_json::to_string(&receipt)
+        return desk_diagnose_core::communication_handoff::project_send_receipt_output(&receipt)
             .map(Some)
             .map_err(|_| invalid());
     }

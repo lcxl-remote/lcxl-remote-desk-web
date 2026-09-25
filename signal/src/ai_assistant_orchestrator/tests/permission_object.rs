@@ -1019,6 +1019,9 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                         }],
                         directory_entries: vec![],
                         truncated: false,
+                        pagination_id: None,
+                        pagination_consistency: None,
+                        next_cursor: None,
                     },
                 )
             })),

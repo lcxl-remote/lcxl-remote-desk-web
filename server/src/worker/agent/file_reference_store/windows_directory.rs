@@ -8,6 +8,18 @@ pub(super) fn enumerate_directory(
     max_entries: usize,
     filter: &ValidatedDirectoryFilter,
 ) -> Result<(Vec<DirectoryEntryProjection>, bool), AgentError> {
+    let (rows, more, limit_reached) =
+        enumerate_directory_from(stored, opened, 0, max_entries, filter)?;
+    Ok((rows, more || limit_reached))
+}
+
+pub(super) fn enumerate_directory_from(
+    stored: &StoredFile,
+    opened: &OpenedFile,
+    skip_matches: usize,
+    max_entries: usize,
+    filter: &ValidatedDirectoryFilter,
+) -> Result<(Vec<DirectoryEntryProjection>, bool, bool), AgentError> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{ERROR_NO_MORE_FILES, HANDLE};
     use windows::Win32::Storage::FileSystem::{
@@ -27,6 +39,8 @@ pub(super) fn enumerate_directory(
         ));
     }
     let mut rows = Vec::new();
+    let mut scanned = 0;
+    let mut matched = 0;
     let mut restart = true;
     loop {
         let mut buffer = vec![0u8; 64 * 1024];
@@ -46,7 +60,7 @@ pub(super) fn enumerate_directory(
         };
         if let Err(cause) = result {
             if cause.code() == windows::core::HRESULT::from_win32(ERROR_NO_MORE_FILES.0) {
-                return Ok((rows, false));
+                return Ok((rows, false, false));
             }
             return Err(error(
                 AgentErrorKind::InvalidInput,
@@ -83,9 +97,16 @@ pub(super) fn enumerate_directory(
                 .chunks_exact(2)
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect::<Vec<_>>();
+            if scanned >= MAX_DIRECTORY_SCAN_ENTRIES {
+                return Ok((rows, true, true));
+            }
+            scanned += 1;
             let display_name = String::from_utf16_lossy(&name_utf16);
+            let exact_name_matches = filter.file_name.as_deref().is_none_or(|requested| {
+                String::from_utf16(&name_utf16).ok().as_deref() == Some(requested)
+            });
             let reparse = info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
-            if display_name != "." && display_name != ".." && !reparse {
+            if display_name != "." && display_name != ".." && !reparse && exact_name_matches {
                 let is_directory = info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
                 let byte_len = (!is_directory).then_some(info.EndOfFile.max(0) as u64);
                 let modified_at = windows_file_time_value(info.LastWriteTime);
@@ -109,21 +130,25 @@ pub(super) fn enumerate_directory(
                     offset += next;
                     continue;
                 }
-                if rows.len() >= max_entries {
-                    return Ok((rows, true));
+                if matched < skip_matches {
+                    matched += 1;
+                } else if rows.len() >= max_entries {
+                    return Ok((rows, true, false));
+                } else {
+                    matched += 1;
+                    rows.push(DirectoryEntryProjection {
+                        object_ref: if is_directory {
+                            None
+                        } else {
+                            Some(issue_child(stored, &name_utf16, info.FileId as u64)?)
+                        },
+                        parent_snapshot_id: stored.snapshot_id.clone(),
+                        display_name: display_name.chars().take(512).collect(),
+                        is_directory,
+                        byte_len,
+                        modified_at: modified_at.map(|timestamp| timestamp.to_rfc3339()),
+                    });
                 }
-                rows.push(DirectoryEntryProjection {
-                    object_ref: if is_directory {
-                        None
-                    } else {
-                        Some(issue_child(stored, &name_utf16, info.FileId as u64)?)
-                    },
-                    parent_snapshot_id: stored.snapshot_id.clone(),
-                    display_name: display_name.chars().take(512).collect(),
-                    is_directory,
-                    byte_len,
-                    modified_at: modified_at.map(|timestamp| timestamp.to_rfc3339()),
-                });
             }
             if info.NextEntryOffset == 0 {
                 break;

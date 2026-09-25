@@ -27,7 +27,9 @@ fn fields(tool: &str) -> &'static [(&'static str, &'static str)] {
 }
 
 pub fn needs_resolution(tool: &str) -> bool {
-    !fields(tool).is_empty() || tool == "request_permissions"
+    !fields(tool).is_empty()
+        || tool == "request_permissions"
+        || crate::browser_model_ids::supports(tool)
 }
 
 fn references(value: &Value, result: &mut Vec<ObjectRef>) {
@@ -139,6 +141,14 @@ pub(crate) fn resolve_single_call(
     }
     let mut value: Value = serde_json::from_str(&call.arguments_json)
         .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
+    if crate::browser_model_ids::supports(&call.name) {
+        crate::browser_model_ids::resolve(call, &mut value, history, now_ms)?;
+        crate::model_input::fill_versions(&call.name, &mut value);
+        return Ok(ToolCall {
+            arguments_json: value.to_string(),
+            ..call.clone()
+        });
+    }
     let object = value
         .as_object_mut()
         .ok_or_else(|| invalid("Tool arguments must be a JSON object."))?;
@@ -256,6 +266,21 @@ pub(crate) fn resolve_single_call(
     if call.name == "request_permissions" {
         if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
             for item in items {
+                if let Some(tool) = item["tool_name"].as_str().map(str::to_owned)
+                    && crate::browser_model_ids::supports(&tool)
+                    && let Some(exact) = item.get_mut("exact_input")
+                {
+                    let nested = ToolCall {
+                        id: call.id.clone(),
+                        name: tool,
+                        arguments_json: exact.to_string(),
+                    };
+                    *exact = serde_json::from_str(
+                        &resolve_call(&nested, history, now_ms)?.arguments_json,
+                    )
+                    .unwrap();
+                    continue;
+                }
                 if item["tool_name"] == "send_raw_input" {
                     if let Some(exact) = item.get_mut("exact_input") {
                         let nested = ToolCall {
@@ -309,6 +334,10 @@ pub(crate) fn resolve_single_call(
 }
 
 fn project_arguments(tool: &str, value: &mut Value) {
+    if crate::browser_model_ids::supports(tool) {
+        crate::browser_model_ids::project_arguments(tool, value);
+        return;
+    }
     if crate::application_batch::supports(tool) && value.get("remaining_steps").is_some() {
         // Failed model calls are also replayed; only invert the trusted shape.
         let Some(tail) = value.get("remaining_steps").and_then(Value::as_array) else {
@@ -370,6 +399,15 @@ fn project_arguments(tool: &str, value: &mut Value) {
             if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
                 for item in items {
                     project_scope(item);
+                    if let Some(tool) = item["tool_name"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .filter(|tool| crate::browser_model_ids::supports(tool))
+                        && let Some(exact) = item.get_mut("exact_input")
+                    {
+                        project_arguments(&tool, exact);
+                        continue;
+                    }
                     if item["tool_name"] == "send_raw_input" {
                         if let Some(exact) = item.get_mut("exact_input") {
                             project_arguments("send_raw_input", exact);
@@ -439,6 +477,8 @@ fn hide_references(value: &mut Value) {
 
 /// Convert the entire trusted result before attachment paging.
 pub(crate) fn project_tool_message(message: &mut ChatMessage) {
+    crate::browser_model_ids::project_result_message(message);
+    crate::output_contracts::project_status(message);
     if message.role == ChatRole::Tool {
         if let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
             && (value.pointer("/ReadContext/DesktopUiInspect").is_some()
@@ -520,9 +560,12 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
                     let end = start + stream.byte_offset();
                     for entry in &mut entries {
                         project_scope(entry);
-                        if entry["tool_name"] == "send_raw_input" {
+                        if let Some(tool) = entry["tool_name"].as_str().map(str::to_owned)
+                            && (tool == "send_raw_input"
+                                || crate::browser_model_ids::supports(&tool))
+                        {
                             if let Some(exact) = entry.get_mut("approved_exact_input") {
-                                project_arguments("send_raw_input", exact);
+                                project_arguments(&tool, exact);
                             }
                         }
                     }
@@ -549,6 +592,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
     {
         return;
     }
+    crate::browser_model_ids::project_tool(tool);
     let schema = &mut tool.parameters_schema;
     for (internal, model) in fields(&tool.name) {
         if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {

@@ -5151,7 +5151,7 @@ fn current_unix_ms(clock: &dyn Fn() -> String) -> Result<u64, AgentError> {
         })
 }
 
-fn verified_browser_result(message: &ChatMessage) -> Option<BrowserActionResult> {
+pub(crate) fn verified_browser_result(message: &ChatMessage) -> Option<BrowserActionResult> {
     let message = message.trusted_tool_result();
     if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
         return None;
@@ -5543,8 +5543,8 @@ fn reusable_provider_result_projection(
                 });
                 elements.truncate(MAX_BROWSER_ELEMENTS_PER_RESULT);
                 browser_results.push(serde_json::json!({
-                    "page": result.page,
-                    "elements": elements,
+                    "page": crate::browser_model_ids::page_projection(&result.page),
+                    "elements": elements.iter().map(crate::browser_model_ids::element_projection).collect::<Vec<_>>(),
                 }));
                 browser_envelopes.push(envelope.clone());
             }
@@ -5583,7 +5583,7 @@ fn reusable_provider_result_projection(
         error_code: None,
     })?;
     let text = format!(
-        "CURRENT REUSABLE PROVIDER RESULTS (server authoritative bounded references; not a grant; copy opaque ids verbatim and never invent them): {payload}. This registry is emitted after the turn-start capability catalog. When browser_reference_delta.page_reference_prerequisite_present=true, it supersedes only an older catalog claim that the page-reference prerequisite is absent. If request_permissions is available and the named downstream browser tool is a registered permission candidate, request its exact permission using the complete copied page/input now; do not claim that no BrowserPageRef exists. Runtime readiness, the tool registry, grants, and final server validation remain authoritative and are not widened by this delta."
+        "CURRENT REUSABLE PROVIDER RESULTS (server authoritative bounded references; not a grant; copy observed browser page_id and element_id verbatim and never invent them): {payload}. This registry is emitted after the turn-start capability catalog. When browser_reference_delta.page_reference_prerequisite_present=true, it supersedes only an older catalog claim that the page-reference prerequisite is absent. If request_permissions is available and the named downstream browser tool is a registered permission candidate, request its exact permission using the observed IDs and complete remaining input now; do not claim that no browser page exists. Runtime readiness, the tool registry, grants, and final server validation remain authoritative and are not widened by this delta."
     );
     let mut projection = ChatMessage::system_event(message_id, &text);
     projection.data_envelope = derive_internal_tool_result_envelope(

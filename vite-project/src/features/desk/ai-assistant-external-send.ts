@@ -4,6 +4,9 @@ export type ExternalSendReceipt = {
     snapshot_sha256: string;
     idempotency_key: string;
     outcome: 'sent' | 'definitely_not_sent' | 'outcome_unknown';
+    /** Present on newly projected results; historical receipts omit both fields. */
+    receipt_status?: 'verified';
+    business_effect?: 'sent' | 'not_sent' | 'unknown';
     provider_receipt_id?: string | null;
     evidence:
         | 'provider_ui_acknowledgement'
@@ -17,6 +20,11 @@ const SHA256 = /^[0-9a-f]{64}$/;
 
 export function isExactExternalSendTool(toolName: string) {
     return EXACT_SEND_TOOLS.has(toolName);
+}
+
+export function isConfirmedNotSent(toolName: string, output: string | null) {
+    return isExactExternalSendTool(toolName)
+        && parseExternalSendReceipt(output)?.outcome === 'definitely_not_sent';
 }
 
 export function parseExternalSendReceipt(output: string | null): ExternalSendReceipt | null {
@@ -47,7 +55,14 @@ export function parseExternalSendReceipt(output: string | null): ExternalSendRec
             || (value.outcome === 'outcome_unknown'
                 && value.evidence === 'receipt_not_observed_after_activation'
                 && noReceipt);
-        return validOutcome ? value as ExternalSendReceipt : null;
+        if (!validOutcome) return null;
+        const expectedEffect = value.outcome === 'sent' ? 'sent'
+            : value.outcome === 'definitely_not_sent' ? 'not_sent' : 'unknown';
+        const hasSummary = value.receipt_status !== undefined || value.business_effect !== undefined;
+        if (hasSummary && (value.receipt_status !== 'verified' || value.business_effect !== expectedEffect)) {
+            return null;
+        }
+        return value as ExternalSendReceipt;
     } catch {
         return null;
     }

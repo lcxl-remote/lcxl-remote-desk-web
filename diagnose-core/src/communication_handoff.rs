@@ -420,6 +420,51 @@ pub fn project_web_send_receipt(
     Ok(Some(receipt))
 }
 
+/// Add explicit call-receipt and business-effect semantics only at the
+/// model-visible boundary. The device's SendReceipt wire type stays unchanged.
+pub fn project_send_receipt_output(receipt: &SendReceipt) -> Result<String, AgentError> {
+    receipt.validate().map_err(|_| invalid())?;
+    let mut value = serde_json::to_value(receipt).map_err(|_| invalid())?;
+    let object = value.as_object_mut().ok_or_else(invalid)?;
+    object.insert("receipt_status".into(), "verified".into());
+    object.insert(
+        "business_effect".into(),
+        business_effect(receipt.outcome).into(),
+    );
+    serde_json::to_string(&value).map_err(|_| invalid())
+}
+
+/// Accept historical raw receipts while rejecting contradictory projected
+/// summaries. Other provider outputs are left to their own typed validators.
+pub fn parse_send_receipt_output(content: &str) -> Result<Option<SendReceipt>, AgentError> {
+    let Ok(serde_json::Value::Object(mut object)) = serde_json::from_str(content) else {
+        return Ok(None);
+    };
+    if !object.contains_key("snapshot_sha256") || !object.contains_key("outcome") {
+        return Ok(None);
+    }
+    let status = object.remove("receipt_status");
+    let effect = object.remove("business_effect");
+    let receipt: SendReceipt =
+        serde_json::from_value(serde_json::Value::Object(object)).map_err(|_| invalid())?;
+    receipt.validate().map_err(|_| invalid())?;
+    match (status, effect) {
+        (None, None) => {}
+        (Some(serde_json::Value::String(status)), Some(serde_json::Value::String(effect)))
+            if status == "verified" && effect == business_effect(receipt.outcome) => {}
+        _ => return Err(invalid()),
+    }
+    Ok(Some(receipt))
+}
+
+fn business_effect(outcome: SendOutcome) -> &'static str {
+    match outcome {
+        SendOutcome::Sent => "sent",
+        SendOutcome::DefinitelyNotSent => "not_sent",
+        SendOutcome::OutcomeUnknown => "unknown",
+    }
+}
+
 /// Historical content tied to an explicit Sent receipt. The caller must also
 /// verify the original dispatch, subject and grant before using this as evidence.
 /// It is not a reusable authorization or proof of current provider readiness.
@@ -879,6 +924,26 @@ mod tests {
                     evidence,
                     observed_at_unix_ms: 300,
                 };
+                let projected = project_send_receipt_output(&receipt).unwrap();
+                let projected_value: serde_json::Value = serde_json::from_str(&projected).unwrap();
+                let expected_effect = match outcome {
+                    SendOutcome::Sent => "sent",
+                    SendOutcome::DefinitelyNotSent => "not_sent",
+                    SendOutcome::OutcomeUnknown => "unknown",
+                };
+                assert_eq!(projected_value["receipt_status"], "verified");
+                assert_eq!(projected_value["business_effect"], expected_effect);
+                assert_eq!(
+                    parse_send_receipt_output(&projected).unwrap(),
+                    Some(receipt.clone())
+                );
+                assert_eq!(
+                    parse_send_receipt_output(&serde_json::to_string(&receipt).unwrap()).unwrap(),
+                    Some(receipt.clone())
+                );
+                let mut contradicted = projected_value;
+                contradicted["business_effect"] = serde_json::json!("sent_wrong");
+                assert!(parse_send_receipt_output(&contradicted.to_string()).is_err());
                 let completed = ComputerActionCompleted {
                     work_id: "1".into(),
                     action_request_id: "request".into(),

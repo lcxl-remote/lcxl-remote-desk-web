@@ -1550,7 +1550,7 @@ export default {
   'pages.aiAssistant.executionDisabled': '执行功能未开放',
   'pages.aiAssistant.questionPlaceholder': '描述你的问题或希望助手完成的任务…',
   'pages.aiAssistant.readOnlyReminder': '语义观察会发送给已配置模型；写入或外部草稿交接只有在精确授权后才会执行，邮件不会自动发送。',
-  'pages.aiAssistant.toolCall.batchCompleted': '已完成 {{count}} 步',
+  'pages.aiAssistant.toolCall.batchCompleted': '已分发 {{count}} 步，应用状态待确认',
   'pages.aiAssistant.toolCall.batchFailed': '第 {{count}} 步失败',
   'pages.aiAssistant.toolCall.batchNotStarted': '确定未开始执行',
   'pages.aiAssistant.toolCall.batchPartiallyDispatched': '前 {{count}} 步已派发，需回读确认结果',

@@ -1552,7 +1552,7 @@ export default {
   'pages.aiAssistant.executionDisabled': 'Execution is not available',
   'pages.aiAssistant.questionPlaceholder': 'Describe your question or the task you want help with…',
   'pages.aiAssistant.readOnlyReminder': 'Semantic observations are sent to the configured model. Writes and external-draft handoffs run only under exact grants, and mail is never sent automatically.',
-  'pages.aiAssistant.toolCall.batchCompleted': 'Completed {{count}} steps',
+  'pages.aiAssistant.toolCall.batchCompleted': 'Dispatched {{count}} steps; app state unverified',
   'pages.aiAssistant.toolCall.batchFailed': 'Step {{count}} failed',
   'pages.aiAssistant.toolCall.batchNotStarted': 'Execution definitely did not start',
   'pages.aiAssistant.toolCall.batchPartiallyDispatched': '{{count}} earlier steps dispatched; inspect to verify the result',

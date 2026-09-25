@@ -5294,10 +5294,13 @@ impl SignalAiAssistantTools {
             input = OperationInput::ReadContext(ReadContextInput {
                 kind: ContextKind::FileMetadataInspect(FileMetadataInspectParams {
                     roots: self.selected_file_roots.clone(),
-                    max_entries: 256,
-                    max_bytes: 64 * 1024,
+                    max_entries: requested.max_entries.min(256),
+                    max_bytes: requested.max_bytes.min(64 * 1024),
                     enumerate_directories: true,
                     file_extensions: requested.file_extensions,
+                    file_name: requested.file_name,
+                    paginate: requested.paginate,
+                    cursor: requested.cursor,
                     min_file_bytes: requested.min_file_bytes,
                     max_file_bytes: requested.max_file_bytes,
                     modified_after: requested.modified_after,

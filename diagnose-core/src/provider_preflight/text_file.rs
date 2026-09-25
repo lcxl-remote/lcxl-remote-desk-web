@@ -689,6 +689,8 @@ pub struct ResultFileRead {
     file: ObjectRef,
     additional: Vec<ResultFileRead>,
     tool_name: String,
+    file_name: Option<String>,
+    paginated: bool,
     pub source_envelope_id: String,
     pub valid_until_unix_ms: u64,
 }
@@ -917,6 +919,21 @@ impl ResultFileRead {
             return Ok(first);
         }
         if call.name == "inspect_files" {
+            let arguments: serde_json::Value =
+                serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+            let file_name = arguments
+                .get("file_name")
+                .filter(|name| !name.is_null())
+                .map(|name| name.as_str().ok_or_else(unavailable).map(str::to_owned))
+                .transpose()?;
+            let paginated = arguments
+                .get("paginate")
+                .map(|value| value.as_bool().ok_or_else(unavailable))
+                .transpose()?
+                .unwrap_or(false);
+            if arguments.get("cursor").is_some() && !paginated {
+                return Err(unavailable());
+            }
             let owner = crate::permission_resume::latest_user_requirement(&session.conversation)
                 .and_then(|m| m.data_envelope.as_ref())
                 .ok_or_else(unavailable)?;
@@ -933,6 +950,8 @@ impl ResultFileRead {
                 file,
                 additional: vec![],
                 tool_name: call.name.clone(),
+                file_name,
+                paginated,
                 source_envelope_id: owner.envelope_id.clone(),
                 valid_until_unix_ms: now.saturating_add(120_000),
             });
@@ -976,6 +995,8 @@ impl ResultFileRead {
             file: evidence.reference.clone(),
             additional: vec![],
             tool_name: call.name.clone(),
+            file_name: None,
+            paginated: false,
             source_envelope_id: source_id.into(),
             valid_until_unix_ms,
         })
@@ -1104,6 +1125,28 @@ impl ResultFileRead {
             if metadata.entries.len() != 1
                 || metadata.entries[0].object_ref != self.file
                 || metadata.directory_entries.len() > 256
+                || (self.paginated
+                    && metadata
+                        .pagination_id
+                        .as_deref()
+                        .is_none_or(|id| id.is_empty() || id.len() > 128 || !id.is_ascii()))
+                || (self.paginated
+                    && metadata.pagination_consistency.as_deref() != Some("best_effort"))
+                || (self.paginated && metadata.truncated != metadata.next_cursor.is_some())
+                || (!self.paginated
+                    && (metadata.pagination_id.is_some()
+                        || metadata.pagination_consistency.is_some()
+                        || metadata.next_cursor.is_some()))
+                || metadata.next_cursor.as_ref().is_some_and(|cursor| {
+                    cursor.is_empty() || cursor.len() > 128 || !cursor.is_ascii()
+                })
+                || self.file_name.as_ref().is_some_and(|name| {
+                    metadata.directory_entries.len() > 1
+                        || metadata
+                            .directory_entries
+                            .iter()
+                            .any(|entry| entry.is_directory || entry.display_name != *name)
+                })
                 || metadata.directory_entries.iter().any(|entry| {
                     entry.parent_snapshot_id != self.file.snapshot_id
                         || entry.object_ref.as_ref().is_some_and(|r| {
@@ -1692,7 +1735,9 @@ mod tests {
         let source = ToolCall {
             id: "metadata".into(),
             name: "inspect_files".into(),
-            arguments_json: serde_json::json!({"directory_request_id":"directory"}).to_string(),
+            arguments_json:
+                serde_json::json!({"directory_request_id":"directory","file_name":"notes.txt"})
+                    .to_string(),
         };
         let root = crate::file_scope::select_output_directory(&session, &source, 1000).unwrap();
         let output = FileMetadataInspectOutput {
@@ -1713,9 +1758,12 @@ mod tests {
                 modified_at: None,
             }],
             truncated: false,
+            pagination_id: None,
+            pagination_consistency: None,
+            next_cursor: None,
         };
         let text = serde_json::to_string(&desk_agent_protocol::OperationOutput::ReadContext(
-            desk_agent_protocol::ReadContextOutput::FileMetadataInspect(output),
+            desk_agent_protocol::ReadContextOutput::FileMetadataInspect(output.clone()),
         ))
         .unwrap();
         let proposal = ChatMessage::assistant_tool_calls(
@@ -1742,6 +1790,52 @@ mod tests {
             .provenance
             .source_provider_id = crate::ai_assistant::FILE_WORKSPACE_PROVIDER_ID.into();
         session.conversation = vec![owner, proposal, receipt];
+        let scoped = ResultFileRead::build(&session, &source, &destination, 1000).unwrap();
+        let delivered = crate::seam::ToolRunOutput {
+            format: crate::seam::ToolOutputFormat::Text,
+            content: text.clone(),
+            image_data_url: None,
+            document_preview: None,
+        };
+        scoped.validate_output(&delivered).unwrap();
+        let paged_source = ToolCall {
+            arguments_json: serde_json::json!({"directory_request_id":"directory","paginate":true})
+                .to_string(),
+            ..source.clone()
+        };
+        let paged = ResultFileRead::build(&session, &paged_source, &destination, 1000).unwrap();
+        assert!(paged.validate_output(&delivered).is_err());
+        let mut paged_output = output.clone();
+        paged_output.truncated = true;
+        paged_output.pagination_id = Some("page-chain".into());
+        paged_output.pagination_consistency = Some("best_effort".into());
+        paged_output.next_cursor = Some("opaque-next".into());
+        let paged_delivery = |metadata: FileMetadataInspectOutput| crate::seam::ToolRunOutput {
+            content: serde_json::to_string(&desk_agent_protocol::OperationOutput::ReadContext(
+                desk_agent_protocol::ReadContextOutput::FileMetadataInspect(metadata),
+            ))
+            .unwrap(),
+            ..delivered.clone()
+        };
+        paged
+            .validate_output(&paged_delivery(paged_output.clone()))
+            .unwrap();
+        paged_output.pagination_consistency = Some("snapshot".into());
+        assert!(
+            paged
+                .validate_output(&paged_delivery(paged_output))
+                .is_err()
+        );
+        let mut wrong = output;
+        wrong.directory_entries[0].display_name = "other.txt".into();
+        let wrong = crate::seam::ToolRunOutput {
+            content: serde_json::to_string(&desk_agent_protocol::OperationOutput::ReadContext(
+                desk_agent_protocol::ReadContextOutput::FileMetadataInspect(wrong),
+            ))
+            .unwrap(),
+            ..delivered
+        };
+        assert!(scoped.validate_output(&wrong).is_err());
         let framed = crate::chat::frame_file_tool_result(&session.conversation[2]);
         assert!(framed.starts_with("file_result_call_id: \"metadata\"\n"));
         assert!(framed.ends_with(&text));
@@ -1854,13 +1948,12 @@ mod tests {
             "preview_spreadsheet_merge",
         ] {
             let mut args = serde_json::json!({"max_bytes":4096});
-            let selector =
-                serde_json::json!({"file_result_call_id":"metadata", "entry_name":"notes.txt"});
+            let selector = serde_json::json!({"kind":"directory_entry",
+                "file_result_call_id":"metadata", "entry_name":"notes.txt"});
             if selection::multiple(name) {
-                args["file_sources"] = serde_json::json!([selector]);
+                args["sources"] = serde_json::json!([selector]);
             } else {
-                args["file_result_call_id"] = selector["file_result_call_id"].clone();
-                args["entry_name"] = selector["entry_name"].clone();
+                args["source"] = selector.clone();
             }
             if name == "inspect_excel_cell" {
                 args["sheet_name"] = "Sheet1".into();
@@ -1877,6 +1970,47 @@ mod tests {
             };
             let read = ResultFileRead::build(session, &call, destination, 1000).unwrap();
             assert_eq!(read.files(), vec![file.clone()]);
+            let mut legacy_args = args.clone();
+            if selection::multiple(name) {
+                legacy_args.as_object_mut().unwrap().remove("sources");
+                legacy_args["file_sources"] = serde_json::json!([{
+                    "file_result_call_id":"metadata", "entry_name":"notes.txt"
+                }]);
+            } else {
+                legacy_args.as_object_mut().unwrap().remove("source");
+                legacy_args["file_result_call_id"] = "metadata".into();
+                legacy_args["entry_name"] = "notes.txt".into();
+            }
+            let legacy_call = ToolCall {
+                arguments_json: legacy_args.to_string(),
+                ..call.clone()
+            };
+            assert_eq!(
+                ResultFileRead::build(session, &legacy_call, destination, 1000)
+                    .unwrap()
+                    .files(),
+                vec![file.clone()]
+            );
+            let mut wrong_kind_args = args.clone();
+            let wrong =
+                serde_json::json!({"kind":"artifact_result","file_result_call_id":"metadata"});
+            if selection::multiple(name) {
+                wrong_kind_args["sources"] = serde_json::json!([wrong]);
+            } else {
+                wrong_kind_args["source"] = wrong;
+            }
+            let wrong_kind = ToolCall {
+                arguments_json: wrong_kind_args.to_string(),
+                ..call.clone()
+            };
+            assert!(ResultFileRead::build(session, &wrong_kind, destination, 1000).is_err());
+            let mut mixed_args = args.clone();
+            mixed_args["file_result_call_id"] = "metadata".into();
+            let mixed = ToolCall {
+                arguments_json: mixed_args.to_string(),
+                ..call.clone()
+            };
+            assert!(ResultFileRead::build(session, &mixed, destination, 1000).is_err());
             assert!(
                 validate_read_permission_input(session, name, Some(&call.arguments_json), 1000)
                     .is_ok()
@@ -1923,7 +2057,7 @@ mod tests {
                 "{name}"
             );
             if selection::multiple(name) {
-                args["file_sources"] = serde_json::json!([selector.clone(), selector]);
+                args["sources"] = serde_json::json!([selector.clone(), selector]);
                 let duplicate = ToolCall {
                     arguments_json: args.to_string(),
                     ..call
@@ -2037,6 +2171,30 @@ mod tests {
             validate_read_permission_input(&session, "read_text_file", Some(corrected), 1000)
                 .is_ok()
         );
+        let artifact_read = ToolCall {
+            id: "artifact-read".into(),
+            name: "inspect_word_file".into(),
+            arguments_json: serde_json::json!({
+                "source":{"kind":"artifact_result","file_result_call_id":"read-call"},
+                "max_bytes":4096
+            })
+            .to_string(),
+        };
+        assert_eq!(
+            ResultFileRead::build(&session, &artifact_read, &destination, 1000)
+                .unwrap()
+                .files(),
+            vec![evidence.reference.clone()]
+        );
+        let wrong_artifact_kind = ToolCall {
+            arguments_json: serde_json::json!({
+                "source":{"kind":"directory_entry","file_result_call_id":"read-call","entry_name":"notes.txt"},
+                "max_bytes":4096
+            })
+            .to_string(),
+            ..artifact_read
+        };
+        assert!(ResultFileRead::build(&session, &wrong_artifact_kind, &destination, 1000).is_err());
         let mut altered = call.clone();
         let mut arguments: serde_json::Value =
             serde_json::from_str(&altered.arguments_json).unwrap();

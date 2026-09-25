@@ -4,6 +4,7 @@ import { AlertTriangle } from 'lucide-react';
 import { Disclosure } from '@/components/ui/disclosure';
 import type { AiAssistantMessage, AiAssistantToolActivity } from './use-ai-assistant-chat';
 import { hasUnknownActionResult } from './action-result-status';
+import { isConfirmedNotSent } from './ai-assistant-external-send';
 
 function failureMessage(output: string | null): string | null {
     if (!output) return null;
@@ -35,8 +36,8 @@ export function AssistantToolGroup({ messages, tools, renderMessage, displayName
     const known = entries.filter(tool => !uncertain.includes(tool));
     const failed = known.filter(tool => tool.status === 'failed');
     const firstFailureMessage = failureMessage(failed[0]?.output ?? null);
-    const succeeded = known.filter(tool => tool.status === 'ok').length;
-    const returned = known.filter(tool => tool.status === 'returned').length;
+    const succeeded = known.filter(tool => tool.status === 'ok' && !isConfirmedNotSent(tool.name, tool.output)).length;
+    const returned = known.filter(tool => tool.status === 'returned' || (tool.status === 'ok' && isConfirmedNotSent(tool.name, tool.output))).length;
     return <Disclosure className="w-full max-w-full rounded-md border bg-muted/30 px-3 py-2 sm:max-w-[90%]"
         summaryClassName="cursor-pointer text-sm" title={<span className="space-y-1">
             <span className="block font-medium">{t('pages.aiAssistant.workspace.toolGroup', { count: callIds.length })}</span>

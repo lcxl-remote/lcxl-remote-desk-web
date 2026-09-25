@@ -24,13 +24,66 @@ use crate::dynamic_run::{
     MAX_PERMISSION_SCOPE_VALUES, PERMISSION_REQUEST_SCHEMA_VERSION, PermissionRequest,
     PermissionRequestState,
 };
-use crate::provider_registry::ProviderRegistry;
+use crate::provider_registry::{CapabilityDescriptor, ProviderRegistry};
 use crate::registry::{RegisteredTool, ToolEffect};
 
 pub const REQUEST_CAPABILITY_GRANTS_TOOL_NAME: &str = "request_permissions";
 pub const MAX_REQUEST_TTL_SECONDS: u32 = 3_600;
 pub const MAX_REQUEST_USES: u32 = 16;
 pub const MAX_CAPABILITY_CATALOG_PROMPT_BYTES: usize = 16 * 1024;
+
+/// Describe the input binding the permission planner actually requires. This
+/// hint never grants authority; the planner still validates the full request.
+pub(crate) fn permission_input_mode(capability: &CapabilityDescriptor) -> &'static str {
+    if matches!(
+        capability.required_capability,
+        Capability::DesktopUiActionConfirmed | Capability::DesktopBackgroundInputConfirmed
+    ) {
+        return "application_scope";
+    }
+    let id = capability.wire.capability_id.as_str();
+    if matches!(
+        capability.wire.effect,
+        CapabilityEffect::SendExternal
+            | CapabilityEffect::WriteExternalDraft
+            | CapabilityEffect::InputFallback
+            | CapabilityEffect::ExecuteCommand
+            | CapabilityEffect::LaunchApplication
+    ) || crate::provider_preflight::text_file::TextMutationPreflight::supports(
+        &capability.tool_spec.name,
+    ) || capability.required_capability == Capability::SpreadsheetFormulaWorkbookCreateConfirmed
+        || matches!(
+            capability.wire.authorization_hint.resources.as_slice(),
+            [AuthorizationResourceKind::ExternalUrl]
+                | [AuthorizationResourceKind::ExternalQuery]
+                | [AuthorizationResourceKind::ExactCommand]
+        )
+        || matches!(
+            id,
+            crate::ai_assistant::BROWSER_OPEN_CAPABILITY_ID
+                | crate::ai_assistant::BROWSER_NAVIGATE_CAPABILITY_ID
+                | crate::ai_assistant::OUTLOOK_NEW_HANDOFF_CAPABILITY_ID
+                | crate::ai_assistant::GMAIL_WEB_HANDOFF_CAPABILITY_ID
+                | crate::ai_assistant::SLACK_WEB_HANDOFF_CAPABILITY_ID
+                | crate::ai_assistant::GMAIL_WEB_SEND_CAPABILITY_ID
+                | crate::ai_assistant::SLACK_WEB_SEND_CAPABILITY_ID
+                | crate::ai_assistant::DESKTOP_RAW_INPUT_CAPABILITY_ID
+                | crate::ai_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
+                | crate::ai_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID
+                | crate::ai_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID
+                | crate::ai_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID
+                | crate::ai_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID
+                | crate::ai_assistant::PRESENTATION_BATCH_PATCH_CAPABILITY_ID
+                | crate::ai_assistant::windows_excel::PATCH_CAPABILITY_ID
+                | crate::ai_assistant::windows_word::PATCH_CAPABILITY_ID
+                | crate::ai_assistant::windows_office::PATCH_CAPABILITY_ID
+        )
+    {
+        "exact_input"
+    } else {
+        "optional_exact_input"
+    }
+}
 
 /// Content-free baseline measurements for the current capability projection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -495,6 +548,10 @@ pub(crate) fn capability_catalog_entries(
                         "supports_cancel".into(),
                         json!(capability.wire.supports_cancel),
                     );
+                    object.insert(
+                        "permission_input_mode".into(),
+                        json!(permission_input_mode(capability)),
+                    );
                     let mut model_spec = capability.tool_spec.clone();
                     crate::ui_model_ids::project_tool(&mut model_spec);
                     object.insert("description".into(), json!(model_spec.description));
@@ -611,8 +668,10 @@ struct RequestItem {
     exact_input: Option<serde_json::Value>,
     #[serde(default)]
     application_scope: Option<desk_agent_protocol::computer_use::UiApplicationScope>,
-    suggested_ttl_seconds: u32,
-    suggested_max_uses: u32,
+    #[serde(default)]
+    suggested_ttl_seconds: Option<u32>,
+    #[serde(default)]
+    suggested_max_uses: Option<u32>,
     reason: String,
 }
 
@@ -708,7 +767,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-            description: "Create one bounded approval request by actually calling this tool. Use describe_tools only for missing parameter formats; application_scope approval does not require loading individual action definitions; loading alone creates no request. Only report an approval card as submitted after a successful result contains request_id and status=pending_user_decision. An error creates no card; correct the input and call again. Never invent a submitted request or tell the user to refresh to find one without a successful receipt. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
+            description: "Create one bounded approval request by actually calling this tool. The capability index and describe_tools expose each tool's permission_input_mode: application_scope requires an observed application and actions; exact_input requires complete target tool arguments; optional_exact_input permits a scope-only request. Use describe_tools only for missing parameter formats. Loading alone creates no request. Only report an approval card as submitted after a successful result contains request_id and status=pending_user_decision. An error creates no card; correct the input and call again. Never invent a submitted request or tell the user to refresh to find one without a successful receipt. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -725,11 +784,11 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
                                 "exact_input": {"type": "object", "description": "Use the target tool definition (describe_tools if missing) and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
-                                "suggested_ttl_seconds": {"type": "integer", "minimum": 1},
-                                "suggested_max_uses": {"type": "integer", "minimum": 1},
+                                "suggested_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_TTL_SECONDS, "description":"Optional; server defaults to 300 seconds. The owner can narrow it."},
+                                "suggested_max_uses": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_USES, "description":"Optional; server defaults to one use. Exact one-shot actions remain one use regardless of this suggestion."},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
                             },
-                            "required": ["item_id", "tool_name", "suggested_ttl_seconds", "suggested_max_uses", "reason"],
+                            "required": ["item_id", "tool_name", "reason"],
                             "additionalProperties": false
                         }
                     }
@@ -808,6 +867,12 @@ pub fn build_permission_request(
             ));
         }
         let application_scope = item.application_scope;
+        if permission_input_mode(capability) == "exact_input" && item.exact_input.is_none() {
+            return Err(invalid(format!(
+                "item_id={} tool_name={}: requires exact_input containing the complete tool arguments",
+                item.item_id, item.tool_name
+            )));
+        }
         if matches!(
             capability.required_capability,
             Capability::DesktopUiActionConfirmed | Capability::DesktopBackgroundInputConfirmed
@@ -1219,7 +1284,10 @@ pub fn build_permission_request(
             canonical_input_digest_sha256,
             command_confirmation,
             launch_confirmation: None,
-            suggested_ttl_seconds: item.suggested_ttl_seconds.clamp(1, MAX_REQUEST_TTL_SECONDS),
+            suggested_ttl_seconds: item
+                .suggested_ttl_seconds
+                .unwrap_or(300)
+                .clamp(1, MAX_REQUEST_TTL_SECONDS),
             suggested_max_uses: if inherently_r3
                 || exact_command
                 || exact_outlook_handoff
@@ -1229,7 +1297,9 @@ pub fn build_permission_request(
             {
                 1
             } else {
-                item.suggested_max_uses.clamp(1, MAX_REQUEST_USES)
+                item.suggested_max_uses
+                    .unwrap_or(1)
+                    .clamp(1, MAX_REQUEST_USES)
             },
             reason: item.reason.trim().to_string(),
         });
@@ -1391,6 +1461,83 @@ mod tests {
             id: "call-1".into(),
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
             arguments_json: arguments_json.into(),
+        }
+    }
+
+    #[test]
+    fn permission_modes_and_default_limits_match_planner_requirements() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        for (name, mode) in [
+            ("execute_ui_actions", "application_scope"),
+            ("send_background_input", "application_scope"),
+            ("send_gmail_message", "exact_input"),
+            ("browser_open_page", "exact_input"),
+            ("create_formula_workbook", "exact_input"),
+            ("patch_numbers_copy", "exact_input"),
+            ("update_text_file", "exact_input"),
+            ("inspect_files", "optional_exact_input"),
+            ("read_current_screen", "optional_exact_input"),
+        ] {
+            let capability = registry.capability_for_tool(name).unwrap();
+            assert_eq!(permission_input_mode(capability), mode, "{name}");
+        }
+        let tool = permission_planning_tool_registry().remove(0);
+        let item = &tool.spec.parameters_schema["properties"]["items"]["items"];
+        assert_eq!(item["required"], json!(["item_id", "tool_name", "reason"]));
+        let request = build_permission_request(
+            &call(r#"{"items":[{"item_id":"read","tool_name":"inspect_desktop_session","reason":"Inspect the desktop"}]}"#),
+            &registry,
+            "permission-default-limits".into(),
+            1,
+            "2026-09-25T00:00:00Z".into(),
+        )
+        .unwrap();
+        assert_eq!(request.items[0].suggested_ttl_seconds, 300);
+        assert_eq!(request.items[0].suggested_max_uses, 1);
+        assert!(build_permission_request(
+            &call(r#"{"items":[{"item_id":"send","tool_name":"send_gmail_message","reason":"Send message"}]}"#),
+            &registry,
+            "permission-missing-send".into(),
+            1,
+            "2026-09-25T00:00:00Z".into(),
+        )
+        .unwrap_err()
+        .message
+        .contains("requires exact_input"));
+    }
+
+    #[test]
+    fn every_disclosed_required_input_mode_is_enforced() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        for capability in registry
+            .providers()
+            .flat_map(|provider| provider.capabilities.iter())
+        {
+            let expected = match permission_input_mode(capability) {
+                "application_scope" => "requires application_scope",
+                "exact_input" => "requires exact_input",
+                "optional_exact_input" => continue,
+                mode => panic!("unexpected permission input mode {mode}"),
+            };
+            let arguments = json!({"items":[{
+                "item_id":"missing-binding",
+                "tool_name":capability.tool_spec.name,
+                "reason":"Check required input binding"
+            }]});
+            let failure = build_permission_request(
+                &call(&arguments.to_string()),
+                &registry,
+                "permission-required-mode".into(),
+                1,
+                "2026-09-25T00:00:00Z".into(),
+            )
+            .unwrap_err();
+            assert!(
+                failure.message.contains(expected),
+                "{}: {}",
+                capability.tool_spec.name,
+                failure.message
+            );
         }
     }
 
@@ -1608,7 +1755,7 @@ mod tests {
             "2026-08-29T00:00:00Z".into(),
         )
         .unwrap_err();
-        assert!(error.message.contains("require exact_input"));
+        assert!(error.message.contains("requires exact_input"));
     }
 
     #[test]
@@ -1737,7 +1884,16 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.message.contains("Structural example"));
+        assert!(
+            error
+                .message
+                .contains("does not match the current closed tool contract")
+        );
+        assert!(
+            error
+                .message
+                .contains("no request or approval card was created")
+        );
     }
 
     #[test]
@@ -2060,7 +2216,7 @@ mod tests {
             )
             .unwrap_err()
             .message
-            .contains("require exact_input")
+            .contains("requires exact_input")
         );
 
         let exact = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_numbers_copy","expected_effect":"mutate_application","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"cell-token","snapshot_id":"batch-snapshot","object_kind":"range","expires_at":"2026-08-28T00:01:00Z"},"output":{"destination_parent":{"token":"directory-token","snapshot_id":"directory-snapshot","object_kind":"directory","expires_at":"2026-08-28T00:01:00Z"},"native_file_name":"reviewed-copy.numbers"},"action":{"kind":"set_cell_value","params":{"value":"42"}}},"suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
@@ -2140,11 +2296,7 @@ mod tests {
             "2026-08-26T00:00:00Z".into(),
         )
         .unwrap_err();
-        assert!(
-            error
-                .message
-                .contains("formula workbook creation requires exact_input")
-        );
+        assert!(error.message.contains("requires exact_input"));
 
         let exact = r#"{"items":[{"item_id":"formula","provider_id":"spreadsheet.formula_artifact","tool_name":"create_formula_workbook","expected_effect":"write_artifact","resource_scope":["directory:current"],"operation_scope":["create_new_artifact"],"exact_input":{"preview_id":"preview-1","file_name":"regional-formula.xlsx","target_cell":"Merged!C2","formula":"=B2*1.1","locale":"en-US-a1"},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Create the requested formula workbook copy"}]}"#;
         let request = build_permission_request(

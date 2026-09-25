@@ -38,6 +38,9 @@ fn add_directory_source(
                 modified_at: None,
             }],
             truncated: false,
+            pagination_id: None,
+            pagination_consistency: None,
+            next_cursor: None,
         }),
     ))
     .unwrap();

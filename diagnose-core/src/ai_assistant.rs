@@ -1716,7 +1716,7 @@ fn send_gmail_message_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "send_gmail_message".into(),
-            description: "Send exactly one previously prepared and semantically read-back-verified Gmail Web draft. First take a fresh bounded snapshot of the same compose surface, then copy the complete handoff output and the owner's original draft verbatim, and bind the fresh To, Subject, Message Body, and reviewed Send button references. This always requires a new one-shot SendExternal confirmation even if draft permission was already granted. The edge rechecks every field and attachment name immediately before one activation; it returns Sent, DefinitelyNotSent, or OutcomeUnknown and never retries an unknown outcome.".into(),
+            description: "Send exactly one previously prepared and semantically read-back-verified Gmail Web draft. First take a fresh bounded snapshot of the same compose surface, then copy the complete handoff output and the owner's original draft verbatim, and bind the fresh To, Subject, Message Body, and reviewed Send button references. This always requires a new one-shot SendExternal confirmation even if draft permission was already granted. The edge rechecks every field and attachment name immediately before one activation; it returns Sent, DefinitelyNotSent, or OutcomeUnknown and never retries an unknown outcome. In the projected receipt, receipt_status=verified only means the receipt was validated; report a message as sent only when business_effect=sent.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1768,7 +1768,7 @@ fn send_slack_message_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "send_slack_message".into(),
-            description: "Send exactly one previously prepared and semantically read-back-verified Slack Web message. First take a fresh bounded snapshot of the same composer, then copy the complete handoff output and owner-provided body verbatim, and bind the fresh composer and reviewed Send button references. This always requires a new one-shot SendExternal confirmation. The edge rechecks the destination-bound composer and exact body immediately before one activation; it returns Sent, DefinitelyNotSent, or OutcomeUnknown and never retries an unknown outcome. Attachments are not supported.".into(),
+            description: "Send exactly one previously prepared and semantically read-back-verified Slack Web message. First take a fresh bounded snapshot of the same composer, then copy the complete handoff output and owner-provided body verbatim, and bind the fresh composer and reviewed Send button references. This always requires a new one-shot SendExternal confirmation. The edge rechecks the destination-bound composer and exact body immediately before one activation; it returns Sent, DefinitelyNotSent, or OutcomeUnknown and never retries an unknown outcome. In the projected receipt, receipt_status=verified only means the receipt was validated; report a message as sent only when business_effect=sent. Attachments are not supported.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1919,7 +1919,7 @@ fn browser_snapshot_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "browser_take_snapshot".into(),
-            description: "Read a bounded semantic accessibility projection from one provider-owned page. Both page and max_elements (1-512) are required, including in request_permissions.exact_input. This is semantic JSON, not a screenshot. After navigation, this read can refresh the known tab within the same origin and account; use the returned page and element references for subsequent actions. Static page text, arbitrary DOM, credentials, cookies, storage and non-task tab inventory are excluded.".into(),
+            description: "Read a bounded semantic accessibility projection from one provider-owned page. Both observed page_id and max_elements (1-512) are required, including in request_permissions.exact_input. This is semantic JSON, not a screenshot. After navigation, this read can refresh the known tab within the same origin and account; use returned page_id and element_id values for subsequent actions. Static page text, arbitrary DOM, credentials, cookies, storage and non-task tab inventory are excluded.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1939,7 +1939,7 @@ fn browser_wait_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "browser_wait_for".into(),
-            description: "Wait for one exact semantic element reference to remain present. All four parameters are required, including in request_permissions.exact_input: page, element, state=present, timeout_ms (1-30000). To recover after navigation, use browser_take_snapshot instead of waiting on an old element. The first slice deliberately rejects absent/enabled/disabled predicates that the pinned upstream tool cannot prove.".into(),
+            description: "Wait for one observed semantic element to remain present. Supply page_id, element_id and timeout_ms (1-30000), including in request_permissions.exact_input; the server fixes state=present and restores the full references. To recover after navigation, use browser_take_snapshot instead of waiting on an old element. The first slice deliberately rejects absent/enabled/disabled predicates that the pinned upstream tool cannot prove.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -3777,10 +3777,11 @@ fn prompt(locale: Option<&str>) -> String {
     );
     text = text.replace(
         "When the closed browser_* tools are present, they operate only on provider-owned page/element references from the current approved Chrome profile.",
-        "When the closed browser_* tools are present, they operate only on provider-owned page/element references from the current approved Chrome profile. A successful browser result can create a page reference after the turn-start capability catalog was frozen. On the next model step, CURRENT REUSABLE PROVIDER RESULTS is the newer server-authored page-reference prerequisite delta: copy its complete page object into the exact downstream input and call request_permissions immediately when that planning tool and candidate are available. Do not claim that the page reference is missing merely because the older catalog preceded the result; the delta does not override runtime readiness, tool registration, grants, or final server validation.",
+        "When the closed browser_* tools are present, they operate only on provider-owned page/element references from the current approved Chrome profile. A successful browser result can create a page reference after the turn-start capability catalog was frozen. On the next model step, CURRENT REUSABLE PROVIDER RESULTS is the newer server-authored page-reference prerequisite delta: copy its observed page_id and element_id values into the exact downstream input and call request_permissions immediately when that planning tool and candidate are available. Do not claim that the page reference is missing merely because the older catalog preceded the result; the delta does not override runtime readiness, tool registration, grants, or final server validation.",
     );
     text.push_str("\n\nFile operations require the device Computer Use master switch and a currently approved conversation directory. Use request_directory to propose a missing directory; the owner can also add one in this conversation. Directory consent is not file read, write, delete, or export permission: request the exact operation separately. Use only current server directory metadata, never infer approval from old messages. File creation allows empty UTF-8 content, is limited to 64 KiB, and never overwrites existing files. Dedicated text updates and recoverable deletion require their exact one-shot approval and a verified complete file version when those tools are available. Reuse verified creation/read/update receipts and their full SHA-256. When the edit content is already known, request update_text_file directly: do not list the directory or read again merely to obtain a version. Read only for missing content or a reported version conflict; metadata grants do not authorize content reading. Device verification already checks a successful update, so do not offer another read solely to confirm that success. Never retry an unknown mutation outcome.\n");
     text.push_str("\nKeep progress explanations brief: at most one or two sentences before a tool call. Empty or truncated UI searches do not prove a result is unreadable: check the root and self-only versus descendant search, then narrow to a relevant container or increase depth only when traversal is incomplete before concluding unsupported. Recheck current grants before claiming expiry; when permission is missing, submit request_permissions directly instead of asking permission to request permission. Do not repeat object tokens, approved arguments, or complete action batches in prose; the owner can review tool details and permission cards. For GUI tasks, locate the target window/editor, then read known result elements with element_id and element_only=true; search task-specific labels/native_id first and control types only as fallback. Re-read a full UI tree only when precise lookup fails or the structure changed. Never replace a user-requested GUI workflow with shell calculation. Identify requested permissions by tool_name; the server derives the Provider and effect.");
+    text.push_str("\n\nFor browser tool calls and their request_permissions.exact_input, use only current observed page_id and element_id fields shown in each tool schema. The server restores the full profile, origin, page incarnation, document revision, and element metadata before authorization. browser_wait_for.state is always present; omit it. create_formula_workbook.locale is always en-US-a1; omit it. For browser_open_page and browser_navigate_page, pass the exact target.url and omit target.origin; the server derives it from that URL and displays the resolved target in the permission card. Never invent IDs, origins, or account identity.");
     text.push_str("\nFor an authorized GUI task, continue with the next supported action instead of asking the user to perform it or reconfirm an already explicit instruction. Opening an editor, expanding a date/time button, and reading the resulting controls are ordinary steps under the matching grants. Stop only for a concrete blocker, missing authorization, or material ambiguity in the user requirement; do not infer a blocker from a search miss. Load missing capability details before requesting permission. After an argument error, correct the named field and retry within the documented limits. Verify the exact edited control and intended event: a quick-entry field is not the title field of another editor, and an existing event containing the requested words does not prove your edit succeeded. Neither saved nor unsaved state may be inferred from an API success receipt alone.");
     text.push_str(crate::wait_tools::BACKGROUND_TASK_GUIDANCE);
     if let Some(tag) = locale.filter(|tag| !tag.is_empty()) {
@@ -3926,6 +3927,60 @@ mod tests {
             120
         );
         assert_eq!(BROWSER_EXTENSION_ADAPTER_ID, "browser.extension.edge");
+    }
+
+    #[test]
+    fn file_source_schemas_use_discriminated_result_selectors() {
+        let tools = ai_assistant_tool_registry();
+        for name in [
+            "inspect_numbers_file",
+            "inspect_pages_file",
+            "inspect_keynote_file",
+            "inspect_powerpoint_file",
+            "inspect_word_file",
+            "inspect_excel_cell",
+            "preview_document",
+            "convert_document",
+            "inspect_spreadsheets",
+            "preview_spreadsheet_merge",
+        ] {
+            let tool = tools.iter().find(|tool| tool.name() == name).unwrap();
+            let schema = &tool.spec.parameters_schema;
+            let multi = crate::provider_preflight::text_file::selection::multiple(name);
+            let field = if multi { "sources" } else { "source" };
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&field.into())
+            );
+            assert!(schema["properties"].get("file_result_call_id").is_none());
+            assert!(schema["properties"].get("file_sources").is_none());
+            let selector = if multi {
+                &schema["properties"][field]["items"]
+            } else {
+                &schema["properties"][field]
+            };
+            assert_eq!(
+                selector["oneOf"][0]["properties"]["kind"]["const"],
+                "directory_entry"
+            );
+            assert_eq!(
+                selector["oneOf"][1]["properties"]["kind"]["const"],
+                "artifact_result"
+            );
+            assert!(
+                selector["oneOf"][0]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&"entry_name".into())
+            );
+            assert!(
+                selector["oneOf"][1]["properties"]
+                    .get("entry_name")
+                    .is_none()
+            );
+        }
     }
 
     #[test]
@@ -4378,10 +4433,7 @@ mod tests {
             wait.parameters_schema["properties"]["state"]["const"],
             "present"
         );
-        assert!(
-            wait.description
-                .contains("All four parameters are required")
-        );
+        assert!(wait.description.contains("server fixes state=present"));
     }
 
     #[test]

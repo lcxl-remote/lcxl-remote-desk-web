@@ -285,7 +285,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_files",
             Capability::FileMetadataRead,
-            "Read bounded metadata by supplying directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_text_file using this result call id and exact entry_name; content reading still requires a separate grant. Reduce max_entries or use the supported file filters to narrow large results; max_bytes is at most 32768 and does not expand your permission.",
+            "Read bounded metadata by supplying directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_text_file using this result call id and exact entry_name; content reading still requires a separate grant. For an unknown file name in a large directory, set paginate=true with max_entries at least 2, then repeat the same filters and bounds with each next_cursor. Pagination is best effort: directory changes between pages may duplicate or omit names, so restart if completeness matters. For a known name, set file_name to the exact leaf instead. Pagination scans at most 100000 directory records per page and fails closed beyond that bound. max_bytes is at most 32768 and does not expand your permission.",
             json!({
                 "type": "object",
                 "properties": {
@@ -296,6 +296,9 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                         "uniqueItems": true,
                         "default": []
                     },
+                    "file_name": {"type":"string", "minLength":1, "maxLength":512, "description":"Exact immediate regular-file leaf name in the approved directory; not a path."},
+                    "paginate": {"type":"boolean", "default":false, "description":"Use best-effort pagination for one approved directory; omit file_name."},
+                    "cursor": {"type":"string", "minLength":1, "maxLength":128, "description":"Opaque next_cursor from the previous inspect_files page. Repeat the same directory, filters, and bounds."},
                     "directory_request_id": {"type":"string", "minLength":1, "maxLength":256},
                     "max_entries": {"type":"integer", "minimum":1, "maximum":256, "default":256},
                     "max_bytes": {"type":"integer", "minimum":1024, "maximum":32768, "default":32768},
@@ -320,7 +323,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_spreadsheets",
             Capability::SpreadsheetFileInspect,
-            "Read bounded cell, formula, and value projections from inert .xlsx, .csv, or .tsv files discovered in approved conversation directories. Select 1–8 exact files using file_sources; macros, external links, data connections, and model-provided paths are rejected. Reduce max_workbooks, max_sheets, max_rows, max_columns or max_bytes to narrow an oversized result. Returned truncated projections do not contain the omitted cells.",
+            "Read bounded cell, formula, and value projections from inert .xlsx, .csv, or .tsv files discovered in approved conversation directories. Select 1–8 exact files using sources; macros, external links, data connections, and model-provided paths are rejected. Reduce max_workbooks, max_sheets, max_rows, max_columns or max_bytes to narrow an oversized result. Returned truncated projections do not contain the omitted cells.",
             json!({
                 "type": "object",
                 "properties": {
@@ -336,7 +339,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "preview_spreadsheet_merge",
             Capability::SpreadsheetMergePreview,
-            "Preview a bounded multi-workbook merge, dedupe, and statistics operation over inert spreadsheets selected from recorded directory results with file_sources. Rules are typed data only; no script or formula is executed and no file is written. Narrow source_sheet, columns, statistics or max_rows to reduce output; max_bytes is at most 32768. A truncated merge preview cannot be materialized as a complete workbook or report.",
+            "Preview a bounded multi-workbook merge, dedupe, and statistics operation over inert spreadsheets selected from recorded directory results with sources. Rules are typed data only; no script or formula is executed and no file is written. Narrow source_sheet, columns, statistics or max_rows to reduce output; max_bytes is at most 32768. A truncated merge preview cannot be materialized as a complete workbook or report.",
             json!({
                 "type": "object",
                 "properties": {
@@ -505,6 +508,12 @@ struct SelectedFileMetadataToolArgs {
     directory_request_id: Option<String>,
     #[serde(default)]
     file_extensions: Vec<String>,
+    #[serde(default)]
+    file_name: Option<String>,
+    #[serde(default)]
+    paginate: bool,
+    #[serde(default)]
+    cursor: Option<String>,
     #[serde(default)]
     min_file_bytes: Option<u64>,
     #[serde(default)]
@@ -774,15 +783,46 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
             }) {
                 return Err(bad_arguments("invalid conversation directory selector"));
             }
+            if args.file_name.as_ref().is_some_and(|name| {
+                name.is_empty()
+                    || name.chars().count() > 512
+                    || matches!(name.as_str(), "." | "..")
+                    || name
+                        .chars()
+                        .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+            }) {
+                return Err(bad_arguments(
+                    "file_name must be one exact regular-file leaf name",
+                ));
+            }
+            if args.cursor.as_ref().is_some_and(|cursor| {
+                cursor.is_empty()
+                    || cursor.len() > 128
+                    || !cursor.is_ascii()
+                    || cursor.chars().any(char::is_control)
+            }) || (args.cursor.is_some() && !args.paginate)
+                || (args.paginate && args.file_name.is_some())
+            {
+                return Err(bad_arguments(
+                    "cursor requires paginate=true; pagination cannot combine with file_name",
+                ));
+            }
+            let max_entries = result_bound(args.max_entries, 256, 1, 256, "max_entries")?;
+            if args.paginate && max_entries < 2 {
+                return Err(bad_arguments("pagination requires max_entries at least 2"));
+            }
             ContextKind::FileMetadataInspect(FileMetadataInspectParams {
                 // The central orchestrator replaces this empty placeholder with
                 // the exact edge-issued refs selected by the owner. The model
                 // schema has no field that can nominate a path or token.
                 roots: Vec::new(),
-                max_entries: result_bound(args.max_entries, 256, 1, 256, "max_entries")?,
+                max_entries,
                 max_bytes: json_result_budget(args.max_bytes)?,
                 enumerate_directories: false,
                 file_extensions: args.file_extensions,
+                file_name: args.file_name,
+                paginate: args.paginate,
+                cursor: args.cursor,
                 min_file_bytes: args.min_file_bytes,
                 max_file_bytes: args.max_file_bytes,
                 modified_after: args.modified_after,
@@ -930,6 +970,42 @@ mod tests {
             panic!("wrong read operation");
         };
         assert_eq!((params.max_entries, params.max_bytes), (2, 4096));
+        let (_, input) =
+            build_read_operation(&make("inspect_files", r#"{"file_name":"entry-0599.txt"}"#))
+                .unwrap();
+        let OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::FileMetadataInspect(params),
+        }) = input
+        else {
+            panic!("wrong read operation");
+        };
+        assert_eq!(params.file_name.as_deref(), Some("entry-0599.txt"));
+        let (_, input) = build_read_operation(&make(
+            "inspect_files",
+            r#"{"directory_request_id":"approved","paginate":true,"cursor":"opaque-next","max_entries":24,"max_bytes":4096}"#,
+        ))
+        .unwrap();
+        let OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::FileMetadataInspect(params),
+        }) = input
+        else {
+            panic!("wrong read operation");
+        };
+        assert!(params.paginate);
+        assert_eq!(params.cursor.as_deref(), Some("opaque-next"));
+        assert_eq!((params.max_entries, params.max_bytes), (24, 4096));
+        for invalid in [
+            r#"{"cursor":"opaque-next"}"#,
+            r#"{"paginate":true,"file_name":"notes.txt"}"#,
+            r#"{"paginate":true,"cursor":""}"#,
+            r#"{"paginate":true,"max_entries":1}"#,
+        ] {
+            assert!(build_read_operation(&make("inspect_files", invalid)).is_err());
+        }
+        assert!(
+            build_read_operation(&make("inspect_files", r#"{"file_name":"../secret.txt"}"#,))
+                .is_err()
+        );
         let (_, input) = build_read_operation(&make("preview_spreadsheet_merge",
             r#"{"columns":[{"output_header":"name","source_headers":["name"]}],"max_rows":3,"max_bytes":8192}"#)).unwrap();
         let OperationInput::ReadContext(ReadContextInput {

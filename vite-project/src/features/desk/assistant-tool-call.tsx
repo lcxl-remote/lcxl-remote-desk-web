@@ -5,6 +5,7 @@ import { CheckCircle2, CircleDot, CircleHelp, Loader2, XCircle } from 'lucide-re
 import { useTranslation } from 'react-i18next';
 import type { AiAssistantToolActivity } from './use-ai-assistant-chat';
 import { hasUnknownActionResult } from './action-result-status';
+import { isConfirmedNotSent } from './ai-assistant-external-send';
 
 export function isHistoricalPermissionSkip(output: string | null | undefined): boolean {
     return output?.startsWith('not executed: waiting for user permission decision')
@@ -55,9 +56,10 @@ export function AssistantToolCall({ tool, running, displayName }: { tool?: AiAss
     const permissionSubmission = isPermissionSubmissionReceipt(tool);
     const outcomeUnknown = hasUnknownActionResult(tool.output, tool.callId);
     const status = tool.status === 'running' && !running ? 'missing' : tool.status;
-    const StatusIcon = permissionSkip || outcomeUnknown ? CircleHelp : status === 'ok' ? CheckCircle2 : status === 'failed' ? XCircle : status === 'running' ? Loader2 : status === 'returned' ? CircleDot : CircleHelp;
-    const statusLabel = t(`${prefix}${permissionSkip ? 'skippedForPermission' : outcomeUnknown ? 'outcomeUnknown' : status === 'ok' ? 'success' : status === 'failed' ? 'failure' : status === 'running' ? 'waiting' : status === 'returned' ? 'returned' : 'missing'}`);
-    const statusClass = permissionSkip || outcomeUnknown ? 'text-amber-700 dark:text-amber-300' : status === 'ok' ? 'text-green-600 dark:text-green-400' : status === 'failed' ? 'text-destructive' : 'text-muted-foreground';
+    const displayStatus = status === 'ok' && isConfirmedNotSent(tool.name, tool.output) ? 'returned' : status;
+    const StatusIcon = permissionSkip || outcomeUnknown ? CircleHelp : displayStatus === 'ok' ? CheckCircle2 : displayStatus === 'failed' ? XCircle : displayStatus === 'running' ? Loader2 : displayStatus === 'returned' ? CircleDot : CircleHelp;
+    const statusLabel = t(`${prefix}${permissionSkip ? 'skippedForPermission' : outcomeUnknown ? 'outcomeUnknown' : displayStatus === 'ok' ? 'success' : displayStatus === 'failed' ? 'failure' : displayStatus === 'running' ? 'waiting' : displayStatus === 'returned' ? 'returned' : 'missing'}`);
+    const statusClass = permissionSkip || outcomeUnknown ? 'text-amber-700 dark:text-amber-300' : displayStatus === 'ok' ? 'text-green-600 dark:text-green-400' : displayStatus === 'failed' ? 'text-destructive' : 'text-muted-foreground';
     return <Disclosure open={open} onOpenChange={setOpen} className="min-w-0 rounded-md border bg-muted/30 px-3 py-2" title={<>
             <span role="img" aria-label={statusLabel} title={statusLabel} className={`mr-2 inline-flex align-middle ${statusClass}`}>
                 <StatusIcon aria-hidden="true" className={`size-4 shrink-0${status === 'running' && !permissionSkip && !outcomeUnknown ? ' animate-spin motion-reduce:animate-none' : ''}`} />

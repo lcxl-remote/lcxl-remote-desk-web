@@ -31,6 +31,22 @@ describe('external send receipts', () => {
             provider_receipt_id: null,
             evidence: 'receipt_not_observed_after_activation',
         }))?.outcome).toBe('outcome_unknown');
+        expect(parseExternalSendReceipt(JSON.stringify({
+            ...base,
+            outcome: 'definitely_not_sent',
+            provider_receipt_id: null,
+            evidence: 'precondition_rejected_before_activation',
+            receipt_status: 'verified',
+            business_effect: 'not_sent',
+        }))?.business_effect).toBe('not_sent');
+        expect(parseExternalSendReceipt(JSON.stringify({
+            ...base,
+            outcome: 'definitely_not_sent',
+            provider_receipt_id: null,
+            evidence: 'precondition_rejected_before_activation',
+            receipt_status: 'verified',
+            business_effect: 'sent',
+        }))).toBeNull();
 
         expect(parseExternalSendReceipt(JSON.stringify({
             ...base,

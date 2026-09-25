@@ -357,6 +357,9 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
                             ],
                             directory_entries: vec![],
                             truncated: false,
+                            pagination_id: None,
+                            pagination_consistency: None,
+                            next_cursor: None,
                         },
                     ),
                 ))
