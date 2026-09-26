@@ -335,9 +335,8 @@ pub enum SignalingType {
 
     /// In-Terminal AI Assistant request (control end → host / manager). Carries
     /// `desk_agent_protocol::terminal_ai_assistant::TerminalAiAssistantAsk` as
-    /// signaling_data. Like `Diagnose`, it is a manager-owned AI control frame:
-    /// in the manager the control authorizer runs it centrally; in the signal
-    /// server (no authorizer) it relays to the host that runs the assistant. The
+    /// signaling_data. Manager and the open-source signal server authorize and
+    /// run the assistant centrally, as they do for `AskAiAssistant`. The
     /// target device rides the outer `to_connection_id`, not the payload.
     #[wincode(tag = 617)]
     AskTerminalAiAssistant = 617,
@@ -349,7 +348,8 @@ pub enum SignalingType {
     TerminalAiAssistantUpdated = 618,
     /// In-Terminal AI Assistant cancellation (control end → host / manager). Sent
     /// when the operator dismisses an in-flight assistant turn; the message
-    /// `request_id` correlates the cancelled turn. Routed like `DiagnoseCancel`.
+    /// `request_id` correlates the requested turn. Consumed centrally, like
+    /// `CancelAiAssistant`; it is not relayed as a device action.
     #[wincode(tag = 619)]
     CancelTerminalAiAssistant = 619,
 
@@ -433,7 +433,7 @@ pub enum SignalingType {
     #[wincode(tag = 632)]
     ComputerUseReadinessUpdated = 632,
 
-    /// Owner browser to central brain: start one read-only AI Assistant turn.
+    /// Owner browser to central brain: start one AI Assistant turn with owner-authorized actions.
     /// Carries `desk_agent_protocol::ai_assistant::AiAssistantAsk`.
     #[wincode(tag = 633)]
     AskAiAssistant = 633,
