@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503 } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { installService } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const installServiceMutationKey = () => [{ url: '/api/service/install' }] as const
 
@@ -26,9 +26,8 @@ export function installServiceMutationOptions<TContext = unknown>(config: Partia
 }
 
 /**
- * @description Stateless: the handler publishes a `ServiceOp` command on the host control
- * hub and returns 202 Accepted immediately. The caller should poll
- * `GET /api/server_info` to check `service_installed`.
+ * @description Returns a receipt ID after dispatch. Clients query the operation until the
+ * native process reports completion; acceptance alone is not success.
  * @summary Install OS system service
  * {@link /api/service/install}
  */

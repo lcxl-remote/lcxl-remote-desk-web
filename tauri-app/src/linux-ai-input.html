@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Input Control</title>
+<style>
+:root{font:15px system-ui,sans-serif;color-scheme:light dark}body{margin:24px;line-height:1.5}h1{font-size:22px;margin:0 0 12px}p{margin:10px 0}.panel{border:1px solid #888;border-radius:8px;padding:12px;margin:16px 0}label{display:block;margin:12px 0}button,select{font:inherit;padding:7px 14px}button{margin-right:10px}#detail{overflow-wrap:anywhere;font-size:13px}input{margin-right:7px}#state{font-weight:600}button:disabled{opacity:.5}
+</style></head><body>
+<h1 id="title"></h1><p id="scope"></p><p id="escape"></p>
+<label><span id="durationLabel"></span> <select id="duration"><option>30</option><option selected>60</option><option>120</option><option>300</option></select> <span id="secondsLabel"></span></label>
+<label><input id="consent" type="checkbox"><span id="consentLabel"></span></label>
+<label><input id="partial" type="checkbox"><span id="partialLabel"></span></label>
+<div class="panel" role="status" aria-live="polite"><div id="state"></div><div id="counts"></div><div id="detail"></div></div>
+<button id="start" disabled></button><button id="stop" disabled></button>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const messages={
+ en:{title:'AI Input Control',scope:'Best effort on existing keyboards and pointers only. Newly connected devices are not covered; the screen stays visible. This does not grant additional AI permissions.',escape:'Release all keys during the 3-second countdown. Ctrl+Alt+L releases input. Closing this window disconnects control. Maximum duration: 5 minutes.',durationLabel:'Duration',secondsLabel:'seconds',consentLabel:'I agree to temporarily block local input for this period.',partialLabel:'Allow partial blocking if some devices cannot be blocked.',start:'Start control',stop:'Stop control',unavailable:'No registered input control endpoint is available for this host/session.',idle:'Ready for local confirmation',starting:'Starting in 3 seconds — release all keys',active:'Control active (best effort)',stopping:'Waiting for input release acknowledgement…',released:'Worker confirmed input released',error:'Control failed or connection lost; release acknowledgement unavailable',counts:(v)=>`${v[0]} blocked · ${v[1]} failed · ${v[2]} skipped`},
+ zh:{title:'AI 输入控制',scope:'仅尽力阻断当前已有的键盘和指针设备，不覆盖新接入设备，屏幕仍然可见。这不会增加 AI 的动作权限。',escape:'三秒倒计时期间请松开所有按键。Ctrl+Alt+L 释放输入。关闭本窗口会断开控制。最长时段为五分钟。',durationLabel:'持续时间',secondsLabel:'秒',consentLabel:'我同意在本时段内临时阻断本地输入。',partialLabel:'部分设备无法阻断时，仍接受部分覆盖。',start:'开始控制',stop:'停止控制',unavailable:'当前宿主或会话尚无已注册的可用输入控制入口。',idle:'等待本机确认',starting:'三秒后开始，请松开所有按键',active:'控制已开启（尽力阻断）',stopping:'正在等待输入释放回执…',released:'worker 已确认释放输入',error:'控制失败或连接中断，未取得释放确认',counts:(v)=>`${v[0]} 个已阻断 · ${v[1]} 个失败 · ${v[2]} 个跳过`}
+};
+let current={available:false,phase:'idle',locale:'en'}, language='en', revision;
+function render(value){
+ const wasBusy=['starting','active','stopping'].includes(current.phase);
+ current=value;language=value.locale.startsWith('zh')?'zh':'en';const t=messages[language];document.documentElement.lang=language;
+ for(const id of ['title','scope','escape','durationLabel','secondsLabel','consentLabel','partialLabel','start','stop'])$(id).textContent=t[id];
+ const busy=['starting','active','stopping'].includes(value.phase);
+ if(revision!==value.revision||(wasBusy&&!busy)){$('consent').checked=false;revision=value.revision;}
+ if(busy){$('consent').checked=true;$('partial').checked=Boolean(value.accept_partial);if(value.duration_secs)$('duration').value=String(value.duration_secs);}
+ $('state').textContent=!value.available?t.unavailable:(t[value.phase]||t.idle);
+ $('counts').textContent=value.report?t.counts(value.report):'';$('detail').textContent=value.message||'';
+ $('start').disabled=!value.available||busy||!$('consent').checked;
+ $('stop').disabled=!busy;$('consent').disabled=busy;$('partial').disabled=busy;$('duration').disabled=busy;
+}
+const invoke=(command,args)=>window.__TAURI__.core.invoke(command,args);
+$('consent').addEventListener('change',()=>render(current));
+$('start').addEventListener('click',async()=>{if(!$('consent').checked)return;$('start').disabled=true;try{render(await invoke('linux_ai_input_start',{seconds:Number($('duration').value),acceptPartial:$('partial').checked}));}catch(error){$('detail').textContent=String(error);}});
+$('stop').addEventListener('click',async()=>{try{render(await invoke('linux_ai_input_stop'));}catch(error){$('detail').textContent=String(error);}});
+async function poll(){try{render(await invoke('linux_ai_input_status'));}catch(error){$('state').textContent=messages[language].error;$('detail').textContent=String(error);$('start').disabled=true;}setTimeout(poll,500);}
+render(current);poll();
+</script></body></html>

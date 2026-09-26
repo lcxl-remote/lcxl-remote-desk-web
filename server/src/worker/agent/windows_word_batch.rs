@@ -154,6 +154,7 @@ mod tests {
             let expires_at = chrono::Utc::now() + chrono::Duration::seconds(30);
             let file_name = format!("{scenario}.docx");
             let mut plan = SealedComputerActionPlan {
+                turn_scope: None,
                 schema_version: COMPUTER_USE_SCHEMA_VERSION,
                 work_id: "work".into(),
                 action_request_id: "call".into(),

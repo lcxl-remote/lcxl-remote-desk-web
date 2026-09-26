@@ -55,6 +55,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::UpdateAiAssistantContext
         | SignalingType::UpdateAiAssistantObjectContext
         | SignalingType::SelectAiAssistantSession
+        | SignalingType::QueryComputerActionTurn
         | SignalingType::ManageScheduledTasks
         | SignalingType::RequestDocumentPreviewPage
         | SignalingType::ManageFileRecovery => Request,
@@ -94,6 +95,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::AiAssistantContextUpdated
         | SignalingType::AiAssistantObjectContextUpdated
         | SignalingType::AiAssistantSessionSelected
+        | SignalingType::ComputerActionTurnStatus
         | SignalingType::ScheduledTasksManaged
         | SignalingType::DocumentPreviewPageUpdated
         | SignalingType::FileRecoveryManaged => Response,
@@ -167,6 +169,7 @@ pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
         SignalingType::CancelComputerAction | SignalingType::QueryComputerActionState => {
             SignalingType::ComputerActionStateReported
         }
+        SignalingType::QueryComputerActionTurn => SignalingType::ComputerActionTurnStatus,
         SignalingType::AskAiAssistant => SignalingType::AiAssistantUpdated,
         SignalingType::GetAiAssistantCapabilities => SignalingType::AiAssistantCapabilitiesUpdated,
         SignalingType::UpdateAiAssistantContext => SignalingType::AiAssistantContextUpdated,
@@ -221,6 +224,7 @@ pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] 
         UpdateAiAssistantObjectContext => &[AiAssistantObjectContextUpdated],
         SelectAiAssistantSession => &[AiAssistantSessionSelected],
         RequestDocumentPreviewPage => &[DocumentPreviewPageUpdated],
+        QueryComputerActionTurn => &[ComputerActionTurnStatus],
         _ => &[],
     }
 }

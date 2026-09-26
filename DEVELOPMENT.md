@@ -302,3 +302,19 @@ A: Modify the `port` setting in `config.toml`.
 
 **Q: WebRTC connection failed.**
 A: Check STUN/TURN server configuration and ensure network connectivity. For external access, verify the signaling server mode is correctly started and ports are mapped.
+
+### Linux AI Assistant development
+
+The Linux desktop adapter targets a logged-in GNOME Wayland user session. It uses logind on the system bus and the user session bus, xdg-desktop-portal with the GNOME backend, PipeWire, and the existing AT-SPI accessibility bus. Headless builds do not prove any of these runtime capabilities. Do not run the desktop worker as root, add it to the input group, or enable accessibility settings automatically.
+
+File changes use Linux openat2 and renameat2 without a weaker syscall fallback; runtime checks also constrain filesystem support and file ownership. No extra native AT-SPI development library is required: this adapter uses zbus directly. Retain the general capture build dependencies above even though this AI desktop scope excludes X11.
+
+The browser extension uses WebCrypto primitives and has dependency-free Node tests (`cd browser-extension && npm test`, Node 22.16.0). `Browser Assistant Contract` runs these tests with mocked Chrome APIs; it does not perform a live pairing or page action. The parent workspace contains opt-in GNOME probes in `pocs/poc-linux-wayland-assistant`; their README documents Python/GStreamer runtime dependencies and external timeouts. Keep live Portal tests separate from ordinary CI and never run all ignored tests indiscriminately.
+
+Linux AI desktop writes remain gated pending GNOME input-ownership and fresh-target evidence. A successful build or generated client is not desktop acceptance.
+
+AT-SPI event registration binds to the Registry's unique D-Bus owner. Replacing that service invalidates the subscription; readiness returns only after registration succeeds again. Connection and registration have a combined six-second deadline. The lifecycle monitor continues processing tree invalidations during periodic identity checks. A check has a six-second deadline; timeout or bus loss revokes UI observation readiness and invalidates old nodes. Event traffic cannot extend the deadline. Offline concurrency tests cover this boundary but do not replace live GNOME lock, application-exit or bus-restart acceptance.
+
+A Mutter Notify reply can precede input processing or acknowledge an early absolute-motion request that was dropped. With that reply alone, Linux output actions retain OutcomeUnknown, publish no changed=true fact, and never replay automatically. IdleMonitor Core watches do not supply input provenance or a processing barrier.
+
+Desktop and AT-SPI monitors share a worker monitor ownership lease. Replacing monitors or rebuilding the worker fences late results and cleanup from retired tasks. Publication and ownership changes are serialized under the same lock.

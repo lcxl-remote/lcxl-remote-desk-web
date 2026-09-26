@@ -971,7 +971,12 @@ pub(super) async fn handle_computer_action_inbound(
     });
     let expiry_valid = chrono::DateTime::parse_from_rfc3339(&plan.expires_at)
         .is_ok_and(|expiry| expiry > chrono::Utc::now());
-    if model.request_id != plan.execution_generation
+    let turn_matches = plan
+        .turn_scope
+        .as_ref()
+        .is_none_or(|scope| authz.session_id.as_deref() == Some(scope.conversation_id.as_str()));
+    if !turn_matches
+        || model.request_id != plan.execution_generation
         || plan.device_id != authz.audience
         || !actor_matches
         || !capabilities_match
@@ -1007,6 +1012,7 @@ pub(super) async fn handle_computer_action_inbound(
             )
         });
     let payload = ComputerActionPlanPayload {
+        turn_authority: ctx.file_recovery_authority.clone(),
         file_recovery,
         request_id: model.request_id.clone(),
         connection_id: model.from_connection_id.clone(),

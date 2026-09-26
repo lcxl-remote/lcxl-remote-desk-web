@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { UpdateComputerUseCommunicationPolicyMutationRequest, UpdateComputerUseCommunicationPolicyMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { UpdateComputerUseCommunicationPolicyMutationRequest, UpdateComputerUseCommunicationPolicyMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { updateComputerUseCommunicationPolicy } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const updateComputerUseCommunicationPolicyMutationKey = () => [{ url: '/api/desk/settings/computer-use-communication' }] as const
 

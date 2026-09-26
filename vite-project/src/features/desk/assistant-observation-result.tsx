@@ -12,6 +12,8 @@ export function AssistantObservationResult({ data }: { data: unknown }) {
     const label = (name: string, options?: Record<string, unknown>) => t(`pages.aiAssistant.observation.${name}`, options);
     const context = record(record(data).ReadContext);
     const session = record(context.DesktopSessionInspect);
+    const screenshot = record(context.ScreenCaptureCurrent);
+    const frame = record(screenshot.frame_observation);
     const ui = record(context.DesktopUiInspect);
     const nodes = Array.isArray(ui.nodes) ? ui.nodes.map(record) : null;
     const roles: Record<string, string> = {
@@ -23,6 +25,11 @@ export function AssistantObservationResult({ data }: { data: unknown }) {
     };
     const knownActions = ['invoke', 'select', 'focus', 'toggle', 'set_value', 'scroll'];
     return <div className="space-y-3 text-sm">
+        {context.ScreenCaptureCurrent != null && <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 rounded-md bg-muted p-3">
+            <dt>{label('frameFreshness')}</dt><dd>{frame.freshness === 'latest_observed' ? label('latestObserved') : frame.freshness === 'fresh' ? label('freshFrame') : frame.freshness === 'unchanged_verified' ? label('unchangedFrame') : label('unavailable')}</dd>
+            {typeof frame.receipt_age_ms === 'number' && <><dt>{label('frameAge')}</dt><dd>{label('frameAgeValue', { age: frame.receipt_age_ms })}</dd></>}
+            {frame.source_timestamp_ns == null && <><dt>{label('sourceTime')}</dt><dd>{label('unavailable')}</dd></>}
+        </dl>}
         {context.DesktopSessionInspect != null ? <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 rounded-md bg-muted p-3">
             <dt>{label('status')}</dt><dd>{label('accessible')}</dd>
             <dt>{label('os')}</dt><dd>{typeof session.os === 'string' ? ({ macos: 'macOS', windows: 'Windows', linux: 'Linux' }[session.os] ?? session.os) : label('unavailable')}</dd>
@@ -46,7 +53,7 @@ export function AssistantObservationResult({ data }: { data: unknown }) {
                     </li>;
                 })}
             </ul>
-        </> : <p>{label('unrecognized')}</p>}
+        </> : context.ScreenCaptureCurrent == null ? <p>{label('unrecognized')}</p> : null}
         <Disclosure className="rounded-md border p-3" title={<>{t('pages.aiAssistant.workspace.technicalDetails')}</>} summaryClassName="cursor-pointer text-muted-foreground">
 
             <AssistantCodeBlock testId="observation-output" text={JSON.stringify(data)} />

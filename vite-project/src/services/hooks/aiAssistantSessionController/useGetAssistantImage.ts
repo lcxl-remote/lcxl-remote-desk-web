@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetAssistantImageQueryResponse, GetAssistantImageQueryParams, GetAssistantImage404 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { GetAssistantImageQueryResponse, GetAssistantImageQueryParams, GetAssistantImage404 } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getAssistantImage } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const getAssistantImageQueryKey = (params: GetAssistantImageQueryParams) => [{ url: '/api/my/ai-assistant-session/image' }, ...(params ? [params] : [])] as const
 

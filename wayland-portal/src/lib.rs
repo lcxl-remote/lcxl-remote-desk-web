@@ -7,7 +7,7 @@ mod token_store;
 mod xdg;
 
 pub use broker::{LivePortalSession, PortalBackend, PreparedPortalSession, WaylandPortalBroker};
-pub use input::PortalInputSender;
+pub use input::{PortalInputEvent, PortalInputFailure, PortalInputReceipt, PortalInputSender};
 pub use model::*;
 pub use token_store::{RestoreToken, RestoreTokenStore};
 

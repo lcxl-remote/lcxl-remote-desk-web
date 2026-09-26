@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import type { GrantRequestItemDto, PermissionDecisionBody, PermissionRequestDto } from '@/services/types';
+import { OutputConfirmationCard, validOutputReview, isOutputInput, outputApprovalBlocked } from './ai-assistant-output-confirmation';
 import { AssistantPermissionDisclosure } from './assistant-permission-disclosure';
 import { CommandConfirmationCard, validCommandReview } from './ai-assistant-command';
 import { LaunchConfirmationCard, validLaunchReview } from './ai-assistant-launch';
@@ -126,7 +127,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                             && (entry.toolName !== 'exec_command' || validCommandReview(entry.commandConfirmation))
                             && (entry.toolName !== 'launch_application' || validLaunchReview(entry.launchConfirmation))
                             && hasNativeUiAuthority(entry)
-                            && !fileApprovalBlocked(entry))
+                            && !fileApprovalBlocked(entry) && !outputApprovalBlocked(entry))
                         .map((entry) => entry.itemId);
                     const selected = permissionSelections[request.requestId]
                         ?? defaultItemIds;
@@ -134,9 +135,10 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     const isExternalSend = item.expectedEffect === 'send_external';
                     const sendConfirmation = item.externalSendConfirmation;
                     const commandConfirmation = item.commandConfirmation;
+                    const outputBlocked = outputApprovalBlocked(item);
                     const commandBlocked = item.toolName === 'exec_command' && !validCommandReview(commandConfirmation);
                     const launchBlocked = item.toolName === 'launch_application' && !validLaunchReview(item.launchConfirmation);
-                    const approvalBlocked = (isExternalSend && !sendConfirmation) || commandBlocked || launchBlocked || !hasNativeUiAuthority(item) || fileApprovalBlocked(item);
+                    const approvalBlocked = outputBlocked || (isExternalSend && !sendConfirmation) || commandBlocked || launchBlocked || !hasNativeUiAuthority(item) || fileApprovalBlocked(item);
                     const edit = permissionEdits[request.requestId]?.[item.itemId]
                         ?? {};
                     const resourceScope = edit.resourceScope
@@ -182,6 +184,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                         <p>{item.applicationScope.actions.map((action) => t(`pages.aiAssistant.uiAction_${action}`)).join(' · ')}</p>
                                     </div>
                                 )}
+                                {validOutputReview(item.waylandOutputConfirmation) && <OutputConfirmationCard value={item.waylandOutputConfirmation} />}
                                 {validCommandReview(commandConfirmation) && <CommandConfirmationCard value={commandConfirmation} />}
                                 {validLaunchReview(item.launchConfirmation) && <LaunchConfirmationCard value={item.launchConfirmation} />}
                                 {validTextFileReview(item.textFileConfirmation) && <TextFileConfirmationCard value={item.textFileConfirmation} />}
@@ -225,7 +228,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 )}
                                 {approvalBlocked && (
                                     <p className="mt-2 text-xs font-medium text-red-700 dark:text-red-300">
-                                        {t(needsApplicationScope(item.toolName) && !hasNativeUiAuthority(item) ? 'pages.aiAssistant.applicationUiScopeMissing' : fileApprovalBlocked(item) ? 'pages.aiAssistant.fileConfirmMissing'
+                                        {t(outputBlocked ? 'pages.aiAssistant.outputConfirmMissing' : needsApplicationScope(item.toolName) && !hasNativeUiAuthority(item) ? 'pages.aiAssistant.applicationUiScopeMissing' : fileApprovalBlocked(item) ? 'pages.aiAssistant.fileConfirmMissing'
                                             : launchBlocked ? 'pages.aiAssistant.launchSummaryMissing' : commandBlocked ? 'pages.aiAssistant.commandSummaryMissing' : 'pages.aiAssistant.externalSendSummaryMissing')}
                                     </p>
                                 )}
@@ -339,8 +342,8 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                     type="number"
                                                     min={1}
                                                     max={item.suggestedMaxUses}
-                                                    value={isExternalSend ? 1 : (edit.maxUses ?? item.suggestedMaxUses)}
-                                                    disabled={isExternalSend}
+                                                    value={isExternalSend || isOutputInput(item) ? 1 : (edit.maxUses ?? item.suggestedMaxUses)}
+                                                    disabled={isExternalSend || isOutputInput(item)}
                                                     onChange={(event) => updatePermissionItemEdit(
                                                         request.requestId,
                                                         item.itemId,
@@ -384,14 +387,14 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                             && (entry.toolName !== 'exec_command' || validCommandReview(entry.commandConfirmation))
                             && (entry.toolName !== 'launch_application' || validLaunchReview(entry.launchConfirmation))
                                             && hasNativeUiAuthority(entry)
-                                            && !fileApprovalBlocked(entry))
+                                            && !fileApprovalBlocked(entry) && !outputApprovalBlocked(entry))
                                         .map((entry) => entry.itemId);
                                 if (!selected.includes(item.itemId)
                                     || (item.expectedEffect === 'send_external'
                                         && !item.externalSendConfirmation)
                                     || (item.toolName === 'exec_command' && !validCommandReview(item.commandConfirmation))
                                     || (item.toolName === 'launch_application' && !validLaunchReview(item.launchConfirmation))
-                                    || fileApprovalBlocked(item) || !hasNativeUiAuthority(item)) {
+                                    || outputApprovalBlocked(item) || fileApprovalBlocked(item) || !hasNativeUiAuthority(item)) {
                                     return {
                                         itemId: item.itemId,
                                         decision: 'deny' as const,
@@ -409,7 +412,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                     export_destinations: item.exportDestinations.filter((_, index) =>
                                         destinationIndexes.includes(index)),
                                     ttl_seconds: edit.ttlSeconds ?? item.suggestedTtlSeconds,
-                                    max_uses: item.expectedEffect === 'send_external'
+                                    max_uses: item.expectedEffect === 'send_external' || isOutputInput(item)
                                         ? 1
                                         : (edit.maxUses ?? item.suggestedMaxUses),
                                 };

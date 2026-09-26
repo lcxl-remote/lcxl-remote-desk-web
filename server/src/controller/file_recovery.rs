@@ -248,7 +248,7 @@ pub async fn export_local_file_recovery(
         .body(bytes))
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
     use crate::model::settings::Settings;
@@ -451,3 +451,7 @@ mod tests {
         assert_eq!(queried["data"]["records"], serde_json::json!([]));
     }
 }
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[path = "file_recovery/export_tests.rs"]
+mod export_tests;

@@ -8,6 +8,17 @@ struct Release {
     generation: String,
 }
 
+/// A queued native operation retains this handle in its authority callback.
+/// Cancelling its async waiter cannot release the lease while dispatch or
+/// pressed-key cleanup is still running on the serial Portal queue.
+#[cfg(target_os = "linux")]
+pub(crate) fn retain_writer_lease(
+    broker: Arc<ComputerUseBroker>,
+    generation: String,
+) -> impl Send + Sync + 'static {
+    Release { broker, generation }
+}
+
 impl Drop for Release {
     fn drop(&mut self) {
         self.broker.release_writer_lease(&self.generation);

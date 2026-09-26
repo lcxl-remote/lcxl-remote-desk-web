@@ -61,6 +61,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mobile_fixture_profiles_match_actual_server_features() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../agent-protocol/tests/fixtures/mobile_ai_assistant/contract-v1.json"
+        ))
+        .unwrap();
+        for (name, actual) in [
+            ("oss", AiAssistantClientCapabilities::oss()),
+            (
+                "manager_current",
+                AiAssistantClientCapabilities::manager_current(),
+            ),
+        ] {
+            let profile = fixture["feature_profiles"][name]["ai_assistant"].clone();
+            let decoded: AiAssistantClientCapabilities = serde_json::from_value(profile).unwrap();
+            assert_eq!(decoded, actual, "{name}");
+        }
+    }
+
+    #[test]
     fn profiles_keep_one_shape_and_gate_controls_independently() {
         let oss = serde_json::to_value(AiAssistantClientCapabilities::oss()).unwrap();
         let manager =

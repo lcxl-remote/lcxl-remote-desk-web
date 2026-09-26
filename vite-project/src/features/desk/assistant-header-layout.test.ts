@@ -22,7 +22,7 @@ it('keeps the context trigger below the input beside send or stop', () => {
     const input = composer.indexOf('<Textarea');
     const actions = composer.indexOf('<div className="flex min-w-0 items-center gap-1">');
     const add = composer.indexOf("aria-label={t('pages.aiAssistant.workspace.addContext')}");
-    const send = composer.indexOf('<Button type="submit" className="assistant-action"');
+    const send = composer.search(/<Button\s+type="submit"/);
     expect(input).toBeGreaterThanOrEqual(0);
     expect(actions).toBeGreaterThan(input);
     expect(add).toBeGreaterThan(actions);

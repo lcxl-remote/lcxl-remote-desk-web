@@ -18,6 +18,8 @@ mod scope;
 pub(crate) use scope::scope_for_action;
 #[path = "computer_use_writer_task.rs"]
 mod task;
+#[cfg(target_os = "linux")]
+pub(crate) use task::retain_writer_lease;
 pub(crate) use task::spawn_writer_task;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,6 +182,22 @@ impl WriterLeaseCoordinator {
         }
     }
 
+    /// Accessibility loss invalidates UI targets, not file-only operations.
+    /// Keep the scope check and state change under the same coordinator lock.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn preempt_accessibility(&self) {
+        let mut slot = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = slot.as_mut()
+            && state.request.scope != WriterLeaseScope::FileWorker
+            && state.status == WriterLeaseStatus::Active
+        {
+            state.status = WriterLeaseStatus::Preempted(InputPreemptionSource::SessionChanged);
+        }
+    }
+
     /// Cancellation targets the original actor and complete action identity.
     /// It forbids subsequent steps but does not assert that an OS call stopped.
     pub fn cancel(
@@ -301,6 +319,28 @@ mod tests {
         assert_eq!(leases.acquire(duplicate, 7).unwrap(), first);
         let error = leases.acquire(request("generation-2"), 7).unwrap_err();
         assert_eq!(error.kind, AgentErrorKind::HostAtCapacity);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn accessibility_loss_preempts_both_ui_scopes_but_not_file_worker() {
+        for scope in [
+            WriterLeaseScope::InteractiveSession,
+            WriterLeaseScope::BackgroundApplication,
+            WriterLeaseScope::FileWorker,
+        ] {
+            let leases = WriterLeaseCoordinator::new();
+            let mut input = request("generation-1");
+            input.scope = scope;
+            leases.acquire(input, 0).unwrap();
+            leases.preempt_accessibility();
+            assert_eq!(
+                leases.require_active("generation-1", 0).is_ok(),
+                scope == WriterLeaseScope::FileWorker
+            );
+            leases.preempt(InputPreemptionSource::SessionChanged);
+            assert!(leases.require_active("generation-1", 0).is_err());
+        }
     }
 
     #[test]

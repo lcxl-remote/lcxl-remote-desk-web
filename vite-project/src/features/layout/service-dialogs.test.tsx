@@ -10,6 +10,7 @@ vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast }) }))
 
 import { ServiceInstallDialog } from "./service-install-dialog"
 import { ServiceUninstallDialog } from "./service-uninstall-dialog"
+import { SERVICE_OPERATION_EVENT } from "./service-operation"
 
 function deferredResponse() {
     let resolve!: (value: Response) => void
@@ -84,5 +85,58 @@ describe("service mutation dialogs", () => {
 
         act(() => uninstall.resolve(response({ code: 0 })))
         await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    })
+
+    it("shows a fixed Linux path without IDD and waits for authorization outcome", async () => {
+        const status = { operation_id: 'linux-install', op: 'install', state: 'queued', error: null, exit_code: null }
+        global.fetch = vi.fn(async () => response({ code: 0, data: status })) as typeof fetch
+        const onOpenChange = vi.fn()
+        const onCompleted = vi.fn()
+        render(<ServiceInstallDialog open platform="linux" onOpenChange={onOpenChange}
+            onCompleted={onCompleted} defaultInstallPath="/usr/lib/lcxl-remote-desk" />)
+        expect(global.fetch).not.toHaveBeenCalled()
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+        expect(screen.getByRole('textbox')).toHaveAttribute('readonly')
+        const confirm = screen.getByRole('button', { name: 'Install Service' })
+        fireEvent.click(confirm)
+        await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2))
+        expect(toast).not.toHaveBeenCalled()
+        expect(confirm).toBeDisabled()
+        expect(screen.getByRole('status')).toHaveTextContent(/authorization|installation/i)
+        act(() => window.dispatchEvent(new CustomEvent(SERVICE_OPERATION_EVENT, {
+            detail: { ...status, state: 'cancelled', exit_code: 126 },
+        })))
+        await waitFor(() => expect(confirm).not.toBeDisabled())
+        expect(onOpenChange).not.toHaveBeenCalledWith(false)
+        expect(onCompleted).toHaveBeenCalledTimes(1)
+        expect(toast).toHaveBeenCalledWith(expect.objectContaining({ description: expect.stringMatching(/cancelled/i) }))
+    })
+
+    it("reports missing pkexec and accepts native uninstall completion after disconnect", async () => {
+        const status = { operation_id: 'linux-uninstall', op: 'uninstall', state: 'queued', error: null, exit_code: null }
+        global.fetch = vi.fn(async (_input, init) => {
+            if (init?.method === 'POST') return response({ code: 0, data: status })
+            throw new Error('daemon stopped')
+        }) as typeof fetch
+        const onOpenChange = vi.fn()
+        const onCompleted = vi.fn()
+        render(<ServiceUninstallDialog open platform="linux" onOpenChange={onOpenChange} onCompleted={onCompleted} />)
+        const confirm = screen.getByRole('button', { name: /uninstall/i })
+        fireEvent.click(confirm)
+        await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/connection/i))
+        act(() => window.dispatchEvent(new CustomEvent(SERVICE_OPERATION_EVENT, {
+            detail: { ...status, state: 'failed', error: 'missing_pkexec' },
+        })))
+        await waitFor(() => expect(confirm).not.toBeDisabled())
+        expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive', description: expect.stringContaining('pkexec') }))
+        expect(onOpenChange).not.toHaveBeenCalledWith(false)
+        fireEvent.click(confirm)
+        await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(4))
+        act(() => window.dispatchEvent(new CustomEvent(SERVICE_OPERATION_EVENT, {
+            detail: { ...status, state: 'succeeded', exit_code: 0 },
+        })))
+        await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+        expect(onCompleted).toHaveBeenCalledTimes(2)
+        expect(toast).toHaveBeenLastCalledWith(expect.objectContaining({ description: expect.stringMatching(/uninstalled/i) }))
     })
 })

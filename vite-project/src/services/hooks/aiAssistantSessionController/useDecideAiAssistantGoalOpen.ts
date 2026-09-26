@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { DecideAiAssistantGoalOpenMutationRequest, DecideAiAssistantGoalOpenMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { DecideAiAssistantGoalOpenMutationRequest, DecideAiAssistantGoalOpenMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { decideAiAssistantGoalOpen } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const decideAiAssistantGoalOpenMutationKey = () => [{ url: '/api/my/ai-assistant-session/goal/open-decision' }] as const
 

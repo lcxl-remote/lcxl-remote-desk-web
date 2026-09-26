@@ -40,6 +40,51 @@ pub(crate) use transaction_location::transaction_location;
 mod transaction_cleanup;
 pub(crate) use transaction_cleanup::clean_transaction;
 
+pub(super) fn state_ancestors(path: &std::path::Path) -> io::Result<Vec<File>> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| crate::invalid("state directory requires a parent"))?;
+    let leaf = path
+        .file_name()
+        .and_then(|leaf| leaf.to_str())
+        .ok_or_else(|| crate::invalid("state directory name missing"))?;
+    let mut ancestors = root::resolve_directory(parent)?;
+    let directory = open_relative(
+        ancestors.last().unwrap(),
+        leaf,
+        &security::current_user()?,
+        OpenKind::StateParent,
+    )?;
+    if file_identity(&directory, FileKind::Directory)?.volume_serial
+        != file_identity(ancestors.last().unwrap(), FileKind::Directory)?.volume_serial
+    {
+        return Err(crate::invalid("state directory crossed volumes"));
+    }
+    ancestors.push(directory);
+    Ok(ancestors)
+}
+
+pub(super) fn state_open(
+    parent: &File,
+    leaf: &str,
+    create: bool,
+    temporary: bool,
+) -> io::Result<File> {
+    let user = security::current_user()?;
+    open_relative(
+        parent,
+        leaf,
+        &user,
+        if temporary {
+            OpenKind::TransactionFile
+        } else if create {
+            OpenKind::Lock
+        } else {
+            OpenKind::InspectTransactionFile
+        },
+    )
+}
+
 pub struct PrivateDirectory {
     handle: File,
     user: String,
@@ -56,6 +101,7 @@ pub struct PrivateDirectoryLock {
 
 enum OpenKind {
     Anchor,
+    StateParent,
     InspectDirectory,
     NewDirectory,
     Directory,
@@ -271,11 +317,17 @@ fn open_relative(parent: &File, leaf: &str, user: &str, kind: OpenKind) -> io::R
         kind,
         OpenKind::Directory
             | OpenKind::Anchor
+            | OpenKind::StateParent
             | OpenKind::InspectDirectory
             | OpenKind::NewDirectory
             | OpenKind::DeleteDirectory
     );
     let (access, share, disposition) = match kind {
+        OpenKind::StateParent => (
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+        ),
         OpenKind::InspectDirectory => (
             FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL,
             FILE_SHARE_READ | FILE_SHARE_WRITE,

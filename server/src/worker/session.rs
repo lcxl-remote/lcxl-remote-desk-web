@@ -99,7 +99,7 @@ use tokio::{
 };
 
 mod connection;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 mod file_recovery;
 mod file_recovery_quota;
 #[cfg(windows)]

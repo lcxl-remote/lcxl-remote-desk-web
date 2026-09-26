@@ -46,6 +46,7 @@ pub fn blocks_targeting(session: &PersistedAgentSession, tool_name: &str) -> boo
                 | "execute_ui_actions"
                 | "send_background_input"
                 | "send_raw_input"
+                | "execute_wayland_output_input"
         )
 }
 
@@ -153,6 +154,7 @@ pub fn record_live_observation(
         })
         .map(|attachment| attachment.display_summary.clone());
     let frame = VisualEvidenceFrame {
+        frame_observation: observation_timing(&message.text),
         schema_version: VISUAL_EVIDENCE_SCHEMA_VERSION,
         evidence_id,
         conversation_id: session.conversation_id.clone(),
@@ -368,6 +370,68 @@ mod tests {
     }
 
     #[test]
+    fn frame_timing_survives_storage_without_retaining_pixels_or_input_references() {
+        let mut session = session_with_observation();
+        session.conversation.last_mut().unwrap().text = serde_json::json!({
+            "ReadContext": {"ScreenCaptureCurrent": {"frame_observation": {
+                "observation_id": "original-observation", "stream_generation": 7,
+                "received_at_unix_ms": 1000, "receipt_age_ms": 42,
+                "source_timestamp_ns": null, "freshness": "latest_observed"
+            }}}
+        })
+        .to_string();
+        let url = "data:image/png;base64,AQID";
+        let frame = record_live_observation(
+            &mut session,
+            "call-1",
+            url,
+            &validate_image_data_url(url).unwrap(),
+        )
+        .unwrap();
+        let encoded = session.encode_json_for_storage().unwrap();
+        assert!(!encoded.contains(url));
+        let recovered = PersistedAgentSession::decode_json(&encoded).unwrap();
+        let stored = &recovered.visual_evidence[0];
+        assert_eq!(stored.frame_observation, frame.frame_observation);
+        assert_eq!(
+            stored.frame_observation.as_ref().unwrap().receipt_age_ms,
+            42
+        );
+        assert!(stored.preview_data_url.is_none());
+        let projected = serde_json::to_value(stored).unwrap();
+        let timing = &projected["frame_observation"];
+        assert!(timing.get("output_reference").is_none());
+        assert!(timing.get("observation_id").is_none());
+    }
+
+    #[test]
+    fn observation_timing_preserves_receipt_age_without_target_authority() {
+        let text = serde_json::json!({"ReadContext": {"ScreenCaptureCurrent": {
+            "frame_observation": {
+                "observation_id": "device-observation",
+                "stream_generation": 7,
+                "received_at_unix_ms": 1000,
+                "receipt_age_ms": 42,
+                "source_timestamp_ns": null,
+                "freshness": "latest_observed"
+            }
+        }}})
+        .to_string();
+        let timing = observation_timing(&text).unwrap();
+        assert_eq!(timing.receipt_age_ms, 42);
+        assert_eq!(timing.source_timestamp_ns, None);
+        assert_eq!(
+            timing.freshness,
+            desk_agent_protocol::ScreenFrameFreshness::LatestObserved
+        );
+        let encoded = serde_json::to_value(timing).unwrap();
+        assert!(encoded.get("output_reference").is_none());
+        assert!(encoded.get("observation_id").is_none());
+        assert!(observation_timing("{}").is_none());
+        assert!(observation_timing("invalid").is_none());
+    }
+
+    #[test]
     fn targeting_waits_for_model_to_consume_image_not_an_extra_observation() {
         let mut session = session_with_observation();
         session.conversation.push(ChatMessage::assistant_tool_calls(
@@ -388,6 +452,7 @@ mod tests {
         ));
         note_successful_observation(&mut session, "screen-1", "read_current_screen").unwrap();
         assert!(blocks_targeting(&session, "preview_computer_action"));
+        assert!(blocks_targeting(&session, "execute_wayland_output_input"));
         assert!(blocks_targeting(&session, "send_raw_input"));
 
         note_successful_observation(&mut session, "ui-same-batch", "inspect_desktop_ui").unwrap();
@@ -409,5 +474,25 @@ mod tests {
             .conversation
             .push(ChatMessage::assistant_tool_calls("assistant-3", "", vec![]));
         assert!(!blocks_targeting(&session, "send_raw_input"));
+        assert!(!blocks_targeting(&session, "execute_wayland_output_input"));
     }
+}
+
+/// Retain receipt timing in owner history without exporting the device's input reference.
+fn observation_timing(
+    text: &str,
+) -> Option<desk_agent_protocol::visual_evidence::VisualFrameTiming> {
+    let value = crate::image_input::structured_tool_result(text).ok()?;
+    let frame: desk_agent_protocol::ScreenFrameObservation = serde_json::from_value(
+        value
+            .pointer("/ReadContext/ScreenCaptureCurrent/frame_observation")?
+            .clone(),
+    )
+    .ok()?;
+    Some(desk_agent_protocol::visual_evidence::VisualFrameTiming {
+        received_at_unix_ms: frame.received_at_unix_ms,
+        receipt_age_ms: frame.receipt_age_ms,
+        source_timestamp_ns: frame.source_timestamp_ns,
+        freshness: frame.freshness,
+    })
 }

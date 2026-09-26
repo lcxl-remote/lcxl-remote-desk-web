@@ -57,4 +57,17 @@ pub struct VisualEvidenceFrame {
     /// Bounded data URL already authorized for this active owner stream. It is
     /// never accepted from a client and is never persisted by the session store.
     pub preview_data_url: Option<String>,
+    /// Timing of the original observed pixels; contains no action authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_observation: Option<VisualFrameTiming>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct VisualFrameTiming {
+    pub received_at_unix_ms: u64,
+    pub receipt_age_ms: u64,
+    pub source_timestamp_ns: Option<u64>,
+    pub freshness: crate::ScreenFrameFreshness,
 }

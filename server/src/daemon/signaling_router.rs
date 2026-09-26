@@ -217,7 +217,9 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::ComputerActionCompleted
         | SignalingType::ComputerActionStateReported
         | SignalingType::ComputerUseReadinessUpdated
-        | SignalingType::FileRecoveryManaged => RouteOwnership::Daemon,
+        | SignalingType::FileRecoveryManaged
+        | SignalingType::QueryComputerActionTurn
+        | SignalingType::ComputerActionTurnStatus => RouteOwnership::Daemon,
 
         // Browser → daemon media control. This is a local bounded restart of
         // the already-negotiated pipeline and never enters the worker's generic
@@ -1266,7 +1268,13 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::ComputerActionCompleted
         | SignalingType::ComputerActionStateReported
         | SignalingType::ComputerUseReadinessUpdated
-        | SignalingType::FileRecoveryManaged => Ok(()),
+        | SignalingType::FileRecoveryManaged
+        | SignalingType::QueryComputerActionTurn => Ok(()),
+        SignalingType::ComputerActionTurnStatus => {
+            #[cfg(target_os = "linux")]
+            ctx.worker_mgr.complete_turn_query(model, ctx.file_recovery_authority.as_deref());
+            Ok(())
+        }
         // AI audit events are emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never persists audit itself).
         SignalingType::ReportAiAuditEvent => Ok(()),
@@ -1751,6 +1759,7 @@ fn allowed_while_remote_access_locked(signaling_type: SignalingType) -> bool {
             | SignalingType::RemoteAccessLockUpdated
             | SignalingType::RemotePeerTerminationResolved
             | SignalingType::CancelComputerAction
+            | SignalingType::ComputerActionTurnStatus
     )
 }
 

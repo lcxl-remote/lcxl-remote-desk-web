@@ -1,18 +1,15 @@
-/// Service management endpoints — available in all modes but only functional
-/// when running inside Tauri. After host-control-hub unification,
-/// the install / uninstall command travels over the same `/ws/tauri_ipc` link
-/// as every other Tauri-bound command, so the endpoint just publishes a hub
-/// message and returns 202.
+//! Owner-only service operations, with authenticated native completion receipts.
 use std::sync::Arc;
 
 use actix_session::Session;
-use actix_web::{Error as AWError, HttpResponse, post, web};
+use actix_web::{Error as AWError, HttpResponse, get, post, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::model::code_session::{CODE_SESSION_KEY, CodeSessionCookie};
 use desk_utils::rest::RestResponse;
 use serde::Deserialize;
 use utoipa::ToSchema;
 
+use crate::host_control::service_operations::ServiceOperationStatus;
 use crate::{
     daemon::windows_service::default_install_dir,
     error::DeskError,
@@ -67,15 +64,14 @@ fn validate_install_path(path: &str) -> Result<(), DeskError> {
 
 /// Request the host (Tauri) to install the OS system service.
 ///
-/// Stateless: the handler publishes a `ServiceOp` command on the host control
-/// hub and returns 202 Accepted immediately. The caller should poll
-/// `GET /api/server_info` to check `service_installed`.
+/// Returns a receipt ID after dispatch. Clients query the operation until the
+/// native process reports completion; acceptance alone is not success.
 #[utoipa::path(
     tag = TAG,
     summary = "Install OS system service",
     request_body = InstallServiceRequest,
     responses(
-        (status = 202, description = "Install request accepted"),
+        (status = 202, description = "Install request accepted", body = RestResponse<ServiceOperationStatus>),
         (status = 503, description = "No host control hub or no Tauri shell connected"),
     ),
 )]
@@ -95,12 +91,9 @@ pub async fn install_service(
 
     Ok(dispatch_service_op(
         hub.as_ref().as_ref(),
-        HostControlMessage::ServiceOp {
-            op: ServiceOpKind::Install,
-            install_path: Some(install_path),
-            install_idd_driver: body.install_idd_driver,
-        },
-        "Install request accepted",
+        ServiceOpKind::Install,
+        Some(install_path),
+        body.install_idd_driver,
     )?)
 }
 
@@ -109,7 +102,7 @@ pub async fn install_service(
     tag = TAG,
     summary = "Uninstall OS system service",
     responses(
-        (status = 202, description = "Uninstall request accepted"),
+        (status = 202, description = "Uninstall request accepted", body = RestResponse<ServiceOperationStatus>),
         (status = 503, description = "No host control hub or no Tauri shell connected"),
     ),
 )]
@@ -124,13 +117,37 @@ pub async fn uninstall_service(
     }
     Ok(dispatch_service_op(
         hub.as_ref().as_ref(),
-        HostControlMessage::ServiceOp {
-            op: ServiceOpKind::Uninstall,
-            install_path: None,
-            install_idd_driver: false,
-        },
-        "Uninstall request accepted",
+        ServiceOpKind::Uninstall,
+        None,
+        false,
     )?)
+}
+
+/// Read the receipt for a machine-local OS operation; no automatic retries.
+#[utoipa::path(
+    tag = TAG,
+    summary = "Query OS service operation",
+    params(("operation_id" = String, Path, description = "Server-generated operation identifier")),
+    responses((status = 200, body = RestResponse<ServiceOperationStatus>), (status = 404, description = "Operation receipt unavailable")),
+)]
+#[get("/api/service/operations/{operation_id}")]
+pub async fn query_service_operation(
+    hub: web::Data<Option<Arc<HostControlHub>>>,
+    settings: web::Data<SharedSettings>,
+    session: Session,
+    operation_id: web::Path<String>,
+) -> Result<HttpResponse, AWError> {
+    if let Some(response) = authorize_service_management(&settings, &session).await? {
+        return Ok(response);
+    }
+    let status = hub
+        .as_ref()
+        .as_ref()
+        .and_then(|h| h.service_operations().get(&operation_id));
+    Ok(match status {
+        Some(status) => HttpResponse::Ok().json(RestResponse::succeed_with_data(status)),
+        None => HttpResponse::NotFound().finish(),
+    })
 }
 
 async fn authorize_service_management(
@@ -167,8 +184,9 @@ async fn authorize_service_management(
 
 fn dispatch_service_op(
     hub: Option<&Arc<HostControlHub>>,
-    msg: HostControlMessage,
-    accepted_message: &str,
+    op: ServiceOpKind,
+    install_path: Option<String>,
+    install_idd_driver: bool,
 ) -> Result<HttpResponse, DeskError> {
     let Some(hub) = hub else {
         return Ok(
@@ -188,18 +206,43 @@ fn dispatch_service_op(
         );
     }
 
-    match hub.send_command(msg) {
-        Ok(_) => Ok(
-            HttpResponse::Accepted().json(RestResponse::<()>::succeed_with_message(
-                accepted_message.into(),
-            )),
-        ),
-        Err(e) => Ok(
+    if hub.mode() == crate::host_control::HubMode::Forwarder {
+        return Ok(
             HttpResponse::ServiceUnavailable().json(RestResponse::<()>::failed(
-                crate::error::DeskErrorCode::SYSTEM_ERROR,
-                format!("Service op dispatch failed: {e}"),
+                DeskErrorCode::FEATURE_UNAVAILABLE,
+                "Use the host service management endpoint".into(),
             )),
-        ),
+        );
+    }
+    let status = match hub.service_operations().begin(op) {
+        Ok(status) => status,
+        Err(message) => {
+            return Ok(HttpResponse::Conflict().json(RestResponse::<()>::failed(
+                DeskErrorCode::PRECONDITION_FAILED,
+                message.into(),
+            )));
+        }
+    };
+    let msg = HostControlMessage::ServiceOp {
+        operation_id: Some(status.operation_id.clone()),
+        op,
+        install_path,
+        install_idd_driver,
+    };
+    match hub.send_command(msg) {
+        Ok(count) if count > 0 => {
+            Ok(HttpResponse::Accepted().json(RestResponse::succeed_with_data(status)))
+        }
+        _ => {
+            hub.service_operations()
+                .dispatch_failed(&status.operation_id);
+            Ok(
+                HttpResponse::ServiceUnavailable().json(RestResponse::<()>::failed(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "Service operation could not reach a local client".into(),
+                )),
+            )
+        }
     }
 }
 
@@ -249,6 +292,7 @@ mod tests {
             .app_data(settings_data(true))
             .service(install_service)
             .service(uninstall_service)
+            .service(query_service_operation)
             .wrap_fn(|req, service| {
                 req.get_session()
                     .set_current_user(&CurrentUser::new_admin("owner"))
@@ -390,10 +434,12 @@ mod tests {
             .expect("not lagged");
         match msg {
             HostControlMessage::ServiceOp {
+                operation_id,
                 op,
                 install_path,
                 install_idd_driver,
             } => {
+                assert!(operation_id.is_some());
                 assert!(matches!(op, ServiceOpKind::Install));
                 assert_eq!(install_path.as_deref(), Some("C:/foo"));
                 assert!(install_idd_driver, "must thread caller-supplied flag");
@@ -493,8 +539,72 @@ mod tests {
                 op: ServiceOpKind::Uninstall,
                 install_path: None,
                 install_idd_driver: false,
+                ..
             }
         ));
+    }
+
+    #[actix_web::test]
+    async fn receipt_is_queryable_and_acceptance_is_not_completion() {
+        use crate::host_control::service_operations::ServiceOperationState;
+        let hub = Arc::new(HostControlHub::new_local());
+        let _rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+        let app = test::init_service(build_app(Some(hub.clone()))).await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/service/uninstall")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), 202);
+        let accepted: RestResponse<ServiceOperationStatus> = test::read_body_json(response).await;
+        let mut status = accepted.data.unwrap();
+        assert_eq!(status.state, ServiceOperationState::Queued);
+        let busy = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/service/uninstall")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(busy.status(), 409);
+        assert!(hub.service_operations().claim(&status.operation_id, 5));
+        status.state = ServiceOperationState::Succeeded;
+        assert!(hub.service_operations().complete(5, status.clone()));
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/api/service/operations/{}", status.operation_id))
+                .to_request(),
+        )
+        .await;
+        let completed: RestResponse<ServiceOperationStatus> = test::read_body_json(response).await;
+        assert_eq!(completed.data.unwrap(), status);
+    }
+
+    #[actix_web::test]
+    async fn receipt_query_requires_owner_authentication() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(None::<Arc<HostControlHub>>))
+                .app_data(settings_data(true))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(query_service_operation),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/service/operations/unknown")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), 401);
     }
 
     // Plain sync tests are wrapped in a child module so the outer

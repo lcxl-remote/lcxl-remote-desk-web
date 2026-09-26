@@ -60,7 +60,7 @@ use desk_ipc_protocol::message::{InputPayload, StartMediaPayload, StopMediaPaylo
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::image_capture::DisplayInfo;
 #[cfg(target_os = "linux")]
-use desk_wayland_portal::{PortalInputSender, WaylandPortalBroker};
+use desk_wayland_portal::WaylandPortalBroker;
 use log::{debug, error, info, warn};
 
 /// Per-connection injection state. Mirrors the per-DC `Arc<Mutex<...>>`
@@ -160,8 +160,8 @@ impl InputDispatcher {
         let portal = self
             .portal_broker
             .as_ref()
-            .and_then(|broker| broker.try_borrow_session(true).ok())
-            .map(PortalInputSender::new);
+            .and_then(|broker| broker.try_borrow_input().ok())
+            .map(|(_, sender)| sender);
         let mouse = match create_mouse_event_handler(
             geometry.clone(),
             wayland_mode,

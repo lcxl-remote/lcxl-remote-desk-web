@@ -4,7 +4,7 @@ use super::*;
 impl ComputerUseBroker {
     pub(super) fn inspect_application_catalog(
         &self,
-        session_id: u32,
+        session_id: &str,
         params: &UiInspectParams,
         ceiling: &ComputerUseSettings,
     ) -> Result<UiInspectOutput, AgentError> {
@@ -21,7 +21,7 @@ impl ComputerUseBroker {
 
     fn project_application_catalog(
         &self,
-        session_id: u32,
+        session_id: &str,
         params: &UiInspectParams,
         ceiling: &ComputerUseSettings,
         applications: impl IntoIterator<
@@ -196,7 +196,7 @@ mod tests {
         };
         let output = broker
             .project_application_catalog(
-                1,
+                "1",
                 &params(),
                 &ceiling,
                 [
@@ -238,7 +238,7 @@ mod tests {
         params.max_nodes = 1;
         let output = broker
             .project_application_catalog(
-                1,
+                "1",
                 &params,
                 &ceiling,
                 [
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(
             broker
                 .project_application_catalog(
-                    1,
+                    "1",
                     &params,
                     &ceiling,
                     [entry(app_path("app").as_str(), 1)]

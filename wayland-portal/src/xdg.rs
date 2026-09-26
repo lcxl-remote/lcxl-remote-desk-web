@@ -331,6 +331,18 @@ impl LivePortalSession for XdgLiveSession {
         Ok(())
     }
 
+    async fn notify_keyboard_keysym(&self, keysym: i32, state: u32) -> Result<(), PortalError> {
+        let options: HashMap<&str, Value<'_>> = HashMap::new();
+        self.remote_proxy()
+            .await?
+            .call_method(
+                "NotifyKeyboardKeysym",
+                &(&self.handle, options, keysym, state),
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn close(&self) -> Result<(), PortalError> {
         self.closed.cancel();
         close_session(&self.connection, &self.handle).await;

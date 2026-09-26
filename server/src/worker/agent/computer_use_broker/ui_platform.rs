@@ -11,7 +11,10 @@ mod implementation;
 #[cfg(target_os = "macos")]
 #[path = "ui_platform/macos.rs"]
 mod implementation;
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+#[path = "ui_platform/linux.rs"]
+mod implementation;
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 #[path = "ui_platform/unsupported.rs"]
 mod implementation;
 

@@ -173,7 +173,7 @@ impl Default for ClientRole {
 }
 
 /// Service installation operation kind.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceOpKind {
     Install,
@@ -219,6 +219,9 @@ pub enum HostControlMessage {
         locale: String,
         locale_persisted: bool,
     },
+
+    /// Local host's Linux input endpoint. Never forwarded between OS sessions.
+    LinuxAiInputEndpoint { revision: u64, path: Option<String> },
 
     /// Daemon-issued identity for one validated Tauri WebSocket registration.
     SessionShellRegistered {
@@ -275,10 +278,17 @@ pub enum HostControlMessage {
     /// `install_idd_driver` is only honoured when `op == Install`; the
     /// uninstall path always removes the driver as well.
     ServiceOp {
+        #[serde(default)]
+        operation_id: Option<String>,
         op: ServiceOpKind,
         install_path: Option<String>,
         #[serde(default)]
         install_idd_driver: bool,
+    },
+
+    /// Completion from the Tauri connection selected for this operation.
+    ServiceOperationFinished {
+        status: super::service_operations::ServiceOperationStatus,
     },
 
     /// Complete daemon-authoritative remote-access state for the local shell.
@@ -429,6 +439,7 @@ mod tests {
                 error_msg: None,
             },
             HostControlMessage::ServiceOp {
+                operation_id: None,
                 op: ServiceOpKind::Install,
                 install_path: Some("C:\\Program Files\\app".to_string()),
                 install_idd_driver: true,
@@ -454,11 +465,13 @@ mod tests {
                 },
             },
             HostControlMessage::ServiceOp {
+                operation_id: None,
                 op: ServiceOpKind::Install,
                 install_path: Some("C:\\Program Files\\app".to_string()),
                 install_idd_driver: false,
             },
             HostControlMessage::ServiceOp {
+                operation_id: None,
                 op: ServiceOpKind::Uninstall,
                 install_path: None,
                 install_idd_driver: false,
@@ -516,6 +529,7 @@ mod tests {
         let msg: HostControlMessage = serde_json::from_str(json).expect("deserialise");
         match msg {
             HostControlMessage::ServiceOp {
+                operation_id: _,
                 op,
                 install_path,
                 install_idd_driver,

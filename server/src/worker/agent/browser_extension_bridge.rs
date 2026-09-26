@@ -4,7 +4,17 @@
 //! validated them. Uploads replace the edge-only ObjectRef with exact verified
 //! bytes; native paths and raw browser scripting never exist on this wire.
 
-use std::collections::HashMap;
+mod crypto;
+mod dispatch;
+mod endpoint;
+#[cfg(all(test, target_os = "linux"))]
+mod native_chrome;
+pub mod pairing;
+#[cfg(all(test, target_os = "linux"))]
+mod pairing_http;
+mod private_file;
+
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,9 +37,8 @@ const MAX_EXTENSION_VERSION_BYTES: usize = 64;
 const MAX_PROFILE_INCARCATION_BYTES: usize = 256;
 const MAX_PAIRING_TOKEN_BYTES: usize = 256;
 const BROWSER_EXTENSION_CALL_TIMEOUT: Duration = Duration::from_secs(35);
-pub(crate) const BROWSER_EXTENSION_BRIDGE_PORT: u16 = 8091;
 pub(crate) const BROWSER_EXTENSION_VERSION: &str = "0.1.0";
-const PAIRING_TOKEN_FILE: &str = "browser-extension-pairing-token";
+const PAIRING_TOKEN_FILE: &str = "browser-extension-pairing-token-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -480,26 +489,69 @@ enum BrowserExtensionResponseType {
 struct ConnectedExtension {
     revision: u64,
     adapter: BrowserAdapterRef,
-    sender: mpsc::UnboundedSender<String>,
+    sender: mpsc::Sender<dispatch::Outbound>,
 }
 
 #[derive(Debug, Default)]
 struct BrowserExtensionState {
+    #[cfg(target_os = "linux")]
+    linux_session_binding: Option<String>,
     connection: Option<ConnectedExtension>,
     readiness: Option<desk_agent_protocol::browser_control::BrowserReadiness>,
     surface: Option<desk_agent_protocol::computer_use::ObjectRef>,
     pages: HashMap<String, BrowserPageRef>,
-    pending:
-        HashMap<String, oneshot::Sender<Result<serde_json::Value, BrowserExtensionBridgeError>>>,
+    pending: HashMap<String, dispatch::Pending>,
+    issued_calls: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct BrowserExtensionBroker {
     state: Mutex<BrowserExtensionState>,
     next_revision: AtomicU64,
+    startup_failure: Mutex<Option<std::io::ErrorKind>>,
 }
 
 impl BrowserExtensionBroker {
+    #[cfg(target_os = "linux")]
+    pub(super) fn set_linux_session_binding(&self, binding: Option<String>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.linux_session_binding == binding {
+            return;
+        }
+        state.linux_session_binding = binding;
+        fail_pending(&mut state, BrowserExtensionBridgeError::Disconnected);
+        state.connection = None;
+        state.surface = None;
+        state.readiness = None;
+        state.pages.clear();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_session_binding(&self) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .linux_session_binding
+            .clone()
+    }
+
+    pub(super) fn note_startup_failure(&self, kind: std::io::ErrorKind) {
+        *self
+            .startup_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kind);
+    }
+
+    pub(super) fn startup_failure(&self) -> Option<std::io::ErrorKind> {
+        *self
+            .startup_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub(super) fn readiness(
         &self,
     ) -> Option<desk_agent_protocol::browser_control::BrowserReadiness> {
@@ -516,7 +568,7 @@ impl BrowserExtensionBroker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .surface
             .as_ref()
-            .map(|surface| super::renew_browser_surface_ref(surface))
+            .map(super::renew_browser_surface_ref)
     }
 
     fn attach(
@@ -524,7 +576,7 @@ impl BrowserExtensionBroker {
         device_id: &str,
         os_session_id: &str,
         hello: &BrowserExtensionHello,
-        sender: mpsc::UnboundedSender<String>,
+        sender: mpsc::Sender<dispatch::Outbound>,
     ) -> Result<u64, BrowserExtensionBridgeError> {
         hello.validate()?;
         let browser_major_version = hello
@@ -595,8 +647,13 @@ impl BrowserExtensionBroker {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        if state.linux_session_binding.as_deref() != Some(os_session_id) {
+            return Err(BrowserExtensionBridgeError::Disconnected);
+        }
         fail_pending(&mut state, BrowserExtensionBridgeError::Disconnected);
         state.pages.clear();
+        state.issued_calls.clear();
         state.connection = Some(ConnectedExtension {
             revision,
             adapter,
@@ -627,18 +684,39 @@ impl BrowserExtensionBroker {
         state.pages.clear();
     }
 
+    #[cfg(test)]
     fn complete(&self, response: BrowserExtensionResponse) {
+        let revision = self
+            .state
+            .lock()
+            .unwrap()
+            .connection
+            .as_ref()
+            .unwrap()
+            .revision;
+        self.complete_for_revision(revision, response);
+    }
+
+    fn complete_for_revision(&self, revision: u64, response: BrowserExtensionResponse) {
         if response.schema_version != BROWSER_CONTROL_SCHEMA_VERSION
             || response.message_type != BrowserExtensionResponseType::Response
         {
             return;
         }
-        let pending = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending
-            .remove(&response.request_id);
+        let pending = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state
+                .connection
+                .as_ref()
+                .is_none_or(|connection| connection.revision != revision)
+            {
+                return;
+            }
+            state.pending.remove(&response.request_id)
+        };
         let Some(pending) = pending else {
             return;
         };
@@ -653,7 +731,7 @@ impl BrowserExtensionBroker {
                     .unwrap_or_else(|| "extension_error".into()),
             ))
         };
-        let _ = pending.send(result);
+        let _ = pending.reply.send(result);
     }
 
     pub(super) fn preflight(
@@ -691,10 +769,39 @@ impl BrowserExtensionBroker {
         Ok(())
     }
 
+    fn reject_queued(&self, outbound: &dispatch::Outbound) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = state
+            .pending
+            .iter()
+            .find(|(_, pending)| Arc::ptr_eq(&pending.ticket, &outbound.ticket))
+            .map(|(id, _)| id.clone());
+        if let Some(pending) = id.and_then(|id| state.pending.remove(&id)) {
+            let _ = pending.reply.send(Err(dispatch::classify_failure(
+                &pending.ticket,
+                BrowserExtensionBridgeError::StaleSurface,
+            )));
+        }
+    }
+
+    #[cfg(test)]
     pub(super) async fn execute(
         &self,
         surface: &desk_agent_protocol::computer_use::ObjectRef,
         request: &desk_agent_protocol::browser_control::BrowserActionRequest,
+    ) -> Result<BrowserActionResult, BrowserExtensionBridgeError> {
+        self.execute_guarded(surface, request, Arc::new(|| true))
+            .await
+    }
+
+    pub(super) async fn execute_guarded(
+        &self,
+        surface: &desk_agent_protocol::computer_use::ObjectRef,
+        request: &desk_agent_protocol::browser_control::BrowserActionRequest,
+        guard: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<BrowserActionResult, BrowserExtensionBridgeError> {
         self.preflight(surface, request)?;
         let mut canonical_request = request.clone();
@@ -729,7 +836,9 @@ impl BrowserExtensionBroker {
         let serialized = serde_json::to_string(&wire)
             .map_err(|_| BrowserExtensionBridgeError::InvalidBrowserAction)?;
         let action_kind = extension_action_kind(&canonical_request.action);
-        let (sender, adapter) = {
+        let outbound = dispatch::Outbound::guarded(serialized, guard);
+        let ticket = outbound.ticket.clone();
+        let (adapter, result_rx) = {
             let mut state = self
                 .state
                 .lock()
@@ -741,53 +850,85 @@ impl BrowserExtensionBroker {
             let sender = connection.sender.clone();
             let adapter = connection.adapter.clone();
             let (result_tx, result_rx) = oneshot::channel();
-            // Never replace the original waiter: a duplicate call id must fail
-            // independently while the first dispatch retains its result channel.
-            if state.pending.contains_key(&request.call_id) {
+            // Retain IDs for this connection even after timeout or completion.
+            if state.issued_calls.contains(&request.call_id) {
                 return Err(BrowserExtensionBridgeError::DuplicateRequest);
             }
-            state.pending.insert(request.call_id.clone(), result_tx);
-            (sender, (adapter, result_rx))
+            if state.pending.len() >= dispatch::CAPACITY
+                || state.issued_calls.len() >= dispatch::MAX_CALL_IDS
+            {
+                return Err(BrowserExtensionBridgeError::Busy);
+            }
+            if state
+                .surface
+                .as_ref()
+                .is_none_or(|current| !super::same_browser_surface_identity(surface, current))
+                || !super::browser_surface_lease_is_current(surface)
+                || extension_action_page(&canonical_request.action).is_some_and(|page| {
+                    state
+                        .pages
+                        .get(&page.page_id)
+                        .is_none_or(|current| !same_page_identity(page, current))
+                })
+            {
+                return Err(BrowserExtensionBridgeError::StaleSurface);
+            }
+            sender.try_send(outbound).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => BrowserExtensionBridgeError::Busy,
+                mpsc::error::TrySendError::Closed(_) => BrowserExtensionBridgeError::Disconnected,
+            })?;
+            state.issued_calls.insert(request.call_id.clone());
+            state.pending.insert(
+                request.call_id.clone(),
+                dispatch::Pending {
+                    reply: result_tx,
+                    ticket: ticket.clone(),
+                },
+            );
+            (adapter, result_rx)
         };
         log::info!(
             "[browser-extension] dispatch request_id={} action={} connection_revision={}",
             request.call_id,
             action_kind,
-            adapter.0.connection_revision
+            adapter.connection_revision
         );
-        if sender.send(serialized).is_err() {
-            self.state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pending
-                .remove(&request.call_id);
-            return Err(BrowserExtensionBridgeError::Disconnected);
-        }
-        let (adapter, result_rx) = adapter;
+        let _waiter = dispatch::Waiter {
+            broker: self,
+            id: &request.call_id,
+            ticket: ticket.clone(),
+        };
+        let classify = |error| dispatch::classify_failure(&ticket, error);
         let raw = match tokio::time::timeout(BROWSER_EXTENSION_CALL_TIMEOUT, result_rx).await {
-            Ok(Ok(result)) => result?,
-            Ok(Err(_)) => return Err(BrowserExtensionBridgeError::Disconnected),
+            Ok(Ok(result)) => result.map_err(classify)?,
+            Ok(Err(_)) => return Err(classify(BrowserExtensionBridgeError::Disconnected)),
             Err(_) => {
-                self.state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .pending
-                    .remove(&request.call_id);
                 log::warn!(
                     "[browser-extension] timeout request_id={} action={} timeout_seconds={}",
                     request.call_id,
                     action_kind,
                     BROWSER_EXTENSION_CALL_TIMEOUT.as_secs()
                 );
-                return Err(BrowserExtensionBridgeError::Timeout);
+                return Err(classify(BrowserExtensionBridgeError::Timeout));
             }
         };
         let result = project_extension_result(&canonical_request, &adapter, raw, now_unix_ms()?)?;
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pages
-            .insert(result.page.page_id.clone(), result.page.clone());
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state
+                .connection
+                .as_ref()
+                .is_none_or(|connection| connection.adapter != adapter)
+            {
+                return Err(BrowserExtensionBridgeError::Disconnected);
+            }
+            state
+                .pages
+                .insert(result.page.page_id.clone(), result.page.clone());
+        }
         log::info!(
             "[browser-extension] completed request_id={} action={} connection_revision={}",
             request.call_id,
@@ -876,7 +1017,8 @@ fn verified_upload_bytes(
 
 fn fail_pending(state: &mut BrowserExtensionState, error: BrowserExtensionBridgeError) {
     for (_, pending) in state.pending.drain() {
-        let _ = pending.send(Err(error.clone()));
+        dispatch::cancel(&pending.ticket);
+        let _ = pending.reply.send(Err(error.clone()));
     }
 }
 
@@ -894,6 +1036,7 @@ pub(super) fn start_loopback_bridge(
     device_id: String,
     os_session_id: String,
 ) -> std::io::Result<()> {
+    let bound = endpoint::bind(data_root, &device_id)?;
     let pairing_token = load_or_create_pairing_token(data_root)?;
     let state = BrowserExtensionEndpointState {
         broker,
@@ -904,12 +1047,17 @@ pub(super) fn start_loopback_bridge(
     let server = HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(state.clone()))
-            .route("/browser-extension/v1", web::get().to(extension_ws_handler))
+            .route("/browser-extension/v2", web::get().to(extension_ws_handler))
     })
     .disable_signals()
-    .bind(("127.0.0.1", BROWSER_EXTENSION_BRIDGE_PORT))?
+    .listen(bound.listener)?
     .run();
-    actix_web::rt::spawn(server);
+    actix_web::rt::spawn(async move {
+        let _owner_lock = bound.lock;
+        if let Err(error) = server.await {
+            log::warn!("Browser extension endpoint stopped: {error}");
+        }
+    });
     Ok(())
 }
 
@@ -927,7 +1075,11 @@ async fn extension_ws_handler(
         return Ok(HttpResponse::Forbidden().finish());
     }
     let (response, session, stream) = actix_ws::handle(&request, payload)?;
-    actix_web::rt::spawn(run_extension_session(state.into_inner(), session, stream));
+    actix_web::rt::spawn(run_extension_session(
+        state.into_inner(),
+        session,
+        stream.max_frame_size(16 * 1024 * 1024),
+    ));
     Ok(response)
 }
 
@@ -938,38 +1090,79 @@ async fn run_extension_session(
 ) {
     use futures_util::StreamExt as _;
 
-    let first = tokio::time::timeout(Duration::from_secs(10), stream.next()).await;
-    let hello = match first {
-        Ok(Some(Ok(actix_ws::Message::Text(text)))) => {
-            serde_json::from_str::<BrowserExtensionHello>(&text).ok()
-        }
-        _ => None,
-    };
-    let Some(hello) = hello else {
-        let _ = session.close(None).await;
-        return;
-    };
-    if hello.validate().is_err()
-        || !constant_time_eq(
-            hello.pairing_token.as_bytes(),
-            state.pairing_token.as_bytes(),
-        )
-    {
-        let _ = session.close(None).await;
-        return;
-    }
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
-    let revision =
-        match state
-            .broker
-            .attach(&state.device_id, &state.os_session_id, &hello, outbound_tx)
+    #[cfg(target_os = "linux")]
+    let os_session_id = match super::linux_desktop::resolve().await {
+        Ok(identity)
+            if state.broker.linux_session_binding().as_deref()
+                == Some(identity.binding().as_str()) =>
         {
-            Ok(revision) => revision,
-            Err(_) => {
-                let _ = session.close(None).await;
-                return;
-            }
+            identity.binding()
+        }
+        _ => {
+            let _ = session.close(None).await;
+            return;
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let os_session_id = state.os_session_id.to_string();
+    let handshake = async {
+        let first = stream.next().await;
+        let Some(Ok(actix_ws::Message::Text(text))) = first else {
+            return None;
         };
+        if text.len() > 4096 {
+            return None;
+        }
+        let client: crypto::ClientHello = serde_json::from_str(&text).ok()?;
+        let hello = BrowserExtensionHello {
+            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+            message_type: BrowserExtensionHelloType::Hello,
+            pairing_token: state.pairing_token.to_string(),
+            extension_version: client.extension_version.clone(),
+            browser_version: client.browser_version.clone(),
+            profile_incarnation: client.profile_incarnation.clone(),
+        };
+        hello.validate().ok()?;
+        let server_nonce =
+            base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 32]>());
+        let (handshake, challenge) = crypto::Handshake::new(
+            &state.pairing_token,
+            &client,
+            server_nonce,
+            &state.device_id,
+            &os_session_id,
+        )
+        .ok()?;
+        session
+            .text(serde_json::to_string(&challenge).ok()?)
+            .await
+            .ok()?;
+        let Some(Ok(actix_ws::Message::Text(text))) = stream.next().await else {
+            return None;
+        };
+        if text.len() > 4096 {
+            return None;
+        }
+        let cipher = handshake.finish(serde_json::from_str(&text).ok()?).ok()?;
+        Some((hello, cipher))
+    };
+    let Ok(Some((hello, mut cipher))) =
+        tokio::time::timeout(Duration::from_secs(10), handshake).await
+    else {
+        let _ = session.close(None).await;
+        return;
+    };
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(dispatch::CAPACITY);
+    let revision = match state
+        .broker
+        .attach(&state.device_id, &os_session_id, &hello, outbound_tx)
+    {
+        Ok(revision) => revision,
+        Err(_) => {
+            let _ = session.close(None).await;
+            return;
+        }
+    };
     log::info!(
         "[browser-extension] attached device={} os_session={} revision={} extension_version={} browser_version={} profile_incarnation={}",
         state.device_id,
@@ -979,14 +1172,19 @@ async fn run_extension_session(
         hello.browser_version,
         hello.profile_incarnation
     );
-    if session
-        .text(format!(
-            r#"{{"schema_version":{},"type":"hello_ack"}}"#,
-            BROWSER_CONTROL_SCHEMA_VERSION
-        ))
-        .await
-        .is_err()
-    {
+    let ack = format!(
+        r#"{{"schema_version":{},"type":"hello_ack"}}"#,
+        BROWSER_CONTROL_SCHEMA_VERSION
+    );
+    let Ok(ack) = cipher.seal(&ack) else {
+        state.broker.detach(revision);
+        let _ = session.close(None).await;
+        return;
+    };
+    if !matches!(
+        tokio::time::timeout(Duration::from_secs(5), session.text(ack)).await,
+        Ok(Ok(()))
+    ) {
         state.broker.detach(revision);
         return;
     }
@@ -994,17 +1192,21 @@ async fn run_extension_session(
         tokio::select! {
             outbound = outbound_rx.recv() => {
                 let Some(outbound) = outbound else { break };
-                if session.text(outbound).await.is_err() { break; }
+                if state.broker.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).connection.as_ref().is_none_or(|connection| connection.revision != revision) { break; }
+                if !outbound.try_begin() { state.broker.reject_queued(&outbound); continue; }
+                let Ok(encrypted) = cipher.seal(&outbound) else { break; };
+                if !matches!(tokio::time::timeout(Duration::from_secs(5), session.text(encrypted)).await, Ok(Ok(()))) { break; }
             }
             inbound = stream.next() => {
                 match inbound {
                     Some(Ok(actix_ws::Message::Text(text))) => {
+                        let Ok(text) = cipher.open(&text) else { break; };
                         if let Ok(response) = serde_json::from_str::<BrowserExtensionResponse>(&text) {
-                            state.broker.complete(response);
+                            state.broker.complete_for_revision(revision, response);
                         }
                     }
                     Some(Ok(actix_ws::Message::Ping(bytes))) => {
-                        let _ = session.pong(&bytes).await;
+                        if !matches!(tokio::time::timeout(Duration::from_secs(5), session.pong(&bytes)).await, Ok(Ok(()))) { break; }
                     }
                     Some(Ok(actix_ws::Message::Close(_))) | None | Some(Err(_)) => break,
                     Some(Ok(_)) => {}
@@ -1023,7 +1225,14 @@ async fn run_extension_session(
 
 fn load_or_create_pairing_token(data_root: &Path) -> std::io::Result<String> {
     let path = data_root.join(PAIRING_TOKEN_FILE);
-    match std::fs::read_to_string(&path) {
+    let token_lock = private_file::open(&data_root.join("browser-pairing-token.lock"), true, 128)?;
+    token_lock
+        .try_lock()
+        .map_err(|_| std::io::Error::other("browser pairing token is busy"))?;
+    match private_file::read(&path, MAX_PAIRING_TOKEN_BYTES as u64).and_then(|bytes| {
+        String::from_utf8(bytes)
+            .map_err(|_| std::io::Error::other("invalid browser pairing token encoding"))
+    }) {
         Ok(token) if bounded_secret(token.trim(), MAX_PAIRING_TOKEN_BYTES) => {
             return Ok(token.trim().to_string());
         }
@@ -1036,16 +1245,20 @@ fn load_or_create_pairing_token(data_root: &Path) -> std::io::Result<String> {
         Err(error) => return Err(error),
     }
     let token = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-    crate::durable_file::durable_atomic_write(
-        &path,
-        token.as_bytes(),
-        crate::durable_file::FileMode::OwnerOnly,
-    )?;
+    private_file::write(&path, token.as_bytes())?;
     Ok(token)
 }
 
+pub(crate) fn pairing_endpoint(data_root: &Path, device_id: &str) -> std::io::Result<String> {
+    endpoint::url(data_root, device_id)
+}
+
 pub(crate) fn read_pairing_token(data_root: &Path) -> std::io::Result<String> {
-    let token = std::fs::read_to_string(data_root.join(PAIRING_TOKEN_FILE))?;
+    let token = String::from_utf8(private_file::read(
+        &data_root.join(PAIRING_TOKEN_FILE),
+        MAX_PAIRING_TOKEN_BYTES as u64,
+    )?)
+    .map_err(|_| std::io::Error::other("invalid browser pairing token encoding"))?;
     let token = token.trim();
     if !bounded_secret(token, MAX_PAIRING_TOKEN_BYTES) {
         return Err(std::io::Error::other(
@@ -1124,12 +1337,29 @@ pub(crate) enum BrowserExtensionBridgeError {
     StaleSurface,
     Disconnected,
     DuplicateRequest,
+    Busy,
     Timeout,
+    NotSubmitted(Box<BrowserExtensionBridgeError>),
     ExtensionRejected(String),
     Clock,
 }
 
 impl BrowserExtensionBridgeError {
+    pub(crate) fn may_have_started(&self) -> bool {
+        !matches!(
+            self,
+            Self::NotSubmitted(_)
+                | Self::Busy
+                | Self::InvalidHello
+                | Self::InvalidRequestId
+                | Self::InvalidBrowserAction
+                | Self::MissingUploadBytes
+                | Self::UnexpectedUploadBytes
+                | Self::UploadIdentityMismatch
+                | Self::StaleSurface
+        )
+    }
+
     /// Closed host-authored messages only: extension errors may contain page text.
     pub(crate) fn model_message(&self) -> &'static str {
         match self {
@@ -1161,7 +1391,9 @@ impl BrowserExtensionBridgeError {
             Self::Timeout => {
                 "browser_timeout: result unknown; perform an independent read, never repeat a mutation automatically."
             }
-            Self::InvalidHello
+            Self::NotSubmitted(_)
+            | Self::Busy
+            | Self::InvalidHello
             | Self::InvalidRequestId
             | Self::InvalidBrowserAction
             | Self::MissingUploadBytes
@@ -1189,7 +1421,13 @@ impl std::fmt::Display for BrowserExtensionBridgeError {
             Self::StaleSurface => formatter.write_str("stale browser surface"),
             Self::Disconnected => formatter.write_str("browser extension is disconnected"),
             Self::DuplicateRequest => formatter.write_str("duplicate browser extension request"),
+            Self::Busy => {
+                formatter.write_str("browser extension queue or connection request budget is full")
+            }
             Self::Timeout => formatter.write_str("browser extension request timed out"),
+            Self::NotSubmitted(error) => {
+                write!(formatter, "browser action was not submitted: {error}")
+            }
             Self::ExtensionRejected(code) => {
                 write!(formatter, "browser extension rejected request: {code}")
             }
@@ -1199,6 +1437,17 @@ impl std::fmt::Display for BrowserExtensionBridgeError {
 }
 
 impl std::error::Error for BrowserExtensionBridgeError {}
+
+#[cfg(test)]
+fn private_test_directory() -> tempfile::TempDir {
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir().unwrap()
+}
 
 #[cfg(test)]
 mod tests {
@@ -1228,6 +1477,13 @@ mod tests {
     };
     use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
     use desk_agent_protocol::data_lineage::ContentRef;
+
+    fn bound_test_broker() -> BrowserExtensionBroker {
+        let broker = BrowserExtensionBroker::default();
+        #[cfg(target_os = "linux")]
+        broker.set_linux_session_binding(Some("session-1".into()));
+        broker
+    }
 
     fn page() -> BrowserPageRef {
         BrowserPageRef {
@@ -1356,8 +1612,8 @@ mod tests {
 
     #[tokio::test]
     async fn connected_extension_round_trips_a_typed_open_action() {
-        let broker = Arc::new(BrowserExtensionBroker::default());
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let broker = Arc::new(bound_test_broker());
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(dispatch::CAPACITY);
         broker
             .attach("device-1", "session-1", &extension_hello(), outbound_tx)
             .unwrap();
@@ -1440,8 +1696,8 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_request_does_not_steal_the_original_waiter() {
-        let broker = Arc::new(BrowserExtensionBroker::default());
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let broker = Arc::new(bound_test_broker());
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(dispatch::CAPACITY);
         broker
             .attach("device-1", "session-1", &extension_hello(), outbound_tx)
             .unwrap();
@@ -1497,8 +1753,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_waiter_keeps_call_id_reserved_until_a_late_result() {
-        let broker = Arc::new(BrowserExtensionBroker::default());
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let broker = Arc::new(bound_test_broker());
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(dispatch::CAPACITY);
         broker
             .attach("device-1", "session-1", &extension_hello(), outbound_tx)
             .unwrap();
@@ -1552,48 +1808,62 @@ mod tests {
 
     #[tokio::test]
     async fn disconnect_fails_the_pending_call_and_invalidates_its_surface() {
-        let broker = Arc::new(BrowserExtensionBroker::default());
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
-        let revision = broker
-            .attach("device-1", "session-1", &extension_hello(), outbound_tx)
-            .unwrap();
-        let surface = broker.surface_ref().unwrap();
-        let request = BrowserActionRequest {
-            schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
-            call_id: "call-disconnect".into(),
-            action: BrowserAction::OpenPage {
-                target: BrowserNavigationTarget {
-                    url: "https://mail.google.com/mail/u/0/".into(),
-                    origin: BrowserOrigin {
-                        kind: BrowserOriginKind::Https,
-                        host_ascii: "mail.google.com".into(),
-                        port: 443,
+        for started in [false, true] {
+            let broker = Arc::new(bound_test_broker());
+            let (outbound_tx, mut outbound_rx) = mpsc::channel(dispatch::CAPACITY);
+            let revision = broker
+                .attach("device-1", "session-1", &extension_hello(), outbound_tx)
+                .unwrap();
+            let surface = broker.surface_ref().unwrap();
+            let request = BrowserActionRequest {
+                schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+                call_id: "call-disconnect".into(),
+                action: BrowserAction::OpenPage {
+                    target: BrowserNavigationTarget {
+                        url: "https://mail.google.com/mail/u/0/".into(),
+                        origin: BrowserOrigin {
+                            kind: BrowserOriginKind::Https,
+                            host_ascii: "mail.google.com".into(),
+                            port: 443,
+                        },
                     },
                 },
-            },
-        };
-        let task_broker = Arc::clone(&broker);
-        let task_surface = surface.clone();
-        let task_request = request.clone();
-        let task =
-            tokio::spawn(async move { task_broker.execute(&task_surface, &task_request).await });
-        let _ = outbound_rx.recv().await.unwrap();
+            };
+            let task_broker = Arc::clone(&broker);
+            let task_surface = surface.clone();
+            let task_request = request.clone();
+            let task =
+                tokio::spawn(
+                    async move { task_broker.execute(&task_surface, &task_request).await },
+                );
+            let outbound = outbound_rx.recv().await.unwrap();
+            if started {
+                assert!(outbound.try_begin());
+            }
 
-        broker.detach(revision);
-        assert_eq!(
-            task.await.unwrap(),
-            Err(BrowserExtensionBridgeError::Disconnected)
-        );
-        assert_eq!(
-            broker.preflight(&surface, &request),
-            Err(BrowserExtensionBridgeError::StaleSurface)
-        );
+            broker.detach(revision);
+            assert_eq!(
+                task.await.unwrap(),
+                Err(if started {
+                    BrowserExtensionBridgeError::Disconnected
+                } else {
+                    BrowserExtensionBridgeError::NotSubmitted(Box::new(
+                        BrowserExtensionBridgeError::Disconnected,
+                    ))
+                })
+            );
+            assert_eq!(
+                broker.preflight(&surface, &request),
+                Err(BrowserExtensionBridgeError::StaleSurface)
+            );
+            assert!(!outbound.try_begin());
+        }
     }
 
     #[tokio::test]
     async fn distinct_pages_remain_independently_addressable() {
-        let broker = Arc::new(BrowserExtensionBroker::default());
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let broker = Arc::new(bound_test_broker());
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(dispatch::CAPACITY);
         broker
             .attach("device-1", "session-1", &extension_hello(), outbound_tx)
             .unwrap();
@@ -1669,7 +1939,7 @@ mod tests {
 
     #[test]
     fn pairing_token_is_durable_and_high_entropy() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_test_directory();
         let first = load_or_create_pairing_token(directory.path()).unwrap();
         let second = load_or_create_pairing_token(directory.path()).unwrap();
 
@@ -1681,8 +1951,8 @@ mod tests {
 
     #[test]
     fn extension_reconnect_invalidates_the_previous_surface() {
-        let broker = BrowserExtensionBroker::default();
-        let (first_sender, _first_receiver) = mpsc::unbounded_channel();
+        let broker = bound_test_broker();
+        let (first_sender, _first_receiver) = mpsc::channel(dispatch::CAPACITY);
         broker
             .attach("device-1", "session-1", &extension_hello(), first_sender)
             .unwrap();
@@ -1690,7 +1960,7 @@ mod tests {
 
         let mut reconnected = extension_hello();
         reconnected.profile_incarnation = "profile-2".into();
-        let (second_sender, _second_receiver) = mpsc::unbounded_channel();
+        let (second_sender, _second_receiver) = mpsc::channel(dispatch::CAPACITY);
         broker
             .attach("device-1", "session-1", &reconnected, second_sender)
             .unwrap();
@@ -1720,8 +1990,8 @@ mod tests {
 
     #[test]
     fn active_extension_renews_surface_lease_without_accepting_the_expired_copy() {
-        let broker = BrowserExtensionBroker::default();
-        let (sender, _receiver) = mpsc::unbounded_channel();
+        let broker = bound_test_broker();
+        let (sender, _receiver) = mpsc::channel(dispatch::CAPACITY);
         broker
             .attach("device-1", "session-1", &extension_hello(), sender)
             .unwrap();
@@ -1759,8 +2029,8 @@ mod tests {
 
     #[test]
     fn preflight_canonicalizes_only_a_model_mutated_adapter() {
-        let broker = BrowserExtensionBroker::default();
-        let (sender, _receiver) = mpsc::unbounded_channel();
+        let broker = bound_test_broker();
+        let (sender, _receiver) = mpsc::channel(dispatch::CAPACITY);
         broker
             .attach("device-1", "session-1", &extension_hello(), sender)
             .unwrap();

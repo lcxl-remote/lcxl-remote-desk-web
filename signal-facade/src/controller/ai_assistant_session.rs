@@ -1309,7 +1309,11 @@ pub struct GrantRequestItemDto {
     pub launch_confirmation: Option<LaunchConfirmationDto>,
     pub application_scope: Option<desk_agent_protocol::computer_use::UiApplicationScope>,
     pub text_file_confirmation: Option<TextFileConfirmationDto>,
+    pub wayland_output_confirmation: Option<WaylandOutputConfirmationDto>,
 }
+
+mod wayland_output_confirmation;
+pub use wayland_output_confirmation::WaylandOutputConfirmationDto;
 
 mod text_file_confirmation;
 pub use text_file_confirmation::TextFileConfirmationDto;
@@ -1621,7 +1625,9 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                         &item.tool_name,
                         item.canonical_input_json.as_deref(),
                     );
+                    let wayland_output_confirmation = wayland_output_confirmation::project(&item);
                     GrantRequestItemDto {
+                        wayland_output_confirmation,
                         application_scope,
                         item_id: item.item_id,
                         provider_id: item.provider_id,

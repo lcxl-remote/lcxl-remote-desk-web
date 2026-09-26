@@ -138,7 +138,25 @@ impl WorkerSession {
         let computer_use_broker = shared_computer_use_broker.unwrap_or_else(|| {
             Arc::new(crate::worker::agent::computer_use_broker::ComputerUseBroker::new())
         });
-        #[cfg(windows)]
+        #[cfg(target_os = "linux")]
+        let computer_use_desktop_monitor =
+            (worker_profile == WorkerProfile::SessionUser).then(|| {
+                crate::worker::agent::linux_desktop::DesktopMonitor::start(&computer_use_broker)
+            });
+        #[cfg(target_os = "linux")]
+        let mut linux_input_endpoint = computer_use_desktop_monitor.as_ref().and_then(|monitor| {
+            match crate::worker::agent::linux_desktop::local_control::Endpoint::start(
+                computer_use_broker.clone(),
+                monitor.owner_lease(),
+            ) {
+                Ok(endpoint) => Some(endpoint),
+                Err(error) => {
+                    log::warn!("Local AI input control unavailable: {error}");
+                    None
+                }
+            }
+        });
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let root = worker_data_dir.clone();
             let session_user = worker_profile == WorkerProfile::SessionUser;
@@ -178,7 +196,7 @@ impl WorkerSession {
                     data_root,
                     browser_device_id,
                     init_payload.os_session_id.to_string(),
-                )?;
+                );
             } else {
                 warn!(
                     "SessionWorker Init omitted data_dir; the Chrome extension bridge remains unavailable"
@@ -219,6 +237,8 @@ impl WorkerSession {
         };
 
         #[cfg(target_os = "linux")]
+        let portal_startup_restore = computer_use_broker.claim_portal_startup_restore();
+        #[cfg(target_os = "linux")]
         let (portal_broker, portal_unavailable_snapshot) = if detect_linux_display_environment()
             .active_server()
             == LinuxDisplayServer::Wayland
@@ -233,7 +253,9 @@ impl WorkerSession {
             .await
             {
                 Ok(broker) => {
-                    if let Err(error) = broker.restore_if_available().await {
+                    if portal_startup_restore
+                        && let Err(error) = broker.restore_if_available().await
+                    {
                         warn!("Could not start Wayland Portal authorization restore: {error}");
                     }
                     (Some(broker), None)
@@ -251,6 +273,8 @@ impl WorkerSession {
         } else {
             (None, None)
         };
+        #[cfg(target_os = "linux")]
+        computer_use_broker.set_portal(portal_broker.clone());
         let remote_access_locked = Arc::new(AtomicBool::new(init_payload.remote_access_locked));
         let remote_access_state_version =
             Arc::new(AtomicU64::new(init_payload.remote_access_state_version));
@@ -323,6 +347,10 @@ impl WorkerSession {
                 hub
             }
         };
+        #[cfg(target_os = "linux")]
+        if let Some(endpoint) = linux_input_endpoint.as_mut() {
+            endpoint.publish(host_control_hub.clone());
+        }
 
         // Outbound IPC: dispatchers and the main loop send into an unbounded
         // mpsc; an event-forwarder task drains that mpsc and pushes onto the
@@ -332,9 +360,20 @@ impl WorkerSession {
         // joined at shutdown so the in-process transport's mpsc capacity is
         // fully drained before the test/runtime moves on.
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
+        #[cfg(target_os = "linux")]
+        let linux_turn_monitor = (worker_profile == WorkerProfile::SessionUser).then(|| {
+            crate::worker::agent::linux_desktop::turn_monitor::TurnMonitor::start(
+                computer_use_broker.clone(),
+                writer_tx.clone(),
+            )
+        });
+        #[cfg(target_os = "linux")]
+        if !is_inprocess_worker && let Some(endpoint) = linux_input_endpoint.as_mut() {
+            endpoint.announce_worker(writer_tx.clone());
+        }
         let file_recovery_quota = super::file_recovery_quota::QuotaClient::new(writer_tx.clone());
-        #[cfg(any(target_os = "macos", windows))]
-        let _file_recovery_maintenance = if worker_profile == WorkerProfile::SessionUser {
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        let file_recovery_maintenance = if worker_profile == WorkerProfile::SessionUser {
             worker_data_dir
                 .clone()
                 .map(|root| super::file_recovery::start(root, file_recovery_quota.clone()))
@@ -342,8 +381,13 @@ impl WorkerSession {
             None
         };
 
-        let writer_task =
-            spawn_profiled_event_forwarder_task(writer_rx, Arc::clone(&event_tx), worker_profile);
+        let (writer_shutdown, writer_shutdown_rx) = tokio::sync::oneshot::channel();
+        let writer_task = spawn_profiled_event_forwarder_task(
+            writer_rx,
+            Arc::clone(&event_tx),
+            worker_profile,
+            Some(writer_shutdown_rx),
+        );
         let computer_use_readiness_task = (worker_profile == WorkerProfile::SessionUser).then(|| {
             let readiness_writer = writer_tx.clone();
             let readiness_broker = computer_use_broker.clone();
@@ -354,7 +398,10 @@ impl WorkerSession {
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let mut last_started = std::time::Instant::now();
                 loop {
-                    tick.tick().await;
+                    tokio::select! {
+                        _ = tick.tick() => {},
+                        _ = readiness_broker.wait_for_readiness_change() => {},
+                    }
                     let started = std::time::Instant::now();
                     let gap = started.duration_since(last_started);
                     if gap > Duration::from_secs(35) {
@@ -415,6 +462,7 @@ impl WorkerSession {
         let portal_status_task = if let Some(broker) = portal_broker.as_ref() {
             let mut snapshots = broker.subscribe();
             let portal_writer = writer_tx.clone();
+            let capture_broker = computer_use_broker.clone();
             let initial = snapshots.borrow().clone();
             let _ = portal_writer.send(WorkerToService::WaylandPortalStatus(
                 desk_ipc_protocol::message::WaylandPortalStatusPayload { snapshot: initial },
@@ -422,6 +470,7 @@ impl WorkerSession {
             Some(tokio::spawn(async move {
                 while snapshots.changed().await.is_ok() {
                     let snapshot = snapshots.borrow_and_update().clone();
+                    capture_broker.clear_wayland_frame();
                     if portal_writer
                         .send(WorkerToService::WaylandPortalStatus(
                             desk_ipc_protocol::message::WaylandPortalStatusPayload { snapshot },
@@ -1760,6 +1809,12 @@ impl WorkerSession {
                                         if let Ok(reply) = result { let _ = reply_tx.send(WorkerToService::FileRecoveryManaged(reply)); }
                                     });
                                 }
+                                ServiceToWorker::ComputerTurnStatus(reply) => {
+                                    #[cfg(target_os = "linux")]
+                                    computer_use_broker.apply_linux_input_turn_status(&reply);
+                                    #[cfg(not(target_os = "linux"))]
+                                    let _ = reply;
+                                }
                                 ServiceToWorker::ComputerActionPlan(payload) => {
                                     let file_recovery_quota = file_recovery_quota.clone();
                                     let plan = payload.plan;
@@ -1810,6 +1865,8 @@ impl WorkerSession {
                                         continue;
                                     }
 
+                                    #[cfg(target_os = "linux")]
+                                    let linux_input_control = computer_use_broker.linux_input_control_generation();
                                     if let Some(completed) = crate::worker::agent::application_launch::admitted::replay(worker_data_dir.as_deref(), &plan) {
                                         let _ = writer_tx.send(WorkerToService::ComputerActionCompleted(
                                             ComputerActionCompletedPayload {
@@ -1844,6 +1901,12 @@ impl WorkerSession {
                                             .and_then(|_| computer_use_broker.preflight_ui_action(&plan.actions[0].target, action, &ceiling))
                                             .map_err(|error| error.message),
                                         ComputerActionKind::BackgroundInput { application, input, geometry } => computer_use_broker.preflight_background_input(&plan.actions[0].target,application,input,geometry.as_ref(),&ceiling).map_err(|e|e.message),
+                                        ComputerActionKind::WaylandOutputInput(action) => {
+                                            #[cfg(target_os = "linux")]
+                                            { computer_use_broker.preflight_wayland_output(&plan.actions[0].target, action, &ceiling).map_err(|error| error.message) }
+                                            #[cfg(not(target_os = "linux"))]
+                                            { let _ = action; Err("Wayland output input is unavailable on this platform".into()) }
+                                        }
                                         ComputerActionKind::RawInput(action) => computer_use_broker
                                             .preflight_raw_input(
                                                 &plan.actions[0].target,
@@ -1931,7 +1994,13 @@ impl WorkerSession {
                                         computer_use_broker
                                             .acquire_writer_lease(lease)
                                             .map(|_| ())
-                                            .map_err(|error| error.message)
+                                            .map_err(|error| error.message)?;
+                                        #[cfg(target_os = "linux")]
+                                        if let Err(error) = computer_use_broker.bind_linux_input_action(linux_input_control, &plan, payload.turn_authority.as_deref()) {
+                                            computer_use_broker.release_writer_lease(&plan.execution_generation);
+                                            return Err(error.message);
+                                        }
+                                        Ok(())
                                     });
                                     if let Err(reason) = preflight {
                                         let _ = writer_tx.send(
@@ -2036,6 +2105,8 @@ impl WorkerSession {
                                                 };
                                                 if background { run().map_err(crate::worker::agent::native_ui_identity::NativeExecutionError::maybe_started) } else { crate::worker::agent::native_ui_identity::run_guarded(run, move || {
                                                     guard_broker.require_writer_lease(&guard_generation)?;
+                                                    #[cfg(target_os = "linux")]
+                                                    guard_broker.require_linux_input_control(linux_input_control)?;
                                                     if guard_settings.blocking_read().computer_use != guard_ceiling {
                                                         return Err(desk_agent_protocol::AgentError {
                                                             kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
@@ -2059,6 +2130,17 @@ impl WorkerSession {
                                             return;
                                         }
                                         let step = plan.actions.first().cloned().expect("preflight checked one action");
+                                        #[cfg(target_os = "linux")]
+                                        if matches!(&step.action, ComputerActionKind::WaylandOutputInput(_)) {
+                                            let completed = crate::worker::agent::linux_desktop::output_input::execute(
+                                                action_broker.clone(), application_settings.clone(), plan, linux_input_control,
+                                            ).await;
+                                            let _ = action_writer.send(WorkerToService::ComputerActionCompleted(
+                                                ComputerActionCompletedPayload { request_id: payload.request_id,
+                                                    connection_id: payload.connection_id, completed },
+                                            ));
+                                            return;
+                                        }
                                         if matches!(&step.action, ComputerActionKind::RawInput(_)) {
                                             let target = step.target.clone();
                                             let action = step.action.clone();
@@ -2210,7 +2292,7 @@ impl WorkerSession {
                                             return;
                                         }
                                         if let ComputerActionKind::Browser(request) = &step.action {
-                                            let mutation_may_have_started = matches!(
+                                            let mut mutation_may_have_started = matches!(
                                                 &request.action,
                                                 BrowserAction::OpenPage { .. }
                                                     | BrowserAction::NavigatePage { .. }
@@ -2224,16 +2306,22 @@ impl WorkerSession {
                                                 .map_err(|error| error.message);
                                             let result = match lease_valid {
                                                 Ok(_) => match action_broker
-                                                    .execute_browser_action(&step.target, request)
+                                                    .execute_browser_action(&step.target, request, &generation)
                                                     .await
-                                                    .map_err(|error| error.model_message().to_string()) {
+                                                    .map_err(|error| {
+                                                        mutation_may_have_started &= error.may_have_started();
+                                                        error.model_message().to_string()
+                                                    }) {
                                                     Ok(result) => action_broker
                                                         .require_writer_lease(&generation)
                                                         .map(|_| result)
                                                         .map_err(|error| error.message),
                                                     Err(reason) => Err(reason),
                                                 },
-                                                Err(reason) => Err(reason),
+                                                Err(reason) => {
+                                                    mutation_may_have_started = false;
+                                                    Err(reason)
+                                                },
                                             };
                                             action_broker.release_writer_lease(&generation);
                                             let (class, facts, message, output) = match result {
@@ -2433,7 +2521,7 @@ impl WorkerSession {
                                             let generation_for_call = generation.clone();
                                             let result = crate::worker::agent::computer_use_writer::spawn_writer_task(
                                                 broker.clone(), generation.clone(), move || {
-                                                #[cfg(any(target_os = "macos", windows))]
+                                                #[cfg(any(target_os = "macos", target_os = "linux", windows))]
                                                 {
                                                     broker.require_writer_lease(&generation_for_call)?;
                                                     let (binding, data_root, device, owner, operation_id, generation) = recovery_binding;
@@ -2470,7 +2558,7 @@ impl WorkerSession {
                                                         || broker.require_writer_lease(&generation_for_call).map(|_| ()),
                                                     )
                                                 }
-                                                #[cfg(not(any(target_os = "macos", windows)))]
+                                                #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
                                                 {
                                                     let _ = (target, action, broker, generation_for_call, recovery_binding);
                                                     Err::<(desk_agent_protocol::computer_use::TextFileMutationOutput, &'static str), _>(desk_agent_protocol::AgentError {
@@ -3244,14 +3332,23 @@ impl WorkerSession {
         // threads (each one observes its `stop_flag` within one frame
         // tick and drops its `MediaSender`, which in turn lets the framed
         // writer task on the media pipe drain and exit). Finally drop our
-        // own writer_tx so the event-pipe writer task observes "all
-        // senders gone" and exits cleanly.
+        // own writer_tx and close queue admission explicitly. Background
+        // operations may still retain sender clones; only messages already
+        // queued at that boundary are drained before the forwarder exits.
         heartbeat_task.abort();
+        #[cfg(target_os = "linux")]
+        drop(linux_turn_monitor);
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        drop(file_recovery_maintenance);
         if let Some(task) = computer_use_readiness_task {
             task.abort();
         }
         #[cfg(any(windows, target_os = "macos"))]
         drop(computer_use_input_monitor);
+        #[cfg(target_os = "linux")]
+        drop(linux_input_endpoint);
+        #[cfg(target_os = "linux")]
+        drop(computer_use_desktop_monitor);
         #[cfg(target_os = "linux")]
         if let Some(task) = portal_status_task {
             task.abort();
@@ -3279,7 +3376,9 @@ impl WorkerSession {
         if let Some(dispatcher) = whiteboard_dispatcher.as_ref() {
             dispatcher.shutdown().await;
         }
+        drop(file_recovery_quota);
         drop(writer_tx);
+        let _ = writer_shutdown.send(());
         let _ = writer_task.await;
 
         info!("WorkerSession IPC loop exiting");

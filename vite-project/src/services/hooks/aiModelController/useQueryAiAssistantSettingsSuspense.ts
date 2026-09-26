@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { QueryAiAssistantSettingsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import type { QueryAiAssistantSettingsQueryResponse } from "../../types.ts";
-import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 import { queryAiAssistantSettings } from "../../clients.ts";
+import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 
 export const queryAiAssistantSettingsSuspenseQueryKey = () => [{ url: '/api/desk/settings/ai-assistant' }] as const
 

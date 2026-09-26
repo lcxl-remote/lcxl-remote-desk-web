@@ -244,6 +244,9 @@ pub(crate) fn project(
         return Err(invalid());
     }
     let action = &plan.actions[0].action;
+    if matches!(action, ComputerActionKind::WaylandOutputInput(_)) {
+        desk_diagnose_core::provider_preflight::wayland_output::validate_completion(completed)?;
+    }
     // An assistive Outlook handoff is usable but deliberately unverified; it
     // never acquires semantic read-back or send authority from this projection.
     if let ComputerActionKind::Communication(request) = action {

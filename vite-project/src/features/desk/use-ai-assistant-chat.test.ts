@@ -12,6 +12,8 @@ import {
     SIGNALING_TYPE_CODE_SELECT_AI_ASSISTANT_SESSION,
     SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_CONTEXT,
     SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
+    SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_TURN,
+    SIGNALING_TYPE_CODE_COMPUTER_ACTION_TURN_STATUS,
 } from './constants';
 import type { SignalingSubscriber } from './use-desk-signaling';
 import { useAiAssistantChat } from './use-ai-assistant-chat';
@@ -33,6 +35,31 @@ describe('useAiAssistantChat', () => {
         });
         unmount();
     });
+    it('ignores host turn frames even with the pending controller request id', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({
+            deskId: 'host-turn-role',
+            subscribe: handler => { subscriber = handler; return () => undefined; },
+            sendMessage,
+        }));
+        try {
+            act(() => { result.current.start('Pending controller input'); });
+            const request_id = sendMessage.mock.calls[0][3]!;
+            for (const signaling_type of [SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_TURN, SIGNALING_TYPE_CODE_COMPUTER_ACTION_TURN_STATUS]) {
+                act(() => subscriber?.({ request_id, signaling_type,
+                    signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+                expect(result.current.deliveryState).toBe('sending');
+                expect(result.current.acceptedInput).toBeNull();
+            }
+            act(() => subscriber?.({ request_id, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+            expect(result.current.deliveryState).toBeNull();
+            expect(result.current.acceptedInput?.question).toBe('Pending controller input');
+        } finally { unmount(); }
+    });
+
     it('does not send live desktop metadata as an explicit object attachment', async () => {
         localStorage.setItem('ai-assistant-conversation:delivery-kinds', 'conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {

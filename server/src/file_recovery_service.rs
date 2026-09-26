@@ -62,7 +62,7 @@ fn policy(vault: &LockedVault) -> FileRecoveryPolicyDto {
         max_bytes: vault.policy().max_bytes,
     }
 }
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 pub(crate) fn execute(
     root: Option<&Path>,
     payload: &desk_ipc_protocol::message::FileRecoveryRequestPayload,
@@ -229,7 +229,7 @@ pub(crate) fn execute(
         outcome: result.unwrap_or_else(|reason| FileRecoveryOutcome::Unavailable { reason }),
     }
 }
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub(crate) fn execute(
     _: Option<&Path>,
     payload: &desk_ipc_protocol::message::FileRecoveryRequestPayload,
@@ -452,10 +452,9 @@ fn execute_locked_with_quota(
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
     #[test]
     fn management_rejects_changed_os_user_before_opening_storage() {
         let payload = desk_ipc_protocol::message::FileRecoveryRequestPayload {

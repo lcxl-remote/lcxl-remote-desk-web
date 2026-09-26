@@ -619,6 +619,22 @@ impl ComputerActionObserver for SignalComputerActionObserver {
             }
             let source_id = source.model.connection_id.as_str();
             match model.signaling_type {
+                SignalingType::QueryComputerActionTurn => {
+                    if let (Some(query), Some(device)) = (
+                        desk_signal_facade::service::computer_turn::query_from_host(source, model),
+                        source.model.version_info.client_id.as_deref(),
+                    ) {
+                        let state = self.store.computer_turn_state(device, &query).await
+                            .unwrap_or(desk_agent_protocol::computer_turn::ComputerActionTurnState::Unavailable);
+                        desk_signal_facade::service::computer_turn::reply(
+                            source,
+                            &model.request_id,
+                            query,
+                            state,
+                        )
+                        .await;
+                    }
+                }
                 SignalingType::ComputerActionStateReported => {
                     if !model
                         .response_state
@@ -901,6 +917,7 @@ fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind
         ComputerActionKind::UiInApplication { .. } => Some(ObjectKind::UiElement),
         ComputerActionKind::BackgroundInput { .. } => Some(ObjectKind::Window),
         ComputerActionKind::RawInput(_) => Some(ObjectKind::Application),
+        ComputerActionKind::WaylandOutputInput(_) => Some(ObjectKind::DesktopOutput),
         ComputerActionKind::LaunchApplication(_) => Some(ObjectKind::ApplicationLaunchTarget),
         ComputerActionKind::SpreadsheetLive(_) => Some(ObjectKind::Range),
         ComputerActionKind::DocumentLive(_) => Some(ObjectKind::Document),
@@ -2286,9 +2303,10 @@ impl SignalAiAssistantTools {
     fn authorize_and_execute_semantic_action<'a>(
         &'a self,
         call: &'a ToolCall,
+        ctx: &'a ExecContext,
     ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<ExecOutcome, AgentError>> + 'a>>
     {
-        Box::pin(self.authorize_and_execute_semantic_action_inner(call))
+        Box::pin(self.authorize_and_execute_semantic_action_inner(call, ctx))
     }
 
     /// Both semantic text mutations and artifact dispatch must freeze the same
@@ -2334,6 +2352,7 @@ impl SignalAiAssistantTools {
     async fn authorize_and_execute_semantic_action_inner(
         &self,
         call: &ToolCall,
+        ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -2453,6 +2472,19 @@ impl SignalAiAssistantTools {
         } else {
             None
         };
+        let shared_output = if call.name == desk_diagnose_core::ai_assistant::linux::OUTPUT_TOOL {
+            Some(
+                desk_diagnose_core::provider_preflight::WaylandOutputInputPreflight::from_history(
+                    &self.provider_registry,
+                    ProductSurface::OssPersonalOwner,
+                    call,
+                    &self.authoritative_session().await?.conversation,
+                    now_unix_ms,
+                )?,
+            )
+        } else {
+            None
+        };
         let shared_raw_input = if call.name == EXECUTE_CONFIRMED_RAW_INPUT_TOOL {
             Some(
                 desk_diagnose_core::provider_preflight::RawInputCallPreflight::build(
@@ -2510,14 +2542,27 @@ impl SignalAiAssistantTools {
                     UiSemanticAction::Focus => "focus",
                     UiSemanticAction::SetValue { .. } => "set value",
                     UiSemanticAction::Toggle { .. } => "toggle",
-                    UiSemanticAction::Scroll { .. } => unreachable!(),
+                    UiSemanticAction::Scroll { .. } => "scroll",
                 };
-                #[cfg(windows)]
-                let ui_adapter_kind = ComputerUseAdapterKind::WindowsUia;
-                #[cfg(target_os = "macos")]
-                let ui_adapter_kind = ComputerUseAdapterKind::MacosAccessibility;
-                #[cfg(not(any(windows, target_os = "macos")))]
-                let ui_adapter_kind = ComputerUseAdapterKind::WindowsUia;
+                let current = crate::computer_use_readiness::global_computer_use_readiness_cache()
+                    .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                    .filter(|record| record.readiness.revision == self.readiness_revision)
+                    .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
+                let ui_adapter = current
+                    .readiness
+                    .capabilities
+                    .iter()
+                    .find(|entry| {
+                        entry.capability
+                            == desk_agent_protocol::Capability::DesktopUiActionConfirmed
+                            && entry.supported
+                            && entry.ready
+                    })
+                    .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
+                if !desk_diagnose_core::ai_assistant::valid_ui_adapter(&ui_adapter.adapter) {
+                    return Err(desk_diagnose_core::directory_tools::unavailable());
+                }
+                let ui_adapter_kind = ui_adapter.adapter.kind;
                 (
                     target.clone(),
                     vec![target],
@@ -2538,6 +2583,17 @@ impl SignalAiAssistantTools {
                     input.required_capability(),
                     ComputerUseAdapterKind::MacosBackgroundInput,
                     "background input dispatch",
+                )
+            }
+            desk_diagnose_core::ai_assistant::linux::OUTPUT_TOOL => {
+                let input = shared_output.as_ref().expect("output input preflight");
+                (
+                    input.target().clone(),
+                    vec![input.target().clone()],
+                    ComputerActionKind::WaylandOutputInput(input.action().clone()),
+                    input.required_capability(),
+                    ComputerUseAdapterKind::LinuxWaylandOutput,
+                    "whole-output input",
                 )
             }
             EXECUTE_CONFIRMED_RAW_INPUT_TOOL => {
@@ -2732,6 +2788,9 @@ impl SignalAiAssistantTools {
             .expect("registered semantic UI action capability has a Provider");
         self.verify_current_readiness(capability).await?;
         let session = self.authoritative_session().await?;
+        let turn_scope = desk_diagnose_core::action_turn_fence::AssistantTurnFence::computer_action_scope_for_session(
+            ctx.assistant_turn_fence.as_ref(), &session,
+        )?;
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
         let resource_scope = shared_launch.as_ref().map_or_else(
@@ -2768,6 +2827,8 @@ impl SignalAiAssistantTools {
         let call_authority = if let Some(preflight) = &shared_ui {
             preflight.grant_call(&subject)?
         } else if let Some(preflight) = &shared_background {
+            preflight.grant_call(&subject)?
+        } else if let Some(preflight) = &shared_output {
             preflight.grant_call(&subject)?
         } else if let Some(preflight) = &shared_text {
             preflight.grant_call(&subject)?
@@ -3027,7 +3088,10 @@ impl SignalAiAssistantTools {
                     true,
                 )
             })?;
-        if adapter.kind != adapter_kind {
+        if adapter.kind != adapter_kind
+            || (shared_ui.is_some() && !desk_diagnose_core::ai_assistant::valid_ui_adapter(&adapter))
+            || (shared_output.is_some() && adapter.version != desk_diagnose_core::ai_assistant::linux::OUTPUT_ADAPTER_VERSION)
+        {
             return Err(error(
                 AgentErrorKind::UnsupportedCapability,
                 "the ready adapter does not match the selected semantic Provider",
@@ -3040,6 +3104,7 @@ impl SignalAiAssistantTools {
         let raw_input = required_capability
             == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed;
         let mut plan = SealedComputerActionPlan {
+            turn_scope,
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: claimed.work_id.to_string(),
             action_request_id: server_call_id.clone(),
@@ -3064,7 +3129,9 @@ impl SignalAiAssistantTools {
                 } else {
                     format!("perform one bounded semantic {action_name} action")
                 },
-                verification: if background_input {
+                verification: if shared_output.is_some() {
+                    "Verify original output, frame freshness, input ownership and sensitive-target gates before dispatch; Portal completion is not UI-effect verification".into()
+                } else if background_input {
                     "Report event dispatch only; the assistant must read the target UI or screenshot to verify application state".into()
                 } else if raw_input {
                     "re-observe foreground application and display/DPI, then require a later semantic or screen observation before completion"
@@ -3839,6 +3906,7 @@ impl SignalAiAssistantTools {
             return Err(dispatch_error);
         }
         let plan = SealedComputerActionPlan {
+            turn_scope: None,
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: claimed.work_id.to_string(),
             action_request_id: server_call_id.clone(),
@@ -4430,6 +4498,7 @@ impl SignalAiAssistantTools {
         );
         let generation = dispatch_id.clone();
         let plan = SealedComputerActionPlan {
+            turn_scope: None,
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: claimed.work_id.to_string(),
             action_request_id: server_call_id.clone(),
@@ -4999,6 +5068,7 @@ impl SignalAiAssistantTools {
         };
         let generation = dispatch_id.clone();
         let plan = SealedComputerActionPlan {
+        turn_scope: None,
         schema_version: COMPUTER_USE_SCHEMA_VERSION,
         work_id: claimed.work_id.to_string(),
         action_request_id: server_call_id.clone(),
@@ -5831,6 +5901,7 @@ impl ToolSeam for SignalAiAssistantTools {
             EXECUTE_CONFIRMED_UI_ACTION_TOOL
                 | EXECUTE_BACKGROUND_INPUT_TOOL
                 | EXECUTE_CONFIRMED_RAW_INPUT_TOOL
+                | desk_diagnose_core::ai_assistant::linux::OUTPUT_TOOL
                 | "patch_live_spreadsheet_cell"
                 | "replace_live_document_body"
                 | "patch_live_presentation_slide"
@@ -5844,7 +5915,7 @@ impl ToolSeam for SignalAiAssistantTools {
                 | "delete_text_file"
                 | "launch_application"
         ) {
-            return self.authorize_and_execute_semantic_action(call).await;
+            return self.authorize_and_execute_semantic_action(call, ctx).await;
         }
         if matches!(
             call.name.as_str(),

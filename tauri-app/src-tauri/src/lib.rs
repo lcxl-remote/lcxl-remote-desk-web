@@ -3,12 +3,15 @@ mod error;
 mod external_link;
 mod host_access_status;
 mod ipc_client;
+#[cfg(target_os = "linux")]
+mod linux_ai_input_control;
 #[cfg(target_os = "macos")]
 mod macos_relocate;
 mod overlay_window;
 mod platform;
 mod private_screen;
 mod security_approval;
+mod service_operations;
 mod webview_webrtc;
 mod whiteboard;
 
@@ -36,6 +39,18 @@ rust_i18n::i18n!("locales");
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 pub(crate) const MAIN_TRAY_ID: &str = "main-tray";
 static NATIVE_BRIDGE_STATE: OnceLock<Mutex<Option<(String, String, bool)>>> = OnceLock::new();
+
+fn native_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static
+{
+    #[cfg(target_os = "linux")]
+    return tauri::generate_handler![
+        linux_ai_input_control::linux_ai_input_status,
+        linux_ai_input_control::linux_ai_input_start,
+        linux_ai_input_control::linux_ai_input_stop,
+    ];
+    #[cfg(not(target_os = "linux"))]
+    tauri::generate_handler![]
+}
 
 fn native_bridge_state() -> &'static Mutex<Option<(String, String, bool)>> {
     NATIVE_BRIDGE_STATE.get_or_init(|| Mutex::new(None))
@@ -86,6 +101,17 @@ fn refresh_native_ui(app: &tauri::AppHandle, include_elevate: bool) {
     )
     .expect("create localized elevate menu item");
     let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&show, &status];
+    #[cfg(target_os = "linux")]
+    let ai_input = MenuItem::with_id(
+        app,
+        "linux_ai_input",
+        rust_i18n::t!("linux_ai_input_title"),
+        true,
+        None::<&str>,
+    )
+    .expect("create AI input menu item");
+    #[cfg(target_os = "linux")]
+    items.push(&ai_input);
     if include_elevate {
         items.push(&elevate);
     }
@@ -101,6 +127,8 @@ fn refresh_native_ui(app: &tauri::AppHandle, include_elevate: bool) {
             Some(rust_i18n::t!("app_title"))
         } else if label.starts_with("host-access-status") {
             Some(rust_i18n::t!("remote_access_status_title"))
+        } else if label == "linux-ai-input-control" {
+            Some(rust_i18n::t!("linux_ai_input_title"))
         } else if label == "private-screen" {
             Some(rust_i18n::t!("private_screen_title"))
         } else if label.starts_with("security-approval") {
@@ -124,6 +152,18 @@ fn start_native_bridge_event_loop(
     std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
             let (token, locale, locale_persisted, ready) = match event {
+                ipc_client::NativeBridgeEvent::LinuxAiInputEndpoint { revision, path } => {
+                    #[cfg(target_os = "linux")]
+                    linux_ai_input_control::endpoint(revision, path);
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = (revision, path);
+                    continue;
+                }
+                ipc_client::NativeBridgeEvent::Disconnected => {
+                    #[cfg(target_os = "linux")]
+                    linux_ai_input_control::disconnect();
+                    continue;
+                }
                 ipc_client::NativeBridgeEvent::Ready {
                     token,
                     locale,
@@ -261,8 +301,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
     let (sa_tx, sa_rx) = std::sync::mpsc::channel::<
         lcxl_remote_desk_server::model::security_approval::SecurityApprovalCommand,
     >();
-    let (svc_op_tx, svc_op_rx) =
-        std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
+    let (svc_op_tx, svc_op_rx) = std::sync::mpsc::sync_channel::<service_operations::ServiceJob>(8);
     let (host_access_tx, host_access_rx) =
         std::sync::mpsc::channel::<host_access_status::HostAccessStatusCommand>();
     let (native_bridge_tx, native_bridge_rx) =
@@ -295,26 +334,22 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
         });
     });
 
-    // Service-op handler (ShellExecute runas — does not need Tauri handle).
+    // The service-op handler starts after setup so native results can reach the window.
     #[cfg(target_os = "linux")]
     let service_config_override = Some(remote_access_paths.config_file().to_path_buf());
     #[cfg(not(target_os = "linux"))]
     let service_config_override = remote_access_paths
         .explicit_config_file()
         .map(std::path::Path::to_path_buf);
-    std::thread::spawn(move || {
-        while let Ok(op) = svc_op_rx.recv() {
-            handle_service_op(op, service_config_override.as_deref());
-        }
-    });
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![])
+        .invoke_handler(native_invoke_handler())
         .setup(move |app| {
             let handle = app.handle().clone();
+            service_operations::start(handle.clone(), svc_op_rx, service_config_override);
             let daemon_url = "http://127.0.0.1:8082".to_string();
 
             // Start GUI managers (reuse existing implementations).
@@ -370,6 +405,10 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                             }
                             IS_EXITING.store(true, Ordering::SeqCst);
                             app.exit(0);
+                        }
+                        #[cfg(target_os = "linux")]
+                        "linux_ai_input" => {
+                            linux_ai_input_control::show(app);
                         }
                         "host_access_status" => {
                             host_access_status::show_status_windows(app);
@@ -519,7 +558,7 @@ fn find_server_binary() -> std::path::PathBuf {
 fn handle_service_op(
     op: lcxl_remote_desk_server::ServiceOp,
     config_override: Option<&std::path::Path>,
-) {
+) -> service_operations::Outcome {
     let sidecar = find_server_binary();
 
     #[cfg(target_os = "windows")]
@@ -563,7 +602,7 @@ fn handle_service_op(
             .chain(std::iter::once(0))
             .collect();
 
-        unsafe {
+        let launch = unsafe {
             ShellExecuteW(
                 None,
                 PCWSTR(operation.as_ptr()),
@@ -571,49 +610,21 @@ fn handle_service_op(
                 PCWSTR(params.as_ptr()),
                 None,
                 SW_SHOW,
-            );
-        }
+            )
+        };
+        use lcxl_remote_desk_server::host_control::service_operations::{
+            ServiceOperationError as Error, ServiceOperationState as State,
+        };
+        return if (launch.0 as isize) > 32 {
+            (State::Submitted, None, None)
+        } else {
+            (State::Failed, Some(Error::LaunchFailed), None)
+        };
     }
 
     #[cfg(target_os = "linux")]
     {
-        let mut cmd = std::process::Command::new("pkexec");
-        cmd.arg(&sidecar);
-        match &op {
-            lcxl_remote_desk_server::ServiceOp::Install {
-                install_path,
-                install_idd_driver,
-            } => {
-                cmd.arg("--install-service")
-                    .arg("--install-path")
-                    .arg(install_path);
-                // pkexec intentionally replaces the caller environment with a
-                // minimal safe set, so explicitly carry the already-checked
-                // development opt-in as a sidecar argument. The Tauri process
-                // must itself have been launched with the flag; normal users
-                // still cannot enter the experimental install path by default.
-                if std::env::var(
-                    lcxl_remote_desk_server::daemon::linux_service::EXPERIMENTAL_INSTALL_ENV,
-                )
-                .as_deref()
-                    == Ok("1")
-                {
-                    cmd.arg("--experimental-linux-service-daemon");
-                }
-                if *install_idd_driver {
-                    cmd.arg("--install-idd-driver");
-                }
-                if let Some(path) = config_override {
-                    cmd.arg("--config-file-path").arg(path);
-                }
-            }
-            lcxl_remote_desk_server::ServiceOp::Uninstall => {
-                cmd.arg("--uninstall-service");
-            }
-        }
-        if let Err(e) = cmd.status() {
-            log::error!("Service op failed: {e}");
-        }
+        return service_operations::execute_linux(&sidecar, &op, config_override);
     }
 
     #[cfg(target_os = "macos")]
@@ -629,6 +640,10 @@ fn handle_service_op(
         log::warn!(
             "Service op requested on macOS; ignored (auto-start is managed via the LaunchAgent)"
         );
+        use lcxl_remote_desk_server::host_control::service_operations::{
+            ServiceOperationError as Error, ServiceOperationState as State,
+        };
+        return (State::Failed, Some(Error::Unsupported), None);
     }
 }
 
@@ -769,7 +784,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![])
+        .invoke_handler(native_invoke_handler())
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -788,7 +803,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 lcxl_remote_desk_server::model::security_approval::SecurityApprovalCommand,
             >();
             let (svc_op_tx, svc_op_rx) =
-                std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
+                std::sync::mpsc::sync_channel::<service_operations::ServiceJob>(8);
             let (host_access_tx, host_access_rx) =
                 std::sync::mpsc::channel::<host_access_status::HostAccessStatusCommand>();
             let (native_bridge_tx, native_bridge_rx) =
@@ -840,11 +855,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 .paths()
                 .explicit_config_file()
                 .map(std::path::Path::to_path_buf);
-            std::thread::spawn(move || {
-                while let Ok(op) = svc_op_rx.recv() {
-                    handle_service_op(op, service_config_override.as_deref());
-                }
-            });
+            service_operations::start(handle.clone(), svc_op_rx, service_config_override);
 
             // The hub Local owns the broadcast channels for `/ws/tauri_ipc`.
             // All overlay / approval / service-op traffic now flows through the
@@ -997,6 +1008,8 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                             IS_EXITING.store(true, Ordering::SeqCst);
                             app.exit(0);
                         },
+                        #[cfg(target_os = "linux")]
+                        "linux_ai_input" => { linux_ai_input_control::show(app); }
                         "host_access_status" => {
                             host_access_status::show_status_windows(app);
                         }

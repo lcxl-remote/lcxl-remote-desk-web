@@ -239,6 +239,10 @@
         if (!element || !element.isConnected) {
             throw new Error("stale_element_ref");
         }
+        const role = roleOf(element);
+        if (role !== reference.role || accessibleName(element, role) !== reference.accessible_name) {
+            throw new Error("stale_element_ref");
+        }
         return element;
     }
 

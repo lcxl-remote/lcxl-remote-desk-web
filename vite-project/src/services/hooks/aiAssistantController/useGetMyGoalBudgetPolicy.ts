@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetMyGoalBudgetPolicyQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { GetMyGoalBudgetPolicyQueryResponse } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getMyGoalBudgetPolicy } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const getMyGoalBudgetPolicyQueryKey = () => [{ url: '/api/my/ai-assistant-session/goal/budget-policy' }] as const
 

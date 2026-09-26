@@ -148,6 +148,11 @@ catalog!(
         InlineBackgroundOrAttachment
     ),
     (
+        "execute_wayland_output_input",
+        "ComputerActionCompleted",
+        InlineBackgroundOrAttachment
+    ),
+    (
         "preview_computer_action",
         "ComputerActionDraft",
         InlineOrAttachment
@@ -493,7 +498,7 @@ mod tests {
         ] {
             assert!(for_tool(builtin).is_some());
         }
-        assert_eq!(ALL.len(), 74);
+        assert_eq!(ALL.len(), 75);
     }
 
     #[test]

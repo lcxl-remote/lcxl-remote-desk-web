@@ -1,0 +1,1 @@
+{"type":"string","enum":["authorization_not_granted","missing_pkexec","launch_failed","installer_failed","busy","unsupported","connection_lost","timed_out"],"x-readme-ref-name":"ServiceOperationError"}

@@ -513,6 +513,12 @@ pub enum SignalingType {
     /// Central brain to owner browser: one bounded UI-only preview page.
     #[wincode(tag = 650)]
     DocumentPreviewPageUpdated = 650,
+    /// Authenticated host -> central: check a frozen turn, never renew it.
+    #[wincode(tag = 651)]
+    QueryComputerActionTurn = 651,
+    /// Central -> requesting host: persisted turn state, not action authority.
+    #[wincode(tag = 652)]
+    ComputerActionTurnStatus = 652,
 
     /// Error
     #[wincode(tag = -1)]

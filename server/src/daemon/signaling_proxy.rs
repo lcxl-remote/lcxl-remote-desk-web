@@ -718,6 +718,8 @@ pub async fn run_signaling_proxy(
                 WorkerToService::Ready
                     | WorkerToService::Heartbeat(_)
                     | WorkerToService::Capabilities(_)
+                    | WorkerToService::LinuxAiInputEndpoint(_)
+                    | WorkerToService::ComputerTurnQuery(_)
                     | WorkerToService::DesktopChanged(_)
                     | WorkerToService::InteractiveRouteApplied(_)
                     | WorkerToService::RemoteAccessStateApplied(_)
@@ -748,6 +750,35 @@ pub async fn run_signaling_proxy(
         }
 
         match worker_message.message {
+            WorkerToService::ComputerTurnQuery(request) => {
+                #[cfg(target_os = "linux")]
+                if worker_mgr
+                    .register_turn_query(resident_worker_key.as_ref(), worker_incarnation, &request)
+                    .await
+                {
+                    emit_typed_signaling(
+                        &outbound_tx,
+                        &request.request_id,
+                        SignalingType::QueryComputerActionTurn,
+                        None,
+                        &request.query,
+                    );
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = request;
+            }
+            WorkerToService::LinuxAiInputEndpoint(path) => {
+                #[cfg(target_os = "linux")]
+                super::linux_ai_input_route::publish(
+                    &worker_mgr,
+                    &host_control_hub,
+                    resident_worker_key.as_ref(),
+                    worker_incarnation,
+                    path,
+                );
+                #[cfg(not(target_os = "linux"))]
+                let _ = path;
+            }
             WorkerToService::Ready => {
                 info!("[SignalingProxy] Worker is Ready");
             }

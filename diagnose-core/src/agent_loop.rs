@@ -4604,6 +4604,7 @@ async fn run_inner_impl(
                                     providers,
                                     inventory,
                                     deps.registry,
+                                    permission_candidates,
                                 )?;
                                 let now = chrono::DateTime::parse_from_rfc3339(&request.created_at)
                                     .ok()
@@ -5779,7 +5780,8 @@ fn validate_browser_permission_references(
     Ok(())
 }
 
-/// Validate a permission request against the turn-start callable set while
+/// Validate a permission request against the turn-start callable and explicit
+/// permission-candidate sets while
 /// allowing one narrow same-turn context transition: a verified browser result
 /// can supply the exact fresh page prerequisite for navigate/snapshot/wait after
 /// the initial catalog was frozen. The browser-reference validator runs first,
@@ -5791,9 +5793,21 @@ fn validate_permission_request_availability(
     providers: &crate::provider_registry::ProviderRegistry,
     inventory: &[crate::capability_availability::CapabilityAvailability],
     turn_start_callable_tools: &[RegisteredTool],
+    permission_candidates: &[RegisteredTool],
 ) -> Result<(), AgentError> {
     validate_browser_permission_references(conversation, request)?;
     let mut effective_callable_tools = turn_start_callable_tools.to_vec();
+    // Candidates are context-grounded by the orchestrator, but deliberately
+    // absent from the executable registry until the owner grants permission.
+    // Merge them only for request validation, never for tool dispatch.
+    for candidate in permission_candidates {
+        if !effective_callable_tools
+            .iter()
+            .any(|tool| tool.name() == candidate.name())
+        {
+            effective_callable_tools.push(candidate.clone());
+        }
+    }
     for item in &request.items {
         if !matches!(
             item.tool_name.as_str(),

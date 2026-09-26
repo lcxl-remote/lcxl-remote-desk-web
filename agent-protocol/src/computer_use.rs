@@ -11,6 +11,8 @@ use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
 pub mod office_batch;
+pub mod wayland_output;
+pub use wayland_output::{OutputFrameBinding, WaylandOutputInputAction};
 
 use crate::{
     Capability, RiskLevel,
@@ -66,6 +68,7 @@ pub enum ObjectKind {
     Directory,
     TerminalOutput,
     BrowserSurface,
+    DesktopOutput,
     ApplicationLaunchTarget,
 }
 
@@ -77,6 +80,7 @@ impl ObjectKind {
                 | Self::Application
                 | Self::Window
                 | Self::UiElement
+                | Self::DesktopOutput
                 | Self::ApplicationLaunchTarget
                 | Self::Directory
         )
@@ -141,6 +145,8 @@ pub enum ComputerUseAdapterKind {
     BrowserExtension,
     OutlookNewMailto,
     OfficeWord,
+    LinuxAtspi,
+    LinuxWaylandOutput,
     NativeApplication,
     DocumentConversion,
 }
@@ -1395,6 +1401,7 @@ pub enum ComputerActionKind {
         application: ObjectRef,
         action: UiSemanticAction,
     },
+    WaylandOutputInput(WaylandOutputInputAction),
     LaunchApplication(crate::application_launch::LaunchApprovalBinding),
     DocumentConversion(crate::document_conversion::DocumentConvertAction),
 }
@@ -1415,6 +1422,7 @@ impl ComputerActionKind {
         match self {
             Self::UiInApplication { .. } => Capability::DesktopUiActionConfirmed,
             Self::RawInput(_) => Capability::DesktopInputFallbackConfirmed,
+            Self::WaylandOutputInput(_) => Capability::DesktopOutputInputConfirmed,
             Self::BackgroundInput { .. } => Capability::DesktopBackgroundInputConfirmed,
             Self::Excel(_) => Capability::OfficeExcelPatchConfirmed,
             Self::PowerPoint(_) => Capability::OfficePowerPointPatchConfirmed,
@@ -1501,6 +1509,35 @@ pub struct ComputerActionDraft {
 }
 
 /// Immutable, exact-owner-approved device execution wire.
+/// Frozen orchestration turn identity. This is correlation, never an action grant.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerActionTurnScope {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub input_revision: u64,
+    pub lease_token: u64,
+}
+impl ComputerActionTurnScope {
+    pub fn validate(&self) -> Result<(), ComputerUseValidationError> {
+        if [&self.conversation_id, &self.turn_id]
+            .iter()
+            .any(|id| id.trim().is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+            || self.input_revision == 0
+            || self.input_revision > i64::MAX as u64
+            || self.lease_token == 0
+            || self.lease_token > i64::MAX as u64
+        {
+            return Err(ComputerUseValidationError::InvalidContextReference(
+                "invalid action turn scope",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
 pub struct SealedComputerActionPlan {
     pub schema_version: u16,
@@ -1516,6 +1553,8 @@ pub struct SealedComputerActionPlan {
     pub expires_at: String,
     pub timeout_ms: u32,
     pub actions: Vec<ComputerActionStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_scope: Option<ComputerActionTurnScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1596,6 +1635,9 @@ impl ComputerActionDraft {
 impl SealedComputerActionPlan {
     pub fn validate(&self) -> Result<(), ComputerUseValidationError> {
         validate_schema(self.schema_version)?;
+        if let Some(scope) = &self.turn_scope {
+            scope.validate()?;
+        }
         for (field, value) in [
             ("work_id", self.work_id.as_str()),
             ("action_request_id", self.action_request_id.as_str()),
@@ -1680,10 +1722,12 @@ fn validate_actions(
             max: MAX_COMPUTER_ACTIONS,
         });
     }
-    if actions
-        .iter()
-        .any(|step| matches!(step.action, ComputerActionKind::RawInput(_)))
-        && actions.len() != 1
+    if actions.iter().any(|step| {
+        matches!(
+            step.action,
+            ComputerActionKind::RawInput(_) | ComputerActionKind::WaylandOutputInput(_)
+        )
+    }) && actions.len() != 1
     {
         return Err(ComputerUseValidationError::InvalidContextReference(
             "raw input fallback plans must contain exactly one action",
@@ -1723,7 +1767,8 @@ fn validate_actions(
                     (&adapter.kind, &step.action),
                     (
                         ComputerUseAdapterKind::WindowsUia
-                            | ComputerUseAdapterKind::MacosAccessibility,
+                            | ComputerUseAdapterKind::MacosAccessibility
+                            | ComputerUseAdapterKind::LinuxAtspi,
                         ComputerActionKind::UiInApplication { .. }
                     ) | (
                         ComputerUseAdapterKind::MacosBackgroundInput,
@@ -1731,6 +1776,9 @@ fn validate_actions(
                     ) | (
                         ComputerUseAdapterKind::WindowsRawInput,
                         ComputerActionKind::RawInput(_)
+                    ) | (
+                        ComputerUseAdapterKind::LinuxWaylandOutput,
+                        ComputerActionKind::WaylandOutputInput(_)
                     ) | (
                         ComputerUseAdapterKind::OfficeExcel,
                         ComputerActionKind::Excel(_)
@@ -1804,6 +1852,10 @@ fn validate_actions(
                 ComputerActionKind::BackgroundInput { .. },
                 ObjectKind::Window
             ) | (ComputerActionKind::RawInput(_), ObjectKind::Application)
+                | (
+                    ComputerActionKind::WaylandOutputInput(_),
+                    ObjectKind::DesktopOutput
+                )
                 | (ComputerActionKind::Excel(_), ObjectKind::Range)
                 | (ComputerActionKind::PowerPoint(_), ObjectKind::Shape)
                 | (ComputerActionKind::SpreadsheetLive(_), ObjectKind::Range)
@@ -1862,6 +1914,9 @@ fn validate_actions(
             ] {
                 require_non_empty(field, value)?;
             }
+        }
+        if let ComputerActionKind::WaylandOutputInput(action) = &step.action {
+            action.validate()?;
         }
         if let ComputerActionKind::RawInput(action) = &step.action {
             validate_raw_input_action(action)?;
@@ -2637,6 +2692,7 @@ mod tests {
 
     fn plan() -> SealedComputerActionPlan {
         SealedComputerActionPlan {
+            turn_scope: None,
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: "work-1".to_string(),
             action_request_id: "action-1".to_string(),
@@ -2684,6 +2740,62 @@ mod tests {
             verification: "observe application state again".into(),
         }];
         sealed
+    }
+
+    #[test]
+    fn turn_scope_is_optional_for_legacy_json_but_validated_when_present() {
+        let mut sealed = plan();
+        let legacy = serde_json::to_value(&sealed).unwrap();
+        assert!(legacy.get("turn_scope").is_none());
+        assert!(
+            serde_json::from_value::<SealedComputerActionPlan>(legacy)
+                .unwrap()
+                .turn_scope
+                .is_none()
+        );
+        let scope = ComputerActionTurnScope {
+            conversation_id: "conversation".into(),
+            turn_id: "turn".into(),
+            input_revision: 2,
+            lease_token: 3,
+        };
+        sealed.turn_scope = Some(scope.clone());
+        sealed.validate().unwrap();
+        assert_eq!(
+            serde_json::from_value::<SealedComputerActionPlan>(
+                serde_json::to_value(&sealed).unwrap()
+            )
+            .unwrap(),
+            sealed
+        );
+        for invalid in [
+            ComputerActionTurnScope {
+                conversation_id: " ".into(),
+                ..scope.clone()
+            },
+            ComputerActionTurnScope {
+                turn_id: "x".repeat(257),
+                ..scope.clone()
+            },
+            ComputerActionTurnScope {
+                turn_id: "bad\nturn".into(),
+                ..scope.clone()
+            },
+            ComputerActionTurnScope {
+                input_revision: 0,
+                ..scope.clone()
+            },
+            ComputerActionTurnScope {
+                lease_token: u64::MAX,
+                ..scope.clone()
+            },
+        ] {
+            sealed.turn_scope = Some(invalid);
+            assert!(sealed.validate().is_err());
+        }
+        let mut unknown = serde_json::to_value(scope).unwrap();
+        unknown["authority"] = serde_json::json!("untrusted");
+        assert!(serde_json::from_value::<ComputerActionTurnScope>(unknown).is_err());
     }
 
     #[test]

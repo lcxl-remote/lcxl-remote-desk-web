@@ -19,6 +19,31 @@ pub struct AssistantTurnFence {
 }
 
 impl AssistantTurnFence {
+    /// Never adopt a newer persisted turn on behalf of an older tool call.
+    pub fn computer_action_scope_for_session(
+        held: Option<&Self>,
+        session: &PersistedAgentSession,
+    ) -> Result<Option<desk_agent_protocol::computer_use::ComputerActionTurnScope>, AgentError>
+    {
+        let current = Self::from_session(session)?;
+        if held != current.as_ref() {
+            return Err(invalid());
+        }
+        held.map(Self::computer_action_scope).transpose()
+    }
+
+    pub fn computer_action_scope(
+        &self,
+    ) -> Result<desk_agent_protocol::computer_use::ComputerActionTurnScope, AgentError> {
+        self.validate()?;
+        Ok(desk_agent_protocol::computer_use::ComputerActionTurnScope {
+            conversation_id: self.conversation_id.clone(),
+            turn_id: self.turn_id.clone(),
+            input_revision: self.input_revision,
+            lease_token: self.lease_token,
+        })
+    }
+
     /// Freeze the loop's held snapshot, not a newly loaded session that might
     /// already belong to a different input or leaseholder.
     pub fn from_session(session: &PersistedAgentSession) -> Result<Option<Self>, AgentError> {
@@ -89,6 +114,20 @@ mod tests {
     }
 
     #[test]
+    fn computer_action_scope_preserves_frozen_identity_and_rejects_invalid_fences() {
+        let fence = valid();
+        let scope = fence.computer_action_scope().unwrap();
+        scope.validate().unwrap();
+        assert_eq!(scope.conversation_id, fence.conversation_id);
+        assert_eq!(scope.turn_id, fence.turn_id);
+        assert_eq!(scope.input_revision, fence.input_revision);
+        assert_eq!(scope.lease_token, fence.lease_token);
+        let mut invalid = fence;
+        invalid.actor_id.clear();
+        assert!(invalid.computer_action_scope().is_err());
+    }
+
+    #[test]
     fn strict_metadata_never_accepts_unknown_version_or_unbounded_identity() {
         let original = valid();
         original.validate().unwrap();
@@ -154,8 +193,31 @@ mod tests {
             .begin_turn("turn", None, None, 1, session.scope_snapshot.clone(), "now")
             .unwrap();
         let frozen = AssistantTurnFence::from_session(&session).unwrap().unwrap();
+        assert!(AssistantTurnFence::computer_action_scope_for_session(None, &session).is_err());
+        assert_eq!(
+            AssistantTurnFence::computer_action_scope_for_session(Some(&frozen), &session).unwrap(),
+            Some(frozen.computer_action_scope().unwrap())
+        );
+        for field in 0..6 {
+            let mut stale = frozen.clone();
+            match field {
+                0 => stale.conversation_id.push_str("-other"),
+                1 => stale.turn_id.push_str("-other"),
+                2 => stale.actor_id.push_str("-other"),
+                3 => stale.device_id.push_str("-other"),
+                4 => stale.input_revision += 1,
+                _ => stale.lease_token += 1,
+            }
+            assert!(
+                AssistantTurnFence::computer_action_scope_for_session(Some(&stale), &session)
+                    .is_err()
+            );
+        }
         session.input_revision += 1;
         session.lease_token += 1;
+        assert!(
+            AssistantTurnFence::computer_action_scope_for_session(Some(&frozen), &session).is_err()
+        );
         assert_eq!(frozen.input_revision, 1);
         assert_ne!(
             frozen,

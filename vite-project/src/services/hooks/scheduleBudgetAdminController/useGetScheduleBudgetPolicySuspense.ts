@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetScheduleBudgetPolicyQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import type { GetScheduleBudgetPolicyQueryResponse } from "../../types.ts";
-import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 import { getScheduleBudgetPolicy } from "../../clients.ts";
+import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 
 export const getScheduleBudgetPolicySuspenseQueryKey = () => [{ url: '/api/admin/system/schedule-budget-policy' }] as const
 

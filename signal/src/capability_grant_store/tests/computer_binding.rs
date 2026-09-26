@@ -214,6 +214,7 @@ impl Fixture {
             ));
         }
         let plan = SealedComputerActionPlan {
+            turn_scope: None,
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: prepared.work_id.to_string(),
             action_request_id: call_id,

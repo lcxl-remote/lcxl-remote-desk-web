@@ -63,11 +63,17 @@ async function send(site, existing, onClick, accountOptions = {}) {
     }
     const ref = name => ({ ...snapshot.elements.find(element => element.accessible_name === name),
         page_incarnation: snapshot.page.page_incarnation, document_revision: snapshot.page.document_revision });
-    if (accountOptions.afterSnapshot) accountOptions.afterSnapshot(account, accounts);
+    if (accountOptions.afterSnapshot) accountOptions.afterSnapshot(account, accounts, button);
     const result = await request({ action: "activate_element", element: ref("Send"), activation_class: {
         kind: "send_external", site, fields: [{ element: ref("Message"), value: "Daily status" }],
         attachment_file_names: [], snapshot_id: "reviewed", payload_sha256: "a".repeat(64), idempotency_key: "test-run"
     } });
+    if (accountOptions.staleTarget) {
+        assert.equal(result.ok, false);
+        assert.equal(result.error_code, "stale_element_ref");
+        assert.equal(clicks, 0);
+        return;
+    }
     assert.equal(result.ok, true);
     assert.equal(clicks, accountOptions.reject ? 0 : 1);
     return result.result.send_receipt;
@@ -165,3 +171,15 @@ test("slack_web: account switched after click cannot confirm delivery", async ()
     assert.equal(receipt.outcome, "outcome_unknown");
     assert.equal(receipt.provider_receipt_id, null);
 });
+
+for (const change of ["name", "role"]) {
+    test(`a send control whose ${change} changed after observation is rejected before click`, async () => {
+        await send("gmail_web", [], () => {}, {
+            staleTarget: true,
+            afterSnapshot(_account, _accounts, button) {
+                if (change === "name") button.name = "Different target";
+                else button.tagName = "INPUT";
+            }
+        });
+    });
+}

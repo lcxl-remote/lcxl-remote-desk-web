@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { ListAiAssistantAttentionQueryResponse, ListAiAssistantAttentionQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { ListAiAssistantAttentionQueryResponse, ListAiAssistantAttentionQueryParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listAiAssistantAttention } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const listAiAssistantAttentionQueryKey = (params?: ListAiAssistantAttentionQueryParams) => [{ url: '/api/my/ai-assistant-attention' }, ...(params ? [params] : [])] as const
 

@@ -12,22 +12,21 @@ import {
     DialogTitle,
 } from "@/components/ui/dialog"
 import { useToast } from "@/hooks/use-toast"
-import { deskErrorCodeEnum } from "@/services/types"
-import { serviceManagementErrorMessage } from "@/features/layout/service-management-error"
+import { serviceManagementErrorMessage, serviceOperationMessage } from "@/features/layout/service-management-error"
 
-/**
- * Shared "uninstall service" confirmation dialog. Uninstalling the
- * service always force-uninstalls the LcxlVirtualDisplay IDD driver
- * (Q7) — the dialog body explicitly calls this out so the user
- * understands the side effect.
- */
+import { ServiceRequestError, useServiceOperation } from "./service-operation"
+
+/** Shared native service uninstall confirmation and completion feedback. */
 export interface ServiceUninstallDialogProps {
     open: boolean
+    platform?: string
+    onCompleted?: () => void
     onOpenChange: (open: boolean) => void
 }
 
 export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
-    const { open, onOpenChange } = props
+    const { open, onOpenChange, platform = "windows", onCompleted } = props
+    const operation = useServiceOperation()
     const { t } = useTranslation()
     const { toast } = useToast()
     const [submitting, setSubmitting] = React.useState(false)
@@ -38,36 +37,23 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
         submittingRef.current = true
         setSubmitting(true)
         try {
-            const resp = await fetch("/api/service/uninstall", { method: "POST" })
-            const body = await resp.json().catch(() => null)
-            if (body?.code === deskErrorCodeEnum.SUCCESS) {
-                toast({
-                    title: t("pages.system.settings.success"),
-                    description: t(
-                        "pages.system.settings.serviceManagement.uninstallSuccess",
-                    ),
-                })
-                onOpenChange(false)
-            } else {
-                toast({
-                    variant: "destructive",
-                    title: t("pages.system.settings.error"),
-                    description:
-                        serviceManagementErrorMessage(
-                            t,
-                            body?.code,
-                            body?.message,
-                            "pages.system.settings.serviceManagement.uninstallError",
-                        ),
-                })
-            }
-        } catch (e) {
+            const result = await operation.run('uninstall')
+            const completed = !result || ['succeeded', 'submitted'].includes(result.state)
             toast({
-                variant: "destructive",
-                title: t("pages.system.settings.error"),
-                description: t(
-                    "pages.system.settings.serviceManagement.uninstallError",
-                ),
+                variant: completed || result?.state === 'cancelled' ? 'default' : 'destructive',
+                title: t(result?.state === 'succeeded' ? 'pages.system.settings.success' : 'pages.system.settings.serviceManagement.operationTitle'),
+                description: serviceOperationMessage(t, 'uninstall', result),
+            })
+            onCompleted?.()
+            if (completed) onOpenChange(false)
+        } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') return
+            toast({
+                variant: 'destructive', title: t('pages.system.settings.error'),
+                description: e instanceof ServiceRequestError && e.busy
+                    ? t('pages.system.settings.serviceManagement.busy')
+                    : serviceManagementErrorMessage(t, e instanceof ServiceRequestError ? e.code : undefined,
+                        e instanceof Error ? e.message : undefined, 'pages.system.settings.serviceManagement.uninstallError'),
             })
         } finally {
             submittingRef.current = false
@@ -86,10 +72,13 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
                     </DialogTitle>
                     <DialogDescription>
                         {t(
-                            "pages.system.settings.serviceManagement.uninstallDialog.description",
+                            platform === "linux" ? "pages.system.settings.serviceManagement.linuxUninstallDescription" : "pages.system.settings.serviceManagement.uninstallDialog.description",
                         )}
                     </DialogDescription>
                 </DialogHeader>
+                {submitting && <p role="status" className="text-sm text-muted-foreground">{t(operation.disconnected
+                    ? "pages.system.settings.serviceManagement.waitingDisconnected"
+                    : "pages.system.settings.serviceManagement.waitingResult")}</p>}
                 <DialogFooter>
                     <Button
                         variant="outline"

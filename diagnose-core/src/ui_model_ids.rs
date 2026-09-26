@@ -21,6 +21,7 @@ fn fields(tool: &str) -> &'static [(&'static str, &'static str)] {
         "inspect_desktop_ui" => &[("root", "root_id")],
         "send_background_input" => &[("application", "application_id"), ("target", "window_id")],
         "send_raw_input" => &[("target", "application_id")],
+        "execute_wayland_output_input" => &[("target", "output_id")],
         "read_current_screen" => &[("window", "window_id")],
         _ => &[],
     }
@@ -178,11 +179,16 @@ pub(crate) fn resolve_single_call(
         let id = id
             .as_str()
             .ok_or_else(|| invalid(format!("{model} must be an observed ID string.")))?;
-        let reference = resolve(history, id, now_ms)?;
+        let reference = if *model == "output_id" {
+            crate::provider_preflight::wayland_output::bind_observation(history, id, now_ms)?.0
+        } else {
+            resolve(history, id, now_ms)?
+        };
         let expected = match *model {
             "application_id" => Some(ObjectKind::Application),
             "element_id" => Some(ObjectKind::UiElement),
             "window_id" => Some(ObjectKind::Window),
+            "output_id" => Some(ObjectKind::DesktopOutput),
             _ => None,
         };
         if expected.is_some_and(|kind| kind != reference.object_kind) {
@@ -191,6 +197,31 @@ pub(crate) fn resolve_single_call(
             )));
         }
         object.insert((*internal).into(), serde_json::to_value(reference).unwrap());
+    }
+    if call.name == crate::ai_assistant::linux::OUTPUT_TOOL {
+        let target: ObjectRef = serde_json::from_value(
+            object
+                .get("target")
+                .cloned()
+                .ok_or_else(|| invalid("output_id is required"))?,
+        )
+        .map_err(|_| invalid("A device-observed output_id is required"))?;
+        let (_, screen, frame) = crate::provider_preflight::wayland_output::bind_observation(
+            history,
+            &target.token,
+            now_ms,
+        )?;
+        let action = object
+            .get_mut("action")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid("action.step is required"))?;
+        if action.contains_key("screen") || action.contains_key("frame") {
+            return Err(invalid(
+                "The server supplies output geometry and frame identity; provide only action.step",
+            ));
+        }
+        action.insert("screen".into(), json!(screen));
+        action.insert("frame".into(), json!(frame));
     }
     if call.name == "execute_ui_actions"
         && (!object.contains_key("application") || !object.contains_key("target"))
@@ -281,11 +312,15 @@ pub(crate) fn resolve_single_call(
                     .unwrap();
                     continue;
                 }
-                if item["tool_name"] == "send_raw_input" {
+                if matches!(
+                    item["tool_name"].as_str(),
+                    Some("send_raw_input" | "execute_wayland_output_input")
+                ) {
+                    let exact_tool = item["tool_name"].as_str().unwrap().to_owned();
                     if let Some(exact) = item.get_mut("exact_input") {
                         let nested = ToolCall {
                             id: call.id.clone(),
-                            name: "send_raw_input".into(),
+                            name: exact_tool.clone(),
                             arguments_json: exact.to_string(),
                         };
                         *exact = serde_json::from_str(
@@ -363,6 +398,12 @@ fn project_arguments(tool: &str, value: &mut Value) {
             project_arguments(tool, item);
         }
         let mut result = json!({"application_id":all[0]["application_id"],"steps":[]});
+        if tool == crate::ai_assistant::linux::OUTPUT_TOOL {
+            if let Some(action) = value.get_mut("action").and_then(Value::as_object_mut) {
+                action.remove("screen");
+                action.remove("frame");
+            }
+        }
         if tool == "send_background_input" {
             result["window_id"] = all[0]["window_id"].clone();
         }
@@ -408,9 +449,13 @@ fn project_arguments(tool: &str, value: &mut Value) {
                         project_arguments(&tool, exact);
                         continue;
                     }
-                    if item["tool_name"] == "send_raw_input" {
+                    if matches!(
+                        item["tool_name"].as_str(),
+                        Some("send_raw_input" | "execute_wayland_output_input")
+                    ) {
+                        let exact_tool = item["tool_name"].as_str().unwrap().to_owned();
                         if let Some(exact) = item.get_mut("exact_input") {
-                            project_arguments("send_raw_input", exact);
+                            project_arguments(&exact_tool, exact);
                         }
                     }
                 }
@@ -477,6 +522,24 @@ fn hide_references(value: &mut Value) {
 
 /// Convert the entire trusted result before attachment paging.
 pub(crate) fn project_tool_message(message: &mut ChatMessage) {
+    if message.role == ChatRole::Tool {
+        if let Ok(mut value) = crate::image_input::structured_tool_result(&message.text)
+            && value.pointer("/ReadContext/ScreenCaptureCurrent").is_some()
+        {
+            let omitted = message
+                .text
+                .trim_end()
+                .ends_with(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER);
+            hide_references(&mut value);
+            message.text = value.to_string();
+            if omitted {
+                message.text.push('\n');
+                message
+                    .text
+                    .push_str(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER);
+            }
+        }
+    }
     crate::browser_model_ids::project_result_message(message);
     crate::output_contracts::project_status(message);
     if message.role == ChatRole::Tool {
@@ -562,6 +625,7 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
                         project_scope(entry);
                         if let Some(tool) = entry["tool_name"].as_str().map(str::to_owned)
                             && (tool == "send_raw_input"
+                                || tool == "execute_wayland_output_input"
                                 || crate::browser_model_ids::supports(&tool))
                         {
                             if let Some(exact) = entry.get_mut("approved_exact_input") {
@@ -623,10 +687,21 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
             );
         }
     }
+    if tool.name == crate::ai_assistant::linux::OUTPUT_TOOL {
+        if let Some(properties) = schema
+            .pointer_mut("/properties/action/properties")
+            .and_then(Value::as_object_mut)
+        {
+            properties.remove("screen");
+            properties.remove("frame");
+        }
+        schema["properties"]["action"]["required"] = json!(["step"]);
+    }
     match tool.name.as_str() {
         "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. Queries are substring OR matches, up to 16 alternatives. First locate the target window and, when available, its dialog/popover/editor; search inside that observed root using task-specific localized/English labels or native_id (e.g. 标题, title-field, 完成, Done). Group needed controls together. If no separate container exists, use the window root. Only after targeted misses add control types such as AXTextField/input. Broad text/date/time queries are fallbacks: text can match every AXStaticText date and weekday. Use element_only=true only for a known result control itself, without queries; it never searches descendants. To find descendants use root_id for the smallest relevant observed region with targeted queries. When truncated=true, narrow the root first when possible; increase depth/node/byte bounds only as needed to complete that search. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in original window screenshot pixels relative to the top-left (0,0) of location.window.id (the same pixel space as background input, not percentages or normalized coordinates). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
         "send_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
         "read_current_screen" => tool.description = "Capture one whole display, or use window_id for an independent Windows/macOS window. For full-display capture first call inspect_desktop_session to read displays: if there is one entry, use it automatically without asking the user to select a screen; if there are multiple entries, choose the one matching the task before requesting screenshot permission. Copy its opaque displays[].display ID into both the permission request and this call; never construct a native display name or escape the ID yourself. If no display was specified, execution only auto-selects when exactly one display is currently attached; multiple displays return a selection-required error. Do not use saved remote-desktop settings as the choice. Window capture needs no display discovery; never combine window_id and display. To obtain window_id: inspect_desktop_session -> inspect_desktop_ui(root_id=session ID, queries=[localized app name, English app name]) -> inspect_desktop_ui(root_id=returned application ID, queries=[窗口, window]) -> read_current_screen(window_id=owner_selectable_windows[].object_ref.id). The application catalog does not query windows; never infer capture is unsupported from missing window entries there. Do not pass an application ID as window_id. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture. Returned width/height are original image pixel dimensions. For window screenshots, background position and UI bounds use these pixel coordinates with top-left origin (0,0); do not convert to percentages.".into(),
+        "execute_wayland_output_input" => tool.description = "Perform one explicitly approved input step on the entire observed Wayland output. Use output_id from a read_current_screen observation and action.step. The server supplies the original frame and geometry; latest_observed is accepted only as best-effort evidence, with an original device receipt at most 30 seconds old at submission. Never claim the frame is new or unchanged. Expired evidence requires a new observation and exact grant. Coordinates use the returned original image width/height, not a resized preview. Whole-screen authority is separate from application permission. Never replay an unknown outcome.".into(),
         _ => {}
     }
     crate::application_batch::project_schema(tool);

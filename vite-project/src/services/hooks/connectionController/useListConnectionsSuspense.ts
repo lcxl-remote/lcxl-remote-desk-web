@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { ListConnectionsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import type { ListConnectionsQueryResponse } from "../../types.ts";
-import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 import { listConnections } from "../../clients.ts";
+import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 
 export const listConnectionsSuspenseQueryKey = () => [{ url: '/api/desk/connections' }] as const
 

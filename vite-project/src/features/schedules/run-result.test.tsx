@@ -33,8 +33,8 @@ describe('scheduled run conversation', () => {
         const card = await screen.findByRole('button', { name: /File result from device.*Create.*Succeeded/ });
         fireEvent.click(card);
         expect(screen.getByText(fileName)).toBeVisible();
-        expect(screen.getByText('123')).toBeVisible();
-        expect(screen.getByText('a'.repeat(64))).toBeVisible();
+        expect(screen.getByText('123', { selector: 'dd' })).toBeVisible();
+        expect(screen.getByText('a'.repeat(64), { selector: 'dd' })).toBeVisible();
         expect(fetch).toHaveBeenCalledTimes(1);
     });
     it('localizes the persisted terminal error without replaying the run', async () => {

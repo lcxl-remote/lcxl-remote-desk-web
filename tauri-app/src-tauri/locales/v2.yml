@@ -116,3 +116,7 @@ permission:
   file_transfer:
     en: "File Transfer"
     zh-CN: "文件传输"
+
+linux_ai_input_title:
+  en: AI Input Control
+  zh-CN: AI 输入控制

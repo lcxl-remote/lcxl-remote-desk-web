@@ -1,0 +1,1 @@
+{"type":"string","enum":["fresh","latest_observed","unchanged_verified"],"x-readme-ref-name":"ScreenFrameFreshness"}

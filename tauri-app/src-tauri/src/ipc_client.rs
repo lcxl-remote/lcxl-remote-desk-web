@@ -1,9 +1,13 @@
 use crate::host_access_status::HostAccessStatusCommand;
+use crate::service_operations::ServiceJob;
 use awc::Client;
 use desk_input_injection::model::host_control::{
     HostControlEventType, PrivateScreenCommand, WhiteboardCommand,
 };
 use futures_util::{SinkExt, StreamExt};
+use lcxl_remote_desk_server::host_control::service_operations::{
+    ServiceOperationError, ServiceOperationState, ServiceOperationStatus,
+};
 use lcxl_remote_desk_server::{
     ServiceOp,
     host_control::{ClientRole, HostControlMessage, ServiceOpKind},
@@ -23,6 +27,11 @@ use std::os::unix::ffi::OsStrExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeBridgeEvent {
+    LinuxAiInputEndpoint {
+        revision: u64,
+        path: Option<String>,
+    },
+    Disconnected,
     Ready {
         token: String,
         locale: String,
@@ -47,7 +56,7 @@ pub async fn run_ipc_loop(
     ps_cmd_tx: std::sync::mpsc::Sender<PrivateScreenCommand>,
     wb_cmd_tx: std::sync::mpsc::Sender<WhiteboardCommand>,
     sa_tx: std::sync::mpsc::Sender<SecurityApprovalCommand>,
-    svc_op_tx: std::sync::mpsc::SyncSender<ServiceOp>,
+    svc_op_tx: std::sync::mpsc::SyncSender<ServiceJob>,
     host_access_tx: std::sync::mpsc::Sender<HostAccessStatusCommand>,
     mut state_rx: Option<UnboundedReceiver<HostControlEventType>>,
     token_holder: Arc<Mutex<Option<String>>>,
@@ -122,6 +131,8 @@ pub async fn run_ipc_loop(
                     );
                 }
 
+                let (service_result_tx, mut service_result_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<ServiceOperationStatus>();
                 // Main select loop
                 'session: loop {
                     tokio::select! {
@@ -139,6 +150,7 @@ pub async fn run_ipc_loop(
                                             &host_access_tx,
                                             &token_holder,
                                             Some(&native_bridge_tx),
+                                            Some(&service_result_tx),
                                         ),
                                         Err(e) => {
                                             log::warn!("[IpcClient] Parse error: {e} — raw: {text}");
@@ -163,6 +175,11 @@ pub async fn run_ipc_loop(
                                 }
                             }
                         }
+                        result = service_result_rx.recv() => {
+                            let Some(status) = result else { continue; };
+                            if let Ok(json) = serde_json::to_string(&HostControlMessage::ServiceOperationFinished { status })
+                                && sink.send(awc::ws::Message::Text(json.into())).await.is_err() { break 'session; }
+                        }
                         state_event = next_state(&mut state_rx) => {
                             let Some(event) = state_event else { continue };
                             let Some(msg) = map_state_event(event) else { continue };
@@ -183,6 +200,7 @@ pub async fn run_ipc_loop(
                 // leaving the window pinned until the next live dialog.
                 let _ = sa_tx.send(SecurityApprovalCommand::Reset);
                 let _ = host_access_tx.send(HostAccessStatusCommand::Reset);
+                let _ = native_bridge_tx.send(NativeBridgeEvent::Disconnected);
             }
             Err(e) => {
                 log::warn!("[IpcClient] Connection failed: {e:?}, retrying in 3 s...");
@@ -208,12 +226,18 @@ fn handle_server_msg(
     ps_cmd_tx: &std::sync::mpsc::Sender<PrivateScreenCommand>,
     wb_cmd_tx: &std::sync::mpsc::Sender<WhiteboardCommand>,
     sa_tx: &std::sync::mpsc::Sender<SecurityApprovalCommand>,
-    svc_op_tx: &std::sync::mpsc::SyncSender<ServiceOp>,
+    svc_op_tx: &std::sync::mpsc::SyncSender<ServiceJob>,
     host_access_tx: &std::sync::mpsc::Sender<HostAccessStatusCommand>,
     token_holder: &Arc<Mutex<Option<String>>>,
     native_bridge_tx: Option<&std::sync::mpsc::Sender<NativeBridgeEvent>>,
+    service_result_tx: Option<&tokio::sync::mpsc::UnboundedSender<ServiceOperationStatus>>,
 ) {
     match msg {
+        HostControlMessage::LinuxAiInputEndpoint { revision, path } => {
+            if let Some(tx) = native_bridge_tx {
+                let _ = tx.send(NativeBridgeEvent::LinuxAiInputEndpoint { revision, path });
+            }
+        }
         HostControlMessage::TauriToken { token } => {
             log::info!("[IpcClient] Received TauriToken from server");
             *token_holder.lock().unwrap() = Some(token);
@@ -291,6 +315,7 @@ fn handle_server_msg(
             let _ = sa_tx.send(SecurityApprovalCommand::Finish { req_id });
         }
         HostControlMessage::ServiceOp {
+            operation_id,
             op,
             install_path,
             install_idd_driver,
@@ -302,10 +327,30 @@ fn handle_server_msg(
                 }),
                 ServiceOpKind::Uninstall => Some(ServiceOp::Uninstall),
             };
-            if let Some(svc_op) = svc_op
-                && let Err(e) = svc_op_tx.try_send(svc_op)
-            {
-                log::warn!("[IpcClient] ServiceOp channel full: {e}");
+            let failure = |error| {
+                if let (Some(id), Some(tx)) = (operation_id.as_ref(), service_result_tx) {
+                    let _ = tx.send(ServiceOperationStatus {
+                        operation_id: id.clone(),
+                        op,
+                        state: ServiceOperationState::Failed,
+                        error: Some(error),
+                        exit_code: None,
+                    });
+                }
+            };
+            if let Some(svc_op) = svc_op {
+                if svc_op_tx
+                    .try_send(ServiceJob {
+                        operation_id: operation_id.clone(),
+                        op: svc_op,
+                        result_tx: service_result_tx.cloned(),
+                    })
+                    .is_err()
+                {
+                    failure(ServiceOperationError::Busy);
+                }
+            } else {
+                failure(ServiceOperationError::LaunchFailed);
             }
         }
         HostControlMessage::HostAccessSnapshot { snapshot } => {
@@ -316,7 +361,8 @@ fn handle_server_msg(
         | HostControlMessage::SecurityApprovalCancel { .. }
         | HostControlMessage::PrivateScreenStateChangedToWorker { .. } => {}
         // Client → server frames; receiving is unexpected but harmless.
-        HostControlMessage::Ready { .. }
+        HostControlMessage::ServiceOperationFinished { .. }
+        | HostControlMessage::Ready { .. }
         | HostControlMessage::SessionShellInfo { .. }
         | HostControlMessage::PrivateScreenStateChanged { .. }
         | HostControlMessage::SecurityApprovalResolved { .. } => {}
@@ -463,7 +509,7 @@ mod tests {
         let (ps_tx, ps_rx) = std::sync::mpsc::channel::<PrivateScreenCommand>();
         let (wb_tx, _wb_rx) = std::sync::mpsc::channel::<WhiteboardCommand>();
         let (sa_tx, _sa_rx) = std::sync::mpsc::channel::<SecurityApprovalCommand>();
-        let (svc_tx, _svc_rx) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (svc_tx, _svc_rx) = std::sync::mpsc::sync_channel::<ServiceJob>(1);
         let (status_tx, _status_rx) = std::sync::mpsc::channel();
         let token_holder = Arc::new(Mutex::new(None));
 
@@ -478,6 +524,7 @@ mod tests {
             &svc_tx,
             &status_tx,
             &token_holder,
+            None,
             None,
         );
         match ps_rx
@@ -500,7 +547,7 @@ mod tests {
         let (ps_tx, _) = std::sync::mpsc::channel();
         let (wb_tx, _) = std::sync::mpsc::channel();
         let (sa_tx, _) = std::sync::mpsc::channel();
-        let (svc_tx, _) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (svc_tx, _) = std::sync::mpsc::sync_channel::<ServiceJob>(1);
         let (status_tx, _) = std::sync::mpsc::channel();
         let token_holder = Arc::new(Mutex::new(None));
 
@@ -515,6 +562,7 @@ mod tests {
             &status_tx,
             &token_holder,
             None,
+            None,
         );
         assert_eq!(token_holder.lock().unwrap().as_deref(), Some("tok-xyz"));
     }
@@ -524,7 +572,7 @@ mod tests {
         let (ps_tx, _) = std::sync::mpsc::channel();
         let (wb_tx, _) = std::sync::mpsc::channel();
         let (sa_tx, _) = std::sync::mpsc::channel();
-        let (svc_tx, _) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (svc_tx, _) = std::sync::mpsc::sync_channel::<ServiceJob>(1);
         let (status_tx, status_rx) = std::sync::mpsc::channel();
         let token_holder = Arc::new(Mutex::new(None));
         let snapshot = lcxl_remote_desk_server::host_control::HostAccessSnapshot {
@@ -547,6 +595,7 @@ mod tests {
             &status_tx,
             &token_holder,
             None,
+            None,
         );
 
         match status_rx
@@ -563,7 +612,7 @@ mod tests {
         let (ps_tx, _) = std::sync::mpsc::channel();
         let (wb_tx, _) = std::sync::mpsc::channel();
         let (sa_tx, _) = std::sync::mpsc::channel();
-        let (svc_tx, _) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (svc_tx, _) = std::sync::mpsc::sync_channel::<ServiceJob>(1);
         let (status_tx, _) = std::sync::mpsc::channel();
         let token_holder = Arc::new(Mutex::new(None));
         let (native_tx, native_rx) = std::sync::mpsc::channel();
@@ -581,6 +630,7 @@ mod tests {
             &status_tx,
             &token_holder,
             Some(&native_tx),
+            None,
         );
 
         assert_eq!(
@@ -598,12 +648,13 @@ mod tests {
         let (ps_tx, _) = std::sync::mpsc::channel();
         let (wb_tx, _) = std::sync::mpsc::channel();
         let (sa_tx, _) = std::sync::mpsc::channel();
-        let (svc_tx, svc_rx) = std::sync::mpsc::sync_channel::<ServiceOp>(1);
+        let (svc_tx, svc_rx) = std::sync::mpsc::sync_channel::<ServiceJob>(1);
         let (status_tx, _) = std::sync::mpsc::channel();
         let token_holder = Arc::new(Mutex::new(None));
 
         handle_server_msg(
             HostControlMessage::ServiceOp {
+                operation_id: Some("install-test".into()),
                 op: ServiceOpKind::Install,
                 install_path: Some("C:/foo".to_string()),
                 install_idd_driver: true,
@@ -615,10 +666,12 @@ mod tests {
             &status_tx,
             &token_holder,
             None,
+            None,
         );
         match svc_rx
             .recv_timeout(std::time::Duration::from_millis(50))
             .unwrap()
+            .op
         {
             ServiceOp::Install {
                 install_path,
@@ -632,6 +685,47 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn service_queue_failure_is_reported_and_results_stay_on_the_original_connection() {
+        let (ps_tx, _) = std::sync::mpsc::channel();
+        let (wb_tx, _) = std::sync::mpsc::channel();
+        let (sa_tx, _) = std::sync::mpsc::channel();
+        let (svc_tx, svc_rx) = std::sync::mpsc::sync_channel::<ServiceJob>(1);
+        let (status_tx, _) = std::sync::mpsc::channel();
+        let token_holder = Arc::new(Mutex::new(None));
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        for id in ["first", "second"] {
+            handle_server_msg(
+                HostControlMessage::ServiceOp {
+                    operation_id: Some(id.into()),
+                    op: ServiceOpKind::Uninstall,
+                    install_path: None,
+                    install_idd_driver: false,
+                },
+                &ps_tx,
+                &wb_tx,
+                &sa_tx,
+                &svc_tx,
+                &status_tx,
+                &token_holder,
+                None,
+                Some(&result_tx),
+            );
+        }
+        let rejected = result_rx.try_recv().unwrap();
+        assert_eq!(rejected.operation_id, "second");
+        assert_eq!(rejected.error, Some(ServiceOperationError::Busy));
+        let job = svc_rx.try_recv().unwrap();
+        assert_eq!(job.operation_id.as_deref(), Some("first"));
+        // Once the original WS disappears, its sender cannot report a stale
+        // completion through a new authenticated WS session.
+        drop(result_rx);
+        let (new_tx, mut new_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceOperationStatus>();
+        assert!(job.result_tx.unwrap().send(rejected).is_err());
+        assert!(new_rx.try_recv().is_err());
+        drop(new_tx);
     }
 
     #[test]

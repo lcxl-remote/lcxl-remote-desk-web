@@ -1,3 +1,4 @@
+import { AssistantFrameTiming } from './assistant-frame-timing';
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AiAssistantMessage } from './use-ai-assistant-chat';
 import { useTranslation } from 'react-i18next';
@@ -46,6 +47,7 @@ function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; on
             {t(durable ? (failed ? 'pages.aiAssistant.imageUnavailable' : 'pages.aiAssistant.imageLoading')
                 : frame.status === 'expired' ? 'pages.aiAssistant.visualEvidenceExpired' : 'pages.aiAssistant.visualEvidenceNotRetained')}
         </div>}
+        <AssistantFrameTiming frame={frame.frame_observation} />
         <div className="flex items-center justify-between gap-2 border-t p-2 text-xs">
             <div><div>{t(`pages.aiAssistant.visualEvidencePhase.${frame.phase}`)}</div>
                 <div className="text-muted-foreground">{new Date(frame.captured_at_unix_ms).toLocaleString()}</div></div>

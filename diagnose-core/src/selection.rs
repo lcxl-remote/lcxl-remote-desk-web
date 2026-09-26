@@ -99,6 +99,7 @@ fn is_allowed(cap: Capability, request: &DiagnoseRequestData, policy: &Collectio
         | Capability::DesktopBackgroundInputConfirmed
         | Capability::DesktopUiActionConfirmed
         | Capability::DesktopInputFallbackConfirmed
+        | Capability::DesktopOutputInputConfirmed
         | Capability::OfficeExcelPatchConfirmed
         | Capability::OfficePowerPointPatchConfirmed
         | Capability::SpreadsheetLivePatchConfirmed
@@ -188,6 +189,7 @@ pub fn capability_name(cap: Capability) -> Option<&'static str> {
         | Capability::DesktopBackgroundInputConfirmed
         | Capability::DesktopUiActionConfirmed
         | Capability::DesktopInputFallbackConfirmed
+        | Capability::DesktopOutputInputConfirmed
         | Capability::OfficeExcelPatchConfirmed
         | Capability::OfficePowerPointPatchConfirmed
         | Capability::SpreadsheetLivePatchConfirmed
@@ -300,6 +302,7 @@ pub fn context_input_for(cap: Capability) -> Option<ReadContextInput> {
         | Capability::DesktopBackgroundInputConfirmed
         | Capability::DesktopUiActionConfirmed
         | Capability::DesktopInputFallbackConfirmed
+        | Capability::DesktopOutputInputConfirmed
         | Capability::OfficeExcelPatchConfirmed
         | Capability::OfficePowerPointPatchConfirmed
         | Capability::SpreadsheetLivePatchConfirmed

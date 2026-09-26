@@ -32,12 +32,6 @@ struct ServerArgs {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[arg(long)]
     install_idd_driver: bool,
-
-    /// Internal propagation of the Linux development opt-in across pkexec,
-    /// whose sanitized environment does not preserve the parent LRD_* flag.
-    #[cfg(target_os = "linux")]
-    #[arg(long, hide = true)]
-    experimental_linux_service_daemon: bool,
 }
 
 /// Offline OpenAPI dump command. Parsed only when `argv[1]` is exactly
@@ -49,6 +43,13 @@ struct DumpOpenapiCli {
     /// Output path for the generated `openapi.json`.
     #[arg(long, default_value = "openapi.json")]
     out: String,
+}
+
+/// Mint an OS-user proof without starting the server or exposing its pairing secret.
+#[derive(clap::Parser, Debug)]
+struct BrowserPairingCli {
+    #[arg(short, long)]
+    config_file_path: Option<PathBuf>,
 }
 
 /// One-shot local remote-access controls. These commands only talk to the
@@ -177,6 +178,31 @@ fn main() {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some("ai-input-control") {
+        if let Err(error) = lcxl_remote_desk_server::worker::agent::run_linux_input_control_cli() {
+            eprintln!("ai-input-control: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if std::env::args().nth(1).as_deref() == Some("browser-pairing-proof") {
+        let cli = BrowserPairingCli::parse_from(std::env::args().skip(1));
+        let result = (|| -> anyhow::Result<String> {
+            let paths = HostDataPaths::resolve_current(cli.config_file_path.as_deref())?;
+            Ok(lcxl_remote_desk_server::worker::agent::browser_extension_bridge::pairing::issue_local_proof(paths.data_root())?)
+        })();
+        match result {
+            Ok(proof) => println!("{proof}"),
+            Err(error) => {
+                eprintln!("browser-pairing-proof: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Local access control is deliberately handled before the permissive
     // legacy parser and before any server infrastructure is initialized.
     if std::env::args().nth(1).as_deref() == Some("access") {
@@ -257,19 +283,9 @@ fn main() {
                 eprintln!("--install-idd-driver is unsupported on Linux");
                 std::process::exit(2);
             }
-            let experimental_opt_in = server_args.experimental_linux_service_daemon
-                || std::env::var(
-                    lcxl_remote_desk_server::daemon::linux_service::EXPERIMENTAL_INSTALL_ENV,
-                )
-                .as_deref()
-                    == Ok("1");
-            if let Err(error) = install_service(
-                dir,
-                server_args.config_file_path.as_deref(),
-                experimental_opt_in,
-            ) {
+            if let Err(error) = install_service(dir, server_args.config_file_path.as_deref()) {
                 eprintln!("Failed to install service: {error}");
-                std::process::exit(1);
+                std::process::exit(linux_service_exit_code(error.as_ref()));
             }
             println!("Service installed successfully");
             return;
@@ -278,7 +294,7 @@ fn main() {
             if let Err(error) = lcxl_remote_desk_server::daemon::linux_service::uninstall_service()
             {
                 eprintln!("Failed to uninstall service: {error}");
-                std::process::exit(1);
+                std::process::exit(linux_service_exit_code(error.as_ref()));
             }
             println!("Service uninstalled successfully");
             return;
@@ -386,15 +402,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_service_install_accepts_explicit_experimental_opt_in() {
-        let cli = ServerArgs::try_parse_from([
-            "server",
-            "--install-service",
-            "--experimental-linux-service-daemon",
-        ])
-        .unwrap();
+    fn linux_service_install_requires_no_experimental_opt_in() {
+        let cli = ServerArgs::try_parse_from(["server", "--install-service"]).unwrap();
         assert!(cli.install_service);
-        assert!(cli.experimental_linux_service_daemon);
     }
 
     #[test]
@@ -424,5 +434,14 @@ mod tests {
             AccessCommand::Disconnect { connection_id } if connection_id == "peer-1"
         ));
         assert!(AccessCli::try_parse_from(["access", "--unknown"]).is_err());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_service_exit_code(error: &(dyn std::error::Error + 'static)) -> i32 {
+    if error.is::<lcxl_remote_desk_server::daemon::linux_service::ServiceOperationBusy>() {
+        lcxl_remote_desk_server::daemon::linux_service::SERVICE_OPERATION_BUSY_EXIT_CODE
+    } else {
+        1
     }
 }

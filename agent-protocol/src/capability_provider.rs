@@ -182,6 +182,8 @@ pub struct CapabilityPrerequisites {
     pub platforms: Vec<CapabilityPlatform>,
     pub applications: Vec<ApplicationPrerequisite>,
     pub requires_edge_connection: bool,
+    /// Requires a graphical user desktop, independently of device connectivity.
+    /// File and terminal adapters still enforce their own user/worker/PTY scopes.
     pub requires_interactive_session: bool,
     pub requires_credential_connection: bool,
 }

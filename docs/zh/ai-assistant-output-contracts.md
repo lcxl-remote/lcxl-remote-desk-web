@@ -32,6 +32,7 @@
 | `execute_ui_actions` | `ApplicationBatchDispatchReceipt` | 1 | inline | background_completion | externalized_attachment |
 | `send_background_input` | `ApplicationBatchDispatchReceipt` | 1 | inline | background_completion | externalized_attachment |
 | `send_raw_input` | `ComputerActionCompleted` | 1 | inline | background_completion | externalized_attachment |
+| `execute_wayland_output_input` | `ComputerActionCompleted` | 1 | inline | background_completion | externalized_attachment |
 | `preview_computer_action` | `ComputerActionDraft` | 1 | inline | externalized_attachment |
 | `browser_open_page` | `BrowserActionResult / ComputerActionCompleted<BrowserActionResult>` | 1 | inline | background_completion | externalized_attachment |
 | `browser_navigate_page` | `BrowserActionResult / ComputerActionCompleted<BrowserActionResult>` | 1 | inline | background_completion | externalized_attachment |

@@ -16,7 +16,8 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useToast } from "@/hooks/use-toast"
 import { deskErrorCodeEnum } from "@/services/types"
-import { serviceManagementErrorMessage } from "@/features/layout/service-management-error"
+import { serviceManagementErrorMessage, serviceOperationMessage } from "@/features/layout/service-management-error"
+import { ServiceRequestError, useServiceOperation } from "./service-operation"
 
 /**
  * Shared "install service" confirmation dialog. Used by both the
@@ -24,7 +25,7 @@ import { serviceManagementErrorMessage } from "@/features/layout/service-managem
  * present an identical UX (the system-settings page previously skipped
  * the confirmation step entirely).
  *
- * The dialog fetches `/api/virtual-display/driver/status` on open so
+ * On Windows the dialog fetches `/api/virtual-display/driver/status` so
  * the "also install IDD virtual display driver" checkbox can be
  * disabled (with an inline hint) when the driver files are not
  * present next to the server binary.
@@ -33,6 +34,8 @@ export interface ServiceInstallDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     defaultInstallPath: string
+    platform?: string
+    onCompleted?: () => void
 }
 
 interface DriverStatus {
@@ -44,7 +47,9 @@ interface DriverStatus {
 }
 
 export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
-    const { open, onOpenChange, defaultInstallPath } = props
+    const { open, onOpenChange, defaultInstallPath, platform = "windows", onCompleted } = props
+    const isLinux = platform === "linux"
+    const operation = useServiceOperation()
     const { t } = useTranslation()
     const { toast } = useToast()
 
@@ -59,6 +64,7 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
         if (open) {
             setInstallPath(defaultInstallPath)
             setInstallIdd(false)
+            if (isLinux) { setDriverStatus(null); setStatusLoading(false); return }
             setStatusLoading(true)
             fetch("/api/virtual-display/driver/status")
                 .then((r) => r.json())
@@ -72,7 +78,7 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
                 .catch(() => setDriverStatus(null))
                 .finally(() => setStatusLoading(false))
         }
-    }, [open, defaultInstallPath])
+    }, [open, defaultInstallPath, isLinux])
 
     const filesAvailable = driverStatus?.files_available ?? false
     const iddCheckboxDisabled = statusLoading || !filesAvailable
@@ -82,52 +88,28 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
         submittingRef.current = true
         setSubmitting(true)
         try {
-            const resp = await fetch("/api/service/install", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    install_path: installPath,
-                    install_idd_driver: installIdd && filesAvailable,
-                }),
+            const result = await operation.run('install', {
+                install_path: installPath,
+                install_idd_driver: !isLinux && installIdd && filesAvailable,
             })
-            const body = await resp.json().catch(() => null)
-            const code = body?.code
-            if (code === deskErrorCodeEnum.SUCCESS) {
-                toast({
-                    title: t("pages.system.settings.success"),
-                    description: t(
-                        "pages.system.settings.serviceManagement.installSuccess",
-                    ),
-                })
-                onOpenChange(false)
-            } else if (code === deskErrorCodeEnum.INVALID_PARAMS) {
-                toast({
-                    variant: "destructive",
-                    title: t("pages.system.settings.error"),
-                    description: t(
-                        "pages.layout.serviceBanner.installDialog.invalidPath",
-                    ),
-                })
-            } else {
-                toast({
-                    variant: "destructive",
-                    title: t("pages.system.settings.error"),
-                    description:
-                        serviceManagementErrorMessage(
-                            t,
-                            code,
-                            body?.message,
-                            "pages.system.settings.serviceManagement.installError",
-                        ),
-                })
-            }
-        } catch (e) {
+            const completed = !result || ['succeeded', 'submitted'].includes(result.state)
             toast({
-                variant: "destructive",
-                title: t("pages.system.settings.error"),
-                description: t(
-                    "pages.system.settings.serviceManagement.installError",
-                ),
+                variant: completed || result?.state === 'cancelled' ? 'default' : 'destructive',
+                title: t(result?.state === 'succeeded' ? 'pages.system.settings.success' : 'pages.system.settings.serviceManagement.operationTitle'),
+                description: serviceOperationMessage(t, 'install', result),
+            })
+            onCompleted?.()
+            if (completed) onOpenChange(false)
+        } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') return
+            toast({
+                variant: 'destructive', title: t('pages.system.settings.error'),
+                description: e instanceof ServiceRequestError && e.busy
+                    ? t('pages.system.settings.serviceManagement.busy')
+                    : e instanceof ServiceRequestError && e.code === deskErrorCodeEnum.INVALID_PARAMS
+                        ? t('pages.layout.serviceBanner.installDialog.invalidPath')
+                        : serviceManagementErrorMessage(t, e instanceof ServiceRequestError ? e.code : undefined,
+                            e instanceof Error ? e.message : undefined, 'pages.system.settings.serviceManagement.installError'),
             })
         } finally {
             submittingRef.current = false
@@ -139,10 +121,10 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
         <Dialog open={open} onOpenChange={(nextOpen) => !submitting && onOpenChange(nextOpen)}>
             <DialogContent>
                 <DialogHeader>
-                    <DialogTitle>{t("pages.layout.serviceBanner.title")}</DialogTitle>
+                    <DialogTitle>{t(isLinux ? "pages.system.settings.serviceManagement.linuxTitle" : "pages.layout.serviceBanner.title")}</DialogTitle>
                     <DialogDescription>
                         {t(
-                            "pages.layout.serviceBanner.installDialog.description",
+                            isLinux ? "pages.system.settings.serviceManagement.linuxInstallDescription" : "pages.layout.serviceBanner.installDialog.description",
                         )}
                     </DialogDescription>
                 </DialogHeader>
@@ -154,10 +136,12 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
                         <Input
                             id="install-path"
                             value={installPath}
+                            readOnly={isLinux}
+                            disabled={submitting}
                             onChange={(e) => setInstallPath(e.target.value)}
                         />
                     </div>
-                    <div className="flex items-start gap-2">
+                    {!isLinux && <div className="flex items-start gap-2">
                         <Checkbox
                             id="install-idd"
                             checked={installIdd && !iddCheckboxDisabled}
@@ -184,7 +168,10 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
                                         )}
                             </p>
                         </div>
-                    </div>
+                    </div>}
+                    {submitting && <p role="status" className="text-sm text-muted-foreground">{t(operation.disconnected
+                        ? "pages.system.settings.serviceManagement.waitingDisconnected"
+                        : "pages.system.settings.serviceManagement.waitingResult")}</p>}
                 </div>
                 <DialogFooter>
                     <Button

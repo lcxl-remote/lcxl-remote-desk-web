@@ -50,6 +50,7 @@ pub mod command_completion;
 pub mod command_confirmation;
 pub mod communication;
 pub mod communication_handoff;
+pub mod computer_turn;
 pub mod content_safety;
 pub mod context_attachment;
 pub mod context_usage;

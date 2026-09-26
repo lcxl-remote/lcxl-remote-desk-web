@@ -262,8 +262,8 @@ export function SystemSettings() {
             {!isMac && (serverInfo?.startup_mode === "default" || serverInfo?.startup_mode === "service-daemon") && serverInfo.server_binary_available && (
                 <Card className="mt-6 border-amber-500/50 bg-amber-500/10 dark:border-amber-500/30 dark:bg-amber-500/10">
                     <CardHeader>
-                        <CardTitle>{t("pages.system.settings.serviceManagement.title")}</CardTitle>
-                        <CardDescription>{t("pages.system.settings.serviceManagement.description")}</CardDescription>
+                        <CardTitle>{t(serverInfo.platform === "linux" ? "pages.system.settings.serviceManagement.linuxTitle" : "pages.system.settings.serviceManagement.title")}</CardTitle>
+                        <CardDescription>{t(serverInfo.platform === "linux" ? "pages.system.settings.serviceManagement.linuxDescription" : "pages.system.settings.serviceManagement.description")}</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
                         <div className="flex items-center justify-between">
@@ -271,7 +271,7 @@ export function SystemSettings() {
                                 <h4 className="text-sm font-medium">{t("pages.system.settings.serviceManagement.status")}</h4>
                                 <p className="text-sm text-muted-foreground">
                                     {serverInfo.service_installed 
-                                        ? t("pages.system.settings.serviceManagement.installed") 
+                                        ? t(serverInfo.service_running ? "pages.system.settings.serviceManagement.installed" : "pages.system.settings.serviceManagement.stopped")
                                         : t("pages.system.settings.serviceManagement.notInstalled")}
                                 </p>
                             </div>
@@ -294,11 +294,15 @@ export function SystemSettings() {
 
             <ServiceInstallDialog
                 open={installDialogOpen}
+                platform={serverInfo?.platform}
+                onCompleted={() => { void refetchServerInfo() }}
                 onOpenChange={setInstallDialogOpen}
                 defaultInstallPath={serverInfo?.default_install_path ?? ""}
             />
             <ServiceUninstallDialog
                 open={uninstallDialogOpen}
+                platform={serverInfo?.platform}
+                onCompleted={() => { void refetchServerInfo() }}
                 onOpenChange={setUninstallDialogOpen}
             />
 

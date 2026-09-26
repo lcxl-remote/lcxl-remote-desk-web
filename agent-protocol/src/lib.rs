@@ -40,6 +40,7 @@ pub mod capability_provider;
 pub mod command_blocklist;
 pub mod command_template;
 pub mod communication;
+pub mod computer_turn;
 pub mod computer_use;
 pub mod content_safety;
 pub mod data_lineage;
@@ -532,6 +533,9 @@ pub enum Capability {
     BrowserExternalSendConfirmed,
     #[serde(rename = "file.delete.confirmed")]
     FileDeleteConfirmed,
+    /// Control one complete authorized Wayland output, never an application scope.
+    #[serde(rename = "desktop.output.input.confirmed")]
+    DesktopOutputInputConfirmed,
     #[serde(rename = "application.list")]
     ApplicationList,
     #[serde(rename = "application.launch.confirmed")]
@@ -970,6 +974,9 @@ pub struct ContainerLogsOutput {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct ScreenCaptureOutput {
+    /// Explicit observation provenance; receipt age is not source-render age.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_observation: Option<ScreenFrameObservation>,
     /// Opaque display reference returned by the edge capture backend.
     /// Raw-input fallback must also match the current owner-selected display.
     pub display: String,
@@ -998,6 +1005,33 @@ pub enum ImageFormat {
     Png,
     Jpeg,
     Webp,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct ScreenFrameObservation {
+    /// Device-issued identity of this observation, not a model-selected label.
+    pub observation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_reference: Option<computer_use::ObjectRef>,
+    pub stream_generation: u64,
+    pub received_at_unix_ms: u64,
+    pub receipt_age_ms: u64,
+    /// Optional producer presentation timestamp; its clock domain is not Unix time.
+    /// Presence alone does not prove render time or current pixel freshness.
+    pub source_timestamp_ns: Option<u64>,
+    pub freshness: ScreenFrameFreshness,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenFrameFreshness {
+    Fresh,
+    LatestObserved,
+    UnchangedVerified,
 }
 
 // -------- exec request shape --------

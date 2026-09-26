@@ -1,10 +1,23 @@
+import { createSendReceiptCoordinator } from "./send-receipts.js";
+import { createInboundQueue } from "./inbound-queue.js";
+import { runBoundedCommand } from "./command-lifetime.js";
+import { parsePairingSettings } from "./pairing-settings.js";
+import { createBridgeCipher } from "./bridge-crypto.js";
 import { SCHEMA_VERSION, parseHostCommand, response } from "./protocol.js";
 import { assertHostPermissionForUrl, assertTabHostPermission } from "./host-permissions.js";
 import { registerContentDigest } from "./content-digest.js";
 
 registerContentDigest(chrome);
 
-const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8091/browser-extension/v1";
+const secureConnections = new WeakMap();
+
+async function sendSecure(activeSocket, payload) {
+    const cipher = secureConnections.get(activeSocket);
+    if (!cipher) throw new Error("bridge_not_authenticated");
+    const encrypted = await cipher.seal(JSON.stringify(payload));
+    if (socket !== activeSocket || activeSocket.readyState !== WebSocket.OPEN) throw new Error("bridge_disconnected");
+    activeSocket.send(encrypted);
+}
 const RECONNECT_ALARM = "lcxl-browser-extension-reconnect";
 const RECONNECT_MAX_MS = 30000;
 const KEEPALIVE_INTERVAL_MS = 20000;
@@ -16,13 +29,17 @@ const TAB_QUERY_TIMEOUT_MS = 3000;
 const TARGET_TAB_CACHE_KEY = "openedTargetTabs";
 const MAX_REMEMBERED_TARGET_TABS = 16;
 const SEND_RECEIPTS_KEY = "exactSendReceipts";
-const MAX_SEND_RECEIPTS = 128;
 let socket = null;
 let reconnectDelayMs = 1000;
 let reconnectTimer = null;
 let keepaliveTimer = null;
 let connectionGeneration = 0;
-const sendInflight = new Map();
+const executeSend = createSendReceiptCoordinator({
+    read: async () => (await storageGet("local", [SEND_RECEIPTS_KEY]))?.[SEND_RECEIPTS_KEY] || {},
+    write: receipts => chrome.storage.local.set({ [SEND_RECEIPTS_KEY]: receipts }),
+    execute: executeOnce,
+    pageFromAction: rawPageFromAction
+});
 
 function stopKeepalive() {
     if (keepaliveTimer) {
@@ -38,7 +55,7 @@ function startKeepalive(activeSocket) {
     // alive without granting any capability or performing a browser action.
     keepaliveTimer = setInterval(() => {
         if (socket === activeSocket && activeSocket.readyState === WebSocket.OPEN) {
-            activeSocket.send(JSON.stringify({ schema_version: SCHEMA_VERSION, type: "keepalive" }));
+            void sendSecure(activeSocket, { schema_version: SCHEMA_VERSION, type: "keepalive" }).catch(() => activeSocket.close());
         }
     }, KEEPALIVE_INTERVAL_MS);
 }
@@ -70,7 +87,7 @@ function scheduleReconnect() {
     // A one-shot alarm survives MV3 service-worker suspension. The timer keeps
     // the fast path at sub-minute latency while the worker is still alive; both
     // converge through connect(), which clears the other trigger.
-    chrome.alarms.create(RECONNECT_ALARM, { when: reconnectAt });
+    void chrome.alarms.create(RECONNECT_ALARM, { when: reconnectAt }).catch(() => {});
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         void connect();
@@ -88,26 +105,29 @@ function withTimeout(promise, timeoutMs, errorCode) {
     ]).finally(() => clearTimeout(timeout));
 }
 
-async function sendTabMessage(tabId, action, timeoutMs = null) {
+async function sendTabMessage(tabId, action, timeoutMs = null, guard = () => {}) {
+    guard();
     const request = chrome.tabs.sendMessage(tabId, { type: "lcxl_browser_action", action });
     return timeoutMs === null
         ? request
         : withTimeout(request, timeoutMs, "content_script_timeout");
 }
 
-async function sendToTab(tabId, action, messageTimeoutMs = null) {
+export async function sendToTab(tabId, action, messageTimeoutMs = null, guard = () => {}) {
     let reply;
     try {
-        reply = await sendTabMessage(tabId, action, messageTimeoutMs);
+        reply = await sendTabMessage(tabId, action, messageTimeoutMs, guard);
     } catch (error) {
         // A lost response does not prove a mutation was not executed.
         if (!["describe_page", "take_snapshot", "wait_for"].includes(action.action)) throw error;
+        guard();
         const tab = await chrome.tabs.get(tabId);
         if (!tab.url) {
             throw error;
         }
+        guard();
         await chrome.scripting.executeScript({ target: { tabId }, files: ["src/content-script.js"] });
-        reply = await sendTabMessage(tabId, action, messageTimeoutMs);
+        reply = await sendTabMessage(tabId, action, messageTimeoutMs, guard);
     }
     if (!reply?.ok) {
         throw new Error(reply?.error_code || "content_script_error");
@@ -169,31 +189,38 @@ export function samePageObservation(expected, current) {
 }
 
 export async function waitForComplete(tab, settleTimeoutMs = NAVIGATION_SETTLE_TIMEOUT_MS) {
-    if (tab.status === "complete") {
-        return tab.id;
-    }
+    if (tab.status === "complete") return tab.id;
     return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
+        let settled = false;
+        let statusPoll;
+        const complete = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            clearTimeout(statusPoll);
             chrome.tabs.onUpdated.removeListener(listener);
-            // Gmail and Slack are long-lived applications: their tab can stay
-            // in `loading` after the actionable DOM and content script are
-            // already available. Return the current tab so sendToTab can make
-            // a bounded semantic probe. If the document is not actionable,
-            // scripting/message delivery still fails with a known error well
-            // before the host's 35-second OutcomeUnknown boundary. Do not issue
-            // another unbounded chrome.tabs.get() here: the tab identity was
-            // already returned by create/update, and only that stable id is
-            // needed for the bounded descriptor probe.
             resolve(tab.id);
-        }, settleTimeoutMs);
-        const listener = (updatedId, info) => {
-            if (updatedId === tab.id && info.status === "complete") {
-                clearTimeout(timeout);
-                chrome.tabs.onUpdated.removeListener(listener);
-                resolve(tab.id);
-            }
         };
+        const listener = (updatedId, info) => {
+            if (updatedId === tab.id && info.status === "complete") complete();
+        };
+        // A long-lived page can remain loading after its actionable DOM exists.
+        // The deadline returns the known tab for the bounded semantic probe;
+        // neither a missing event nor an unresponsive status lookup extends it.
+        const timeout = setTimeout(complete, settleTimeoutMs);
         chrome.tabs.onUpdated.addListener(listener);
+        // Completion may precede listener registration while create/update or
+        // target-cache persistence is pending. Register first, then re-read.
+        const pollStatus = () => {
+            void Promise.resolve().then(() => settled ? null : chrome.tabs.get(tab.id))
+                .then(current => {
+                    if (current?.id === tab.id && current.status === "complete") complete();
+                    else if (!settled) statusPoll = setTimeout(pollStatus, 250);
+                }, () => {});
+        };
+        // Some completion notifications can be missed even after registration.
+        // Only one read is in flight; late results cannot restart polling.
+        pollStatus();
     });
 }
 
@@ -279,29 +306,13 @@ function rawPageFromAction(action) {
     };
 }
 
-async function cachedSendReceipt(idempotencyKey) {
-    const stored = await storageGet("local", [SEND_RECEIPTS_KEY]);
-    return stored?.[SEND_RECEIPTS_KEY]?.[idempotencyKey] || null;
-}
-
-async function rememberSendReceipt(receipt) {
-    const stored = await storageGet("local", [SEND_RECEIPTS_KEY]);
-    const entries = Object.entries(stored?.[SEND_RECEIPTS_KEY] || {})
-        .filter(([, value]) => value?.idempotency_key !== receipt.idempotency_key)
-        .sort((left, right) =>
-            Number(left[1]?.observed_at_unix_ms || 0) - Number(right[1]?.observed_at_unix_ms || 0)
-        )
-        .slice(-(MAX_SEND_RECEIPTS - 1));
-    const next = Object.fromEntries(entries);
-    next[receipt.idempotency_key] = receipt;
-    await chrome.storage.local.set({ [SEND_RECEIPTS_KEY]: next });
-}
-
-async function executeOnce(action) {
+async function executeOnce(action, guard) {
+    guard();
     if (action.action === "open_page") {
         await assertHostPermissionForUrl(chrome, action.target.url);
         const existing = await findExistingTabForTarget(action.target.url)
             || await rememberedTabForTarget(action.target.url);
+        guard();
         if (existing) {
             return describeTabWithRetry(existing.id);
         }
@@ -315,10 +326,10 @@ async function executeOnce(action) {
     // Writes and element waits require an exact observation. Snapshot reads
     // may refresh the same tab/origin/account after navigation; validate both
     // before and after reading so a raced navigation cannot widen the scope.
-    const current = await sendToTab(tabId, { action: "describe_page" });
+    const current = await sendToTab(tabId, { action: "describe_page" }, null, guard);
     if (action.action === "take_snapshot") {
         if (!sameReadScope(action.page, current.page)) throw new Error("page_scope_changed");
-        const result = await sendToTab(tabId, { ...action, page: current.page });
+        const result = await sendToTab(tabId, { ...action, page: current.page }, null, guard);
         if (!sameReadScope(action.page, result.snapshot?.page)) throw new Error("page_scope_changed");
         return result;
     }
@@ -327,11 +338,12 @@ async function executeOnce(action) {
     }
     if (action.action === "navigate_page") {
         await assertHostPermissionForUrl(chrome, action.target.url);
+        guard();
         const updated = await chrome.tabs.update(tabId, { url: action.target.url, active: true });
         await waitForComplete(updated);
         return describeTabWithRetry(tabId);
     }
-    return sendToTab(tabId, action);
+    return sendToTab(tabId, action, null, guard);
 }
 
 // A read may refresh a document, but never switch tab, origin or account.
@@ -344,34 +356,14 @@ export function sameReadScope(expected, current) {
         && expected.origin?.port === current.origin?.port;
 }
 
-export async function execute(action) {
+export async function execute(action, guard = () => {}) {
+    guard();
     const send = action.action === "activate_element" && action.activation_class?.kind === "send_external";
-    if (!send) return executeOnce(action);
-    const key = action.activation_class.idempotency_key;
-    const cached = await cachedSendReceipt(key);
-    if (cached) {
-        if (cached.snapshot_id !== action.activation_class.snapshot_id ||
-            cached.snapshot_sha256 !== action.activation_class.payload_sha256 ||
-            cached.idempotency_key !== key) {
-            throw new Error("invalid_cached_send_receipt");
-        }
-        return { page: rawPageFromAction(action), send_receipt: cached };
-    }
-    const existing = sendInflight.get(key);
-    if (existing) return existing;
-    const pending = (async () => {
-        const result = await executeOnce(action);
-        if (!result?.send_receipt || result.send_receipt.idempotency_key !== key) {
-            throw new Error("invalid_send_receipt");
-        }
-        await rememberSendReceipt(result.send_receipt);
-        return result;
-    })().finally(() => sendInflight.delete(key));
-    sendInflight.set(key, pending);
-    return pending;
+    if (!send) return executeOnce(action, guard);
+    return executeSend(action, guard);
 }
 
-async function handleMessage(event, activeSocket) {
+async function handleMessage(event, activeSocket, deadline) {
     if (socket !== activeSocket) {
         return;
     }
@@ -379,72 +371,129 @@ async function handleMessage(event, activeSocket) {
     try {
         const envelope = JSON.parse(event.data);
         if (envelope?.schema_version === SCHEMA_VERSION && envelope?.type === "hello_ack") {
-            await chrome.storage.session.set({ connectionState: "connected" });
+            await chrome.storage.session.set({ connectionState: "connected" }).catch(() => {});
+            if (socket !== activeSocket || activeSocket.readyState !== WebSocket.OPEN) return;
             startKeepalive(activeSocket);
             return;
         }
         command = parseHostCommand(event.data);
-        const result = await execute(command.action);
+        const result = await runBoundedCommand(
+            guard => execute(command.action, guard),
+            () => socket === activeSocket && activeSocket.readyState === WebSocket.OPEN,
+            () => activeSocket.close(),
+            Math.max(0, deadline - performance.now()),
+        );
         if (socket === activeSocket && activeSocket.readyState === WebSocket.OPEN) {
-            activeSocket.send(JSON.stringify(response(command.request_id, true, result, null)));
+            await sendSecure(activeSocket, response(command.request_id, true, result, null));
         }
     } catch (error) {
         const requestId = command?.request_id || "invalid";
         if (socket === activeSocket && activeSocket.readyState === WebSocket.OPEN) {
-            activeSocket.send(JSON.stringify(response(requestId, false, null, error instanceof Error ? error.message : "extension_error")));
+            await sendSecure(activeSocket, response(requestId, false, null, error instanceof Error ? error.message : "extension_error"));
         }
     }
 }
 
 async function connect() {
-    const settings = await storageGet("local", ["bridgeUrl", "pairingToken"]);
-    if (!settings.pairingToken) {
-        return;
-    }
     const generation = ++connectionGeneration;
+    const previousSocket = socket;
+    socket = null;
+    if (previousSocket) secureConnections.delete(previousSocket);
+    previousSocket?.close();
+    stopKeepalive();
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
     }
-    await chrome.alarms.clear(RECONNECT_ALARM);
-    stopKeepalive();
-    const bridgeUrl = settings.bridgeUrl || DEFAULT_BRIDGE_URL;
-    const previousSocket = socket;
-    const activeSocket = new WebSocket(bridgeUrl);
+    // Alarm service failure must not strand an otherwise usable connection.
+    try { await withTimeout(chrome.alarms.clear(RECONNECT_ALARM), 3000, "alarm_clear_timeout"); } catch {}
+    if (generation !== connectionGeneration) return;
+    let settings;
+    try {
+        settings = parsePairingSettings(await withTimeout(
+            storageGet("local", ["bridgeUrl", "pairingToken"]), 3000, "pairing_read_timeout"));
+    } catch {
+        if (generation === connectionGeneration) {
+            void chrome.storage.session.set({ connectionState: "disconnected" }).catch(() => {});
+            scheduleReconnect();
+        }
+        return;
+    }
+    if (generation !== connectionGeneration) return;
+    if (!settings) {
+        await chrome.storage.session.set({ connectionState: "disconnected" }).catch(() => {});
+        return;
+    }
+    let activeSocket;
+    try { activeSocket = new WebSocket(settings.bridgeUrl); }
+    catch {
+        void chrome.storage.session.set({ connectionState: "disconnected" }).catch(() => {});
+        scheduleReconnect();
+        return;
+    }
     socket = activeSocket;
-    previousSocket?.close();
-    void chrome.storage.session.set({ connectionState: "connecting" });
+    void chrome.storage.session.set({ connectionState: "connecting" }).catch(() => {});
     activeSocket.addEventListener("open", async () => {
         if (socket !== activeSocket || generation !== connectionGeneration) {
             activeSocket.close();
             return;
         }
-        reconnectDelayMs = 1000;
-        const incarnation = await profileIncarnation();
-        if (
-            socket !== activeSocket ||
-            generation !== connectionGeneration ||
-            activeSocket.readyState !== WebSocket.OPEN
-        ) {
+        try {
+            const incarnation = await withTimeout(profileIncarnation(), 3000, "profile_read_timeout");
+            if (
+                socket !== activeSocket ||
+                generation !== connectionGeneration ||
+                activeSocket.readyState !== WebSocket.OPEN
+            ) {
+                return;
+            }
+            const cipher = await createBridgeCipher(settings.pairingToken, {
+                extension_version: chrome.runtime.getManifest().version,
+                browser_version: browserVersion(),
+                profile_incarnation: incarnation
+            });
+            if (socket !== activeSocket || activeSocket.readyState !== WebSocket.OPEN) return;
+            secureConnections.set(activeSocket, cipher);
+            activeSocket.send(cipher.hello);
+        } catch { activeSocket.close(); }
+    });
+    let proved = false;
+    let acknowledged = false;
+    const handshakeTimer = setTimeout(() => { if (!acknowledged) activeSocket.close(); }, 10000);
+    const inbound = createInboundQueue(async (text, deadline) => {
+        if (socket !== activeSocket) return;
+        const cipher = secureConnections.get(activeSocket);
+        if (!cipher) throw new Error("unexpected_handshake_message");
+        if (!proved) {
+            const proof = await cipher.challenge(text);
+            if (socket !== activeSocket || activeSocket.readyState !== WebSocket.OPEN) return;
+            activeSocket.send(proof);
+            proved = true;
             return;
         }
-        activeSocket.send(JSON.stringify({
-            schema_version: SCHEMA_VERSION,
-            type: "hello",
-            pairing_token: settings.pairingToken,
-            extension_version: chrome.runtime.getManifest().version,
-            browser_version: browserVersion(),
-            profile_incarnation: incarnation
-        }));
-    });
-    activeSocket.addEventListener("message", (event) => void handleMessage(event, activeSocket));
+        const plaintext = await cipher.open(text);
+        if (socket !== activeSocket) return;
+        if (!acknowledged) {
+            const ack = JSON.parse(plaintext);
+            if (ack?.schema_version !== SCHEMA_VERSION || ack?.type !== "hello_ack") throw new Error("invalid_handshake_ack");
+            acknowledged = true;
+            reconnectDelayMs = 1000;
+            clearTimeout(handshakeTimer);
+        }
+        if (performance.now() >= deadline) throw new Error("bridge_command_expired");
+        await handleMessage({ data: plaintext }, activeSocket, deadline);
+    }, () => activeSocket.close());
+    activeSocket.addEventListener("message", event => { inbound.push(event.data); });
     activeSocket.addEventListener("close", () => {
+        inbound.stop();
+        clearTimeout(handshakeTimer);
+        secureConnections.delete(activeSocket);
         if (socket !== activeSocket || generation !== connectionGeneration) {
             return;
         }
         socket = null;
         stopKeepalive();
-        void chrome.storage.session.set({ connectionState: "disconnected" });
+        void chrome.storage.session.set({ connectionState: "disconnected" }).catch(() => {});
         scheduleReconnect();
     });
     activeSocket.addEventListener("error", () => activeSocket.close());
@@ -458,8 +507,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
         void connect();
     }
 });
-chrome.storage.onChanged.addListener((_changes, area) => {
-    if (area === "local") {
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && ("bridgeUrl" in changes || "pairingToken" in changes)) {
         void connect();
     }
 });

@@ -7,9 +7,10 @@
         "capability_inventory": true,
         "full_session_snapshot": true,
         "permission_decision": true,
+        "approval_delegation": true,
         "grant_revoke": true,
         "background_task_cancel": true,
-        "unknown_outcome_disposition": true,
+        "exec_pty": true,
         "object_context": true,
         "future_optional": "ignored"
       }
@@ -21,9 +22,10 @@
         "capability_inventory": true,
         "full_session_snapshot": false,
         "permission_decision": false,
+        "approval_delegation": false,
         "grant_revoke": false,
         "background_task_cancel": false,
-        "unknown_outcome_disposition": false,
+        "exec_pty": false,
         "object_context": false
       }
     },
@@ -34,9 +36,10 @@
         "capability_inventory": true,
         "full_session_snapshot": true,
         "permission_decision": true,
+        "approval_delegation": true,
         "grant_revoke": true,
         "background_task_cancel": true,
-        "unknown_outcome_disposition": true,
+        "exec_pty": true,
         "object_context": true
       }
     },
@@ -141,7 +144,7 @@
     "evidenceSummary": {"schemaVersion":1,"nodes":[],"artifacts":[],"handoffReceipts":[],"missingSourceEnvelopeIds":[],"truncated":false,"graphComplete":true},
     "messages": [{"id":"message-1","turnId":"turn-1","role":"user","text":"Inspect the device","toolCalls":[]}],
     "contextNotices": [{"id":"notice-1","turnId":"turn-1","kind":"compacted","checkpointGeneration":1,"coveredMessageCount":2}],
-    "contextAttachments": [{"id":"attachment-1","kind":"file","providerId":"filesystem","capabilityId":"file.inspect","displaySummary":"report.txt","createdAtUnixMs":1788086400000,"expiresAtUnixMs":1788086700000,"state":"active"}]
+    "fileScope":{"revision":0,"directories":[]},"contextAttachments": [{"id":"attachment-1","kind":"file","providerId":"filesystem","capabilityId":"file.inspect","displaySummary":"report.txt","createdAtUnixMs":1788086400000,"expiresAtUnixMs":1788086700000,"state":"active"}]
   },
   "session_list": {
     "sessions": [{"sessionId":"session-1","conversationId":"conversation-1","firstQuestion":"Inspect the device","createdAt":"2026-08-30T00:00:00Z","updatedAt":"2026-08-30T00:00:02Z","active":true,"messageCount":2}]

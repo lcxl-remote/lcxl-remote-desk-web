@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetAiAssistantSessionQueryResponse, GetAiAssistantSessionQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { GetAiAssistantSessionQueryResponse, GetAiAssistantSessionQueryParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getAiAssistantSession } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const getAiAssistantSessionQueryKey = (params?: GetAiAssistantSessionQueryParams) => [{ url: '/api/my/ai-assistant-session' }, ...(params ? [params] : [])] as const
 

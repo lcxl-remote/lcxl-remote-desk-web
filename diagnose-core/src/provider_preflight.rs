@@ -31,6 +31,8 @@ mod background_input;
 pub use background_input::{BackgroundInputCallPreflight, background_input_from_call};
 mod semantic_ui;
 pub use semantic_ui::{UiCallPreflight, ui_action_from_call, ui_application_from_call};
+pub mod wayland_output;
+pub use wayland_output::{WaylandOutputInputPreflight, wayland_output_input_from_call};
 mod semantic_raw_input;
 pub use semantic_raw_input::{RawInputCallPreflight, raw_input_from_call};
 mod semantic_iwork;

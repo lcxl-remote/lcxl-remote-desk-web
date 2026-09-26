@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { UninstallServiceMutationResponse, UninstallService503 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { UninstallServiceMutationResponse, UninstallService503 } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { uninstallService } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const uninstallServiceMutationKey = () => [{ url: '/api/service/uninstall' }] as const
 

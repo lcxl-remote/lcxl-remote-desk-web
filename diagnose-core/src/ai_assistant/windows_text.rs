@@ -5,6 +5,8 @@ pub const ADAPTER_ID: &str = "file.text.windows.edge";
 pub(super) fn adapter_for_os(os: &str) -> &'static str {
     if os.eq_ignore_ascii_case("windows") {
         ADAPTER_ID
+    } else if os.eq_ignore_ascii_case("linux") {
+        linux::TEXT_ADAPTER_ID
     } else {
         TEXT_FILE_ADAPTER_ID
     }
@@ -44,11 +46,19 @@ mod tests {
             assert_eq!(capability.wire.tool_name, tool);
             assert_eq!(
                 capability.adapter_ids,
-                vec![TEXT_FILE_ADAPTER_ID.to_owned(), ADAPTER_ID.to_owned()]
+                vec![
+                    TEXT_FILE_ADAPTER_ID.to_owned(),
+                    ADAPTER_ID.to_owned(),
+                    linux::TEXT_ADAPTER_ID.to_owned()
+                ]
             );
             assert_eq!(
                 capability.wire.prerequisites.platforms,
-                vec![CapabilityPlatform::Windows, CapabilityPlatform::Macos]
+                vec![
+                    CapabilityPlatform::Windows,
+                    CapabilityPlatform::Macos,
+                    CapabilityPlatform::Linux
+                ]
             );
             assert_eq!(
                 capability.wire.execution_policy,

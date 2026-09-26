@@ -25,8 +25,8 @@ pub fn prepare_tauri_window_backend() {
 
 /// System-level input blocking.
 ///
-/// Only macOS routes `on_local_escape`; the other platforms rely on the Tauri
-/// global shortcut alone and ignore it.
+/// macOS and Linux route `on_local_escape` from their native interceptor;
+/// Windows relies on the Tauri global shortcut.
 pub fn block_input(
     block: bool,
     on_local_escape: Option<LocalEscapeCallback>,
@@ -40,8 +40,7 @@ pub fn block_input(
     return macos::block_input(block, on_local_escape);
     #[cfg(target_os = "linux")]
     {
-        let _ = on_local_escape;
-        return linux::block_input(block);
+        return linux::block_input(block, on_local_escape);
     }
 }
 

@@ -37,6 +37,8 @@ const MAX_DIRECTORY_SCAN_ENTRIES: usize = 100_000;
 const MAX_DIRECTORY_PAGE_CURSORS: usize = 512;
 const DIRECTORY_PAGE_CURSOR_TTL_SECONDS: i64 = 120;
 const MAX_TEXT_READ_BYTES: u32 = 64 * 1024;
+#[cfg(target_os = "linux")]
+mod linux_publish;
 #[cfg(target_os = "macos")]
 mod macos_publish;
 pub(crate) mod publication;
@@ -46,7 +48,10 @@ pub(crate) mod text_mutation;
 #[cfg(windows)]
 #[path = "file_reference_store/windows_text_mutation.rs"]
 pub(crate) mod text_mutation;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "linux")]
+#[path = "file_reference_store/linux_text_mutation.rs"]
+pub(crate) mod text_mutation;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 #[path = "file_reference_store/text_recovery_context.rs"]
 mod text_recovery_context;
 #[cfg(any(windows, target_os = "macos"))]
@@ -998,10 +1003,10 @@ fn enumerate_directory_from(
             return Ok((rows, true, false));
         }
         matched += 1;
-        // macOS signs only the already-open immediate regular child. Future
+        // Sign only the already-open immediate regular child. Future
         // reads reopen and compare this identity; neither a path nor metadata
         // alone grants content access. Do not follow links or mint directories.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let object_ref = if metadata.is_file() && name.to_str().is_ok() {
             let identity = unix_file_identity(&child)
                 .map_err(|cause| io_error("read child identity", cause))?;
@@ -1018,7 +1023,7 @@ fn enumerate_directory_from(
         } else {
             None
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let object_ref = None;
         rows.push(DirectoryEntryProjection {
             object_ref,
@@ -2107,147 +2112,7 @@ fn create_binary_artifact_with_limit(
     content_bytes: &[u8],
     max_bytes: usize,
 ) -> Result<CreatedTextArtifact, AgentError> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-
-    struct PendingStage<'a> {
-        directory: &'a File,
-        name: &'a std::ffi::CStr,
-        armed: bool,
-    }
-
-    impl Drop for PendingStage<'_> {
-        fn drop(&mut self) {
-            if self.armed {
-                unsafe {
-                    libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0);
-                }
-            }
-        }
-    }
-
-    if directory.object_kind != ObjectKind::Directory {
-        return Err(error(
-            AgentErrorKind::InvalidInput,
-            "artifact creation requires one selected directory reference",
-            false,
-        ));
-    }
-    if content_bytes.len() > max_bytes {
-        return Err(error(
-            AgentErrorKind::OutputLimitExceeded,
-            format!("artifact content exceeds the {max_bytes} byte ceiling"),
-            false,
-        ));
-    }
-    if file_name.is_empty()
-        || file_name.len() > 200
-        || matches!(file_name, "." | "..")
-        || file_name
-            .chars()
-            .any(|character| character.is_control() || character == '/')
-    {
-        return Err(error(
-            AgentErrorKind::InvalidInput,
-            "artifact name is not one safe Linux leaf component",
-            false,
-        ));
-    }
-    let leaf = CString::new(file_name).map_err(|_| {
-        error(
-            AgentErrorKind::InvalidInput,
-            "artifact name contains an invalid NUL byte",
-            false,
-        )
-    })?;
-    let stage_name = CString::new(format!(".lrd-artifact-{}", uuid::Uuid::new_v4()))
-        .expect("UUID artifact stage name has no NUL");
-    let stored = resolve(directory)?;
-    let selected = open_verified(&stored.path)?;
-    if selected.identity != stored.identity || !selected.metadata.is_dir() {
-        return Err(error(
-            AgentErrorKind::InvalidInput,
-            "selected directory changed after reference issuance",
-            false,
-        ));
-    }
-
-    let result = (|| -> std::io::Result<CreatedTextArtifact> {
-        let parent_identity = unix_file_identity(&selected.handle)?;
-        let raw = unsafe {
-            libc::openat(
-                selected.handle.as_raw_fd(),
-                stage_name.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if raw < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut pending_stage = PendingStage {
-            directory: &selected.handle,
-            name: &stage_name,
-            armed: true,
-        };
-        let mut created = unsafe { File::from_raw_fd(raw) };
-        created.write_all(content_bytes)?;
-        created.sync_all()?;
-        drop(created);
-
-        let renamed = unsafe {
-            libc::renameat2(
-                selected.handle.as_raw_fd(),
-                stage_name.as_ptr(),
-                selected.handle.as_raw_fd(),
-                leaf.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if renamed != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        pending_stage.armed = false;
-        selected.handle.sync_all()?;
-        let published = open_relative_unix(&selected.handle, &leaf)?;
-        let created_identity = unix_file_identity(&published)?;
-        drop(published);
-        #[cfg(test)]
-        run_artifact_after_close_hook();
-        if unix_file_identity(&selected.handle)? != parent_identity {
-            return Err(std::io::Error::other(
-                "target parent identity changed during artifact creation",
-            ));
-        }
-        let mut verified = open_relative_unix(&selected.handle, &leaf)?;
-        if unix_file_identity(&verified)? != created_identity {
-            return Err(std::io::Error::other(
-                "artifact identity changed before read-back verification",
-            ));
-        }
-        let mut bytes = Vec::new();
-        verified.read_to_end(&mut bytes)?;
-        if unix_file_identity(&verified)? != created_identity {
-            return Err(std::io::Error::other(
-                "artifact identity changed during read-back verification",
-            ));
-        }
-        if bytes != content_bytes {
-            return Err(std::io::Error::other(
-                "artifact read-back differs from requested bytes",
-            ));
-        }
-        let file =
-            issue_durable_artifact_with_identity(&stored.path.join(file_name), &created_identity)
-                .map_err(|error| std::io::Error::other(error.message))?;
-        Ok(CreatedTextArtifact {
-            file,
-            file_name: file_name.to_string(),
-            byte_len: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
-        })
-    })();
-    result.map_err(|cause| io_error("create verified artifact", cause))
+    linux_publish::publish_with_limit(directory, file_name, content_bytes, max_bytes, &mut false)
 }
 
 #[cfg(target_os = "linux")]

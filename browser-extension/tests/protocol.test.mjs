@@ -30,7 +30,7 @@ function extensionChrome(overrides = {}) {
     return {
         alarms: {
             clear: async () => true,
-            create() {},
+            create: async () => undefined,
             onAlarm: event
         },
         permissions: {
@@ -223,6 +223,7 @@ test("exact send reuses one stored receipt without dispatching a second click", 
     assert.deepEqual((await execute(action)).send_receipt, receipt);
     assert.deepEqual((await execute(action)).send_receipt, receipt);
     assert.equal(sendDispatches, 1);
+    await new Promise(resolve => setImmediate(resolve));
     delete globalThis.chrome;
 });
 
@@ -240,7 +241,7 @@ test("MV3 reconnect uses an alarm that survives service-worker suspension", asyn
     const worker = await readFile(new URL("../src/service-worker.js", import.meta.url), "utf8");
     assert.match(worker, /chrome\.alarms\.create\(RECONNECT_ALARM/u);
     assert.match(worker, /chrome\.alarms\.onAlarm\.addListener/u);
-    assert.match(worker, /await chrome\.alarms\.clear\(RECONNECT_ALARM\)/u);
+    assert.ok(worker.includes("await withTimeout(chrome.alarms.clear(RECONNECT_ALARM),"));
 });
 
 test("host permission patterns stay least-privilege while exact ports remain runtime-bound", () => {
@@ -314,6 +315,7 @@ test("service worker consults live permission before opening a target tab", asyn
     await assert.rejects(() => execute(openCommand().action), /host_permission_revoked/u);
     assert.equal(createdTabs, 0);
     await Promise.resolve();
+    await new Promise(resolve => setImmediate(resolve));
     delete globalThis.chrome;
 });
 
@@ -368,6 +370,7 @@ test("open retries only the read-only descriptor on one newly created tab", asyn
     assert.equal(injectedScripts, 1);
     assert.equal(messageAttempts, 3);
     assert.equal(result.page.page_id, "tab-9");
+    await new Promise(resolve => setImmediate(resolve));
     delete globalThis.chrome;
 });
 
@@ -394,10 +397,11 @@ test("descriptor retry shares one deadline across message and injection fallback
 
     assert.ok(Date.now() - startedAt < 150);
     assert.ok(messageAttempts >= 1);
+    await new Promise(resolve => setImmediate(resolve));
     delete globalThis.chrome;
 });
 
-test("navigation settle timeout reuses the tab returned by create without a second lookup", async () => {
+test("an unresponsive status lookup cannot extend the navigation settle deadline", async () => {
     let tabLookups = 0;
     globalThis.chrome = extensionChrome({
         tabs: {
@@ -415,8 +419,9 @@ test("navigation settle timeout reuses the tab returned by create without a seco
     const tabId = await waitForComplete({ id: 14, status: "loading" }, 20);
 
     assert.equal(tabId, 14);
-    assert.equal(tabLookups, 0);
+    assert.equal(tabLookups, 1);
     assert.ok(Date.now() - startedAt < 150);
+    await new Promise(resolve => setImmediate(resolve));
     delete globalThis.chrome;
 });
 
@@ -455,6 +460,7 @@ test("open_page reuses the exact existing target after an unknown prior open", a
 
     assert.equal(createdTabs, 0);
     assert.equal(result.page.page_id, "tab-22");
+    await new Promise(resolve => setImmediate(resolve));
     delete globalThis.chrome;
 });
 
@@ -507,6 +513,7 @@ test("open_page reuses the remembered tab after an exact target redirects", asyn
 
     assert.equal(createdTabs, 0);
     assert.equal(result.page.page_id, "tab-31");
+    await new Promise(resolve => setImmediate(resolve));
     delete globalThis.chrome;
 });
 
@@ -556,6 +563,7 @@ test("same-origin user navigation becomes stale before a typed navigate action",
 
     await assert.rejects(() => execute(action), /stale_page_ref/u);
     assert.equal(updatedTabs, 0);
+    await new Promise(resolve => setImmediate(resolve));
     delete globalThis.chrome;
 });
 
@@ -602,6 +610,7 @@ test("snapshot rejects a missing observation after refreshing same-origin naviga
 
     await assert.rejects(() => execute(action), /page_scope_changed/u);
     assert.equal(snapshotReads, 1);
+    await new Promise(resolve => setImmediate(resolve));
     delete globalThis.chrome;
 });
 
@@ -668,7 +677,80 @@ test("signed-in account change invalidates a page even when URL and document rev
         assert.equal(samePageObservation(page, { ...page }), true);
         assert.equal(samePageObservation(page, { ...page, account_id: "gmail-web:other@example.test" }), false);
         assert.equal(samePageObservation(page, { ...page, account_id: null }), false);
-    } finally { delete globalThis.chrome; }
+    } finally {
+        await new Promise(resolve => setImmediate(resolve));
+        delete globalThis.chrome;
+    }
+});
+
+test("navigation already completed before listener registration is detected by a bounded status read", async () => {
+    const listeners = new Set();
+    let lookups = 0;
+    globalThis.chrome = extensionChrome({
+        tabs: {
+            ...extensionChrome().tabs,
+            onUpdated: {
+                addListener: listener => listeners.add(listener),
+                removeListener: listener => listeners.delete(listener)
+            },
+            get: async id => {
+                assert.equal(listeners.size, 1);
+                lookups++;
+                return { id, status: "complete" };
+            }
+        }
+    });
+    try {
+        const { waitForComplete } = await import("../src/service-worker.js?completed-before-listener-test");
+        assert.equal(await waitForComplete({ id: 14, status: "loading" }, 1000), 14);
+        assert.equal(lookups, 1);
+        assert.equal(listeners.size, 0);
+    } finally {
+        await new Promise(resolve => setImmediate(resolve));
+        delete globalThis.chrome;
+    }
+});
+
+
+test("a missing completion event is recovered by serial status reads", async () => {
+    let lookups = 0;
+    globalThis.chrome = extensionChrome({
+        tabs: {
+            ...extensionChrome().tabs,
+            get: async id => ({ id, status: ++lookups === 1 ? "loading" : "complete" })
+        }
+    });
+    try {
+        const { waitForComplete } = await import("../src/service-worker.js?missing-completion-event-test");
+        assert.equal(await waitForComplete({ id: 14, status: "loading" }, 1000), 14);
+        assert.equal(lookups, 2);
+    } finally {
+        await new Promise(resolve => setImmediate(resolve));
+        delete globalThis.chrome;
+    }
+});
+
+test("a late loading status cannot restart polling after the navigation deadline", async () => {
+    let release;
+    let lookups = 0;
+    globalThis.chrome = extensionChrome({
+        tabs: {
+            ...extensionChrome().tabs,
+            get: () => {
+                lookups++;
+                return new Promise(resolve => { release = resolve; });
+            }
+        }
+    });
+    try {
+        const { waitForComplete } = await import("../src/service-worker.js?late-navigation-status-test");
+        assert.equal(await waitForComplete({ id: 14, status: "loading" }, 20), 14);
+        release({ id: 14, status: "loading" });
+        await new Promise(resolve => setTimeout(resolve, 300));
+        assert.equal(lookups, 1);
+    } finally {
+        delete globalThis.chrome;
+    }
 });
 
 

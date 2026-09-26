@@ -1,0 +1,22 @@
+name: Browser Assistant Contract
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  extension-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      # These tests use Node's built-in runner and mocked Chrome APIs. They do
+      # not connect to a browser, desktop session or real bridge endpoint.
+      - name: Check extension protocol, crypto and connection lifecycle
+        working-directory: browser-extension
+        run: timeout --signal=TERM --kill-after=5s 120s npm test

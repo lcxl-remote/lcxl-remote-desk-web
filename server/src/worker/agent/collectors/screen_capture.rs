@@ -27,6 +27,8 @@ use desk_signal_facade::model::desk_settings::DeskSettings;
 const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 
 pub(crate) mod display;
+#[cfg(target_os = "linux")]
+pub(crate) mod wayland;
 mod window;
 #[cfg(windows)]
 mod windows_display;
@@ -66,6 +68,7 @@ pub(crate) fn collect(
     });
 
     Ok(ScreenCaptureOutput {
+        frame_observation: None,
         display: display::reference(&desk_settings.video_device_name),
         format: ImageFormat::Png,
         width,
@@ -161,8 +164,10 @@ fn encode_png_with_dimensions(
 ) -> Result<(Vec<u8>, u32, u32), AgentError> {
     let width = frame.get_width();
     let height = frame.get_height();
-    if width == 0 || height == 0 {
-        return Err(internal("captured frame has zero dimensions"));
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 64 * 1024 * 1024 {
+        return Err(internal(
+            "captured frame dimensions are empty or exceed the pixel budget",
+        ));
     }
 
     let stride = frame.get_stride() as usize;
@@ -172,6 +177,9 @@ fn encode_png_with_dimensions(
         ImageType::RGB => (3usize, false),
     };
     let row_bytes = width as usize * bytes_per_pixel;
+    if stride < row_bytes {
+        return Err(internal("captured row stride is too small"));
+    }
 
     // A buffer shorter than its reported dimensions is a capture bug; fail
     // rather than slice out of bounds.

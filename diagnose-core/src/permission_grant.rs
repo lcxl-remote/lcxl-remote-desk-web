@@ -408,6 +408,8 @@ pub fn build_permission_grants(
                 "native UI approval requires application_scope; exact target/action approvals are not supported",
             ));
         }
+        let exact_output_input = capability.required_capability
+            == desk_agent_protocol::Capability::DesktopOutputInputConfirmed;
         let exact_raw_input = capability.required_capability
             == desk_agent_protocol::Capability::DesktopInputFallbackConfirmed;
         let text_mutation = crate::provider_preflight::text_file::TextMutationPreflight::supports(
@@ -431,6 +433,30 @@ pub fn build_permission_grants(
                 return Err(internal("application UI approval scope is invalid"));
             }
             expected
+        } else if exact_output_input {
+            let call = crate::chat::ToolCall {
+                id: requested.item_id.clone(),
+                name: requested.tool_name.clone(),
+                arguments_json: requested
+                    .canonical_input_json
+                    .clone()
+                    .ok_or_else(|| internal("output input requires exact arguments"))?,
+            };
+            let preflight = crate::provider_preflight::WaylandOutputInputPreflight::from_history(
+                context.registry,
+                context.surface,
+                &call,
+                &session.conversation,
+                context.now_unix_ms,
+            )?;
+            if preflight.resource_scope() != resource_scope.as_slice()
+                || operation_scope.as_slice() != ["wayland_output_input:exact_step"]
+            {
+                return Err(internal(
+                    "whole-output input requires the exact independently approved scope",
+                ));
+            }
+            preflight.resource_scope().to_vec()
         } else if text_mutation {
             let call = crate::chat::ToolCall {
                 id: requested.item_id.clone(),

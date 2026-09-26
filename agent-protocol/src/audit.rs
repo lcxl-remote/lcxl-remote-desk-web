@@ -856,6 +856,7 @@ impl Capability {
             Capability::DesktopUiActionConfirmed => "desktop.ui.action.confirmed",
             Capability::DesktopBackgroundInputConfirmed => "desktop.input.background.confirmed",
             Capability::DesktopInputFallbackConfirmed => "desktop.input.fallback.confirmed",
+            Capability::DesktopOutputInputConfirmed => "desktop.output.input.confirmed",
             Capability::OfficeExcelPatchConfirmed => "office.excel.patch.confirmed",
             Capability::OfficePowerPointPatchConfirmed => "office.powerpoint.patch.confirmed",
             Capability::SpreadsheetLivePatchConfirmed => "spreadsheet.live.patch.confirmed",
@@ -1245,6 +1246,7 @@ mod tests {
         }));
         let output = OperationOutput::ReadContext(ReadContextOutput::ScreenCaptureCurrent(
             crate::ScreenCaptureOutput {
+                frame_observation: None,
                 window_geometry: None,
                 display: r"\\.\DISPLAY1".into(),
                 format: crate::ImageFormat::Png,

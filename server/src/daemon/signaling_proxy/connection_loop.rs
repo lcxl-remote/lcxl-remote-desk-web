@@ -534,6 +534,10 @@ pub(super) async fn maintain_proxy_connection(
             outbound = outbound_rx.recv() => {
                 match outbound {
                     Ok(msg) => {
+                        #[cfg(target_os = "linux")]
+                        if !router_ctx.worker_mgr.turn_query_allowed_on(&msg, router_ctx.file_recovery_authority.as_deref()) {
+                            continue;
+                        }
                         if let Err(e) = sink.send(awc::ws::Message::Text(msg.into())).await {
                             error!("[Proxy] WS send error: {e}");
                             break;

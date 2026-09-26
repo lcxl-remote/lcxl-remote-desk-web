@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { QueryVirtualDisplaySettingsQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import type { QueryVirtualDisplaySettingsQueryResponse } from "../../types.ts";
-import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 import { queryVirtualDisplaySettings } from "../../clients.ts";
+import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 
 export const queryVirtualDisplaySettingsSuspenseQueryKey = () => [{ url: '/api/desk/settings/virtual-display' }] as const
 

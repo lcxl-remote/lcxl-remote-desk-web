@@ -28,6 +28,20 @@ describe('durable assistant images', () => {
         expect(getAssistantImage).not.toHaveBeenCalled();
         expect(screen.queryByRole('img')).toBeNull();
     });
+    it('shows saved observation timing without loading pixels or promoting the frame to fresh', async () => {
+        vi.mocked(listAssistantImages).mockResolvedValue({ data: [{ ...frame, frame_observation: {
+            freshness: 'latest_observed', received_at_unix_ms: 1000, receipt_age_ms: 2500,
+        } }], success: true, code: 0 });
+        render(<AssistantImages sessionId="stored-run" evidence={[]} />);
+        expect(await screen.findByText('pages.aiAssistant.observation.latestObserved')).toBeVisible();
+        expect(screen.getByText('pages.aiAssistant.observation.historicalFrame')).toBeVisible();
+        expect(screen.queryByText('pages.aiAssistant.observation.freshFrame')).toBeNull();
+        expect(getAssistantImage).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
+        await screen.findByRole('img');
+        expect(screen.getByText('pages.aiAssistant.observation.latestObserved')).toBeVisible();
+        expect(screen.queryByText('pages.aiAssistant.observation.freshFrame')).toBeNull();
+    });
     it('inserts each screenshot after its tool record and before the next reply', async () => {
         render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
             { id: 'question', role: 'user', text: 'Capture the window' },

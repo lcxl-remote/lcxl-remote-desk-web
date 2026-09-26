@@ -22,6 +22,16 @@ pub struct DirtyRect {
 }
 
 pub trait ImageInfo {
+    /// Presentation time in the producer clock domain, not Unix time or a freshness proof.
+    fn source_timestamp_ns(&self) -> Option<u64> {
+        None
+    }
+
+    /// Consumer receipt time, not proof of when the compositor rendered pixels.
+    fn received_at(&self) -> Option<(std::time::SystemTime, std::time::Instant)> {
+        None
+    }
+
     fn get_type(&self) -> ImageType;
     fn get_data(&self) -> &[u8];
     fn get_width(&self) -> u32;

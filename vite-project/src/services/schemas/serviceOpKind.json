@@ -1,0 +1,1 @@
+{"type":"string","description":"Service installation operation kind.","enum":["install","uninstall"],"x-readme-ref-name":"ServiceOpKind"}

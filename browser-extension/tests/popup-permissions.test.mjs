@@ -2,10 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { parsePairingSettings } from '../src/pairing-settings.js';
 import { permissionPatternForUrl } from '../src/host-permissions.js';
 
 const source = readFileSync(new URL('../src/popup.js', import.meta.url), 'utf8')
-    .replace(/^import .*;\r?\n/, '');
+    .replace(/^import .*;\r?\n/gm, '');
 
 function popup(request) {
     const elements = new Map();
@@ -28,7 +29,7 @@ function popup(request) {
         },
         permissions: { request },
     };
-    runInNewContext(source, { chrome, document, permissionPatternForUrl });
+    runInNewContext(source, { chrome, document, permissionPatternForUrl, parsePairingSettings });
     return {
         click: () => elements.get('#allow-all-web').handlers.click(),
         status: () => elements.get('#status').textContent,

@@ -166,6 +166,7 @@ pub fn build_messages(
                     "height": shot.height,
                     "dpi_x": shot.dpi_x,
                     "dpi_y": shot.dpi_y,
+                    "frame_observation": shot.frame_observation,
                 });
             }
             continue;
@@ -434,6 +435,7 @@ mod tests {
             capability: "screen.capture.current".into(),
             outcome: AgentOutcome::Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ScreenCaptureCurrent(desk_agent_protocol::ScreenCaptureOutput {
+                    frame_observation: None,
                     window_geometry: None,
                     display: r"\\.\DISPLAY1".into(),
                     format: desk_agent_protocol::ImageFormat::Jpeg,
@@ -477,6 +479,7 @@ mod tests {
             capability: "screen.capture.current".into(),
             outcome: AgentOutcome::Ok(OperationOutput::ReadContext(
                 ReadContextOutput::ScreenCaptureCurrent(desk_agent_protocol::ScreenCaptureOutput {
+                    frame_observation: None,
                     window_geometry: None,
                     display: r"\\.\DISPLAY1".into(),
                     format: desk_agent_protocol::ImageFormat::Jpeg,

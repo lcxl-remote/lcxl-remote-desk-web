@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
@@ -21,6 +21,11 @@ pub trait LivePortalSession: Send + Sync {
     async fn notify_pointer_button(&self, button: i32, state: u32) -> Result<(), PortalError>;
     async fn notify_pointer_axis(&self, delta_x: f64, delta_y: f64) -> Result<(), PortalError>;
     async fn notify_keyboard_keycode(&self, keycode: i32, state: u32) -> Result<(), PortalError>;
+    async fn notify_keyboard_keysym(&self, _keysym: i32, _state: u32) -> Result<(), PortalError> {
+        Err(PortalError::Backend(
+            "Portal keyboard symbols are unavailable".into(),
+        ))
+    }
     /// Resolves when the desktop Portal closes or loses this session.
     fn closure_token(&self) -> CancellationToken {
         CancellationToken::new()
@@ -74,6 +79,12 @@ pub struct WaylandPortalBroker {
     state: Mutex<BrokerState>,
     snapshot_tx: watch::Sender<PortalSnapshot>,
     ready_session: RwLock<Option<Arc<dyn LivePortalSession>>>,
+    input: StdMutex<Option<SharedInput>>,
+}
+
+struct SharedInput {
+    session: Arc<dyn LivePortalSession>,
+    sender: crate::PortalInputSender,
 }
 
 impl WaylandPortalBroker {
@@ -98,6 +109,7 @@ impl WaylandPortalBroker {
             }),
             snapshot_tx,
             ready_session: RwLock::new(None),
+            input: StdMutex::new(None),
         }))
     }
 
@@ -380,10 +392,36 @@ impl WaylandPortalBroker {
             .expect("Portal ready-session lock poisoned")
             .clone()
             .ok_or(PortalError::AuthorizationRequired)?;
+        if session.closure_token().is_cancelled() {
+            return Err(PortalError::Cancelled);
+        }
         if needs_input && !session.target().needs_input() {
             return Err(PortalError::AuthorizationRequired);
         }
         Ok(session)
+    }
+
+    /// All consumers of one live session share one serial input queue. This
+    /// method only borrows existing authorization and never starts or restores.
+    pub fn try_borrow_input(
+        &self,
+    ) -> Result<(Arc<dyn LivePortalSession>, crate::PortalInputSender), PortalError> {
+        let mut cached = self
+            .input
+            .lock()
+            .expect("Portal shared-input lock poisoned");
+        let session = self.try_borrow_session(true)?;
+        if let Some(input) = cached.as_ref()
+            && Arc::ptr_eq(&input.session, &session)
+        {
+            return Ok((session, input.sender.clone()));
+        }
+        let sender = crate::PortalInputSender::new(session.clone());
+        *cached = Some(SharedInput {
+            session: session.clone(),
+            sender: sender.clone(),
+        });
+        Ok((session, sender))
     }
 
     async fn invalidate_closed_session(
@@ -616,6 +654,44 @@ mod tests {
             .await
             .expect("snapshot channel")
             .clone()
+    }
+
+    #[tokio::test]
+    async fn all_consumers_borrow_one_input_queue_and_closed_sessions_are_rejected() {
+        use crate::PortalInputEvent;
+        let broker =
+            broker_with_results(vec![Ok((DEVICE_TYPE_KEYBOARD | DEVICE_TYPE_POINTER, None))]).await;
+        broker
+            .authorize("input".into(), AuthorizationTarget::ScreenAndInput)
+            .await
+            .unwrap();
+        wait_for_phase(&broker, PortalPhase::Ready).await;
+        let (session, human) = broker.try_borrow_input().unwrap();
+        let (same_session, assistant) = broker.try_borrow_input().unwrap();
+        assert!(Arc::ptr_eq(&session, &same_session));
+        human.notify_pointer_button(0x110, 1).unwrap();
+        let denied = assistant
+            .submit_guarded(
+                PortalInputEvent::PointerMotionAbsolute { x: 1.0, y: 1.0 },
+                std::time::Duration::from_secs(1),
+                CancellationToken::new(),
+                || Ok(()),
+            )
+            .await
+            .unwrap_err();
+        assert!(!denied.possibly_started);
+        human.notify_pointer_button(0x110, 0).unwrap();
+        assistant
+            .submit_guarded(
+                PortalInputEvent::PointerMotionAbsolute { x: 1.0, y: 1.0 },
+                std::time::Duration::from_secs(1),
+                CancellationToken::new(),
+                || Ok(()),
+            )
+            .await
+            .unwrap();
+        session.closure_token().cancel();
+        assert!(broker.try_borrow_input().is_err());
     }
 
     #[tokio::test]

@@ -1157,6 +1157,7 @@ export const objectKindEnum = {
     directory: "directory",
     terminal_output: "terminal_output",
     browser_surface: "browser_surface",
+    desktop_output: "desktop_output",
     application_launch_target: "application_launch_target"
 } as const;
 
@@ -1559,6 +1560,189 @@ export type TextFileConfirmationDto = {
     recoverable: boolean;
 };
 
+/**
+ * @description Exact screen geometry observed immediately before one raw-input fallback\nstep. The edge re-resolves the owner-selected display and foreground\napplication, then requires these physical-pixel and DPI facts to remain\nidentical before injecting anything. Coordinates are never interpreted in\na stale or model-selected display space.
+*/
+export type RawInputScreenContext = {
+    /**
+     * @type string
+    */
+    display: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    dpi_x: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    dpi_y: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    height: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    width: number;
+};
+
+export const rawInputMouseButtonEnum = {
+    primary: "primary",
+    secondary: "secondary"
+} as const;
+
+export type RawInputMouseButtonEnumKey = (typeof rawInputMouseButtonEnum)[keyof typeof rawInputMouseButtonEnum];
+
+export type RawInputMouseButton = RawInputMouseButtonEnumKey;
+
+export const rawInputKeyEnum = {
+    enter: "enter",
+    tab: "tab",
+    escape: "escape",
+    backspace: "backspace",
+    delete: "delete",
+    space: "space",
+    arrow_up: "arrow_up",
+    arrow_down: "arrow_down",
+    arrow_left: "arrow_left",
+    arrow_right: "arrow_right",
+    home: "home",
+    end: "end",
+    page_up: "page_up",
+    page_down: "page_down"
+} as const;
+
+export type RawInputKeyEnumKey = (typeof rawInputKeyEnum)[keyof typeof rawInputKeyEnum];
+
+/**
+ * @description Closed navigation-key set for the raw-input beta. Arbitrary virtual-key\ncodes and modifier chords are deliberately absent, so this cannot become a\nhidden command launcher or macro surface.
+*/
+export type RawInputKey = RawInputKeyEnumKey;
+
+export const rawInputStepKindEnum = {
+    click: "click"
+} as const;
+
+export type RawInputStepKindEnumKey = (typeof rawInputStepKindEnum)[keyof typeof rawInputStepKindEnum];
+
+export const rawInputStepKindEnum2 = {
+    key_press: "key_press"
+} as const;
+
+export type RawInputStepKindEnum2Key = (typeof rawInputStepKindEnum2)[keyof typeof rawInputStepKindEnum2];
+
+export const rawInputStepKindEnum3 = {
+    type_text: "type_text"
+} as const;
+
+export type RawInputStepKindEnum3Key = (typeof rawInputStepKindEnum3)[keyof typeof rawInputStepKindEnum3];
+
+export const rawInputStepKindEnum4 = {
+    scroll: "scroll"
+} as const;
+
+export type RawInputStepKindEnum4Key = (typeof rawInputStepKindEnum4)[keyof typeof rawInputStepKindEnum4];
+
+/**
+ * @description One and only one bounded raw-input fallback step. A sealed plan containing\nthis action must contain exactly one action, and completion remains\nunverified until a later semantic or screen observation proves the intended\napplication state.
+*/
+export type RawInputStep = ({
+    /**
+     * @type string
+    */
+    kind: RawInputStepKindEnumKey;
+    /**
+     * @type object
+    */
+    params: {
+        /**
+         * @type string
+        */
+        button: RawInputMouseButton;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        x: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        y: number;
+    };
+} | {
+    /**
+     * @type string
+    */
+    kind: RawInputStepKindEnum2Key;
+    /**
+     * @type object
+    */
+    params: {
+        /**
+         * @description Closed navigation-key set for the raw-input beta. Arbitrary virtual-key\ncodes and modifier chords are deliberately absent, so this cannot become a\nhidden command launcher or macro surface.
+         * @type string
+        */
+        key: RawInputKey;
+    };
+} | {
+    /**
+     * @type string
+    */
+    kind: RawInputStepKindEnum3Key;
+    /**
+     * @type object
+    */
+    params: {
+        /**
+         * @type string
+        */
+        text: string;
+    };
+} | {
+    /**
+     * @type string
+    */
+    kind: RawInputStepKindEnum4Key;
+    /**
+     * @type object
+    */
+    params: {
+        /**
+         * @type integer, int32
+        */
+        horizontal: number;
+        /**
+         * @type integer, int32
+        */
+        vertical: number;
+    };
+});
+
+export type WaylandOutputConfirmationDto = {
+    /**
+     * @type boolean
+    */
+    oneShot: boolean;
+    /**
+     * @description Exact screen geometry observed immediately before one raw-input fallback\nstep. The edge re-resolves the owner-selected display and foreground\napplication, then requires these physical-pixel and DPI facts to remain\nidentical before injecting anything. Coordinates are never interpreted in\na stale or model-selected display space.
+     * @type object
+    */
+    screen: RawInputScreenContext;
+    /**
+     * @description One and only one bounded raw-input fallback step. A sealed plan containing\nthis action must contain exactly one action, and completion remains\nunverified until a later semantic or screen observation proves the intended\napplication state.
+    */
+    step: RawInputStep;
+    /**
+     * @type boolean
+    */
+    wholeOutput: boolean;
+};
+
 export type GrantRequestItemDto = {
     applicationScope?: (null | UiApplicationScope);
     commandConfirmation?: (null | CommandConfirmationDto);
@@ -1607,6 +1791,7 @@ export type GrantRequestItemDto = {
      * @type string
     */
     toolName: string;
+    waylandOutputConfirmation?: (null | WaylandOutputConfirmationDto);
 };
 
 export const permissionRequestStateDtoEnum = {
@@ -1814,6 +1999,38 @@ export type ContentRef = ({
     size_bytes: number;
 });
 
+export const screenFrameFreshnessEnum = {
+    fresh: "fresh",
+    latest_observed: "latest_observed",
+    unchanged_verified: "unchanged_verified"
+} as const;
+
+export type ScreenFrameFreshnessEnumKey = (typeof screenFrameFreshnessEnum)[keyof typeof screenFrameFreshnessEnum];
+
+export type ScreenFrameFreshness = ScreenFrameFreshnessEnumKey;
+
+export type VisualFrameTiming = {
+    /**
+     * @type string
+    */
+    freshness: ScreenFrameFreshness;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    receipt_age_ms: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    received_at_unix_ms: number;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    source_timestamp_ns?: number | null;
+};
+
 export const visualEvidencePhaseEnum = {
     before: "before",
     observation: "observation",
@@ -1884,6 +2101,7 @@ export type VisualEvidenceFrame = {
      * @type string
     */
     frame_id: string;
+    frame_observation?: (null | VisualFrameTiming);
     /**
      * @type string,null
     */
@@ -5058,6 +5276,13 @@ export type LcxlRTCIceServer = {
      * @type string
     */
     username: string;
+};
+
+export type LocalPairingProof = {
+    /**
+     * @type string
+    */
+    local_proof: string;
 };
 
 export const localScheduleRuleKindEnum = {
@@ -8821,6 +9046,85 @@ export type RestResponseServerInfo = {
     success: boolean;
 };
 
+export const serviceOperationErrorEnum = {
+    authorization_not_granted: "authorization_not_granted",
+    missing_pkexec: "missing_pkexec",
+    launch_failed: "launch_failed",
+    installer_failed: "installer_failed",
+    busy: "busy",
+    unsupported: "unsupported",
+    connection_lost: "connection_lost",
+    timed_out: "timed_out"
+} as const;
+
+export type ServiceOperationErrorEnumKey = (typeof serviceOperationErrorEnum)[keyof typeof serviceOperationErrorEnum];
+
+export type ServiceOperationError = ServiceOperationErrorEnumKey;
+
+export const serviceOpKindEnum = {
+    install: "install",
+    uninstall: "uninstall"
+} as const;
+
+export type ServiceOpKindEnumKey = (typeof serviceOpKindEnum)[keyof typeof serviceOpKindEnum];
+
+/**
+ * @description Service installation operation kind.
+*/
+export type ServiceOpKind = ServiceOpKindEnumKey;
+
+export const serviceOperationStateEnum = {
+    queued: "queued",
+    running: "running",
+    succeeded: "succeeded",
+    cancelled: "cancelled",
+    failed: "failed",
+    unknown: "unknown",
+    submitted: "submitted"
+} as const;
+
+export type ServiceOperationStateEnumKey = (typeof serviceOperationStateEnum)[keyof typeof serviceOperationStateEnum];
+
+export type ServiceOperationState = ServiceOperationStateEnumKey;
+
+export type RestResponseServiceOperationStatus = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        error?: (null | ServiceOperationError);
+        /**
+         * @type integer,null, int32
+        */
+        exit_code?: number | null;
+        /**
+         * @description Service installation operation kind.
+         * @type string
+        */
+        op: ServiceOpKind;
+        /**
+         * @type string
+        */
+        operation_id: string;
+        /**
+         * @type string
+        */
+        state: ServiceOperationState;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseSupportSessionStatus = {
     /**
      * @type integer, int32
@@ -9502,6 +9806,7 @@ export type RestResponseVecVisualEvidenceFrame = {
          * @type string
         */
         frame_id: string;
+        frame_observation?: (null | VisualFrameTiming);
         /**
          * @type string,null
         */
@@ -11650,6 +11955,27 @@ export type ServerInfo = {
     wayland_portal?: (null | WaylandPortalInfo);
 };
 
+export type ServiceOperationStatus = {
+    error?: (null | ServiceOperationError);
+    /**
+     * @type integer,null, int32
+    */
+    exit_code?: number | null;
+    /**
+     * @description Service installation operation kind.
+     * @type string
+    */
+    op: ServiceOpKind;
+    /**
+     * @type string
+    */
+    operation_id: string;
+    /**
+     * @type string
+    */
+    state: ServiceOperationState;
+};
+
 /**
  * @description Safe, user-visible projection of one daemon-owned session worker target.\nRaw OS session ids and worker keys are intentionally not exposed.
 */
@@ -12575,18 +12901,21 @@ export type QueryBackendInfoQuery = {
 /**
  * @description Pairing configuration
 */
-export type GetBrowserExtensionPairing200 = RestResponseBrowserExtensionPairing;
+export type CreateBrowserExtensionPairing200 = RestResponseBrowserExtensionPairing;
 
 /**
  * @description Extension bridge is not initialized
 */
-export type GetBrowserExtensionPairing500 = any;
+export type CreateBrowserExtensionPairing500 = any;
 
-export type GetBrowserExtensionPairingQueryResponse = GetBrowserExtensionPairing200;
+export type CreateBrowserExtensionPairingMutationRequest = LocalPairingProof;
 
-export type GetBrowserExtensionPairingQuery = {
-    Response: GetBrowserExtensionPairing200;
-    Errors: GetBrowserExtensionPairing500;
+export type CreateBrowserExtensionPairingMutationResponse = CreateBrowserExtensionPairing200;
+
+export type CreateBrowserExtensionPairingMutation = {
+    Response: CreateBrowserExtensionPairing200;
+    Request: CreateBrowserExtensionPairingMutationRequest;
+    Errors: CreateBrowserExtensionPairing500;
 };
 
 /**
@@ -14013,7 +14342,7 @@ export type QueryServerInfoQuery = {
 /**
  * @description Install request accepted
 */
-export type InstallService202 = any;
+export type InstallService202 = RestResponseServiceOperationStatus;
 
 /**
  * @description No host control hub or no Tauri shell connected
@@ -14030,10 +14359,33 @@ export type InstallServiceMutation = {
     Errors: InstallService503;
 };
 
+export type QueryServiceOperationPathParams = {
+    /**
+     * @description Server-generated operation identifier
+     * @type string
+    */
+    operation_id: string;
+};
+
+export type QueryServiceOperation200 = RestResponseServiceOperationStatus;
+
+/**
+ * @description Operation receipt unavailable
+*/
+export type QueryServiceOperation404 = any;
+
+export type QueryServiceOperationQueryResponse = QueryServiceOperation200;
+
+export type QueryServiceOperationQuery = {
+    Response: QueryServiceOperation200;
+    PathParams: QueryServiceOperationPathParams;
+    Errors: QueryServiceOperation404;
+};
+
 /**
  * @description Uninstall request accepted
 */
-export type UninstallService202 = any;
+export type UninstallService202 = RestResponseServiceOperationStatus;
 
 /**
  * @description No host control hub or no Tauri shell connected

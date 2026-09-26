@@ -576,7 +576,7 @@ pub async fn start_inprocess_daemon(
         paths.data_root(),
         device_id,
         session_id.to_string(),
-    )?;
+    );
 
     // Spawn the in-process worker: same WorkerSession::run_with_transports
     // entry point as the ServiceDaemon path; only difference is the
@@ -684,3 +684,6 @@ fn get_initial_desktop_name() -> Option<String> {
         None
     }
 }
+
+#[cfg(target_os = "linux")]
+mod linux_ai_input_route;

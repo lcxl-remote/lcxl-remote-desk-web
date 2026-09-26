@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { RevokeAiAssistantCapabilityGrantMutationRequest, RevokeAiAssistantCapabilityGrantMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { RevokeAiAssistantCapabilityGrantMutationRequest, RevokeAiAssistantCapabilityGrantMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { revokeAiAssistantCapabilityGrant } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const revokeAiAssistantCapabilityGrantMutationKey = () => [{ url: '/api/my/ai-assistant-session/capability-grant/revoke' }] as const
 

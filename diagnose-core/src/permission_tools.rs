@@ -999,6 +999,7 @@ pub fn build_permission_request(
             && matches!(
                 capability.wire.capability_id.as_str(),
                 crate::ai_assistant::DESKTOP_RAW_INPUT_CAPABILITY_ID
+                    | crate::ai_assistant::linux::OUTPUT_CAPABILITY_ID
                     | crate::ai_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID
                     | crate::ai_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID
                     | crate::ai_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID
@@ -1022,6 +1023,9 @@ pub fn build_permission_request(
             let input: SemanticActionInput = serde_json::from_str(canonical)
                 .map_err(|error| invalid(format!("decode semantic action input: {error}")))?;
             let expected_kind = match capability.required_capability {
+                Capability::DesktopOutputInputConfirmed => {
+                    desk_agent_protocol::computer_use::ObjectKind::DesktopOutput
+                }
                 Capability::DesktopInputFallbackConfirmed => {
                     desk_agent_protocol::computer_use::ObjectKind::Application
                 }
@@ -1045,6 +1049,14 @@ pub fn build_permission_request(
                 return Err(invalid(
                     "semantic action requires one complete target reference of the expected kind",
                 ));
+            }
+            if capability.required_capability == Capability::DesktopOutputInputConfirmed {
+                let call = crate::chat::ToolCall {
+                    id: item.item_id.clone(),
+                    name: item.tool_name.clone(),
+                    arguments_json: canonical.into(),
+                };
+                crate::provider_preflight::wayland_output_input_from_call(&call)?;
             }
             if capability.required_capability == Capability::DesktopInputFallbackConfirmed {
                 #[derive(Deserialize)]
@@ -1184,7 +1196,11 @@ pub fn build_permission_request(
         let resource_scope = if let Some(scope) = &application_scope {
             crate::application_ui::resource(&scope.application)
         } else if let Some(targets) = exact_semantic_refs.as_ref() {
-            fresh_object_resource_scope(targets)
+            if capability.required_capability == Capability::DesktopOutputInputConfirmed {
+                crate::provider_preflight::wayland_output::output_resource_scope(&targets[0])
+            } else {
+                fresh_object_resource_scope(targets)
+            }
         } else if exact_external_url {
             exact_external_url_resource_scope(
                 canonical_input_digest_sha256
@@ -1217,7 +1233,11 @@ pub fn build_permission_request(
             tool_name: item.tool_name.clone(),
             expected_effect: capability.wire.effect,
             resource_scope,
-            operation_scope: if let Some(scope) = &application_scope {
+            operation_scope: if capability.required_capability
+                == Capability::DesktopOutputInputConfirmed
+            {
+                vec!["wayland_output_input:exact_step".into()]
+            } else if let Some(scope) = &application_scope {
                 scope
                     .actions
                     .iter()

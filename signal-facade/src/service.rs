@@ -1,3 +1,4 @@
+pub mod computer_turn;
 pub mod file_recovery;
 pub mod schedule_management;
 use std::{
@@ -1170,6 +1171,18 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 }
             }
 
+            SignalingType::QueryComputerActionTurn => {
+                // Host-only and never peer-relayed. The observer checks the
+                // authenticated owner/device before reading persisted state.
+                if signaling_model.to_connection_id.is_none()
+                    && let Some(observer) = self.computer_action_observer.clone()
+                {
+                    observer.on_computer_action_lifecycle(&self.connection_state, &signaling_model).await;
+                }
+            }
+            SignalingType::ComputerActionTurnStatus => {
+                // A central-only response cannot be originated by a client.
+            }
             SignalingType::ComputerActionStarted
             | SignalingType::ComputerActionCompleted
             | SignalingType::ComputerActionStateReported => {

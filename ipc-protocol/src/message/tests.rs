@@ -1372,6 +1372,7 @@ fn service_to_worker_all_variants_round_trip() {
             envelope: sample_readonly_agent_envelope(),
         }),
         ServiceToWorker::ComputerActionPlan(ComputerActionPlanPayload {
+            turn_authority: None,
             file_recovery: None,
             request_id: "r-computer".to_string(),
             connection_id: Some("c".to_string()),
@@ -2324,6 +2325,7 @@ fn sample_object_ref() -> desk_agent_protocol::computer_use::ObjectRef {
 fn sample_computer_action_plan() -> desk_agent_protocol::computer_use::SealedComputerActionPlan {
     use desk_agent_protocol::computer_use::*;
     SealedComputerActionPlan {
+        turn_scope: None,
         schema_version: COMPUTER_USE_SCHEMA_VERSION,
         work_id: "work-1".to_string(),
         action_request_id: "action-1".to_string(),
@@ -2567,8 +2569,140 @@ fn invoke_agent_capability_cannot_decode_an_exec_envelope() {
 }
 
 #[test]
+fn screenshot_frame_timing_round_trips_without_fabricating_source_time() {
+    use desk_agent_protocol::{
+        ImageFormat, ScreenCaptureOutput, ScreenFrameFreshness, ScreenFrameObservation,
+    };
+    let screen = ScreenCaptureOutput {
+        display: "portal-output".into(),
+        format: ImageFormat::Png,
+        width: 1,
+        height: 1,
+        dpi_x: 96,
+        dpi_y: 96,
+        window: None,
+        window_geometry: None,
+        image: vec![1, 2, 3],
+        truncated: false,
+        frame_observation: Some(ScreenFrameObservation {
+            observation_id: "observation".into(),
+            output_reference: Some(desk_agent_protocol::computer_use::ObjectRef {
+                object_kind: desk_agent_protocol::computer_use::ObjectKind::DesktopOutput,
+                ..sample_object_ref()
+            }),
+            stream_generation: 7,
+            received_at_unix_ms: 1000,
+            receipt_age_ms: 42,
+            source_timestamp_ns: None,
+            freshness: ScreenFrameFreshness::LatestObserved,
+        }),
+    };
+    let decoded = wincode_round_trip(&screen);
+    assert_eq!(decoded.frame_observation, screen.frame_observation);
+    assert_eq!(decoded.image, screen.image);
+    let json = serde_json::to_value(&decoded).unwrap();
+    assert_eq!(json["frame_observation"]["freshness"], "latest_observed");
+    assert!(json["frame_observation"]["source_timestamp_ns"].is_null());
+}
+
+#[test]
+fn wayland_output_action_and_linux_adapters_survive_worker_ipc() {
+    use desk_agent_protocol::computer_use::*;
+    use desk_agent_protocol::{Capability, ScreenFrameFreshness};
+    let mut sealed = sample_computer_action_plan();
+    sealed.interactive_session_incarnation = "linux:c7:compositor-generation".into();
+    sealed.adapter.kind = ComputerUseAdapterKind::LinuxWaylandOutput;
+    let target = ObjectRef {
+        object_kind: ObjectKind::DesktopOutput,
+        ..sample_object_ref()
+    };
+    sealed.actions = vec![ComputerActionStep {
+        target: target.clone(),
+        action: ComputerActionKind::WaylandOutputInput(WaylandOutputInputAction {
+            screen: RawInputScreenContext {
+                display: "portal-output".into(),
+                width: 1920,
+                height: 1080,
+                dpi_x: 96,
+                dpi_y: 96,
+            },
+            frame: OutputFrameBinding {
+                observation_id: "frame-1".into(),
+                stream_generation: 7,
+                received_at_unix_ms: 1000,
+                freshness: ScreenFrameFreshness::Fresh,
+            },
+            step: RawInputStep::KeyPress {
+                key: RawInputKey::Escape,
+            },
+        }),
+        before_summary: "observed output".into(),
+        after_intent: "press Escape once".into(),
+        verification: "native receipt is not business success".into(),
+    }];
+    let message = ServiceToWorker::ComputerActionPlan(ComputerActionPlanPayload {
+        turn_authority: None,
+        file_recovery: None,
+        request_id: "wayland-request".into(),
+        connection_id: Some("owner".into()),
+        plan: sealed.clone(),
+    });
+    let ServiceToWorker::ComputerActionPlan(decoded) = wincode_round_trip(&message) else {
+        panic!("wrong IPC variant")
+    };
+    assert_eq!(decoded.plan.actions, sealed.actions);
+    assert_eq!(
+        decoded.plan.interactive_session_incarnation,
+        sealed.interactive_session_incarnation
+    );
+    assert_eq!(
+        decoded.plan.adapter.kind,
+        ComputerUseAdapterKind::LinuxWaylandOutput
+    );
+    assert_eq!(
+        decoded.plan.actions[0].action.required_capability(),
+        Capability::DesktopOutputInputConfirmed
+    );
+    let mut readiness = sample_computer_use_readiness();
+    readiness.os = "linux".into();
+    readiness.capabilities[0].adapter.kind = ComputerUseAdapterKind::LinuxAtspi;
+    let message = WorkerToService::ComputerUseReadinessUpdated(ComputerUseReadinessPayload {
+        readiness: readiness.clone(),
+    });
+    let WorkerToService::ComputerUseReadinessUpdated(decoded) = wincode_round_trip(&message) else {
+        panic!("wrong IPC variant")
+    };
+    assert_eq!(decoded.readiness, readiness);
+}
+
+#[test]
+fn computer_action_turn_scope_survives_worker_transport() {
+    use desk_agent_protocol::computer_use::ComputerActionTurnScope;
+    let mut sealed = sample_computer_action_plan();
+    sealed.turn_scope = Some(ComputerActionTurnScope {
+        conversation_id: "conversation".into(),
+        turn_id: "turn".into(),
+        input_revision: 2,
+        lease_token: 3,
+    });
+    let message = ServiceToWorker::ComputerActionPlan(ComputerActionPlanPayload {
+        turn_authority: Some("a".repeat(64)),
+        file_recovery: None,
+        request_id: sealed.execution_generation.clone(),
+        connection_id: None,
+        plan: sealed.clone(),
+    });
+    let ServiceToWorker::ComputerActionPlan(decoded) = wincode_round_trip(&message) else {
+        panic!("wrong IPC variant")
+    };
+    assert_eq!(decoded.plan, sealed);
+    assert_eq!(decoded.turn_authority, Some("a".repeat(64)));
+}
+
+#[test]
 fn computer_action_ipc_family_round_trips_independently() {
     let plan = ServiceToWorker::ComputerActionPlan(ComputerActionPlanPayload {
+        turn_authority: None,
         file_recovery: None,
         request_id: "r-computer".to_string(),
         connection_id: Some("conn-1".to_string()),
@@ -2745,4 +2879,62 @@ fn file_recovery_quota_rpc_round_trip_preserves_identity_and_never_allows_restri
             ..
         })
     ));
+}
+
+#[test]
+fn linux_ai_input_endpoint_is_a_session_user_lifecycle_message() {
+    for path in [
+        None,
+        Some("/run/user/1000/lcxl-ai-input/test.sock".to_string()),
+    ] {
+        let message = WorkerToService::LinuxAiInputEndpoint(path.clone());
+        assert!(message.allowed_for_profile(WorkerProfile::SessionUser));
+        assert!(!message.allowed_for_profile(WorkerProfile::RestrictedDesktop));
+        assert!(message.connection_id().is_none());
+        let WorkerToService::LinuxAiInputEndpoint(decoded) = wincode_round_trip(&message) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(decoded, path);
+    }
+}
+
+#[test]
+fn computer_turn_probe_ipc_is_user_only_and_preserves_all_correlations() {
+    use desk_agent_protocol::{
+        computer_turn::{ComputerActionTurnQuery, ComputerActionTurnState},
+        computer_use::ComputerActionTurnScope,
+    };
+    let request = ComputerTurnQueryPayload {
+        request_id: "probe".into(),
+        authority: "a".repeat(64),
+        control_generation: 9,
+        query: ComputerActionTurnQuery {
+            actor_id: "7".into(),
+            scope: ComputerActionTurnScope {
+                conversation_id: "conversation".into(),
+                turn_id: "turn".into(),
+                input_revision: 1,
+                lease_token: 2,
+            },
+        },
+    };
+    let outgoing = WorkerToService::ComputerTurnQuery(request.clone());
+    assert!(outgoing.allowed_for_profile(WorkerProfile::SessionUser));
+    assert!(!outgoing.allowed_for_profile(WorkerProfile::RestrictedDesktop));
+    assert!(outgoing.connection_id().is_none());
+    let WorkerToService::ComputerTurnQuery(decoded) = wincode_round_trip(&outgoing) else {
+        panic!("query expected")
+    };
+    assert_eq!(decoded, request);
+    let status = ComputerTurnStatusPayload {
+        request,
+        state: ComputerActionTurnState::Revoked,
+    };
+    let incoming = ServiceToWorker::ComputerTurnStatus(status.clone());
+    assert!(incoming.allowed_for_profile(WorkerProfile::SessionUser));
+    assert!(!incoming.allowed_for_profile(WorkerProfile::RestrictedDesktop));
+    let ServiceToWorker::ComputerTurnStatus(decoded) = wincode_round_trip(&incoming) else {
+        panic!("reply expected")
+    };
+    assert_eq!(decoded, status);
 }

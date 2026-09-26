@@ -29,6 +29,10 @@ pub struct WaylandPortalImageCapture {
 }
 
 impl WaylandPortalImageCapture {
+    pub fn continuity(&self) -> Option<super::pipewire_capture::CaptureContinuity> {
+        self.inner.continuity()
+    }
+
     pub fn new(
         desk_settings: &DeskSettings,
         session: Arc<dyn LivePortalSession>,

@@ -243,6 +243,8 @@ impl WorkerMessageSink {
 
 #[derive(Clone)]
 pub struct WorkerManager {
+    #[cfg(target_os = "linux")]
+    turn_queries: Arc<linux_turn_queries::Routes>,
     #[cfg(windows)]
     local_recovery_requests: local_file_recovery::PendingRequests,
     settings: web::Data<SharedSettings>,
@@ -621,6 +623,8 @@ impl WorkerManager {
         let (tx, rx) = mpsc::unbounded_channel::<WorkerMessage>();
         let (cap_version_tx, _cap_version_rx) = watch::channel::<u64>(0);
         let mgr = WorkerManager {
+            #[cfg(target_os = "linux")]
+            turn_queries: Arc::new(linux_turn_queries::Routes::default()),
             settings,
             inner: Arc::new(Mutex::new(WorkerManagerInner {
                 active_worker: None,
@@ -717,6 +721,21 @@ impl WorkerManager {
             active_interactive_routes: Arc::clone(&self.active_interactive_routes),
             tx: (*self.worker_msg_tx).clone(),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn native_input_incarnation(
+        &self,
+        key: &WorkerKey,
+        incarnation: WorkerIncarnation,
+    ) -> Option<Arc<AtomicU64>> {
+        let current = self
+            .resident_incarnation_gates
+            .lock()
+            .unwrap()
+            .get(key)?
+            .clone();
+        (current.load(Ordering::Acquire) == incarnation.0).then_some(current)
     }
 
     fn fence_resident_worker(&self, key: &WorkerKey, incarnation: WorkerIncarnation) {
@@ -3660,6 +3679,8 @@ mod policy_tests;
 mod central_routing_tests;
 
 mod file_recovery_quota;
+#[cfg(target_os = "linux")]
+mod linux_turn_queries;
 #[cfg(windows)]
 mod local_file_recovery;
 #[cfg(windows)]

@@ -293,6 +293,7 @@ pub enum ServiceToWorker {
     CancelWaylandPortal(CancelWaylandPortalPayload),
     /// Local authenticated OS-user request; never forwarded from signaling.
     ManageLocalFileRecovery(crate::local_file_recovery::LocalFileRecoveryRequest),
+    ComputerTurnStatus(ComputerTurnStatusPayload),
 }
 
 impl ServiceToWorker {
@@ -575,6 +576,9 @@ pub enum WorkerToService {
     RememberSecurityDecision(RememberSecurityDecisionPayload),
     /// Reply to the local HTTP waiter, never to a remote signaling connection.
     LocalFileRecoveryManaged(crate::local_file_recovery::LocalFileRecoveryReply),
+    /// Appended variant: native input endpoint of this authenticated worker.
+    LinuxAiInputEndpoint(Option<String>),
+    ComputerTurnQuery(ComputerTurnQueryPayload),
 }
 
 impl WorkerToService {
@@ -637,7 +641,9 @@ impl WorkerToService {
             Self::ExecSpawnReport(payload) => payload.connection_id.as_deref(),
             Self::ExecHeartbeat(payload) => payload.connection_id.as_deref(),
             Self::ExecPtyOpened(_) | Self::ExecPtyOutput(_) | Self::ExecPtyClosed(_) => None,
-            Self::LocalFileRecoveryManaged(_)
+            Self::LinuxAiInputEndpoint(_)
+            | Self::ComputerTurnQuery(_)
+            | Self::LocalFileRecoveryManaged(_)
             | Self::FileRecoveryQuotaRequested(_)
             | Self::Ready
             | Self::Capabilities(_)

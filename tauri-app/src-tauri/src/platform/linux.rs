@@ -31,13 +31,11 @@ fn should_default_tauri_to_x11(
     !has_explicit_backend && has_wayland_display && has_x11_display
 }
 
-struct LinuxGrabber {
-    grabbed_devices: Vec<evdev::Device>,
-}
+use desk_input_injection::linux_input_block::{EndReason, InputBlock};
 
-static LINUX_GRABBER: OnceLock<Mutex<Option<LinuxGrabber>>> = OnceLock::new();
+static LINUX_GRABBER: OnceLock<Mutex<Option<InputBlock>>> = OnceLock::new();
 
-fn grabber_slot() -> &'static Mutex<Option<LinuxGrabber>> {
+fn grabber_slot() -> &'static Mutex<Option<InputBlock>> {
     LINUX_GRABBER.get_or_init(|| Mutex::new(None))
 }
 
@@ -57,55 +55,40 @@ fn toggle_xrandr_brightness(on: bool) {
     }
 }
 
-pub fn block_input(block: bool) -> Result<(), String> {
+pub fn block_input(
+    block: bool,
+    on_local_escape: Option<super::LocalEscapeCallback>,
+) -> Result<(), String> {
     if block {
-        let mut guard = grabber_slot()
-            .lock()
-            .map_err(|e| format!("Failed to acquire grabber lock: {}", e))?;
-        if guard.is_some() {
+        let mut guard = grabber_slot().lock().map_err(|e| e.to_string())?;
+        if guard.as_ref().is_some_and(InputBlock::is_active) {
             return Ok(());
         }
-
-        toggle_xrandr_brightness(true);
-
-        let mut grabbed_devices = Vec::new();
-        // Iterate over all /dev/input/event* devices
-        if let Ok(entries) = std::fs::read_dir("/dev/input") {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.to_string_lossy().contains("event") {
-                    if let Ok(mut device) = evdev::Device::open(&path) {
-                        let name = device.name().unwrap_or("");
-                        // Skip our own virtual input devices
-                        if name == "lcxl-web-remote-desk-mouse"
-                            || name == "lcxl-web-remote-desk-keyboard"
-                        {
-                            continue;
-                        }
-                        // Attempt to grab physical devices exclusively
-                        if device.grab().is_ok() {
-                            grabbed_devices.push(device);
-                        }
-                    }
+        // Dispose of an expired owner before acquiring another device set.
+        *guard = None;
+        let input = InputBlock::acquire(std::time::Duration::from_secs(300), move |reason| {
+            if reason != EndReason::Released {
+                if let Some(callback) = on_local_escape {
+                    callback();
                 }
             }
+        })
+        .map_err(|error| error.to_string())?;
+        let report = input.report();
+        // The legacy privacy UI has no partial-coverage indicator. Do not
+        // present it as active after only a subset of devices was acquired.
+        if report.failed != 0 {
+            return Err(format!(
+                "Input blocking is incomplete: {} blocked, {} failed",
+                report.grabbed, report.failed
+            ));
         }
-
-        log::info!("Linux: {} physical devices grabbed", grabbed_devices.len());
-        *guard = Some(LinuxGrabber { grabbed_devices });
+        toggle_xrandr_brightness(true);
+        *guard = Some(input);
     } else {
-        let mut guard = grabber_slot()
-            .lock()
-            .map_err(|e| format!("Failed to acquire grabber lock: {}", e))?;
-
+        let input = grabber_slot().lock().map_err(|e| e.to_string())?.take();
+        drop(input);
         toggle_xrandr_brightness(false);
-
-        if let Some(mut grabber) = guard.take() {
-            for device in grabber.grabbed_devices.iter_mut() {
-                let _ = device.ungrab();
-            }
-            log::info!("Linux: physical devices ungrabbed");
-        }
     }
     Ok(())
 }

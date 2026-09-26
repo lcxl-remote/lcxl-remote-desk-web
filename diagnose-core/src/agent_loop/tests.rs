@@ -4130,7 +4130,7 @@ async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded
         long.loaded_capability_detail_utf8_bytes
     );
     assert_eq!(short.loaded_capability_count, long.loaded_capability_count);
-    assert_eq!(long.capability_registry_count, 62);
+    assert_eq!(long.capability_registry_count, 63);
     assert!(long.conversation_message_count > short.conversation_message_count);
     assert!(long.session_snapshot_json_bytes > short.session_snapshot_json_bytes);
     println!(
@@ -8418,6 +8418,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
             &providers,
             &snapshot_inventory,
             &[],
+            &[],
         )
         .is_ok(),
         "a verified fresh page result must satisfy the same-turn snapshot candidate prerequisite"
@@ -8429,11 +8430,60 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
             &providers,
             &snapshot_inventory,
             &[],
+            &[],
         )
         .unwrap_err()
         .message
         .contains("must copy its exact page and element references"),
         "the dynamic candidate must remain closed without verified browser evidence"
+    );
+
+    let content = providers.capability_for_tool("read_text_file").unwrap();
+    let content_provider = providers
+        .provider_for_capability(&content.wire.capability_id)
+        .unwrap();
+    let mut content_request = snapshot_request.clone();
+    content_request.items[0].provider_id = content_provider.wire.provider_id.clone();
+    content_request.items[0].tool_name = content.tool_spec.name.clone();
+    content_request.items[0].canonical_input_json = None;
+    let mut content_inventory = snapshot_inventory.clone();
+    content_inventory[0].provider_id = content_provider.wire.provider_id.clone();
+    content_inventory[0].capability_id = content.wire.capability_id.clone();
+    content_inventory[0].tool_name = content.tool_spec.name.clone();
+    let candidates = [content.registered_tool()];
+    assert!(
+        validate_permission_request_availability(
+            &[],
+            &content_request,
+            &providers,
+            &content_inventory,
+            &[],
+            &[]
+        )
+        .is_err()
+    );
+    assert!(
+        validate_permission_request_availability(
+            &[],
+            &content_request,
+            &providers,
+            &content_inventory,
+            &[],
+            &candidates
+        )
+        .is_ok()
+    );
+    content_inventory[0].ready = false;
+    assert!(
+        validate_permission_request_availability(
+            &[],
+            &content_request,
+            &providers,
+            &content_inventory,
+            &[],
+            &candidates
+        )
+        .is_err()
     );
 
     let background_completion = serde_json::json!({

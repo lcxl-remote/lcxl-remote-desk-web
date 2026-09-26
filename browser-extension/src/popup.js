@@ -1,3 +1,4 @@
+import { parsePairingSettings } from "./pairing-settings.js";
 import { permissionPatternForUrl } from "./host-permissions.js";
 
 const bridgeUrl = document.querySelector("#bridge-url");
@@ -33,12 +34,18 @@ document.querySelector("#save").addEventListener("click", async () => {
         status.textContent = message("pairingCodeRequired");
         return;
     }
-    await chrome.storage.local.set({
-        bridgeUrl: bridgeUrl.value.trim(),
-        pairingToken: pairingToken.value.trim()
-    });
-    pairingToken.value = "";
-    status.textContent = message("pairingSaved");
+    const settings = parsePairingSettings({ bridgeUrl: bridgeUrl.value, pairingToken: pairingToken.value });
+    if (!settings) {
+        status.textContent = message("pairingInvalid");
+        return;
+    }
+    try {
+        await chrome.storage.local.set(settings);
+        pairingToken.value = "";
+        status.textContent = message("pairingSaved");
+    } catch {
+        status.textContent = message("pairingSaveFailed");
+    }
 });
 
 document.querySelector("#allow-site").addEventListener("click", async () => {

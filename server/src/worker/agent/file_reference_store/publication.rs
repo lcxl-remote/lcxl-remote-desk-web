@@ -114,7 +114,20 @@ pub(crate) fn create_binary_artifact(
             }
         })
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        let mut publication_attempted = false;
+        super::linux_publish::publish(directory, name, bytes, &mut publication_attempted).map_err(
+            |error| {
+                if publication_attempted {
+                    Failure::unknown(error.message)
+                } else {
+                    error.into()
+                }
+            },
+        )
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     super::create_binary_artifact(directory, name, bytes).map_err(Failure::from)
 }
 
@@ -162,8 +175,21 @@ pub(crate) fn create_document_artifact(
     }
     #[cfg(target_os = "linux")]
     {
-        super::create_binary_artifact_with_limit(directory, name, bytes, 32 * 1024 * 1024)
-            .map_err(Failure::from)
+        let mut publication_attempted = false;
+        super::linux_publish::publish_with_limit(
+            directory,
+            name,
+            bytes,
+            32 * 1024 * 1024,
+            &mut publication_attempted,
+        )
+        .map_err(|error| {
+            if publication_attempted {
+                Failure::unknown(error.message)
+            } else {
+                error.into()
+            }
+        })
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
@@ -190,7 +216,7 @@ pub(crate) fn create_text_artifact(
     create_binary_artifact(directory, name, text.as_bytes())
 }
 
-#[cfg(all(test, any(windows, target_os = "macos")))]
+#[cfg(all(test, any(windows, target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
 

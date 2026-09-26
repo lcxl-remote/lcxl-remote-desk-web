@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetApprovalModelProviderQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { GetApprovalModelProviderQueryResponse } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getApprovalModelProvider } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const getApprovalModelProviderQueryKey = () => [{ url: '/api/model/approval-provider' }] as const
 

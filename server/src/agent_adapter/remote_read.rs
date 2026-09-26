@@ -427,6 +427,7 @@ mod tests {
         let outcome = AgentOutcome::Ok(desk_agent_protocol::OperationOutput::ReadContext(
             desk_agent_protocol::ReadContextOutput::ScreenCaptureCurrent(
                 desk_agent_protocol::ScreenCaptureOutput {
+                    frame_observation: None,
                     window_geometry: None,
                     display: r"\\.\DISPLAY1".into(),
                     format: desk_agent_protocol::ImageFormat::Png,

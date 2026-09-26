@@ -129,16 +129,29 @@ pub(super) fn spawn_event_forwarder_task(
     rx: mpsc::UnboundedReceiver<WorkerToService>,
     sender: Arc<dyn EventSender<WorkerToService>>,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_profiled_event_forwarder_task(rx, sender, WorkerProfile::SessionUser)
+    spawn_profiled_event_forwarder_task(rx, sender, WorkerProfile::SessionUser, None)
 }
 
 pub(super) fn spawn_profiled_event_forwarder_task(
     mut rx: mpsc::UnboundedReceiver<WorkerToService>,
     sender: Arc<dyn EventSender<WorkerToService>>,
     profile: WorkerProfile,
+    mut shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        loop {
+            let msg = tokio::select! {
+                biased;
+                _ = async { shutdown.as_mut().unwrap().await }, if shutdown.is_some() => {
+                    // Stop admitting new results, then drain already queued
+                    // messages even if a background task retains a sender.
+                    rx.close();
+                    shutdown = None;
+                    continue;
+                }
+                msg = rx.recv() => msg,
+            };
+            let Some(msg) = msg else { break };
             if !msg.allowed_for_profile(profile) {
                 error!(
                     "Refusing outbound {:?} from {:?} worker",

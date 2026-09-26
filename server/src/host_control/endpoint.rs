@@ -324,6 +324,10 @@ async fn run_ws_session(
                         if !is_outbound_for_role(&msg, role) {
                             continue;
                         }
+                        if let HostControlMessage::ServiceOp { operation_id: Some(id), .. } = &msg
+                            && !state.hub.service_operations().claim(id, session_id) {
+                            continue;
+                        }
                         let json = match serde_json::to_string(&msg) {
                             Ok(j) => j,
                             Err(e) => {
@@ -411,6 +415,7 @@ fn is_outbound_for_role(msg: &HostControlMessage, role: Option<ClientRole>) -> b
         (
             ClientRole::Tauri,
             HostControlMessage::TauriToken { .. }
+            | HostControlMessage::LinuxAiInputEndpoint { .. }
             | HostControlMessage::SessionShellRegistered { .. }
             | HostControlMessage::SessionShellRegistrationRejected { .. }
             | HostControlMessage::PrivateScreenShow { .. }
@@ -445,12 +450,21 @@ async fn handle_client_message(
     msg: HostControlMessage,
 ) {
     match msg {
+        HostControlMessage::ServiceOperationFinished { status } => {
+            if *role == Some(ClientRole::Tauri) {
+                state.hub.service_operations().complete(session_id, status);
+            }
+        }
         HostControlMessage::Ready { role: r, is_admin } => {
+            if role.is_some() {
+                return;
+            }
             info!("[HostCtrl/WS] Ready role={r:?} is_admin={is_admin:?} session_id={session_id}");
             *role = Some(r);
             match r {
                 ClientRole::Tauri => {
                     state.hub.mark_tauri_connected();
+
                     if let Some(override_data) = state.tauri_is_admin.as_ref() {
                         *override_data.lock().unwrap() = is_admin;
                     }
@@ -492,6 +506,12 @@ async fn handle_client_message(
                             locale_persisted,
                         });
                         *native_bridge_token = Some(token);
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        let (revision, path) = state.hub.linux_ai_input_endpoint();
+                        let _ = session_tx
+                            .send(HostControlMessage::LinuxAiInputEndpoint { revision, path });
                     }
                 }
                 ClientRole::Forwarder => {
@@ -535,6 +555,11 @@ async fn handle_client_message(
                         registration_id: registration.registration_id.to_string(),
                         registration_generation: registration.registration_generation,
                     });
+                    state.hub.bind_linux_input_shell(
+                        &state.session_shell_registry,
+                        registration.clone(),
+                        session_tx.clone(),
+                    );
                 }
                 Err((code, detail)) => {
                     warn!(
@@ -595,8 +620,7 @@ async fn handle_client_message(
         | HostControlMessage::PrivateScreenHide { .. }
         | HostControlMessage::WhiteboardShow { .. }
         | HostControlMessage::WhiteboardDraw { .. }
-        | HostControlMessage::WhiteboardHide { .. }
-        | HostControlMessage::ServiceOp { .. })
+        | HostControlMessage::WhiteboardHide { .. })
             if state.hub.mode() == HubMode::Aggregator =>
         {
             let _ = state.hub.send_command(msg);
@@ -613,6 +637,7 @@ fn on_disconnect(
     session_id: UpstreamSessionId,
     native_bridge_token: Option<&str>,
 ) {
+    state.hub.service_operations().disconnected(session_id);
     #[cfg(target_os = "linux")]
     if let Some(registration) = state
         .session_shell_registry
@@ -623,6 +648,8 @@ fn on_disconnect(
             registration.registration_id, registration.registration_generation
         );
     }
+    #[cfg(target_os = "linux")]
+    state.hub.remove_linux_input_shell(session_id);
     if let Some(token) = native_bridge_token {
         state.native_bridge_sessions.lock().unwrap().remove(token);
     }
@@ -807,6 +834,66 @@ mod tests {
             },
             role
         ));
+    }
+
+    #[tokio::test]
+    async fn service_completion_requires_the_selected_tauri_session() {
+        use super::super::{ServiceOpKind, service_operations::ServiceOperationState};
+        let hub = Arc::new(HostControlHub::new_local());
+        let mut status = hub
+            .service_operations()
+            .begin(ServiceOpKind::Install)
+            .unwrap();
+        assert!(hub.service_operations().claim(&status.operation_id, 7));
+        status.state = ServiceOperationState::Succeeded;
+        let state = Arc::new(EndpointState::new(
+            hub.clone(),
+            "secret".into(),
+            TauriLoginToken::empty(),
+        ));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        for (mut role, session) in [
+            (None, 7),
+            (Some(ClientRole::Forwarder), 7),
+            (Some(ClientRole::Tauri), 8),
+        ] {
+            handle_client_message(
+                &state,
+                &mut role,
+                session,
+                &tx,
+                &mut None,
+                HostControlMessage::ServiceOperationFinished {
+                    status: status.clone(),
+                },
+            )
+            .await;
+            assert_eq!(
+                hub.service_operations()
+                    .get(&status.operation_id)
+                    .unwrap()
+                    .state,
+                ServiceOperationState::Running
+            );
+        }
+        handle_client_message(
+            &state,
+            &mut Some(ClientRole::Tauri),
+            7,
+            &tx,
+            &mut None,
+            HostControlMessage::ServiceOperationFinished {
+                status: status.clone(),
+            },
+        )
+        .await;
+        assert_eq!(
+            hub.service_operations()
+                .get(&status.operation_id)
+                .unwrap()
+                .state,
+            ServiceOperationState::Succeeded
+        );
     }
 
     #[tokio::test]

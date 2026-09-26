@@ -47,7 +47,7 @@ use crate::telemetry::TelemetryGuards;
 use crate::{
     controller::{
         api_token::create_token,
-        browser_extension::get_browser_extension_pairing,
+        browser_extension::create_browser_extension_pairing,
         connection::verify_connection,
         host_readiness::{authorize_wayland, cancel_wayland, request_macos_permissions},
         info::{query_backend_info, query_macos_autologin, query_server_info, query_sysinfo},
@@ -55,7 +55,7 @@ use crate::{
         login::{change_password, login_account, login_tauri, logout_account},
         manager_link::{query_manager_link_status, retry_manager_link},
         redeem::redeem_code,
-        service_mgmt::{install_service, uninstall_service},
+        service_mgmt::{install_service, query_service_operation, uninstall_service},
         settings::{
             ack_security_approval, query_ai_assistant_settings, query_ai_policy_settings,
             query_collection_policy_settings, query_log_settings, query_security_settings,
@@ -229,6 +229,7 @@ pub fn configure_api_surface(
         .service(query_server_info)
         .service(install_service)
         .service(uninstall_service)
+        .service(query_service_operation)
         .service(init_requirements)
         .service(init_system)
         // Connection-verify performs its own self-authentication (open before the
@@ -296,7 +297,7 @@ pub fn configure_api_surface(
             })
             .service(
                 utoipa_actix_web::scope("/desk")
-                    .service(get_browser_extension_pairing)
+                    .service(create_browser_extension_pairing)
                     .service(query_settings)
                     .service(update_settings)
                     .service(query_ai_policy_settings)

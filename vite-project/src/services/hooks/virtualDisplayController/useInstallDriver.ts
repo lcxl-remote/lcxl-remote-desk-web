@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { InstallDriverMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { InstallDriverMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { installDriver } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const installDriverMutationKey = () => [{ url: '/api/virtual-display/driver/install' }] as const
 

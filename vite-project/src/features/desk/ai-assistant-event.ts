@@ -86,6 +86,12 @@ export type AiAssistantVisualEvidence = {
     phase: 'before' | 'observation' | 'after';
     status: 'available' | 'expired' | 'not_retained' | 'failed' | 'blocked';
     captured_at_unix_ms: number;
+    frame_observation?: {
+        received_at_unix_ms: number;
+        receipt_age_ms: number;
+        source_timestamp_ns?: number | null;
+        freshness: 'fresh' | 'latest_observed' | 'unchanged_verified';
+    } | null;
     expires_at_unix_ms?: number | null;
     device_id: string;
     display_summary?: string | null;

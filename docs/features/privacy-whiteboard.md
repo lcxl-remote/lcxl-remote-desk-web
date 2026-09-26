@@ -8,13 +8,13 @@ Private screen and whiteboard are subject to the redeemed [access code](/guide/a
 
 ## Privacy Screen
 
-Lock the local display and input to ensure privacy during remote operations — bystanders at the remote machine cannot see the screen or interfere with input while you work.
+The privacy screen provides platform-specific display concealment and local input blocking during remote operations. Linux currently uses best-effort input blocking; GNOME Wayland display concealment is not verified. See the Linux limitations below.
 
 Privacy-screen settings live under `[desk.private_screen]` in `config.toml`.
 
 Press `Ctrl` + `Alt` + `L` on the controlled machine to leave the privacy screen at any time. The shortcut is handled by the input interception itself, so it works even while every other local key and click is being discarded.
 
-The privacy screen belongs to the controller's signaling-session lifecycle, not to one WebRTC PeerConnection. Replacing the PeerConnection for a wire-codec change therefore keeps the screen covered. Releasing or being denied remote control, explicitly turning the privacy screen off, closing the browser signaling connection, or a host-initiated disconnect removes it. This cleanup is lifecycle-driven and does not depend on a configurable timeout.
+The privacy screen belongs to the controller's signaling-session lifecycle, not to one WebRTC PeerConnection. Replacing the PeerConnection for a wire-codec change therefore keeps the screen covered. Releasing or being denied remote control, explicitly turning the privacy screen off, closing the browser signaling connection, or a host-initiated disconnect removes it. This cleanup is lifecycle-driven. Linux additionally limits each activation to five minutes and releases its device handles on expiry.
 
 ::: warning The overlay cannot be checked through a remote view
 The overlay is deliberately excluded from screen capture — that is what lets the remote operator keep seeing the real desktop. The exclusion applies to *every* capture path on the host, including macOS Screen Sharing, Apple Remote Desktop and `screencapture`. Looking at the controlled machine through any of them shows the real desktop with no overlay, which is the feature working, not a fault. The only way to confirm the overlay is to look at the machine's physical display.
@@ -40,3 +40,7 @@ cargo tauri dev
 ```
 
 See [Quick Start → Tauri Desktop Client](/guide/quick-start#option-2-tauri-desktop-client).
+
+### Linux input blocking
+
+Linux attempts to block the keyboard and pointer devices present when activation starts. It requires existing access to those event devices and never changes device permissions automatically. The interceptor handles `Ctrl` + `Alt` + `L` directly. Activation fails if it cannot acquire an escape-capable keyboard, or if some devices failed to open or block; the privacy interface does not claim partial coverage. Newly connected devices are not covered. The native blocker releases its handles on cancellation, input failure or the five-minute limit. This is best-effort input blocking, not proof of GNOME Wayland screen concealment or complete isolation from other software input.

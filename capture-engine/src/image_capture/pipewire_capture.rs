@@ -1,3 +1,11 @@
+mod mailbox;
+mod metadata_request;
+mod native_buffer;
+mod packed_frame;
+mod thread_lifecycle;
+pub use mailbox::{
+    CaptureContinuity, Receiver as PipewireCallbackReceiver, Sender as PipewireCallbackSender,
+};
 use std::{collections::HashMap, ffi::CStr, os::fd::OwnedFd as StdOwnedFd, thread::JoinHandle};
 
 use desk_signal_facade::model::{
@@ -248,11 +256,13 @@ struct UserData {
     format: VideoInfoRaw,
     cursor_move: bool,
     captured_count: u64,
-    main_sender: std::sync::mpsc::Sender<PipewireCallback>,
+    main_sender: PipewireCallbackSender,
 }
 
 #[derive(Debug, Clone)]
 pub struct PipewireImageInfo {
+    pub source_timestamp_ns: Option<u64>,
+    pub received_at: (std::time::SystemTime, std::time::Instant),
     pub image_type: ImageType,
     pub data: Vec<u8>,
     pub height: u32,
@@ -260,6 +270,14 @@ pub struct PipewireImageInfo {
 }
 
 impl ImageInfo for PipewireImageInfo {
+    fn source_timestamp_ns(&self) -> Option<u64> {
+        self.source_timestamp_ns
+    }
+
+    fn received_at(&self) -> Option<(std::time::SystemTime, std::time::Instant)> {
+        Some(self.received_at)
+    }
+
     fn get_type(&self) -> ImageType {
         self.image_type
     }
@@ -330,20 +348,27 @@ fn get_spa_definition() -> Result<pipewire::spa::pod::Object, CaptureError> {
 }
 
 fn pw_thread(
-    main_sender: std::sync::mpsc::Sender<PipewireCallback>,
+    main_sender: PipewireCallbackSender,
     pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
     setup: PipewireSetup,
 ) {
+    let status = main_sender.clone();
     let result = inner_pw_thread(main_sender, pw_receiver, setup);
     if let Err(e) = result {
         log::error!("Pipewire thread error: {}", e);
+        let _ = status.send(PipewireCallback::Failure(
+            "PipeWire capture thread failed".into(),
+        ));
     } else {
         log::info!("Pipewire thread exited normally");
+        let _ = status.send(PipewireCallback::Failure(
+            "PipeWire capture thread stopped".into(),
+        ));
     }
 }
 
 fn inner_pw_thread(
-    main_sender: std::sync::mpsc::Sender<PipewireCallback>,
+    main_sender: PipewireCallbackSender,
     pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
     setup: PipewireSetup,
 ) -> Result<(), CaptureError> {
@@ -445,8 +470,18 @@ fn inner_pw_thread(
 
         let _listener = stream
             .add_local_listener_with_user_data(data)
-            .state_changed(|_, _user_data, old, new| {
+            .state_changed(|_, user_data, old, new| {
                 log::info!("Stream state changed from {:?} to {:?}", old, new);
+                use pipewire::stream::StreamState;
+                if matches!(new, StreamState::Error(_))
+                    || (matches!(new, StreamState::Unconnected)
+                        && !matches!(old, StreamState::Unconnected))
+                    || (matches!(new, StreamState::Paused) && matches!(old, StreamState::Streaming))
+                {
+                    let _ = user_data.main_sender.send(PipewireCallback::Failure(
+                        "PipeWire stream stopped or became unavailable".into(),
+                    ));
+                }
             })
             .control_info(|_, _user_data, id: u32, control| {
                 if let Some(control) = unsafe { control.as_ref() } {
@@ -459,84 +494,127 @@ fn inner_pw_thread(
                     log::info!("Stream control info, id: {}, control is NULL", id);
                 }
             })
-            .param_changed(|_, user_data, id: u32, param| {
-                // NULL means to clear the format
+            .param_changed(|stream, user_data, id: u32, param| {
+                if id != pipewire::spa::param::ParamType::Format.as_raw() {
+                    return;
+                }
+                let fail = |reason: &str| {
+                    let _ = user_data
+                        .main_sender
+                        .send(PipewireCallback::Failure(reason.into()));
+                };
                 let Some(param) = param else {
+                    fail("PipeWire video format was removed");
                     return;
                 };
-
-                let (media_type, media_subtype) = match format_utils::parse_format(param) {
-                    Ok(v) => v,
-                    Err(_) => return,
+                let Ok((media_type, media_subtype)) = format_utils::parse_format(param) else {
+                    fail("PipeWire video format could not be decoded");
+                    return;
                 };
-                log::info!(
-                    "Stream param changed, id: {}, media type: {:?}, media sub type: {:?}",
-                    id,
-                    media_type,
-                    media_subtype
-                );
-                match id {
-                    x if x == pipewire::spa::param::ParamType::Format.as_raw() => {
-                        // only accept raw image
-                        if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
+                if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
+                    fail("PipeWire stream no longer supplies raw video");
+                    return;
+                }
+                let mut format = VideoInfoRaw::default();
+                if format.parse(param).is_err() {
+                    fail("PipeWire raw video format is invalid");
+                    return;
+                }
+                user_data.format = format;
+                // Missing metadata remains an explicit None in the observation.
+                // A rejected optional request does not manufacture a timestamp.
+                if let Err(reason) = metadata_request::request_header(stream) {
+                    log::debug!("PipeWire frame header unavailable: {reason}");
+                }
+                let _ = user_data
+                    .main_sender
+                    .send(PipewireCallback::Format(user_data.format.clone()));
+            })
+            .process(
+                |stream, user_data| match native_buffer::Buffer::dequeue(stream) {
+                    None => log::error!("out of buffers"),
+                    Some(mut buffer) => {
+                        let header = match buffer.header() {
+                            Ok(header) => header.unwrap_or_default(),
+                            Err(reason) => {
+                                log::warn!("Rejecting invalid PipeWire metadata: {reason}");
+                                let _ = user_data.main_sender.send(PipewireCallback::Discontinuity);
+                                return;
+                            }
+                        };
+                        if header.discontinuity || header.unusable {
+                            let _ = user_data.main_sender.send(PipewireCallback::Discontinuity);
+                        }
+                        if header.unusable {
+                            return;
+                        }
+                        let source_timestamp_ns = header.timestamp_ns;
+                        let datas = buffer.datas_mut();
+                        if datas.is_empty() {
+                            let _ = user_data.main_sender.send(PipewireCallback::Discontinuity);
                             return;
                         }
 
-                        // call a helper function to parse the format for us.
-                        user_data
-                            .format
-                            .parse(param)
-                            .expect("Failed to parse param changed to VideoInfoRaw");
-                        user_data
-                            .main_sender
-                            .send(PipewireCallback::Format(user_data.format.clone()))
-                            .expect("Failed to send image format to main thread");
+                        let data = &mut datas[0];
 
-                        log::info!(
-                            "capturing video size :{:?} frame rate:{:?}",
-                            user_data.format.size(),
-                            user_data.format.framerate(),
-                        );
-                    }
-                    _ => return,
-                }
-            })
-            .process(|stream, user_data| match stream.dequeue_buffer() {
-                None => log::error!("out of buffers"),
-                Some(mut buffer) => {
-                    let datas = buffer.datas_mut();
-                    if datas.is_empty() {
-                        return;
-                    }
-
-                    let data = &mut datas[0];
-
-                    let size = user_data.format.size();
-                    if let Some(frame_data) = data.data() {
-                        let pipewire_image_info = PipewireImageInfo {
-                            image_type: match user_data.format.format() {
-                                VideoFormat::RGB | VideoFormat::RGBx => ImageType::RGB,
-                                VideoFormat::BGRA | VideoFormat::BGRx => ImageType::BGRA,
-                                _ => {
-                                    log::error!(
-                                        "Unsupported format: {:?}",
-                                        user_data.format.format()
-                                    );
+                        if data.as_raw().chunk.is_null() {
+                            let _ = user_data.main_sender.send(PipewireCallback::Discontinuity);
+                            return;
+                        }
+                        let chunk = data.chunk();
+                        if chunk
+                            .flags()
+                            .contains(pipewire::spa::buffer::ChunkFlags::CORRUPTED)
+                        {
+                            let _ = user_data.main_sender.send(PipewireCallback::Discontinuity);
+                            return;
+                        }
+                        let (offset, stride, chunk_size) =
+                            (chunk.offset(), chunk.stride(), chunk.size());
+                        let size = user_data.format.size();
+                        let format = match user_data.format.format() {
+                            VideoFormat::RGB => packed_frame::Format::Rgb,
+                            VideoFormat::RGBA => packed_frame::Format::Rgba,
+                            VideoFormat::RGBx => packed_frame::Format::Rgbx,
+                            VideoFormat::BGRA => packed_frame::Format::Bgra,
+                            VideoFormat::BGRx => packed_frame::Format::Bgrx,
+                            _ => return,
+                        };
+                        if let Some(mapped) = data.data() {
+                            let received_at =
+                                (std::time::SystemTime::now(), std::time::Instant::now());
+                            let packed = match packed_frame::bgra(
+                                format,
+                                size.width,
+                                size.height,
+                                offset,
+                                stride,
+                                chunk_size,
+                                mapped,
+                            ) {
+                                Ok(packed) => packed,
+                                Err(reason) => {
+                                    log::warn!("Rejecting invalid PipeWire frame: {reason}");
+                                    let _ =
+                                        user_data.main_sender.send(PipewireCallback::Discontinuity);
                                     return;
                                 }
-                            },
-                            data: frame_data.to_vec(),
-                            width: size.width,
-                            height: size.height,
-                        };
-
-                        user_data
-                            .main_sender
-                            .send(PipewireCallback::ImageInfo(pipewire_image_info))
-                            .expect("Failed to send video samples to main thread");
+                            };
+                            let image = PipewireImageInfo {
+                                source_timestamp_ns,
+                                received_at,
+                                image_type: ImageType::BGRA,
+                                data: packed,
+                                width: size.width,
+                                height: size.height,
+                            };
+                            let _ = user_data
+                                .main_sender
+                                .send(PipewireCallback::ImageInfo(image));
+                        }
                     }
-                }
-            })
+                },
+            )
             .register()?;
 
         let pw_obj = get_spa_definition()?;
@@ -593,7 +671,7 @@ fn inner_pw_thread(
 }
 
 pub struct PipewireLoop {
-    main_sender: std::sync::mpsc::Sender<PipewireCallback>,
+    main_sender: PipewireCallbackSender,
     /// send terminate command to PipewireLoop when dropping
     pw_sender: pipewire::channel::Sender<PipewireCommand>,
     /// pipewire thread handle
@@ -610,31 +688,51 @@ pub enum PipewireCallback {
     ImageInfo(PipewireImageInfo),
     Format(VideoInfoRaw),
     CurrentOutput(DisplayInfo),
+    Failure(String),
+    Discontinuity,
 }
 
 impl PipewireLoop {
     // https://gitlab.freedesktop.org/pipewire/pipewire-rs/-/blob/main/pipewire/examples/image-capture.rs?ref_type=heads
     pub fn new(
         desk_settings: &DeskSettings,
-        main_sender: std::sync::mpsc::Sender<PipewireCallback>,
+        main_sender: PipewireCallbackSender,
         pw_sender: pipewire::channel::Sender<PipewireCommand>,
         pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
     ) -> Result<Self, CaptureError> {
+        let permit = thread_lifecycle::reserve()?;
         let setup = PipewireImageCapture::create_screencast_setup()?;
-        Self::new_with_setup(desk_settings, main_sender, pw_sender, pw_receiver, setup)
+        let _ = desk_settings;
+        Self::start_with_setup(main_sender, pw_sender, pw_receiver, setup, permit)
     }
 
     pub fn new_with_setup(
         _desk_settings: &DeskSettings,
-        main_sender: std::sync::mpsc::Sender<PipewireCallback>,
+        main_sender: PipewireCallbackSender,
         pw_sender: pipewire::channel::Sender<PipewireCommand>,
         pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
         setup: PipewireSetup,
     ) -> Result<Self, CaptureError> {
+        let permit = thread_lifecycle::reserve()?;
+        Self::start_with_setup(main_sender, pw_sender, pw_receiver, setup, permit)
+    }
+
+    fn start_with_setup(
+        main_sender: PipewireCallbackSender,
+        pw_sender: pipewire::channel::Sender<PipewireCommand>,
+        pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
+        setup: PipewireSetup,
+        permit: thread_lifecycle::Permit,
+    ) -> Result<Self, CaptureError> {
         let main_sender_for_pw = main_sender.clone();
-        let pw_thread = Some(std::thread::spawn(move || {
-            pw_thread(main_sender_for_pw, pw_receiver, setup)
-        }));
+        let pw_thread = Some(
+            std::thread::Builder::new()
+                .name("pipewire-capture".into())
+                .spawn(move || {
+                    let _permit = permit;
+                    pw_thread(main_sender_for_pw, pw_receiver, setup)
+                })?,
+        );
 
         Ok(Self {
             main_sender,
@@ -646,10 +744,17 @@ impl PipewireLoop {
 
 impl Drop for PipewireLoop {
     fn drop(&mut self) {
-        // send terminate command to PipewireLoop when dropping
+        // Stop accepting images before requesting native shutdown.
+        let _ = self.main_sender.send(PipewireCallback::Failure(
+            "PipeWire capture is closing".into(),
+        ));
         let result = self.pw_sender.send(PipewireCommand::Terminate);
         if let Some(handle) = self.pw_thread.take() {
-            handle.join().expect("Failed to join Pipewire thread");
+            if !thread_lifecycle::finish(handle, std::time::Duration::from_millis(200)) {
+                log::warn!(
+                    "PipeWire shutdown exceeded its wait limit; native thread retains its resource slot"
+                );
+            }
         }
         log::warn!("PipewireLoop dropped, result: {:?}", result);
     }
@@ -658,21 +763,29 @@ impl Drop for PipewireLoop {
 pub struct PipewireImageCapture {
     pub desk_settings: DeskSettings,
     pub pipewire_loop: Option<PipewireLoop>,
-    pub main_receiver: Option<std::sync::mpsc::Receiver<PipewireCallback>>,
+    pub main_receiver: Option<PipewireCallbackReceiver>,
     pub pw_sender: Option<pipewire::channel::Sender<PipewireCommand>>,
     pub format: Option<VideoInfoRaw>,
+    continuity: Option<CaptureContinuity>,
     pub current_output: Option<DisplayInfo>,
 }
 
 impl PipewireImageCapture {
+    pub fn continuity(&self) -> Option<CaptureContinuity> {
+        self.continuity.clone()
+    }
     pub fn capture(
         &mut self,
         show_mouse: bool,
     ) -> Result<Box<dyn ImageInfo + Send + Sync>, CaptureError> {
         let receiver = self.main_receiver.as_ref().unwrap();
         let mut last_frame = None;
-        for item in receiver.try_iter() {
+        let (items, continuity) = receiver.take_observation();
+        for item in items {
             match item {
+                PipewireCallback::Discontinuity => {
+                    last_frame = None;
+                }
                 PipewireCallback::ImageInfo(image_info) => {
                     log::debug!(
                         "Captured frame: type={:?}, width={}, height={}, bytes={}",
@@ -683,15 +796,27 @@ impl PipewireImageCapture {
                     );
                     last_frame = Some(image_info);
                 }
+                PipewireCallback::Format(format) => {
+                    last_frame = None;
+                    self.format = Some(format);
+                }
                 PipewireCallback::CurrentOutput(output) => {
+                    last_frame = None;
                     self.current_output = Some(output);
                 }
-                _ => {
-                    log::warn!("Unexpected callback: {:?}", item);
+                PipewireCallback::Failure(reason) => {
+                    return CaptureError::custom_error(DeskErrorCode::FEATURE_UNAVAILABLE, &reason);
                 }
             }
         }
         if let Some(image_info) = last_frame {
+            if !continuity.is_current() {
+                return CaptureError::custom_error(
+                    DeskErrorCode::ACTION_NEED_RETRY,
+                    "PipeWire frame format changed during observation",
+                );
+            }
+            self.continuity = Some(continuity);
             return Ok(Box::new(image_info));
         } else {
             return CaptureError::custom_error(
@@ -743,7 +868,7 @@ impl PipewireImageCapture {
     ) -> Result<Self, CaptureError> {
         log::info!("PipeWire capture: spawning PipeWire loop");
         let initial_output = setup.current_output.clone();
-        let (main_sender, main_receiver) = std::sync::mpsc::channel();
+        let (main_sender, main_receiver) = mailbox::channel();
         let (pw_sender, pw_receiver) = pipewire::channel::channel();
 
         let pw_sender_clone = pw_sender.clone();
@@ -764,6 +889,7 @@ impl PipewireImageCapture {
             main_receiver: Some(main_receiver),
             pw_sender: Some(pw_sender),
             format: None,
+            continuity: None,
             current_output: initial_output,
         })
     }
@@ -782,6 +908,32 @@ mod tests {
     use log::LevelFilter;
 
     use super::*;
+    #[test]
+    fn capture_retains_negotiated_format_without_returning_an_old_frame() {
+        let (sender, receiver) = mailbox::channel();
+        let mut capture = PipewireImageCapture {
+            desk_settings: DeskSettings::default(),
+            pipewire_loop: None,
+            main_receiver: Some(receiver),
+            pw_sender: None,
+            format: None,
+            continuity: None,
+            current_output: None,
+        };
+        sender
+            .send(PipewireCallback::Format(VideoInfoRaw::default()))
+            .unwrap();
+        assert!(capture.capture(false).is_err());
+        assert!(capture.format.is_some());
+        sender
+            .send(PipewireCallback::Failure("format removed".into()))
+            .unwrap();
+        assert_eq!(
+            capture.capture(false).err().unwrap().to_error_code(),
+            DeskErrorCode::FEATURE_UNAVAILABLE
+        );
+    }
+
     static INIT: Once = Once::new();
     pub fn initialize() {
         INIT.call_once(|| {
@@ -798,7 +950,7 @@ mod tests {
     fn test_pipewire_loop() -> Result<(), CaptureError> {
         initialize();
         let desk_settings = DeskSettings::default();
-        let (main_sender, main_receiver) = std::sync::mpsc::channel();
+        let (main_sender, main_receiver) = mailbox::channel();
         let (pw_sender, pw_receiver) = pipewire::channel::channel();
 
         let pw_sender_clone = pw_sender.clone();
@@ -808,6 +960,12 @@ mod tests {
         for _ in 0..100 {
             match main_receiver.recv_timeout(Duration::from_secs(1)) {
                 Ok(callback) => match callback {
+                    PipewireCallback::Discontinuity => {
+                        log::warn!("PipeWire frame continuity interrupted")
+                    }
+                    PipewireCallback::Failure(reason) => {
+                        panic!("PipeWire live capture failed: {reason}")
+                    }
                     PipewireCallback::ImageInfo(data) => {
                         log::trace!("Received {:?} bytes of image data", data);
                     }

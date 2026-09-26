@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { UpdateGoalBudgetPolicyMutationRequest, UpdateGoalBudgetPolicyMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { UpdateGoalBudgetPolicyMutationRequest, UpdateGoalBudgetPolicyMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { updateGoalBudgetPolicy } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const updateGoalBudgetPolicyMutationKey = () => [{ url: '/api/admin/system/goal-budget-policy' }] as const
 

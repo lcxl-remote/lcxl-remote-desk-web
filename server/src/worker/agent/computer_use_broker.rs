@@ -6,6 +6,12 @@
 //! only behind the writer lease, local ceiling, and exact-grant dispatch path.
 
 mod application_catalog;
+#[cfg(target_os = "linux")]
+mod linux_input_control;
+#[cfg(target_os = "linux")]
+mod linux_output;
+#[cfg(target_os = "linux")]
+pub use linux_input_control::LinuxInputControlReceipt;
 mod ui_platform;
 mod user_home;
 #[cfg(windows)]
@@ -44,9 +50,11 @@ use desk_agent_protocol::computer_use::{
     UiWindowProjection,
 };
 use desk_agent_protocol::{AgentError, AgentErrorKind, Capability, ScreenCaptureParams};
+#[cfg(target_os = "linux")]
+use desk_diagnose_core::ai_assistant::LINUX_ATSPI_ADAPTER_ID;
 #[cfg(target_os = "macos")]
 use desk_diagnose_core::ai_assistant::MACOS_ACCESSIBILITY_ADAPTER_ID;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use desk_diagnose_core::ai_assistant::WINDOWS_UIA_ADAPTER_ID;
 use desk_diagnose_core::ai_assistant::{
     CURRENT_SCREEN_ADAPTER_ID, DESKTOP_SESSION_ADAPTER_ID, FILE_ARTIFACT_ADAPTER_ID,
@@ -72,6 +80,7 @@ const MAX_UI_INSPECT_DEPTH: u16 = 16;
 const MAX_OBJECT_REFS: usize = 8_192;
 const SCREEN_CAPTURE_MIN_INTERVAL: StdDuration = StdDuration::from_secs(2);
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn screen_capture_readiness(
     observation_enabled: bool,
     platform_supported: bool,
@@ -94,6 +103,10 @@ fn screen_capture_readiness(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ResolvedObject {
+    #[cfg(target_os = "linux")]
+    WaylandOutput {
+        observation_id: String,
+    },
     LaunchTarget {
         identity: desk_agent_protocol::application_launch::ResolvedApplicationIdentity,
     },
@@ -119,7 +132,7 @@ pub(crate) enum ResolvedObject {
         slide_number: i64,
     },
     DesktopSession {
-        session_id: u32,
+        session_id: String,
     },
     Application {
         window_handle: isize,
@@ -227,17 +240,33 @@ struct ScreenCaptureGateState {
 }
 
 pub struct ComputerUseBroker {
+    #[cfg(target_os = "linux")]
+    wayland_frame: Mutex<Option<super::collectors::screen_capture::wayland::CachedFrame>>,
+    #[cfg(target_os = "linux")]
+    pub(crate) wayland_snapshot_service:
+        Mutex<Option<Arc<super::collectors::screen_capture::wayland::service::Service>>>,
+    #[cfg(target_os = "linux")]
+    portal: Mutex<Option<Arc<desk_wayland_portal::WaylandPortalBroker>>>,
+    #[cfg(target_os = "linux")]
+    linux_desktop_identity: Mutex<Option<super::linux_desktop::DesktopIdentity>>,
+    #[cfg(target_os = "linux")]
+    pub(crate) linux_monitor_owner: Arc<super::linux_desktop::monitor_owner::MonitorOwner>,
+    #[cfg(target_os = "linux")]
+    portal_startup_restore: super::linux_desktop::portal_startup::PortalStartupRestore,
+    #[cfg(target_os = "linux")]
+    linux_input_control: Mutex<linux_input_control::Control>,
     application_catalog: Mutex<super::application_launch::catalog_store::ApplicationCatalogStore>,
     incarnation_nonce: String,
     worker_generation: AtomicU64,
     snapshot_counter: AtomicU64,
     readiness_revision: AtomicU64,
     readiness_revision_state: Mutex<Option<ReadinessRevisionState>>,
+    readiness_changed: Arc<tokio::sync::Notify>,
     active_session_incarnation: Mutex<Option<String>>,
     screen_capture_gate: Mutex<ScreenCaptureGateState>,
     human_input_epoch: AtomicU64,
     input_ownership_ready: AtomicBool,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     file_recovery_ready: AtomicBool,
     objects: Mutex<HashMap<String, StoredObject>>,
     ui_identities: Mutex<HashMap<String, ResolvedObject>>,
@@ -263,18 +292,36 @@ impl Default for ComputerUseBroker {
 impl ComputerUseBroker {
     #[must_use]
     pub fn new() -> Self {
+        let readiness_changed = Arc::new(tokio::sync::Notify::new());
         Self {
+            #[cfg(target_os = "linux")]
+            wayland_frame: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            wayland_snapshot_service: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            portal: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            linux_desktop_identity: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            linux_monitor_owner: Arc::default(),
+            #[cfg(target_os = "linux")]
+            portal_startup_restore: Default::default(),
+            #[cfg(target_os = "linux")]
+            linux_input_control: Mutex::new(linux_input_control::Control::with_changes(
+                readiness_changed.clone(),
+            )),
             application_catalog: Mutex::new(Default::default()),
             incarnation_nonce: uuid::Uuid::new_v4().to_string(),
             worker_generation: AtomicU64::new(1),
             snapshot_counter: AtomicU64::new(0),
             readiness_revision: AtomicU64::new(0),
             readiness_revision_state: Mutex::new(None),
+            readiness_changed,
             active_session_incarnation: Mutex::new(None),
             screen_capture_gate: Mutex::new(ScreenCaptureGateState::default()),
             human_input_epoch: AtomicU64::new(0),
             input_ownership_ready: AtomicBool::new(false),
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             file_recovery_ready: AtomicBool::new(false),
             objects: Mutex::new(HashMap::new()),
             ui_identities: Mutex::new(HashMap::new()),
@@ -285,7 +332,110 @@ impl ComputerUseBroker {
         }
     }
 
-    #[cfg(windows)]
+    fn observe_desktop(&self) -> Result<ObservedDesktop, AgentError> {
+        #[cfg(target_os = "linux")]
+        {
+            let identity = self.linux_desktop_identity().ok_or_else(|| {
+                error(
+                    AgentErrorKind::SessionUnavailable,
+                    "Trusted GNOME session unavailable",
+                    false,
+                )
+            })?;
+            Ok(super::linux_desktop::desktop_observation(&identity))
+        }
+        #[cfg(not(target_os = "linux"))]
+        observe_interactive_desktop()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn claim_portal_startup_restore(&self) -> bool {
+        self.portal_startup_restore.claim()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn invalidate_linux_ui(&self) {
+        self.ui_identity_generation.fetch_add(1, Ordering::SeqCst);
+        self.writer_lease.preempt_accessibility();
+        if let Ok(mut identities) = self.ui_identities.lock() {
+            identities.clear();
+        }
+        if let Ok(mut objects) = self.objects.lock() {
+            objects.retain(|_, entry| {
+                !matches!(
+                    entry.resolved,
+                    ResolvedObject::UiElement { .. } | ResolvedObject::Window { .. }
+                )
+            });
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clear_wayland_frame(&self) {
+        if let Some(service) = self
+            .wayland_snapshot_service
+            .lock()
+            .expect("Wayland snapshot service lock")
+            .take()
+        {
+            service.stop();
+        }
+        let mut frame = self.wayland_frame.lock().expect("Wayland frame lock");
+        *frame = None;
+        self.objects
+            .lock()
+            .expect("object reference lock")
+            .retain(|_, entry| !matches!(entry.resolved, ResolvedObject::WaylandOutput { .. }));
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_portal(&self, portal: Option<Arc<desk_wayland_portal::WaylandPortalBroker>>) {
+        *self.portal.lock().expect("Portal binding lock") = portal;
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn portal(&self) -> Option<Arc<desk_wayland_portal::WaylandPortalBroker>> {
+        self.portal.lock().ok()?.clone()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_linux_desktop_identity(
+        &self,
+        identity: Option<super::linux_desktop::DesktopIdentity>,
+    ) {
+        let Ok(mut current) = self.linux_desktop_identity.lock() else {
+            return;
+        };
+        if *current == identity {
+            return;
+        }
+        self.revoke_linux_input_control();
+        self.clear_wayland_frame();
+        self.browser_extension
+            .set_linux_session_binding(identity.as_ref().map(|identity| identity.binding()));
+        *current = identity;
+        // Losing observation is itself a revocation; unlock never revives old
+        // capabilities, even when logind reuses the same session object.
+        self.ui_identity_generation.fetch_add(1, Ordering::SeqCst);
+        self.worker_generation.fetch_add(1, Ordering::SeqCst);
+        self.human_input_epoch.fetch_add(1, Ordering::SeqCst);
+        self.writer_lease
+            .preempt(InputPreemptionSource::SessionChanged);
+        if let Ok(mut active) = self.active_session_incarnation.lock() {
+            *active = None;
+        }
+        if let Ok(mut identities) = self.ui_identities.lock() {
+            identities.clear();
+        }
+        if let Ok(mut objects) = self.objects.lock() {
+            objects.clear();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn linux_desktop_identity(&self) -> Option<super::linux_desktop::DesktopIdentity> {
+        self.linux_desktop_identity.lock().ok()?.clone()
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
     pub(crate) fn set_file_recovery_ready(&self, ready: bool) {
         self.file_recovery_ready.store(ready, Ordering::SeqCst);
     }
@@ -295,13 +445,18 @@ impl ComputerUseBroker {
         data_root: &Path,
         device_id: String,
         os_session_id: String,
-    ) -> std::io::Result<()> {
-        super::browser_extension_bridge::start_loopback_bridge(
+    ) {
+        if let Err(error) = super::browser_extension_bridge::start_loopback_bridge(
             Arc::clone(&self.browser_extension),
             data_root,
             device_id,
             os_session_id,
-        )
+        ) {
+            self.browser_extension.note_startup_failure(error.kind());
+            log::warn!(
+                "Browser extension bridge unavailable: {error}; other worker capabilities remain available"
+            );
+        }
     }
 
     pub(crate) fn acquire_screen_capture_permit(
@@ -310,7 +465,16 @@ impl ComputerUseBroker {
         selected_display: &str,
     ) -> Result<ScreenCapturePermit, AgentError> {
         validate_screen_selection(params, selected_display)?;
+        #[cfg(not(target_os = "linux"))]
         check_capture_foreground(params, ensure_screen_capture_safe)?;
+        #[cfg(target_os = "linux")]
+        if params.window.is_some() || self.linux_desktop_identity().is_none() {
+            return Err(error(
+                AgentErrorKind::UnsupportedCapability,
+                "Linux capture requires an unlocked trusted Wayland output; window capture is unavailable",
+                false,
+            ));
+        }
         let window_target = if let Some(window) = params.window.as_ref() {
             if window.object_kind != ObjectKind::Window {
                 return Err(error(
@@ -368,6 +532,9 @@ impl ComputerUseBroker {
     }
 
     pub(crate) fn input_ownership_is_ready(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return self.linux_input_control_generation().is_some();
+        #[cfg(not(target_os = "linux"))]
         self.input_ownership_ready.load(Ordering::SeqCst)
     }
 
@@ -376,15 +543,44 @@ impl ComputerUseBroker {
         surface: &ObjectRef,
         request: &BrowserActionRequest,
     ) -> Result<(), BrowserExtensionBridgeError> {
+        #[cfg(target_os = "linux")]
+        if self.linux_desktop_identity().is_none() {
+            return Err(BrowserExtensionBridgeError::Disconnected);
+        }
         self.browser_extension.preflight(surface, request)
     }
 
     pub(crate) async fn execute_browser_action(
-        &self,
+        self: &Arc<Self>,
         surface: &ObjectRef,
         request: &BrowserActionRequest,
+        generation: &str,
     ) -> Result<BrowserActionResult, BrowserExtensionBridgeError> {
-        self.browser_extension.execute(surface, request).await
+        #[cfg(target_os = "linux")]
+        {
+            let current = super::linux_desktop::resolve()
+                .await
+                .map_err(|_| BrowserExtensionBridgeError::Disconnected)?;
+            if self.linux_desktop_identity().as_ref() != Some(&current) {
+                self.set_linux_desktop_identity(None);
+                return Err(BrowserExtensionBridgeError::StaleSurface);
+            }
+        }
+        let broker = Arc::downgrade(self);
+        let current_surface = surface.clone();
+        let current_request = request.clone();
+        let generation = generation.to_string();
+        let guard = Arc::new(move || {
+            broker.upgrade().is_some_and(|broker| {
+                broker.require_writer_lease(&generation).is_ok()
+                    && broker
+                        .preflight_browser_action(&current_surface, &current_request)
+                        .is_ok()
+            })
+        });
+        self.browser_extension
+            .execute_guarded(surface, request, guard)
+            .await
     }
 
     fn selected_browser_state(&self) -> (Option<BrowserReadiness>, Option<ObjectRef>) {
@@ -499,13 +695,6 @@ impl ComputerUseBroker {
         action: &UiSemanticAction,
         ceiling: &ComputerUseSettings,
     ) -> Result<(), AgentError> {
-        if !self.input_ownership_is_ready() {
-            return Err(error(
-                AgentErrorKind::SessionUnavailable,
-                "semantic desktop UI actions require an active local-input ownership monitor",
-                true,
-            ));
-        }
         if !ceiling.enabled || !ceiling.generic_semantic_ui {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
@@ -532,6 +721,13 @@ impl ComputerUseBroker {
                 false,
             ));
         }
+        if !self.input_ownership_is_ready() {
+            return Err(error(
+                AgentErrorKind::SessionUnavailable,
+                "semantic desktop UI actions require an active desktop input control",
+                true,
+            ));
+        }
         #[cfg(target_os = "macos")]
         return super::macos_accessibility_observer::preflight_action(
             process_id,
@@ -546,7 +742,14 @@ impl ComputerUseBroker {
             &fingerprint,
             action,
         );
-        #[cfg(not(any(windows, target_os = "macos")))]
+        #[cfg(target_os = "linux")]
+        return super::linux_desktop::atspi::preflight_action(
+            process_id,
+            &image_path,
+            &fingerprint,
+            action,
+        );
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         Err(error(
             AgentErrorKind::UnsupportedCapability,
             "semantic desktop UI actions are not enabled for this platform adapter",
@@ -599,7 +802,22 @@ impl ComputerUseBroker {
                 output: None,
             });
         }
-        #[cfg(not(any(windows, target_os = "macos")))]
+        #[cfg(target_os = "linux")]
+        {
+            let result = super::linux_desktop::atspi::apply_action(
+                process_id,
+                &image_path,
+                &fingerprint,
+                action,
+            )?;
+            return Ok(SemanticActionResult {
+                changed: result.changed,
+                verified: result.verified,
+                summary: result.summary,
+                output: None,
+            });
+        }
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         Err(error(
             AgentErrorKind::UnsupportedCapability,
             "semantic desktop UI actions are not enabled for this platform adapter",
@@ -904,7 +1122,7 @@ impl ComputerUseBroker {
         ceiling: &ComputerUseSettings,
     ) -> Result<DesktopSessionInspectOutput, AgentError> {
         ensure_observation_enabled(ceiling)?;
-        let observed = observe_interactive_desktop()?;
+        let observed = self.observe_desktop()?;
         let snapshot_id = self.next_snapshot_id();
         let incarnation = format!(
             "{}:{}",
@@ -957,6 +1175,11 @@ impl ComputerUseBroker {
             displays: Vec::new(),
             display_list_error: None,
         })
+    }
+
+    /// Coalesced state changes supplement the periodic readiness refresh.
+    pub(crate) async fn wait_for_readiness_change(&self) {
+        self.readiness_changed.notified().await;
     }
 
     pub(crate) fn list_applications(
@@ -1041,10 +1264,14 @@ impl ComputerUseBroker {
         let ui_adapter = edge_registry
             .adapter(MACOS_ACCESSIBILITY_ADAPTER_ID)
             .expect("compiled macOS Accessibility adapter is registered");
-        #[cfg(not(any(windows, target_os = "macos")))]
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         let ui_adapter = edge_registry
             .adapter(WINDOWS_UIA_ADAPTER_ID)
             .expect("compiled fallback UI adapter is registered");
+        #[cfg(target_os = "linux")]
+        let ui_adapter = edge_registry
+            .adapter(LINUX_ATSPI_ADAPTER_ID)
+            .expect("compiled Linux AT-SPI adapter is registered");
         let ui_adapter_version = ui_adapter.adapter_version.clone();
         let office_adapter_version = edge_registry
             .adapter(OFFICE_EXCEL_ADAPTER_ID)
@@ -1094,7 +1321,7 @@ impl ComputerUseBroker {
         let observed_at = Utc::now();
         let expires_at = observed_at + Duration::seconds(READINESS_VALIDITY_SECS);
         let observation = if ceiling.observation_enabled() {
-            Some(observe_interactive_desktop())
+            Some(self.observe_desktop())
         } else {
             None
         };
@@ -1109,6 +1336,23 @@ impl ComputerUseBroker {
                 )
             })
             .unwrap_or_else(|| format!("unavailable:{}", self.current_incarnation_nonce()));
+        #[cfg(target_os = "linux")]
+        let interactive_session_incarnation = self
+            .linux_desktop_identity()
+            .map(|identity| {
+                format!(
+                    "{}:{}",
+                    identity.binding(),
+                    self.current_incarnation_nonce()
+                )
+            })
+            .unwrap_or(interactive_session_incarnation);
+        #[cfg(target_os = "linux")]
+        self.update_active_session_incarnation(
+            (ceiling.enabled && self.linux_desktop_identity().is_some())
+                .then(|| interactive_session_incarnation.clone()),
+        );
+        #[cfg(not(target_os = "linux"))]
         self.update_active_session_incarnation(
             observation
                 .as_ref()
@@ -1118,12 +1362,13 @@ impl ComputerUseBroker {
         let core_diagnostics_supported =
             cfg!(any(windows, target_os = "linux", target_os = "macos"));
         let terminal_provider_supported = core_diagnostics_supported;
-        let desktop_provider_supported = cfg!(any(windows, target_os = "macos"));
+        let desktop_provider_supported =
+            cfg!(any(windows, target_os = "macos", target_os = "linux"));
         let file_provider_supported = cfg!(any(windows, target_os = "linux", target_os = "macos"));
-        let text_file_supported = cfg!(any(windows, target_os = "macos"));
-        #[cfg(windows)]
+        let text_file_supported = cfg!(any(windows, target_os = "macos", target_os = "linux"));
+        #[cfg(any(windows, target_os = "linux"))]
         let text_file_storage_ready = self.file_recovery_ready.load(Ordering::SeqCst);
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let text_file_storage_ready = cfg!(target_os = "macos");
         let artifact_reason = if !file_provider_supported {
             Some(ComputerUseReadinessReason::UnsupportedPlatform)
@@ -1135,8 +1380,15 @@ impl ComputerUseBroker {
         let office_provider_supported = cfg!(windows);
         let iwork_provider_supported = cfg!(target_os = "macos");
         let outlook_provider_supported = cfg!(windows);
-        let browser_provider_supported = cfg!(any(windows, target_os = "macos"));
-        let semantic_action_supported = cfg!(any(windows, target_os = "macos"));
+        let browser_provider_supported =
+            cfg!(any(windows, target_os = "macos", target_os = "linux"));
+        let semantic_action_supported =
+            cfg!(any(windows, target_os = "macos", target_os = "linux"));
+        #[cfg(target_os = "linux")]
+        let wayland_output_ready =
+            self.wayland_output_ready(ceiling, allow_screen) && display_selected;
+        #[cfg(not(target_os = "linux"))]
+        let wayland_output_ready = false;
         let raw_input_supported = cfg!(windows);
         #[cfg(target_os = "macos")]
         let macos_permissions = crate::macos_permissions::probe();
@@ -1180,7 +1432,10 @@ impl ComputerUseBroker {
         let background_post_ready = super::macos_background_input::keyboard_ready();
         #[cfg(not(target_os = "macos"))]
         let background_post_ready = false;
+        #[cfg(not(target_os = "linux"))]
         let ui_ready = session_ready && macos_accessibility_ready && application_reason.is_none();
+        #[cfg(target_os = "linux")]
+        let ui_ready = session_ready && super::linux_desktop::atspi::lifetime::ready();
         let office_configured = super::office_bridge_observer::configured();
         let office_document_ref = (session_ready && ceiling.office_semantic && office_configured)
             .then(super::office_bridge_observer::current_excel_document_hash)
@@ -1272,6 +1527,7 @@ impl ComputerUseBroker {
                 },
             )
         };
+        #[cfg(not(target_os = "linux"))]
         let (screen_ready, screen_reason) = screen_capture_readiness(
             ceiling.observation_enabled(),
             desktop_provider_supported,
@@ -1285,9 +1541,34 @@ impl ComputerUseBroker {
         } else {
             (screen_ready, screen_reason)
         };
+        #[cfg(target_os = "linux")]
+        let (screen_ready, screen_reason) = {
+            let ready = ceiling.observation_enabled()
+                && allow_screen
+                && display_selected
+                && self.linux_desktop_identity().is_some()
+                && self
+                    .portal()
+                    .and_then(|portal| portal.try_borrow_session(false).ok())
+                    .is_some_and(|session| !session.closure_token().is_cancelled());
+            (
+                ready,
+                (!ready).then_some(if !ceiling.observation_enabled() {
+                    ComputerUseReadinessReason::DisabledByLocalCeiling
+                } else if self.linux_desktop_identity().is_none() {
+                    ComputerUseReadinessReason::NoInteractiveSession
+                } else {
+                    ComputerUseReadinessReason::PermissionMissing
+                }),
+            )
+        };
         let (browser_readiness, browser_surface) = self.selected_browser_state();
+        #[cfg(target_os = "linux")]
+        let browser_session_ready = ceiling.enabled && self.linux_desktop_identity().is_some();
+        #[cfg(not(target_os = "linux"))]
+        let browser_session_ready = session_ready;
         let browser_ready = browser_provider_supported
-            && session_ready
+            && browser_session_ready
             && ceiling.browser_semantic
             && browser_readiness
                 .as_ref()
@@ -1297,8 +1578,10 @@ impl ComputerUseBroker {
             ComputerUseReadinessReason::DisabledByLocalCeiling
         } else if !browser_provider_supported {
             ComputerUseReadinessReason::UnsupportedPlatform
-        } else if !session_ready {
-            session_reason.unwrap_or(ComputerUseReadinessReason::NoInteractiveSession)
+        } else if self.browser_extension.startup_failure().is_some() {
+            ComputerUseReadinessReason::AdapterUnavailable
+        } else if !browser_session_ready {
+            ComputerUseReadinessReason::NoInteractiveSession
         } else {
             match browser_readiness
                 .as_ref()
@@ -1384,7 +1667,9 @@ impl ComputerUseBroker {
             kind: ComputerUseAdapterKind::WindowsUia,
             #[cfg(target_os = "macos")]
             kind: ComputerUseAdapterKind::MacosAccessibility,
-            #[cfg(not(any(windows, target_os = "macos")))]
+            #[cfg(target_os = "linux")]
+            kind: ComputerUseAdapterKind::LinuxAtspi,
+            #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
             kind: ComputerUseAdapterKind::WindowsUia,
             version: session_adapter_version,
         };
@@ -1591,6 +1876,25 @@ impl ComputerUseBroker {
                     } else {
                         None
                     },
+                },
+                ComputerUseCapabilityReadiness {
+                    capability: Capability::DesktopOutputInputConfirmed,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::LinuxWaylandOutput,
+                        version: desk_diagnose_core::ai_assistant::linux::OUTPUT_ADAPTER_VERSION
+                            .into(),
+                    },
+                    supported: cfg!(target_os = "linux"),
+                    ready: wayland_output_ready,
+                    reason: (!wayland_output_ready).then_some(if !cfg!(target_os = "linux") {
+                        ComputerUseReadinessReason::UnsupportedPlatform
+                    } else if !ceiling.observation_enabled() || !allow_screen {
+                        ComputerUseReadinessReason::DisabledByLocalCeiling
+                    } else if !display_selected {
+                        ComputerUseReadinessReason::NoDisplaySelected
+                    } else {
+                        ComputerUseReadinessReason::AdapterUnavailable
+                    }),
                 },
                 ComputerUseCapabilityReadiness {
                     capability: Capability::DesktopInputFallbackConfirmed,
@@ -2121,7 +2425,7 @@ impl ComputerUseBroker {
                 false,
             ));
         }
-        let desktop = observe_interactive_desktop()?;
+        let desktop = self.observe_desktop()?;
         let snapshot_id = self.next_snapshot_id();
         let incarnation = format!(
             "{}:{}",
@@ -2734,7 +3038,7 @@ impl ComputerUseBroker {
                 false,
             ));
         }
-        let desktop = observe_interactive_desktop()?;
+        let desktop = self.observe_desktop()?;
         let snapshot_id = self.next_snapshot_id();
         let incarnation = format!(
             "{}:{}",
@@ -2872,7 +3176,7 @@ impl ComputerUseBroker {
             stable_target.clone()
         };
 
-        let observed = observe_interactive_desktop()?;
+        let observed = self.observe_desktop()?;
         if let Some(ResolvedObject::DesktopSession { session_id }) = &resolved_root
             && *session_id == observed.session_id
         {
@@ -2883,7 +3187,7 @@ impl ComputerUseBroker {
                     false,
                 ));
             }
-            return self.inspect_application_catalog(*session_id, params, ceiling);
+            return self.inspect_application_catalog(session_id, params, ceiling);
         }
         let selected_application = ui_platform::selected_application(resolved_root.as_ref())?;
         let application = selected_application
@@ -3218,11 +3522,21 @@ impl ComputerUseBroker {
         cancel: &desk_agent_protocol::computer_use::ComputerActionCancel,
         approved_actor_id: &str,
     ) -> bool {
-        self.writer_lease.cancel(cancel, approved_actor_id)
+        let cancelled = self.writer_lease.cancel(cancel, approved_actor_id);
+        #[cfg(target_os = "linux")]
+        if cancelled {
+            self.cancel_linux_input_action(cancel, approved_actor_id);
+        }
+        cancelled
     }
 
     pub fn release_writer_lease(&self, execution_generation: &str) -> bool {
-        self.writer_lease.release(execution_generation)
+        let released = self.writer_lease.release(execution_generation);
+        #[cfg(target_os = "linux")]
+        if released {
+            self.clear_linux_input_action(execution_generation);
+        }
+        released
     }
 
     fn note_user_input(&self, source: InputPreemptionSource) {
@@ -3312,6 +3626,8 @@ impl ComputerUseBroker {
     /// used by portable daemon-side reads. Every prior ObjectRef becomes invalid
     /// before a replacement in-process worker starts.
     pub(crate) fn reset_worker_incarnation(&self) {
+        #[cfg(target_os = "linux")]
+        let _desktop_publication = self.fence_wayland_worker_reset();
         self.set_input_ownership_ready(false);
         if let Ok(mut active) = self.active_session_incarnation.lock() {
             *active = None;
@@ -3329,7 +3645,7 @@ impl ComputerUseBroker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "linux"))]
     #[must_use]
     pub(crate) fn human_input_epoch(&self) -> u64 {
         self.human_input_epoch.load(Ordering::SeqCst)
@@ -4027,7 +4343,9 @@ fn application_catalog_host_available() -> bool {
 }
 
 pub(super) struct ObservedDesktop {
-    pub(super) session_id: u32,
+    // logind IDs are opaque strings. Numeric platform IDs are converted only
+    // after their native lookup; they are never parsed back by shared code.
+    pub(super) session_id: String,
     pub(super) foreground_application: Option<ObservedApplication>,
 }
 
@@ -4143,7 +4461,7 @@ fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentError> {
             process_started_at: Some(application.process_started_at),
         });
     return Ok(ObservedDesktop {
-        session_id,
+        session_id: session_id.to_string(),
         foreground_application,
     });
 }
@@ -4186,6 +4504,56 @@ fn path_eq(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn portable_worker_recycle_does_not_rearm_portal_startup_restore() {
+        let broker = Arc::new(ComputerUseBroker::new());
+        let claims: Vec<_> = (0..8)
+            .map(|_| {
+                let broker = broker.clone();
+                std::thread::spawn(move || broker.claim_portal_startup_restore())
+            })
+            .collect();
+        let restored = claims
+            .into_iter()
+            .map(|claim| claim.join().unwrap())
+            .filter(|claimed| *claimed)
+            .count();
+        assert_eq!(restored, 1);
+        for _ in 0..3 {
+            broker.reset_worker_incarnation();
+            assert!(!broker.claim_portal_startup_restore());
+        }
+        assert!(ComputerUseBroker::new().claim_portal_startup_restore());
+    }
+
+    #[test]
+    fn desktop_references_preserve_distinct_opaque_session_ids() {
+        let broker = ComputerUseBroker::new();
+        let snapshot = broker.next_snapshot_id();
+        let mut references = Vec::new();
+        for id in ["c7", "7", "007", "graphical-session"] {
+            let reference = broker
+                .issue_ref(
+                    &snapshot,
+                    "test-incarnation",
+                    ObjectKind::DesktopSession,
+                    ResolvedObject::DesktopSession {
+                        session_id: id.into(),
+                    },
+                )
+                .unwrap();
+            assert!(matches!(broker.resolve_ref(&reference).unwrap(),
+                ResolvedObject::DesktopSession { session_id } if session_id == id));
+            assert!(
+                references
+                    .iter()
+                    .all(|previous: &ObjectRef| previous.token != reference.token)
+            );
+            references.push(reference);
+        }
+    }
 
     #[test]
     fn overview_folds_grid_and_remaps_following_controls() {
@@ -4550,7 +4918,7 @@ mod tests {
 
     #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
-    fn unsupported_desktop_ui_adapter_fails_closed() {
+    fn missing_desktop_ui_authority_fails_closed() {
         let error = ui_platform::collect(
             &ObservedApplication {
                 window_handle: 0,
@@ -4572,8 +4940,15 @@ mod tests {
             None,
         )
         .err()
-        .expect("unsupported platforms must not expose a desktop UI adapter");
-        assert_eq!(error.kind, AgentErrorKind::UnsupportedPlatform);
+        .expect("missing desktop authority must not expose UI contents");
+        assert_eq!(
+            error.kind,
+            if cfg!(target_os = "linux") {
+                AgentErrorKind::SessionUnavailable
+            } else {
+                AgentErrorKind::UnsupportedPlatform
+            }
+        );
     }
 
     #[cfg(not(windows))]
@@ -4627,7 +5002,9 @@ mod tests {
                 &snapshot,
                 "test-incarnation",
                 ObjectKind::DesktopSession,
-                ResolvedObject::DesktopSession { session_id: 1 },
+                ResolvedObject::DesktopSession {
+                    session_id: "1".into(),
+                },
             )
             .unwrap();
         let second = broker
@@ -4635,7 +5012,9 @@ mod tests {
                 &snapshot,
                 "test-incarnation",
                 ObjectKind::DesktopSession,
-                ResolvedObject::DesktopSession { session_id: 1 },
+                ResolvedObject::DesktopSession {
+                    session_id: "1".into(),
+                },
             )
             .unwrap();
         assert_eq!(first.expires_at, second.expires_at);
@@ -4655,7 +5034,9 @@ mod tests {
                 &broker.next_snapshot_id(),
                 "test-incarnation",
                 ObjectKind::DesktopSession,
-                ResolvedObject::DesktopSession { session_id: 1 },
+                ResolvedObject::DesktopSession {
+                    session_id: "1".into(),
+                },
             )
             .unwrap();
         let mut expired = reference.clone();
@@ -4683,7 +5064,9 @@ mod tests {
                 &first.next_snapshot_id(),
                 "test-incarnation",
                 ObjectKind::DesktopSession,
-                ResolvedObject::DesktopSession { session_id: 1 },
+                ResolvedObject::DesktopSession {
+                    session_id: "1".into(),
+                },
             )
             .unwrap();
         let error = second.resolve_ref(&reference).unwrap_err();
@@ -4741,7 +5124,9 @@ mod tests {
                 &broker.next_snapshot_id(),
                 "test-incarnation",
                 ObjectKind::DesktopSession,
-                ResolvedObject::DesktopSession { session_id: 1 },
+                ResolvedObject::DesktopSession {
+                    session_id: "1".into(),
+                },
             )
             .unwrap();
         reference.snapshot_id.push_str("-tampered");
@@ -4814,6 +5199,14 @@ mod tests {
         );
         broker.acquire_writer_lease(request.clone()).unwrap();
         broker.require_writer_lease("file-generation").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            // An absent/restarting a11y bus is not physical user input and must
+            // not periodically cancel headless file transactions.
+            broker.invalidate_linux_ui();
+            broker.invalidate_linux_ui();
+            broker.require_writer_lease("file-generation").unwrap();
+        }
         assert!(
             broker
                 .acquire_writer_lease(WriterLeaseRequest {
@@ -5250,7 +5643,7 @@ mod tests {
         let observed = chrono::DateTime::parse_from_rfc3339(&readiness.observed_at).unwrap();
         let expires = chrono::DateTime::parse_from_rfc3339(&readiness.expires_at).unwrap();
         assert_eq!((expires - observed).num_seconds(), 60);
-        assert_eq!(readiness.capabilities.len(), 42);
+        assert_eq!(readiness.capabilities.len(), 43);
         assert!(readiness.capabilities.iter().all(|entry| {
             if matches!(
                 entry.capability,
@@ -5296,6 +5689,7 @@ mod tests {
                     | Capability::DesktopUiActionConfirmed
                     | Capability::DesktopBackgroundInputConfirmed
                     | Capability::DesktopInputFallbackConfirmed
+                    | Capability::DesktopOutputInputConfirmed
                     | Capability::OfficeDocumentInspect
                     | Capability::SpreadsheetLiveInspect
                     | Capability::SpreadsheetLivePatchConfirmed
@@ -5378,39 +5772,47 @@ mod tests {
     #[test]
     fn text_mutations_follow_master_switch_without_granting_directory_authority() {
         let broker = ComputerUseBroker::new();
-        #[cfg(windows)]
-        broker.set_file_recovery_ready(true);
-        for enabled in [false, true, false] {
-            let settings = ComputerUseSettings {
-                enabled,
-                ..Default::default()
-            };
-            let report = broker.readiness(&settings, false, false);
-            for capability in [
-                Capability::FilePatchConfirmed,
-                Capability::FileDeleteConfirmed,
-            ] {
-                let entry = report
-                    .capabilities
-                    .iter()
-                    .find(|entry| entry.capability == capability)
-                    .unwrap();
-                assert_eq!(entry.supported, cfg!(any(target_os = "macos", windows)));
-                assert_eq!(
-                    entry.ready,
-                    enabled && cfg!(any(target_os = "macos", windows))
-                );
-                assert_eq!(
-                    entry.adapter.version,
-                    desk_diagnose_core::ai_assistant::TEXT_FILE_ADAPTER_VERSION
+        for storage_ready in [false, true] {
+            #[cfg(any(windows, target_os = "linux"))]
+            broker.set_file_recovery_ready(storage_ready);
+            let effective_storage_ready = cfg!(target_os = "macos") || storage_ready;
+            for enabled in [false, true, false] {
+                let settings = ComputerUseSettings {
+                    enabled,
+                    ..Default::default()
+                };
+                let report = broker.readiness(&settings, false, false);
+                for capability in [
+                    Capability::FilePatchConfirmed,
+                    Capability::FileDeleteConfirmed,
+                ] {
+                    let entry = report
+                        .capabilities
+                        .iter()
+                        .find(|entry| entry.capability == capability)
+                        .unwrap();
+                    assert_eq!(
+                        entry.supported,
+                        cfg!(any(target_os = "macos", target_os = "linux", windows))
+                    );
+                    assert_eq!(
+                        entry.ready,
+                        enabled
+                            && effective_storage_ready
+                            && cfg!(any(target_os = "macos", target_os = "linux", windows))
+                    );
+                    assert_eq!(
+                        entry.adapter.version,
+                        desk_diagnose_core::ai_assistant::TEXT_FILE_ADAPTER_VERSION
+                    );
+                }
+                assert!(
+                    !report
+                        .context_references
+                        .iter()
+                        .any(|reference| reference.object_ref.object_kind == ObjectKind::Directory)
                 );
             }
-            assert!(
-                !report
-                    .context_references
-                    .iter()
-                    .any(|reference| reference.object_ref.object_kind == ObjectKind::Directory)
-            );
         }
     }
 

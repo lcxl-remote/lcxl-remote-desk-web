@@ -22,6 +22,13 @@ pub mod computer_use_writer;
 pub(crate) mod document_conversion;
 pub mod eval;
 pub mod file_reference_store;
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_desktop;
+#[cfg(target_os = "linux")]
+pub use linux_desktop::local_control::{
+    InputControlCancellation, InputControlReport, NativeInputControlClient,
+    run_cli as run_linux_input_control_cli,
+};
 #[cfg(target_os = "macos")]
 pub mod macos_accessibility_observer;
 #[cfg(target_os = "macos")]
@@ -376,6 +383,14 @@ async fn dispatch_read_context(
                 return Err(unsupported("screen capture requires a session context"));
             };
             let desk_settings = settings.read().await.desk.clone();
+            #[cfg(target_os = "linux")]
+            let output = collectors::screen_capture::wayland::collect(
+                computer_use_broker.clone(),
+                params,
+                desk_settings,
+            )
+            .await?;
+            #[cfg(not(target_os = "linux"))]
             let output = run_blocking(move || {
                 let resolved =
                     collectors::screen_capture::display::resolve(&desk_settings, &params)?;

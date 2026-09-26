@@ -36,6 +36,7 @@
 pub mod bridge;
 pub mod endpoint;
 pub mod protocol;
+pub mod service_operations;
 #[cfg(target_os = "linux")]
 pub mod session_shell;
 pub mod upstream;
@@ -153,6 +154,10 @@ impl ReplaySnapshot {
 }
 
 struct HubInner {
+    #[cfg(target_os = "linux")]
+    linux_ai_session_input: Mutex<linux_ai_session_input::Routes>,
+    #[cfg(target_os = "linux")]
+    linux_ai_input_endpoint: Mutex<(u64, Option<String>)>,
     mode: HubMode,
     /// Outbound: server → ws clients.
     cmd_tx: broadcast::Sender<HostControlMessage>,
@@ -190,6 +195,7 @@ struct HubInner {
     /// increments, each `mark_tauri_disconnected` decrements). Used by Local /
     /// Aggregator hubs to fail-fast or trigger Tauri-loss cleanup precisely.
     tauri_client_count: AtomicUsize,
+    service_operations: service_operations::ServiceOperations,
     host_activity: crate::host_activity::HostActivityRegistry,
     remote_access_gate: crate::daemon::remote_access::RemoteAccessGate,
     remote_access_coordinator:
@@ -239,6 +245,10 @@ pub struct HostControlHub {
 }
 
 impl HostControlHub {
+    pub fn service_operations(&self) -> &service_operations::ServiceOperations {
+        &self.inner.service_operations
+    }
+
     /// Construct a Local hub (portable mode). Owns its broadcast channels;
     /// the ws endpoint is registered in the same server's HTTP routes.
     pub fn new_local() -> Self {
@@ -263,6 +273,10 @@ impl HostControlHub {
         let (state_tx, _) = broadcast::channel(STATE_BROADCAST_CAPACITY);
         let host_activity = crate::host_activity::HostActivityRegistry::new(cmd_tx.clone());
         let inner = HubInner {
+            #[cfg(target_os = "linux")]
+            linux_ai_session_input: Mutex::default(),
+            #[cfg(target_os = "linux")]
+            linux_ai_input_endpoint: Mutex::new((0, None)),
             mode,
             cmd_tx,
             state_tx,
@@ -274,6 +288,7 @@ impl HostControlHub {
             forwarder_sessions: Mutex::new(HashMap::new()),
             upstream,
             tauri_client_count: AtomicUsize::new(0),
+            service_operations: Default::default(),
             host_activity,
             remote_access_gate: crate::daemon::remote_access::RemoteAccessGate::startup_locked(),
             remote_access_coordinator: std::sync::OnceLock::new(),
@@ -1366,3 +1381,9 @@ pub fn new_req_id() -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "linux")]
+mod linux_ai_input;
+
+#[cfg(target_os = "linux")]
+mod linux_ai_session_input;

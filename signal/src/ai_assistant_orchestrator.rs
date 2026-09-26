@@ -2565,6 +2565,7 @@ mod tests {
         assert!(
             granted.contains(&desk_agent_protocol::Capability::DesktopBackgroundInputConfirmed)
         );
+        assert!(granted.contains(&desk_agent_protocol::Capability::DesktopOutputInputConfirmed));
         assert!(desk_diagnose_core::tool_exposure::scope_has_mutation(
             &ai_assistant_provider_registry(),
             &granted

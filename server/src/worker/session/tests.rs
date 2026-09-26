@@ -144,12 +144,46 @@ async fn event_forwarder_drains_queue_and_exits_when_senders_dropped() {
 }
 
 #[tokio::test]
+async fn event_forwarder_shutdown_drains_queued_messages_with_live_senders() {
+    use desk_ipc_protocol::dual_transport::inprocess;
+    let (sender, mut receiver) = inprocess::make_event::<WorkerToService>();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    tx.send(WorkerToService::Ready).unwrap();
+    tx.send(WorkerToService::Heartbeat(HeartbeatPayload {
+        timestamp_ms: 1,
+        active_connections: 0,
+        cpu_usage: None,
+        memory_usage: None,
+    }))
+    .unwrap();
+    stop.send(()).unwrap();
+    let task =
+        spawn_profiled_event_forwarder_task(rx, sender, WorkerProfile::SessionUser, Some(stopped));
+    tokio::time::timeout(tokio::time::Duration::from_secs(1), task)
+        .await
+        .expect("retained sender must not strand shutdown")
+        .unwrap();
+    assert!(matches!(
+        receiver.recv().await,
+        Some(WorkerToService::Ready)
+    ));
+    assert!(matches!(
+        receiver.recv().await,
+        Some(WorkerToService::Heartbeat(_))
+    ));
+    assert!(receiver.recv().await.is_none());
+    assert!(tx.send(WorkerToService::Ready).is_err());
+}
+
+#[tokio::test]
 async fn restricted_event_forwarder_drops_session_user_outputs() {
     use desk_ipc_protocol::dual_transport::inprocess;
 
     let (sender, mut receiver) = inprocess::make_event::<WorkerToService>();
     let (tx, rx) = mpsc::unbounded_channel::<WorkerToService>();
-    let task = spawn_profiled_event_forwarder_task(rx, sender, WorkerProfile::RestrictedDesktop);
+    let task =
+        spawn_profiled_event_forwarder_task(rx, sender, WorkerProfile::RestrictedDesktop, None);
     tx.send(WorkerToService::TerminalClosed(TerminalClosedPayload {
         connection_id: "forbidden".to_string(),
     }))

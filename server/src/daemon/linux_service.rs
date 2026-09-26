@@ -1,5 +1,9 @@
 //! Linux systemd installation lifecycle for ServiceDaemon mode.
 
+mod operation_lock;
+pub use operation_lock::ServiceOperationBusy;
+pub const SERVICE_OPERATION_BUSY_EXIT_CODE: i32 = 75;
+
 use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -11,7 +15,6 @@ const SYSTEM_UNIT_PATH: &str = "/etc/systemd/system/lcxl-remote-desk.service";
 const SYSTEM_CONFIG_PATH: &str = "/etc/lcxl-remote-desk/config.toml";
 const INSTALLED_SERVER_NAME: &str = "lcxl-remote-desk-server";
 const DEFAULT_INSTALL_DIR: &str = "/usr/lib/lcxl-remote-desk";
-pub const EXPERIMENTAL_INSTALL_ENV: &str = "LRD_EXPERIMENTAL_LINUX_SERVICE_DAEMON";
 
 type ServiceResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -50,18 +53,9 @@ struct InstallArtifacts<'a> {
     system_unit: &'a Path,
 }
 
-pub fn install_service(
-    install_dir: &str,
-    source_config: Option<&Path>,
-    experimental_opt_in: bool,
-) -> ServiceResult<()> {
-    if !experimental_opt_in {
-        return Err(format!(
-            "Linux ServiceDaemon installation is not production-ready; set {EXPERIMENTAL_INSTALL_ENV}=1 only for development validation"
-        )
-        .into());
-    }
+pub fn install_service(install_dir: &str, source_config: Option<&Path>) -> ServiceResult<()> {
     require_root()?;
+    let _operation_lock = operation_lock::acquire()?;
     let install_dir = validate_install_dir(Path::new(install_dir))?;
     let source_executable = std::env::current_exe()?;
     validate_install_source(&source_executable)?;
@@ -101,6 +95,7 @@ pub fn install_service(
 
 pub fn uninstall_service() -> ServiceResult<()> {
     require_root()?;
+    let _operation_lock = operation_lock::acquire()?;
     uninstall_service_transactionally(Path::new(SYSTEM_UNIT_PATH), &RealSystemctl)
 }
 

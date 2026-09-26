@@ -8,6 +8,8 @@ use std::{fs::File, io, mem::size_of, os::windows::io::AsRawHandle};
 mod private;
 pub(crate) use private::clean_transaction;
 pub(crate) use private::transaction_location;
+#[path = "windows_private_state.rs"]
+pub mod private_state;
 #[path = "windows_security.rs"]
 mod security;
 #[path = "windows_source.rs"]

@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetWebSearchQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { GetWebSearchQueryResponse } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getWebSearch } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const getWebSearchQueryKey = () => [{ url: '/api/admin/system/web-search' }] as const
 

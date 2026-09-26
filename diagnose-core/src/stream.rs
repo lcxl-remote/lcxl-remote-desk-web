@@ -503,6 +503,7 @@ mod tests {
         let (store, sink) = recorder();
         let mut bridge = StreamingTurnSink::starting_at(sink, "req-1", 7);
         let evidence = VisualEvidenceFrame {
+            frame_observation: None,
             schema_version: VISUAL_EVIDENCE_SCHEMA_VERSION,
             evidence_id: "evidence-1".into(),
             conversation_id: "conversation-1".into(),

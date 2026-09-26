@@ -39,6 +39,24 @@ pub struct ComputerActionPlanPayload {
     pub connection_id: Option<String>,
     pub plan: desk_agent_protocol::computer_use::SealedComputerActionPlan,
     pub file_recovery: Option<FileRecoveryExecutionContext>,
+    /// Device-derived upstream namespace; never copied from the sealed wire plan.
+    #[serde(default)]
+    pub turn_authority: Option<String>,
+}
+
+/// Worker-local correlation plus the device-derived upstream namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerTurnQueryPayload {
+    pub request_id: String,
+    pub authority: String,
+    pub control_generation: u64,
+    pub query: desk_agent_protocol::computer_turn::ComputerActionTurnQuery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ComputerTurnStatusPayload {
+    pub request: ComputerTurnQueryPayload,
+    pub state: desk_agent_protocol::computer_turn::ComputerActionTurnState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]

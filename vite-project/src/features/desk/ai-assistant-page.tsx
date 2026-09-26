@@ -32,18 +32,17 @@ import { capabilityDescriptionKey } from './assistant-capability-copy';
 import { Fragment, type FormEvent, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Check, Copy, Eye, FolderKey, ListTodo, LoaderCircle, Monitor, Paperclip, Plus, Puzzle, RefreshCw, Send, Settings2, ShieldCheck, X } from 'lucide-react';
+import { Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, LoaderCircle, Monitor, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldCheck, X } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { MarkdownContent } from '@/components/markdown-content';
 import { useListConnections } from '@/services/hooks/connectionController/useListConnections';
 import { useGetModelProvider } from '@/services/hooks/modelProviderController/useGetModelProvider';
-import { useGetBrowserExtensionPairing } from '@/services/hooks/browserExtensionController/useGetBrowserExtensionPairing';
+import { AssistantBrowserPairing } from './assistant-browser-pairing';
 import { useQueryServerInfo } from '@/services/hooks/systemController/useQueryServerInfo';
 import { useRestrictedSession } from './restricted-session';
 import { useDeskSignaling } from './use-desk-signaling';
@@ -295,12 +294,7 @@ export function AiAssistantWorkspace({
         acceptUnsolicitedPreviews: true,
     });
     const provider = useGetModelProvider();
-    const browserPairing = useGetBrowserExtensionPairing({
-        query: { enabled: false, retry: false },
-    });
     const providerConfig = provider.data?.data;
-    const pairing = browserPairing.data?.data;
-    const [pairingCopied, setPairingCopied] = useState(false);
     const [question, setQuestion] = useState(rehearsal?.status === 'pending' ? rehearsal.prompt : '');
     const rehearsalCanStart = !rehearsal || (rehearsal.status === 'pending' && !chat.running && !chat.messages.some(message => message.role === 'user'));
     const [schedulesOpen, setSchedulesOpen] = useState(false);
@@ -734,71 +728,7 @@ export function AiAssistantWorkspace({
                 connection: <>
             {recoveryConnections.data?.some(item => item.connection_id === deskId) && <FileRecoverySettings
                 key={deskId} target={{ connection: deskId, device_id: recoveryConnections.data.find(item => item.connection_id === deskId)?.device_id }} />}
-            {localPairingAvailable && (
-                <Card data-testid="browser-extension-pairing">
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-base">
-                            <Puzzle className="h-4 w-4" />
-                            {t('pages.aiAssistant.browserExtensionTitle')}
-                        </CardTitle>
-                        <CardDescription>
-                            {t('pages.aiAssistant.browserExtensionDescription')}
-                        </CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                        {!pairing && (
-                            <Button
-                                variant="outline"
-                                onClick={() => browserPairing.refetch()}
-                                disabled={!assistantEnabled || browserPairing.isFetching}
-                            >
-                                {browserPairing.isFetching && (
-                                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
-                                )}
-                                {t('pages.aiAssistant.browserExtensionShowCode')}
-                            </Button>
-                        )}
-                        {browserPairing.isError && (
-                            <Alert variant="destructive">
-                                <AlertDescription>
-                                    {t('pages.aiAssistant.browserExtensionUnavailable')}
-                                </AlertDescription>
-                            </Alert>
-                        )}
-                        {pairing && (
-                            <div className="space-y-2">
-                                <div className="flex gap-2">
-                                    <Input
-                                        aria-label={t('pages.aiAssistant.browserExtensionPairingCode')}
-                                        readOnly
-                                        value={pairing.pairing_code}
-                                        className="font-mono text-xs"
-                                    />
-                                    <Button
-                                        variant="outline"
-                                        size="icon"
-                                        aria-label={t('pages.aiAssistant.browserExtensionCopyCode')}
-                                        onClick={async () => {
-                                            await navigator.clipboard.writeText(pairing.pairing_code);
-                                            setPairingCopied(true);
-                                        }}
-                                    >
-                                        {pairingCopied
-                                            ? <Check className="h-4 w-4" />
-                                            : <Copy className="h-4 w-4" />}
-                                    </Button>
-                                </div>
-                                <p className="break-all text-xs text-muted-foreground">
-                                    {t('pages.aiAssistant.browserExtensionBridge', {
-                                        bridge: pairing.bridge_url,
-                                        version: pairing.extension_version,
-                                    })}
-                                </p>
-                            </div>
-                        )}
-                    </CardContent>
-                </Card>
-            )}
+            {localPairingAvailable && <AssistantBrowserPairing assistantEnabled={assistantEnabled} />}
 </>,
                 observation: <>            <div className="grid gap-4 lg:grid-cols-2">
                 <ObservationCard

@@ -42,6 +42,7 @@ pub fn require_device_observation(capability: Capability) -> Result<(), AgentErr
         | Capability::DesktopUiActionConfirmed
         | Capability::DesktopBackgroundInputConfirmed
         | Capability::DesktopInputFallbackConfirmed
+        | Capability::DesktopOutputInputConfirmed
         | Capability::OfficeExcelPatchConfirmed
         | Capability::OfficePowerPointPatchConfirmed
         | Capability::SpreadsheetLivePatchConfirmed
@@ -80,6 +81,7 @@ mod tests {
         // Being read-only does not imply membership in the generic transport.
         for capability in [
             Capability::BrowserPageObserve,
+            Capability::DesktopOutputInputConfirmed,
             Capability::WebResearchFetch,
             Capability::ShellExecReadonly,
             Capability::ApplicationLaunchConfirmed,

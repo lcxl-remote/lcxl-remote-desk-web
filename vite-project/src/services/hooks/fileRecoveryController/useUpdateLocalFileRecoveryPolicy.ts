@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { UpdateLocalFileRecoveryPolicyMutationRequest, UpdateLocalFileRecoveryPolicyMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { UpdateLocalFileRecoveryPolicyMutationRequest, UpdateLocalFileRecoveryPolicyMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { updateLocalFileRecoveryPolicy } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const updateLocalFileRecoveryPolicyMutationKey = () => [{ url: '/api/desk/file-recovery/policy' }] as const
 

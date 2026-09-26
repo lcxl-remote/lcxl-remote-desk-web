@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { ListAssistantAttachmentsQueryResponse, ListAssistantAttachmentsQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { ListAssistantAttachmentsQueryResponse, ListAssistantAttachmentsQueryParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listAssistantAttachments } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const listAssistantAttachmentsQueryKey = (params: ListAssistantAttachmentsQueryParams) => [{ url: '/api/my/ai-assistant-session/attachments' }, ...(params ? [params] : [])] as const
 

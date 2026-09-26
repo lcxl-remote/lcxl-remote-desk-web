@@ -154,7 +154,7 @@ pub(super) struct AppliedUiAction {
 pub(super) fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentError> {
     let foreground_application = frontmost_application()?;
     Ok(ObservedDesktop {
-        session_id: unsafe { libc::geteuid() },
+        session_id: unsafe { libc::geteuid() }.to_string(),
         foreground_application: Some(foreground_application),
     })
 }

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
     SIGNALING_API_VERSION,
+    SIGNALING_TYPE_CODE_REQUEST_DOCUMENT_PREVIEW_PAGE,
+    SIGNALING_TYPE_CODE_DOCUMENT_PREVIEW_PAGE_UPDATED,
     SIGNALING_TYPE_CODE_CANCEL_COMPUTER_ACTION,
     SIGNALING_TYPE_CODE_COMPUTER_ACTION_COMPLETED,
     SIGNALING_TYPE_CODE_COMPUTER_ACTION_STARTED,
@@ -9,10 +11,31 @@ import {
     SIGNALING_TYPE_CODE_COMPUTER_USE_READINESS_UPDATED,
     SIGNALING_TYPE_CODE_DISPATCH_COMPUTER_ACTION,
     SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_STATE,
+    SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_TURN,
+    SIGNALING_TYPE_CODE_COMPUTER_ACTION_TURN_STATUS,
 } from './constants';
 import { matchesComputerActionResponse } from './computer-action-protocol';
 
 describe('Computer Action signaling protocol', () => {
+    it('does not consume host turn messages as controller action replies', () => {
+        const types = [SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_TURN, SIGNALING_TYPE_CODE_COMPUTER_ACTION_TURN_STATUS];
+        expect(types).toEqual([651, 652]);
+        const previewTypes = [SIGNALING_TYPE_CODE_REQUEST_DOCUMENT_PREVIEW_PAGE, SIGNALING_TYPE_CODE_DOCUMENT_PREVIEW_PAGE_UPDATED];
+        expect(previewTypes).toEqual([649, 650]);
+        expect(new Set([...types, ...previewTypes]).size).toBe(4);
+        for (const signaling_type of types) {
+            for (const request of [
+                SIGNALING_TYPE_CODE_DISPATCH_COMPUTER_ACTION,
+                SIGNALING_TYPE_CODE_CANCEL_COMPUTER_ACTION,
+                SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_STATE,
+            ]) {
+                expect(matchesComputerActionResponse('current', request, {
+                    request_id: 'current', signaling_type,
+                })).toBe(false);
+            }
+        }
+    });
+
     it('keeps the shared discriminants stable', () => {
         expect(SIGNALING_API_VERSION).toBe(1);
         expect([
