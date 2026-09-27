@@ -219,6 +219,22 @@ impl World for MemoryWorld {
     }
 }
 
+const MAX_DIAGNOSTIC_BYTES: usize = 2_048;
+
+/// Truncates to at most `max` bytes without splitting a UTF-8 code point:
+/// diagnostics echo arbitrary user text, so a byte-count cut can land inside a
+/// multi-byte character and `String::truncate` would panic there.
+fn truncate_at_char_boundary(text: &mut String, max: usize) {
+    if text.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+}
+
 fn bounded_diagnostics<'a>(messages: impl Iterator<Item = &'a str>) -> String {
     let mut output = String::new();
     for message in messages.take(8) {
@@ -226,8 +242,8 @@ fn bounded_diagnostics<'a>(messages: impl Iterator<Item = &'a str>) -> String {
             output.push_str("; ");
         }
         output.push_str(message);
-        if output.len() >= 2_048 {
-            output.truncate(2_048);
+        if output.len() >= MAX_DIAGNOSTIC_BYTES {
+            truncate_at_char_boundary(&mut output, MAX_DIAGNOSTIC_BYTES);
             break;
         }
     }
@@ -250,6 +266,27 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF-"));
         let png = render_page(&compiled, 1).unwrap();
         assert!(png.png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn bounded_diagnostics_never_splits_a_code_point() {
+        for prefix in 0..4 {
+            let message = format!("{}{}", "a".repeat(prefix), "界".repeat(1_000));
+            let output = bounded_diagnostics(std::iter::once(message.as_str()));
+            assert!(output.len() <= MAX_DIAGNOSTIC_BYTES);
+            assert!(output.len() > MAX_DIAGNOSTIC_BYTES - 4);
+        }
+        let emoji = "😀".repeat(600);
+        let output = bounded_diagnostics([emoji.as_str(), emoji.as_str()].into_iter());
+        assert!(output.len() <= MAX_DIAGNOSTIC_BYTES);
+        assert!(output.ends_with('😀'));
+    }
+
+    #[test]
+    fn long_unicode_compile_error_is_a_controlled_failure() {
+        let error = compile("#panic(\"界\" * 1000)", SourceFormat::Typst).unwrap_err();
+        assert_eq!(error.code, "document_compile_failed");
+        assert!(error.message.len() <= MAX_DIAGNOSTIC_BYTES);
     }
 
     #[test]

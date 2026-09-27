@@ -69,7 +69,8 @@ pub async fn update<C: ConnectionTrait>(
     if current.revision != request.expected_revision {
         return Err(WriteError::Conflict);
     }
-    let next = policy::candidate(&current, request.limits).map_err(|_| WriteError::Invalid)?;
+    let next = policy::candidate(&current, request.limits, request.device_unavailable_max_ms)
+        .map_err(|_| WriteError::Invalid)?;
     let encoded = serde_json::to_string(&next).map_err(|_| WriteError::Invalid)?;
     let result = entity::Entity::update_many()
         .col_expr(entity::Column::ConfigJson, Expr::value(encoded))
@@ -104,6 +105,7 @@ mod tests {
         let request = UpdateGoalBudgetPolicy {
             expected_revision: 0,
             limits,
+            device_unavailable_max_ms: initial.device_unavailable_max_ms,
         };
         let txn = db.begin().await.unwrap();
         assert_eq!(update(&txn, &request).await.unwrap().revision, 1);

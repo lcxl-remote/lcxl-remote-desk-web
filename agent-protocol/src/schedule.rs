@@ -150,6 +150,9 @@ pub enum ScheduledTaskStatus {
     Paused,
     Completed,
     Deleted,
+    /// A conversation timer ended because its source conversation was
+    /// reclaimed after the session retention window. Terminal.
+    Expired,
 }
 
 #[derive(

@@ -82,6 +82,10 @@ pub enum ScheduleStoreError {
     NotFound,
     Conflict,
     BudgetExceeded,
+    /// A conversation timer would run after its source session expires.
+    ExceedsSessionRetention {
+        max_delay_seconds: u64,
+    },
     Backend(DbErr),
 }
 impl From<DbErr> for ScheduleStoreError {
@@ -89,6 +93,24 @@ impl From<DbErr> for ScheduleStoreError {
         Self::Backend(error)
     }
 }
+/// A conversation timer must run before its source session can be reclaimed.
+/// Checked under the caller's transaction against the current window.
+pub(super) async fn check_resume_retention(
+    txn: &sea_orm::DatabaseTransaction,
+    spec: &desk_agent_protocol::schedule::ScheduleSpec,
+    now_ms: i64,
+) -> Result<(), ScheduleStoreError> {
+    let days = crate::usage_retention::load(txn).await?.agent_session_days;
+    desk_diagnose_core::schedule::retention::conversation_resume_fits_retention(
+        spec,
+        now_ms,
+        desk_diagnose_core::schedule::retention::retention_ms_from_days(days),
+    )
+    .map_err(|exceeded| ScheduleStoreError::ExceedsSessionRetention {
+        max_delay_seconds: exceeded.max_delay_seconds,
+    })
+}
+
 fn json<T: serde::Serialize>(value: &T) -> Result<String, ScheduleStoreError> {
     serde_json::to_string(value).map_err(|_| ScheduleStoreError::Invalid)
 }
@@ -310,7 +332,7 @@ impl ScheduleStore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[tokio::test]
@@ -357,7 +379,7 @@ mod tests {
         ScheduleCreationSource, ScheduleRule, ScheduleSpec, ScheduledTaskKind,
     };
     use sea_orm::{ConnectionTrait, Database, Schema};
-    pub(super) fn draft() -> ScheduleDraft {
+    pub(crate) fn draft() -> ScheduleDraft {
         ScheduleDraft {
             time_confirmation: None,
             client_create_key: "create-1".into(),

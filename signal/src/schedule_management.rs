@@ -10,7 +10,7 @@ use desk_signal_facade::{
     model::{connection::ConnectionState, signal::SignalingModel},
     service::{
         ControlFrameOutcome,
-        schedule_management::{cookie_owner, reply},
+        schedule_management::{ScheduleManagementFailure, cookie_owner, reply},
     },
 };
 use desk_utils::error::DeskErrorCode;
@@ -123,20 +123,26 @@ pub async fn handle(
             ScheduleStoreError::NotFound => (
                 DeskErrorCode::PERMISSION_ERROR,
                 "task not found or not accessible",
-            ),
+            )
+                .into(),
             ScheduleStoreError::Invalid => (
                 DeskErrorCode::INVALID_PARAMS,
                 "invalid task management request",
-            ),
+            )
+                .into(),
             ScheduleStoreError::Conflict => (
                 DeskErrorCode::PRECONDITION_FAILED,
                 "task changed; refresh before retrying",
-            ),
+            )
+                .into(),
             ScheduleStoreError::BudgetExceeded => {
-                (DeskErrorCode::PRECONDITION_FAILED, "task budget exceeded")
+                (DeskErrorCode::PRECONDITION_FAILED, "task budget exceeded").into()
+            }
+            ScheduleStoreError::ExceedsSessionRetention { max_delay_seconds } => {
+                ScheduleManagementFailure::exceeds_session_retention(max_delay_seconds)
             }
             ScheduleStoreError::Backend(_) => {
-                (DeskErrorCode::SYSTEM_ERROR, "task management unavailable")
+                (DeskErrorCode::SYSTEM_ERROR, "task management unavailable").into()
             }
         }),
     )
@@ -739,7 +745,7 @@ async fn view(
     let target_device_id = public_target(db, owner, &row.target_device_id).await?;
     let spec = desk_diagnose_core::schedule::parse_json(&row.spec_json)
         .map_err(|_| ScheduleStoreError::Invalid)?;
-    let upcoming_runs = if matches!(row.status.as_str(), "deleted" | "completed")
+    let upcoming_runs = if matches!(row.status.as_str(), "deleted" | "completed" | "expired")
         || (row.status == "pending_review"
             && matches!(
                 spec.rule,
@@ -940,7 +946,7 @@ mod tests {
         db.execute(&schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity))
             .await
             .unwrap();
-
+        crate::db::ensure_lifecycle_tables(&db).await;
         db
     }
     #[tokio::test]

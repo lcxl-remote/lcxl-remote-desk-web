@@ -87,6 +87,11 @@ impl ScheduleStore {
                         == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume,
                 )
                 .map_err(|_| ScheduleStoreError::Invalid)?;
+                if draft.kind
+                    == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume
+                {
+                    super::check_resume_retention(&txn, &draft.spec, now).await?;
+                }
                 let task = Self::create_draft_on(&txn, owner, &draft, now).await?;
                 if task.kind == "conversation_resume" {
                     awaiting_review = Some(task.schedule_id.clone());

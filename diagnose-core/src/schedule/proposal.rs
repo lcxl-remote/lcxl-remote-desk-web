@@ -46,7 +46,7 @@ pub fn registry() -> Vec<crate::registry::RegisteredTool> {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: REQUEST_SCHEDULE.into(),
-        description: "Propose a scheduled task for the owner to review. The AI conversation proposal creates a pending review request without granting permissions; it is not a saved task draft. conversation_resume is a one-time continuation of this conversation: this call waits for the owner review decision, and the server approval or rejection receipt is returned before you continue. Owner approval enables the timer; rejection leaves it disabled. fresh_task starts a new context each time and requires owner-guided rehearsal and authorization before publication. For local times use time_input with the explicit user timezone and reference date; the server converts it. For relative conversation continuations use rule kind after_confirmation with delay_seconds; the server counts from confirmation. Ordinary chat confirmation does not activate a draft; the owner must confirm in the review dialog. Use other rule kinds only for explicit UTC input or an absolute RFC3339 instant with an explicit offset; preserve the supplied offset. Supply exactly one of rule or time_input; never guess a timezone or compute UTC yourself. The server binds the current owner, device and conversation.".into(),
+        description: "Propose a scheduled task for the owner to review. The AI conversation proposal creates a pending review request without granting permissions; it is not a saved task draft. conversation_resume is a one-time continuation of this conversation and must run within the deployment's conversation retention window; the server rejects a later run and reports the current maximum delay in seconds. This call waits for the owner review decision, and the server approval or rejection receipt is returned before you continue. Owner approval enables the timer; rejection leaves it disabled. fresh_task starts a new context each time and requires owner-guided rehearsal and authorization before publication. For local times use time_input with the explicit user timezone and reference date; the server converts it. For relative conversation continuations use rule kind after_confirmation with delay_seconds; the server counts from confirmation. Ordinary chat confirmation does not activate a draft; the owner must confirm in the review dialog. Use other rule kinds only for explicit UTC input or an absolute RFC3339 instant with an explicit offset; preserve the supplied offset. Supply exactly one of rule or time_input; never guess a timezone or compute UTC yourself. The server binds the current owner, device and conversation.".into(),
         parameters_schema: json!({"type":"object","additionalProperties":false,"required":["kind","title","prompt"],"oneOf":[{"required":["rule"],"not":{"required":["time_input"]}},{"required":["time_input"],"not":{"required":["rule"]}}],
             "properties":{
                 "kind":{"type":"string","enum":["conversation_resume","fresh_task"]},
@@ -157,6 +157,21 @@ pub fn unavailable() -> desk_agent_protocol::AgentError {
         message:
             "The schedule operation could not be completed under the current conversation authority. Query the task again; do not claim it was changed."
                 .into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    }
+}
+
+/// The proposed continuation would run after its conversation expires. The
+/// message states the current limit so the model can propose a valid time or
+/// explain the limit to the owner.
+pub fn exceeds_session_retention(max_delay_seconds: u64) -> desk_agent_protocol::AgentError {
+    desk_agent_protocol::AgentError {
+        kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+        message: format!(
+            "Rejected: a conversation_resume task must run within {max_delay_seconds} seconds from now, because this conversation expires after the deployment's session retention window. Propose an earlier time, or explain this limit to the owner. No task was created."
+        ),
         retryable: false,
         safe_for_model: true,
         error_code: None,

@@ -69,7 +69,7 @@ impl ScheduleStore {
             || task.active_run_id.is_some()
             || matches!(
                 task.status.as_str(),
-                "deleted" | "completed" | "pending_review"
+                "deleted" | "completed" | "expired" | "pending_review"
             )
         {
             return Err(ScheduleStoreError::Conflict);
@@ -207,7 +207,11 @@ impl ScheduleStore {
             }
             return Err(ScheduleStoreError::Conflict);
         }
-        if matches!(row.status.as_str(), "completed" | "pending_review") && !delete {
+        if matches!(
+            row.status.as_str(),
+            "completed" | "expired" | "pending_review"
+        ) && !delete
+        {
             return Err(ScheduleStoreError::Conflict);
         }
         if prompt == Some(row.prompt.as_str()) {
@@ -308,6 +312,9 @@ impl ScheduleStore {
                 )
             {
                 return Err(ScheduleStoreError::Invalid);
+            }
+            if row.kind == "conversation_resume" {
+                super::check_resume_retention(&txn, &normalized, now).await?;
             }
             patch.spec_json = Set(json(&normalized)?);
             if matches!(row.status.as_str(), "active" | "triggered") {

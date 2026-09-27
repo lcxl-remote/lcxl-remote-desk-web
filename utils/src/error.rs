@@ -482,6 +482,14 @@ desk_error_codes! {
     /// A scheduled run cannot reserve the model tokens required for its next
     /// request within the owner-approved budget. No provider call was made.
     SCHEDULE_MODEL_BUDGET_EXCEEDED = 106,
+    /// A conversation timer would run after its source conversation expires
+    /// under the current session retention window. `data` carries the longest
+    /// accepted delay in seconds.
+    SCHEDULE_EXCEEDS_SESSION_RETENTION = 107,
+    /// An interactive (PTY) command cannot be approved: the approving client's
+    /// terminal carrier is missing, expired, already bound, or belongs to a
+    /// different request. The client reopens the terminal and approves again.
+    EXEC_PTY_CARRIER_UNAVAILABLE = 108,
 
     /// A connection-verify probe could not reach the target at all (DNS failure,
     /// connection refused, TLS handshake failure). Carried inside the

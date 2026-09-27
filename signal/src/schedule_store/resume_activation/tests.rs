@@ -18,6 +18,7 @@ async fn fixture() -> (
         .execute(&schema.create_table_from_entity(session_row::Entity))
         .await
         .unwrap();
+    crate::db::ensure_lifecycle_tables(&store.db).await;
     let mut session = PersistedAgentSession::new(
         "source",
         "1",
@@ -53,13 +54,22 @@ async fn fixture() -> (
     draft.source_conversation_id = Some("source".into());
     draft.requirement_revision = Some(1);
     draft.spec.rule = ScheduleRule::Once {
-        at: "2099-01-01T00:00:00Z".into(),
+        at: fixture_run_at().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
     let task = store
         .create_draft(1, &draft, store.database_time().await.unwrap())
         .await
         .unwrap();
     (store, task, row, session)
+}
+
+/// Midnight UTC two days out: inside the default 30-day session retention.
+fn fixture_run_at() -> chrono::DateTime<chrono::Utc> {
+    (chrono::Utc::now() + chrono::Duration::days(2))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
 }
 
 #[tokio::test]
@@ -73,7 +83,10 @@ async fn confirmation_enables_once_with_receipt_without_granting_authority() {
     assert_eq!(active.revision, task.revision + 1);
     assert_eq!(active.task_revision, task.task_revision);
     assert_eq!(active.requirement_revision, Some(1));
-    assert_eq!(active.next_run_at, Some(4_070_908_800_000));
+    assert_eq!(
+        active.next_run_at,
+        Some(fixture_run_at().timestamp_millis())
+    );
     assert!(
         active.contract_revision.is_none()
             && active.authorization_revision.is_none()
@@ -567,5 +580,40 @@ async fn search_filters_conversation_before_pagination_and_counts() {
             .search(1, 0, 10, None, None, None, None, Some(""), false)
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn activation_rejects_a_continuation_past_the_session_retention_window() {
+    let (store, task, _, _) = fixture().await;
+    let mut config = crate::usage_retention::load(&store.db).await.unwrap();
+    config.agent_session_days = 1;
+    crate::usage_retention::save(&store.db, config.clone())
+        .await
+        .unwrap();
+    // The fixture runs two days out; a one-day window accepts at most one day
+    // minus the reclaim safety margin.
+    assert!(matches!(
+        store
+            .activate_conversation_resume(1, &task.schedule_id, task.revision)
+            .await,
+        Err(ScheduleStoreError::ExceedsSessionRetention {
+            max_delay_seconds: 79_200
+        })
+    ));
+    let unchanged = store.read(1, &task.schedule_id).await.unwrap();
+    assert_eq!(unchanged.status, "pending_review");
+    assert_eq!(unchanged.revision, task.revision);
+    config.agent_session_days = 30;
+    crate::usage_retention::save(&store.db, config)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .activate_conversation_resume(1, &task.schedule_id, task.revision)
+            .await
+            .unwrap()
+            .status,
+        "active"
     );
 }

@@ -67,7 +67,7 @@ pub(super) async fn lock_target(
 fn view(task: &entity::Model) -> Value {
     json!({"schedule_id":task.schedule_id,"title":task.title,"kind":task.kind,"state":task.status,
         "revision":task.revision,"creation_source":task.creation_source,
-        "can_cancel":task.creation_source == "ai_proposal" && !matches!(task.status.as_str(),"deleted"|"completed"),
+        "can_cancel":task.creation_source == "ai_proposal" && !matches!(task.status.as_str(),"deleted"|"completed"|"expired"),
         "next_run_at_utc_ms":task.next_run_at,"active_run_id":task.active_run_id,
         "rule":serde_json::from_str::<Value>(&task.spec_json).ok().map(|spec| spec["rule"].clone())})
 }
@@ -113,6 +113,12 @@ pub(super) async fn cancel(
     if task.status == "completed" {
         return Ok(
             json!({"ok":false,"reason":"task_already_completed","task":view(&task)}).to_string(),
+        );
+    }
+    if task.status == "expired" {
+        return Ok(
+            json!({"ok":false,"reason":"task_expired_with_source_conversation","task":view(&task)})
+                .to_string(),
         );
     }
     if task.revision != expected {

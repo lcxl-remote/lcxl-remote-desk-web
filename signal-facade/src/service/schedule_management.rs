@@ -6,6 +6,7 @@ use super::ControlFrameOutcome;
 #[openapi(components(schemas(
     desk_agent_protocol::schedule::management::ScheduleManagementRequest,
     desk_agent_protocol::schedule::management::ScheduleManagementResponse,
+    ScheduleRetentionExceeded,
 )))]
 pub struct ScheduleManagementSchemas;
 use crate::model::{
@@ -23,10 +24,50 @@ pub fn cookie_owner(auth: &AuthContext) -> Option<i32> {
         .filter(|id| *id > 0)
 }
 
+/// A failed task management request. `data` carries structured detail for
+/// codes that need it, e.g. the accepted maximum delay for
+/// `SCHEDULE_EXCEEDS_SESSION_RETENTION`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleManagementFailure {
+    pub code: DeskErrorCode,
+    pub message: &'static str,
+    pub data: Option<serde_json::Value>,
+}
+
+impl From<(DeskErrorCode, &'static str)> for ScheduleManagementFailure {
+    fn from((code, message): (DeskErrorCode, &'static str)) -> Self {
+        Self {
+            code,
+            message,
+            data: None,
+        }
+    }
+}
+
+/// Error detail of `SCHEDULE_EXCEEDS_SESSION_RETENTION`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleRetentionExceeded {
+    /// Longest delay from now, in seconds, a conversation timer may use.
+    pub max_delay_seconds: u64,
+}
+
+impl ScheduleManagementFailure {
+    pub fn exceeds_session_retention(max_delay_seconds: u64) -> Self {
+        Self {
+            code: DeskErrorCode::SCHEDULE_EXCEEDS_SESSION_RETENTION,
+            message: "the continuation would run after its conversation expires",
+            data: serde_json::to_value(ScheduleRetentionExceeded { max_delay_seconds }).ok(),
+        }
+    }
+}
+
 pub async fn reply(
     actor: &ConnectionState,
     request: &SignalingModel,
-    result: Result<ScheduleManagementResponse, (DeskErrorCode, &'static str)>,
+    result: Result<ScheduleManagementResponse, ScheduleManagementFailure>,
 ) -> ControlFrameOutcome {
     let frame = match result {
         Ok(data) => SignalingModel::success_response(
@@ -36,13 +77,16 @@ pub async fn reply(
             Some(actor.model.connection_id.clone()),
             Some(&data),
         ),
-        Err((code, message)) => SignalingModel::error(
+        Err(failure) => SignalingModel::new_response(
             &request.request_id,
             SignalingType::ScheduledTasksManaged,
             None,
             Some(actor.model.connection_id.clone()),
-            code,
-            message,
+            failure.data.as_ref(),
+            crate::model::signal::SignalingResponseState {
+                error_code: failure.code.code(),
+                message: Some(failure.message.to_string()),
+            },
         ),
     };
     if let Ok(frame) = frame

@@ -1,7 +1,19 @@
 //! Owner-authorized deletion fences the model turn before removing its history.
 use super::*;
-use crate::entity::{agent_attachment, agent_schedule};
-use sea_orm::ExprTrait;
+use crate::entity::{
+    agent_action_item, agent_approval_delegation, agent_attachment,
+    agent_capability_dispatch_outbox, agent_goal_open_request, agent_schedule,
+};
+use desk_diagnose_core::goal::GoalRemovalReason;
+use sea_orm::{ExprTrait, QuerySelect, QueryTrait};
+
+/// Work that provably never left the server; deletion cancels it.
+const UNDISPATCHED_ACTION_STATES: [&str; 4] = [
+    crate::agent_action_store::STATUS_AWAITING_APPROVAL,
+    crate::agent_action_store::STATUS_APPROVED,
+    crate::agent_action_store::STATUS_CLAIMED,
+    crate::capability_grant_store::CAPABILITY_WORK_PREPARED,
+];
 
 impl SignalAgentSessionStore {
     pub async fn delete_for_subject(
@@ -83,8 +95,98 @@ impl SignalAgentSessionStore {
             .exec(&txn)
             .await
             .map_err(save_backend)?;
+        let now = chrono::Utc::now();
+        let now_ms = now.timestamp_millis();
+        // End every goal of this conversation; a running segment's worker gets
+        // an idempotent cancellation when it settles.
+        crate::agent_goal_store::cancel_conversation_goals_on(
+            &txn,
+            id,
+            GoalRemovalReason::ConversationRemoved,
+            u64::try_from(now_ms).map_err(|_| internal("invalid clock"))?,
+        )
+        .await
+        .map_err(save_backend)?;
+        agent_goal_open_request::Entity::delete_many()
+            .filter(agent_goal_open_request::Column::ConversationId.eq(id))
+            .exec(&txn)
+            .await
+            .map_err(save_backend)?;
+        agent_approval_delegation::Entity::delete_many()
+            .filter(agent_approval_delegation::Column::ConversationId.eq(id))
+            .exec(&txn)
+            .await
+            .map_err(save_backend)?;
+        // Undispatched work becomes terminal and its queued outbox entries are
+        // dropped; work that may already be on the device keeps its evidence
+        // and records the cancellation request. Nothing is reported as "did
+        // not run" unless it provably never left the server.
+        let conversation_work = || {
+            agent_action_item::Entity::find()
+                .select_only()
+                .column(agent_action_item::Column::Id)
+                .filter(agent_action_item::Column::ConversationId.eq(id))
+                .into_query()
+        };
+        agent_capability_dispatch_outbox::Entity::delete_many()
+            .filter(
+                agent_capability_dispatch_outbox::Column::WorkId.in_subquery(conversation_work()),
+            )
+            .filter(
+                agent_capability_dispatch_outbox::Column::State
+                    .eq(crate::capability_grant_store::DISPATCH_OUTBOX_PENDING),
+            )
+            .exec(&txn)
+            .await
+            .map_err(save_backend)?;
+        agent_capability_dispatch_outbox::Entity::update_many()
+            .col_expr(
+                agent_capability_dispatch_outbox::Column::State,
+                Expr::value(crate::capability_grant_store::DISPATCH_OUTBOX_OUTCOME_UNKNOWN),
+            )
+            .col_expr(
+                agent_capability_dispatch_outbox::Column::UpdatedAt,
+                Expr::value(now),
+            )
+            .filter(
+                agent_capability_dispatch_outbox::Column::WorkId.in_subquery(conversation_work()),
+            )
+            .filter(
+                agent_capability_dispatch_outbox::Column::State
+                    .eq(crate::capability_grant_store::DISPATCH_OUTBOX_SENDING),
+            )
+            .exec(&txn)
+            .await
+            .map_err(save_backend)?;
+        agent_action_item::Entity::update_many()
+            .col_expr(
+                agent_action_item::Column::Status,
+                Expr::value(crate::agent_action_store::STATUS_CANCELLED),
+            )
+            .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
+            .filter(agent_action_item::Column::ConversationId.eq(id))
+            .filter(agent_action_item::Column::Status.is_in(UNDISPATCHED_ACTION_STATES))
+            .exec(&txn)
+            .await
+            .map_err(save_backend)?;
+        agent_action_item::Entity::update_many()
+            .col_expr(
+                agent_action_item::Column::CancelRequestedAt,
+                Expr::col(agent_action_item::Column::CancelRequestedAt).if_null(now),
+            )
+            .col_expr(
+                agent_action_item::Column::CancelRequestedBy,
+                Expr::value(actor),
+            )
+            .filter(agent_action_item::Column::ConversationId.eq(id))
+            .filter(
+                agent_action_item::Column::Status
+                    .is_in(crate::usage_retention::UNRESOLVED_ACTION_STATES),
+            )
+            .exec(&txn)
+            .await
+            .map_err(save_backend)?;
         // Persist before removing history: reconnect and restart must retain cleanup intent.
-        let now_ms = chrono::Utc::now().timestamp_millis();
         crate::entity::agent_file_recovery_cleanup::ActiveModel {
             conversation_id: Set(id.to_owned()),
             actor_id: Set(actor.to_owned()),

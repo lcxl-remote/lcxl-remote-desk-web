@@ -869,6 +869,37 @@ pub enum GoalPermissionWake {
     Held,
 }
 
+/// Ledger capacity shared by in-flight reservations and settlements. Every
+/// reservation must leave room to be settled, recovered or force-cancelled, so
+/// the two maps together never exceed it.
+pub const MAX_BUDGET_LEDGER_ENTRIES: usize = 512;
+
+/// Why the system, not the owner or the model, ended a goal. These paths do not
+/// require execution eligibility: they run exactly when the subject lost it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalRemovalReason {
+    /// The owner deleted the conversation, or it no longer exists.
+    ConversationRemoved,
+    /// The owner account or the target device was removed or reassigned.
+    SubjectRemoved,
+    /// The owner account was disabled.
+    OwnerDisabled,
+    /// The device stayed unavailable past the configured maximum.
+    DeviceUnavailableTimeout,
+}
+
+impl GoalRemovalReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConversationRemoved => "conversation_removed",
+            Self::SubjectRemoved => "subject_removed",
+            Self::OwnerDisabled => "owner_disabled",
+            Self::DeviceUnavailableTimeout => "device_unavailable_timeout",
+        }
+    }
+}
+
 impl GoalControl {
     pub fn validate(&self) -> Result<(), GoalError> {
         let bounded = |value: &str| !value.trim().is_empty() && value.len() <= 2_048;
@@ -935,6 +966,11 @@ pub struct GoalRun {
     pub next_attempt_unix_ms: Option<u64>,
     /// Consecutive offline observations, used only for bounded device retry.
     pub device_wait_attempts: u8,
+    /// First observation of the current device-unavailable streak. It survives
+    /// rechecks and is cleared only when the device is observed available, so
+    /// the device-unavailable maximum measures one continuous outage.
+    #[serde(default)]
+    pub device_unavailable_since_unix_ms: Option<u64>,
     /// Preserved across due-time wake and claim until a model response succeeds.
     pub model_wait_attempts: u8,
     pub lease_epoch: u64,
@@ -1094,7 +1130,15 @@ impl GoalRun {
         {
             return Err(GoalError::InvalidState);
         }
-        if self.budget_reservations.len() > 512 || self.budget_settlements.len() > 512 {
+        if self.budget_reservations.len() + self.budget_settlements.len()
+            > MAX_BUDGET_LEDGER_ENTRIES
+        {
+            return Err(GoalError::InvalidState);
+        }
+        if self
+            .device_unavailable_since_unix_ms
+            .is_some_and(|since| self.state.is_terminal() || since < self.created_at_unix_ms)
+        {
             return Err(GoalError::InvalidState);
         }
         if self.seen_result_fingerprints.len() > 512
@@ -1240,6 +1284,7 @@ impl GoalRun {
             deadline_unix_ms,
             next_attempt_unix_ms: None,
             device_wait_attempts: 0,
+            device_unavailable_since_unix_ms: None,
             model_wait_attempts: 0,
             lease_epoch: 0,
             status_reason: None,
@@ -1330,7 +1375,6 @@ impl GoalRun {
             || now_unix_ms >= self.deadline_unix_ms
             || delta.slices != 0
             || delta == GoalUsage::default()
-            || self.budget_reservations.len() >= 512
         {
             return Err(GoalError::InvalidState);
         }
@@ -1343,6 +1387,13 @@ impl GoalRun {
         }
         if self.budget_settlements.contains_key(id) {
             return Err(GoalError::InvalidState);
+        }
+        // A full ledger stops new work the same way an exhausted budget does:
+        // the segment can still settle, recover or be cancelled.
+        if self.budget_reservations.len() + self.budget_settlements.len()
+            >= MAX_BUDGET_LEDGER_ENTRIES
+        {
+            return Err(GoalError::BudgetExceeded);
         }
         self.available_for(delta)?;
         self.reserved = self
@@ -1372,10 +1423,7 @@ impl GoalRun {
                 Err(GoalError::InvalidState)
             };
         }
-        if self.state != GoalState::Running
-            || now_unix_ms < self.updated_at_unix_ms
-            || self.budget_settlements.len() >= 512
-        {
+        if self.state != GoalState::Running || now_unix_ms < self.updated_at_unix_ms {
             return Err(GoalError::InvalidState);
         }
         let reserved = *self
@@ -1443,6 +1491,7 @@ impl GoalRun {
         self.slice_seq = slice_seq;
         self.lease_epoch = lease_epoch;
         self.reserved.slices = reserved_slices;
+        self.device_unavailable_since_unix_ms = None;
         self.state = GoalState::Running;
         self.state_version = state_version;
         self.status_reason = None;
@@ -1578,6 +1627,8 @@ impl GoalRun {
             self.user_reply_floor_revision = Some(self.input_revision);
         }
         if self.state == GoalState::Waiting(GoalWaitReason::Device) {
+            self.device_unavailable_since_unix_ms
+                .get_or_insert(now_unix_ms);
             self.device_wait_attempts = 1;
             self.next_attempt_unix_ms = Some(self.next_device_check(now_unix_ms));
         } else {
@@ -1737,7 +1788,6 @@ impl GoalRun {
         if self.state != GoalState::Running
             || self.reserved.slices != 1
             || now_unix_ms < self.updated_at_unix_ms
-            || self.budget_settlements.len() + self.budget_reservations.len() > 512
         {
             return Err(GoalError::InvalidState);
         }
@@ -1807,9 +1857,6 @@ impl GoalRun {
         let interrupted = self.state == GoalState::Running;
         let awaiting_work = self.state == GoalState::Waiting(GoalWaitReason::Work);
         let uncertain_budget = !self.budget_reservations.is_empty();
-        if self.budget_settlements.len() + self.budget_reservations.len() > 512 {
-            return Err(GoalError::InvalidState);
-        }
         let charge = self.budget_reservations.values().try_fold(
             GoalUsage {
                 slices: u32::from(interrupted),
@@ -1911,6 +1958,7 @@ impl GoalRun {
             .ok_or(GoalError::ArithmeticOverflow)?;
         self.next_attempt_unix_ms = None;
         self.device_wait_attempts = 0;
+        self.device_unavailable_since_unix_ms = None;
         self.model_wait_attempts = 0;
         self.updated_at_unix_ms = now_unix_ms;
         Ok(())
@@ -2029,6 +2077,7 @@ impl GoalRun {
         self.next_attempt_unix_ms = None;
         if reason == GoalWaitReason::Device {
             self.device_wait_attempts = 0;
+            self.device_unavailable_since_unix_ms = None;
         }
         if reason == GoalWaitReason::User {
             self.user_reply_floor_revision = None;
@@ -2072,6 +2121,8 @@ impl GoalRun {
             .checked_add(1)
             .ok_or(GoalError::ArithmeticOverflow)?;
         self.device_wait_attempts = 1;
+        self.device_unavailable_since_unix_ms
+            .get_or_insert(now_unix_ms);
         self.next_attempt_unix_ms = Some(self.next_device_check(now_unix_ms));
         self.status_reason = Some("device_unavailable".into());
         self.updated_at_unix_ms = now_unix_ms;
@@ -2200,6 +2251,7 @@ impl GoalRun {
             .checked_add(1)
             .ok_or(GoalError::ArithmeticOverflow)?;
         self.next_attempt_unix_ms = None;
+        self.device_unavailable_since_unix_ms = None;
         self.device_wait_attempts = 0;
         self.model_wait_attempts = 0;
         self.updated_at_unix_ms = now_unix_ms;
@@ -2221,10 +2273,64 @@ impl GoalRun {
             .ok_or(GoalError::ArithmeticOverflow)?;
         self.status_reason = Some("absolute_deadline_reached".into());
         self.next_attempt_unix_ms = None;
+        self.device_unavailable_since_unix_ms = None;
         self.device_wait_attempts = 0;
         self.model_wait_attempts = 0;
         self.updated_at_unix_ms = now_unix_ms;
         Ok(())
+    }
+
+    /// Whether the current continuous device outage has lasted at least
+    /// `max_ms`. The caller terminalizes with
+    /// [`GoalRemovalReason::DeviceUnavailableTimeout`] once it holds.
+    pub fn device_unavailable_exceeded(&self, max_ms: u64, now_unix_ms: u64) -> bool {
+        self.device_unavailable_since_unix_ms
+            .is_some_and(|since| now_unix_ms.saturating_sub(since) >= max_ms)
+    }
+
+    /// System-initiated termination from any non-terminal state, including a
+    /// running segment whose owner or conversation disappeared. A running
+    /// segment is fenced exactly like [`Self::recover_interrupted_slice`]:
+    /// every open reservation is charged at its reserved upper bound and kept
+    /// as a settlement, so a late worker cannot settle it as success. The
+    /// shared ledger capacity invariant guarantees this move always fits.
+    pub fn cancel_for_removal(
+        &mut self,
+        reason: GoalRemovalReason,
+        now_unix_ms: u64,
+    ) -> Result<(), GoalError> {
+        if self.state.is_terminal() {
+            return Err(GoalError::InvalidState);
+        }
+        let now_unix_ms = now_unix_ms.max(self.updated_at_unix_ms);
+        if self.state == GoalState::Running {
+            let charge = self.reserved;
+            self.used = self
+                .used
+                .checked_add(charge)
+                .ok_or(GoalError::ArithmeticOverflow)?;
+            self.reserved = GoalUsage::default();
+            self.budget_settlements
+                .append(&mut self.budget_reservations);
+        } else if self.reserved != GoalUsage::default() || !self.budget_reservations.is_empty() {
+            return Err(GoalError::InvalidState);
+        }
+        self.lease_epoch = self
+            .lease_epoch
+            .checked_add(1)
+            .ok_or(GoalError::ArithmeticOverflow)?;
+        self.state_version = self
+            .state_version
+            .checked_add(1)
+            .ok_or(GoalError::ArithmeticOverflow)?;
+        self.state = GoalState::Cancelled;
+        self.status_reason = Some(reason.as_str().into());
+        self.next_attempt_unix_ms = None;
+        self.device_unavailable_since_unix_ms = None;
+        self.device_wait_attempts = 0;
+        self.model_wait_attempts = 0;
+        self.updated_at_unix_ms = now_unix_ms;
+        self.validate()
     }
 }
 
@@ -2536,6 +2642,133 @@ mod tests {
         )
         .unwrap();
         assert_eq!(goal.used.total_tokens(), Some(10));
+        goal.validate().unwrap();
+    }
+
+    fn tool_call() -> GoalUsage {
+        GoalUsage {
+            tool_calls: 1,
+            ..GoalUsage::default()
+        }
+    }
+
+    fn unlimited_goal() -> GoalRun {
+        let mut goal = goal();
+        goal.limits.tool_calls = 1_000;
+        goal.validate().unwrap();
+        goal
+    }
+
+    #[test]
+    fn removal_cancels_every_non_terminal_state() {
+        let reasons = [
+            GoalRemovalReason::ConversationRemoved,
+            GoalRemovalReason::SubjectRemoved,
+            GoalRemovalReason::OwnerDisabled,
+            GoalRemovalReason::DeviceUnavailableTimeout,
+        ];
+        let mut queued = goal();
+        let mut running = goal();
+        running.claim_slice(1_001).unwrap();
+        let mut device = goal();
+        device.wait_for_device(1_001).unwrap();
+        let mut paused = goal();
+        paused.pause_settled(GoalPauseReason::Owner, 1_001).unwrap();
+        for (mut goal, reason) in [queued.clone(), running, device, paused]
+            .into_iter()
+            .zip(reasons)
+        {
+            let epoch = goal.lease_epoch;
+            goal.cancel_for_removal(reason, 2_000).unwrap();
+            assert_eq!(goal.state, GoalState::Cancelled);
+            assert_eq!(goal.status_reason.as_deref(), Some(reason.as_str()));
+            assert_eq!(goal.lease_epoch, epoch + 1);
+            assert_eq!(goal.reserved, GoalUsage::default());
+            assert_eq!(goal.device_unavailable_since_unix_ms, None);
+            goal.validate().unwrap();
+            assert_eq!(
+                goal.cancel_for_removal(reason, 2_001),
+                Err(GoalError::InvalidState)
+            );
+        }
+        // A removal observed with an older clock never moves time backwards.
+        queued
+            .cancel_for_removal(GoalRemovalReason::ConversationRemoved, 1)
+            .unwrap();
+        assert_eq!(queued.updated_at_unix_ms, 1_000);
+    }
+
+    #[test]
+    fn removal_charges_open_reservations_and_fences_the_running_slice() {
+        let mut goal = goal();
+        goal.claim_slice(1_001).unwrap();
+        goal.reserve_with_id("tool-1", tool_call(), 1_002).unwrap();
+        goal.reserve_with_id("tool-2", tool_call(), 1_003).unwrap();
+        goal.settle_with_id("tool-1", tool_call(), 1_004).unwrap();
+        goal.cancel_for_removal(GoalRemovalReason::ConversationRemoved, 1_005)
+            .unwrap();
+        assert_eq!(goal.used.tool_calls, 2);
+        assert_eq!(goal.used.slices, 1);
+        assert!(goal.budget_reservations.is_empty());
+        assert!(goal.budget_settlements.contains_key("tool-2"));
+        // The removed segment cannot settle its reservation as a success.
+        assert_eq!(goal.require_fence(1, 1, 1), Err(GoalError::StaleLease));
+        assert_eq!(
+            goal.settle_with_id("tool-2", GoalUsage::default(), 1_006),
+            Err(GoalError::InvalidState)
+        );
+        assert_eq!(
+            goal.reserve_with_id("tool-3", tool_call(), 1_006),
+            Err(GoalError::InvalidState)
+        );
+    }
+
+    #[test]
+    fn full_ledger_stops_new_reservations_but_never_blocks_termination() {
+        let mut goal = unlimited_goal();
+        goal.claim_slice(1_001).unwrap();
+        let mut now = 1_002;
+        for index in 0..MAX_BUDGET_LEDGER_ENTRIES - 1 {
+            let id = format!("tool-{index}");
+            goal.reserve_with_id(&id, tool_call(), now).unwrap();
+            goal.settle_with_id(&id, tool_call(), now).unwrap();
+            now += 1;
+        }
+        // The 512th entry is accepted as an open reservation.
+        goal.reserve_with_id("last", tool_call(), now).unwrap();
+        assert_eq!(
+            goal.budget_reservations.len() + goal.budget_settlements.len(),
+            MAX_BUDGET_LEDGER_ENTRIES
+        );
+        // A 513th is a budget stop, not a corrupt state.
+        assert_eq!(
+            goal.reserve_with_id("overflow", tool_call(), now),
+            Err(GoalError::BudgetExceeded)
+        );
+        goal.validate().unwrap();
+        let mut recovered = goal.clone();
+        recovered.recover_interrupted_slice(true, now).unwrap();
+        goal.cancel_for_removal(GoalRemovalReason::OwnerDisabled, now)
+            .unwrap();
+        assert_eq!(goal.budget_settlements.len(), MAX_BUDGET_LEDGER_ENTRIES);
+        assert_eq!(goal.state, GoalState::Cancelled);
+    }
+
+    #[test]
+    fn device_outage_streak_survives_rechecks_and_resets_on_availability() {
+        let mut goal = goal();
+        goal.wait_for_device(2_000).unwrap();
+        assert_eq!(goal.device_unavailable_since_unix_ms, Some(2_000));
+        goal.defer_device_recheck(40_000).unwrap();
+        assert_eq!(goal.device_unavailable_since_unix_ms, Some(2_000));
+        assert!(!goal.device_unavailable_exceeded(38_001, 40_000));
+        assert!(goal.device_unavailable_exceeded(38_000, 40_000));
+        goal.wake_from(GoalWaitReason::Device, 50_000).unwrap();
+        assert_eq!(goal.device_unavailable_since_unix_ms, None);
+        goal.wait_for_device(60_000).unwrap();
+        assert_eq!(goal.device_unavailable_since_unix_ms, Some(60_000));
+        goal.pause_settled(GoalPauseReason::Owner, 61_000).unwrap();
+        assert_eq!(goal.device_unavailable_since_unix_ms, None);
         goal.validate().unwrap();
     }
 

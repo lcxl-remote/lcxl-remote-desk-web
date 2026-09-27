@@ -902,3 +902,24 @@ mod tests {
 
 #[cfg(test)]
 mod write_tests;
+
+/// Test-only: create, if missing, the tables that conversation deletion,
+/// idle reclaim and conversation-timer validation read, so narrow fixtures
+/// exercise the full lifecycle.
+#[cfg(test)]
+pub(crate) async fn ensure_lifecycle_tables(db: &DatabaseConnection) {
+    use crate::entity::*;
+    let schema = Schema::new(db.get_database_backend());
+    for mut statement in [
+        schema.create_table_from_entity(usage_retention::Entity),
+        schema.create_table_from_entity(agent_goal_run::Entity),
+        schema.create_table_from_entity(agent_goal_open_request::Entity),
+        schema.create_table_from_entity(agent_approval_delegation::Entity),
+        schema.create_table_from_entity(agent_schedule::Entity),
+        schema.create_table_from_entity(agent_action_item::Entity),
+        schema.create_table_from_entity(agent_capability_dispatch_outbox::Entity),
+        schema.create_table_from_entity(agent_exec_task::Entity),
+    ] {
+        db.execute(statement.if_not_exists()).await.unwrap();
+    }
+}

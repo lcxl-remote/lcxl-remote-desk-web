@@ -8,6 +8,9 @@ use desk_agent_protocol::ai_assistant::goal_budget::{GoalBudgetLimits, GoalBudge
 
 pub const SCHEMA_VERSION: u16 = 1;
 const MAX_DEADLINE_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+pub const DEFAULT_DEVICE_UNAVAILABLE_MAX_MS: u64 = 24 * 60 * 60 * 1_000;
+pub const MIN_DEVICE_UNAVAILABLE_MAX_MS: u64 = 60 * 60 * 1_000;
+pub const MAX_DEVICE_UNAVAILABLE_MAX_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
 pub fn initial() -> GoalBudgetPolicy {
     GoalBudgetPolicy {
@@ -22,6 +25,7 @@ pub fn initial() -> GoalBudgetPolicy {
             slices: Some(DEFAULT_SLICES),
             stalled_slices: Some(DEFAULT_STALLED_SLICES),
         },
+        device_unavailable_max_ms: DEFAULT_DEVICE_UNAVAILABLE_MAX_MS,
     }
 }
 
@@ -29,7 +33,16 @@ pub fn validate(policy: &GoalBudgetPolicy) -> Result<(), GoalError> {
     if policy.schema_version != SCHEMA_VERSION {
         return Err(GoalError::InvalidLimits);
     }
+    validate_device_unavailable_max(policy.device_unavailable_max_ms)?;
     validate_limits(policy.limits)
+}
+
+pub fn validate_device_unavailable_max(value: u64) -> Result<(), GoalError> {
+    if (MIN_DEVICE_UNAVAILABLE_MAX_MS..=MAX_DEVICE_UNAVAILABLE_MAX_MS).contains(&value) {
+        Ok(())
+    } else {
+        Err(GoalError::InvalidLimits)
+    }
 }
 
 pub fn validate_limits(value: GoalBudgetLimits) -> Result<(), GoalError> {
@@ -56,9 +69,11 @@ pub fn validate_limits(value: GoalBudgetLimits) -> Result<(), GoalError> {
 pub fn candidate(
     current: &GoalBudgetPolicy,
     limits: GoalBudgetLimits,
+    device_unavailable_max_ms: u64,
 ) -> Result<GoalBudgetPolicy, GoalError> {
     validate(current)?;
     validate_limits(limits)?;
+    validate_device_unavailable_max(device_unavailable_max_ms)?;
     Ok(GoalBudgetPolicy {
         schema_version: SCHEMA_VERSION,
         revision: current
@@ -66,6 +81,7 @@ pub fn candidate(
             .checked_add(1)
             .ok_or(GoalError::ArithmeticOverflow)?,
         limits,
+        device_unavailable_max_ms,
     })
 }
 
@@ -108,11 +124,33 @@ mod tests {
         let mut limits = initial.limits;
         limits.model_calls = None;
         limits.deadline_ms = None;
-        let next = candidate(&initial, limits).unwrap();
+        let next = candidate(&initial, limits, DEFAULT_DEVICE_UNAVAILABLE_MAX_MS).unwrap();
         assert_eq!(next.revision, 1);
         assert_eq!(effective_limits(&next).unwrap().model_calls, u32::MAX);
         assert_eq!(deadline_unix_ms(&next, 1_000).unwrap(), i64::MAX as u64);
         limits.model_calls = Some(0);
-        assert!(candidate(&next, limits).is_err());
+        assert!(candidate(&next, limits, DEFAULT_DEVICE_UNAVAILABLE_MAX_MS).is_err());
+    }
+
+    #[test]
+    fn device_unavailable_maximum_is_bounded_and_cannot_be_disabled() {
+        let initial = initial();
+        assert_eq!(initial.device_unavailable_max_ms, 86_400_000);
+        for accepted in [3_600_000, 86_400_000, 2_592_000_000] {
+            assert_eq!(
+                candidate(&initial, initial.limits, accepted)
+                    .unwrap()
+                    .device_unavailable_max_ms,
+                accepted
+            );
+        }
+        for rejected in [0, 3_599_999, 2_592_000_001, u64::MAX] {
+            assert!(candidate(&initial, initial.limits, rejected).is_err());
+        }
+        // Disabling the goal deadline leaves the device bound in force.
+        let mut limits = initial.limits;
+        limits.deadline_ms = None;
+        let next = candidate(&initial, limits, 3_600_000).unwrap();
+        assert_eq!(next.device_unavailable_max_ms, 3_600_000);
     }
 }

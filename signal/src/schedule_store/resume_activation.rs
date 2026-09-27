@@ -159,6 +159,7 @@ impl ScheduleStore {
         let spec = parse_json(&task.spec_json).map_err(|_| ScheduleStoreError::Invalid)?;
         let spec =
             validate_publication(&spec, now, true).map_err(|_| ScheduleStoreError::Invalid)?;
+        super::check_resume_retention(txn, &spec, now).await?;
         let changed = entity::Entity::update_many()
             .set(entity::ActiveModel {
                 status: Set("active".into()),

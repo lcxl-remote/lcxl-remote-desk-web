@@ -52,6 +52,9 @@ pub struct SignalScheduleExecutor {
     connections: web::Data<SharedConnectionMap>,
     gate: Arc<AiAssistantGate>,
     approval_cursor: Arc<AtomicI64>,
+    /// Instance-local position in the runnable goal FIFO. Only rotates which
+    /// candidates are read next; claims are still decided under the write lock.
+    goal_cursor: Arc<std::sync::Mutex<Option<crate::agent_goal_store::QueuedCursor>>>,
 }
 
 enum DispatchResult {
@@ -72,6 +75,7 @@ impl SignalScheduleExecutor {
             connections,
             gate,
             approval_cursor: Arc::new(AtomicI64::new(0)),
+            goal_cursor: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -115,12 +119,30 @@ impl SignalScheduleExecutor {
             .await?;
         crate::agent_goal_store::expire_due(&self.db, chrono::Utc::now(), BATCH_SIZE as u64)
             .await?;
+        let after = self
+            .goal_cursor
+            .lock()
+            .map(|cursor| cursor.clone())
+            .unwrap_or_default();
         let mut goal_candidates = crate::agent_goal_store::queued_candidates(
             &self.db,
             u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             BATCH_SIZE,
+            after.as_ref(),
         )
         .await?;
+        let next = (goal_candidates.len() as u64 == BATCH_SIZE)
+            .then(|| goal_candidates.last())
+            .flatten()
+            .map(|goal| {
+                (
+                    i64::try_from(goal.updated_at_unix_ms).unwrap_or(i64::MAX),
+                    goal.goal_id.clone(),
+                )
+            });
+        if let Ok(mut cursor) = self.goal_cursor.lock() {
+            *cursor = next;
+        }
         goal_candidates.extend(
             crate::agent_goal_store::waiting_device_candidates(
                 &self.db,

@@ -167,11 +167,9 @@ pub(super) async fn settle(args: Settlement) -> Result<run::Model, ScheduleStore
         return Err(ScheduleStoreError::Conflict);
     }
     let paused = !failures.pause_reasons.is_empty();
-    let task_status = if task.status == "deleted" {
-        "deleted"
-    } else if matches!(
+    let task_status = if matches!(
         task.status.as_str(),
-        "draft" | "rehearsing" | "awaiting_authorization"
+        "deleted" | "expired" | "draft" | "rehearsing" | "awaiting_authorization"
     ) {
         &task.status
     } else if paused {

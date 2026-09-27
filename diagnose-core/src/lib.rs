@@ -99,6 +99,7 @@ pub mod schedule;
 pub mod seam;
 pub mod selection;
 pub mod session;
+pub mod session_reclaim;
 pub mod simulated_grant;
 pub mod sink_authorizer;
 pub mod spreadsheet_formula;

@@ -14,6 +14,7 @@ async fn add_cleanup_tables(db: &DatabaseConnection) {
     ] {
         db.execute(&table).await.unwrap();
     }
+    crate::db::ensure_lifecycle_tables(db).await;
 }
 
 async fn counts(db: &DatabaseConnection) -> Vec<u64> {

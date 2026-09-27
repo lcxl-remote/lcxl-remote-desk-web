@@ -25,6 +25,7 @@ pub(in crate::capability_grant_store::tests::computer_binding) async fn claim_or
     ] {
         db.execute(&statement).await.unwrap();
     }
+    crate::db::ensure_lifecycle_tables(db).await;
     assert_eq!(session.actor_id, "1");
     // Create the occurrence before preparing or signing any original action.
     let mut proposal = session.conversation.pop().unwrap();

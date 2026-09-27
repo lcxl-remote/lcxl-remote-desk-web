@@ -10,8 +10,8 @@ use crate::entity::{
 use chrono::{DateTime, Duration, Utc};
 use desk_diagnose_core::dynamic_run::{AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEventKind};
 use desk_diagnose_core::goal::{
-    GoalControl, GoalLedgerEvent, GoalOwnerAction, GoalPauseReason, GoalPermissionWake, GoalRun,
-    GoalSegmentEnd, GoalState, GoalUsage, GoalWaitReason,
+    GoalControl, GoalLedgerEvent, GoalOwnerAction, GoalPauseReason, GoalPermissionWake,
+    GoalRemovalReason, GoalRun, GoalSegmentEnd, GoalState, GoalUsage, GoalWaitReason,
 };
 use desk_diagnose_core::seam::ClaimTurnParams;
 use desk_diagnose_core::session::{
@@ -131,6 +131,61 @@ pub(crate) async fn replace_on(
         .exec(txn)
         .await?;
     Ok(result.rows_affected == 1)
+}
+
+const TERMINAL_STATUS_CODES: [&str; 3] = ["completed", "failed", "cancelled"];
+
+/// Terminalize every non-terminal goal of a conversation for a system reason,
+/// inside the caller's write transaction. A running segment is fenced by the
+/// state transition; see [`settle_slice`] for its idempotent late settlement.
+pub(crate) async fn cancel_conversation_goals_on(
+    txn: &DatabaseTransaction,
+    conversation_id: &str,
+    reason: GoalRemovalReason,
+    now_ms: u64,
+) -> Result<Vec<GoalRun>, DbErr> {
+    let rows = goal_row::Entity::find()
+        .filter(goal_row::Column::ConversationId.eq(conversation_id))
+        .filter(goal_row::Column::Status.is_not_in(TERMINAL_STATUS_CODES))
+        .order_by_asc(goal_row::Column::Id)
+        .all(txn)
+        .await?;
+    let mut cancelled = Vec::new();
+    for row in rows {
+        let mut goal = decode(&row)?;
+        let previous = (goal.state_version, goal.lease_epoch);
+        goal.cancel_for_removal(reason, now_ms)
+            .map_err(|_| invalid())?;
+        if !replace_on(txn, &goal, previous.0, previous.1, None, None).await? {
+            return Err(invalid());
+        }
+        cancelled.push(goal);
+    }
+    Ok(cancelled)
+}
+
+/// A worker settling a segment whose goal the system already ended receives
+/// that terminal goal instead of an error.
+async fn settled_by_removal(txn: &DatabaseTransaction, goal_id: &str) -> Result<GoalRun, DbErr> {
+    let row = goal_row::Entity::find()
+        .filter(goal_row::Column::GoalId.eq(goal_id))
+        .one(txn)
+        .await?
+        .ok_or_else(invalid)?;
+    let goal = decode(&row)?;
+    let removed = [
+        GoalRemovalReason::ConversationRemoved,
+        GoalRemovalReason::SubjectRemoved,
+        GoalRemovalReason::OwnerDisabled,
+        GoalRemovalReason::DeviceUnavailableTimeout,
+    ]
+    .iter()
+    .any(|reason| goal.status_reason.as_deref() == Some(reason.as_str()));
+    if goal.state == GoalState::Cancelled && removed {
+        Ok(goal)
+    } else {
+        Err(invalid())
+    }
 }
 
 pub async fn load_for_subject(
@@ -488,24 +543,42 @@ pub async fn wake_for_permission_decision(
     Ok(outcome)
 }
 
+/// Keyset position in the FIFO of runnable goals.
+pub type QueuedCursor = (i64, String);
+
 /// Bounded, durable FIFO scan. A candidate is rechecked and fenced by
-/// `claim_slice`; this read by itself never owns a planning turn.
+/// `claim_slice`; this read by itself never owns a planning turn. `after`
+/// resumes behind the previous page so candidates that keep failing cannot
+/// occupy every page; callers wrap to `None` after a short page.
 pub async fn queued_candidates(
     db: &DatabaseConnection,
     now_unix_ms: u64,
     limit: u64,
+    after: Option<&QueuedCursor>,
 ) -> Result<Vec<GoalRun>, DbErr> {
     let now = as_i64(now_unix_ms)?;
-    let rows = goal_row::Entity::find()
+    let mut query = goal_row::Entity::find()
         .filter(goal_row::Column::Status.eq("queued"))
         .filter(goal_row::Column::CreatedAt.gt(active_deadline_cutoff(db, now_unix_ms).await?))
         .filter(
             Condition::any()
                 .add(goal_row::Column::NextAttemptAt.is_null())
                 .add(goal_row::Column::NextAttemptAt.lte(now)),
-        )
+        );
+    if let Some((updated_at, goal_id)) = after {
+        query = query.filter(
+            Condition::any()
+                .add(goal_row::Column::UpdatedAt.gt(*updated_at))
+                .add(
+                    Condition::all()
+                        .add(goal_row::Column::UpdatedAt.eq(*updated_at))
+                        .add(goal_row::Column::GoalId.gt(goal_id.as_str())),
+                ),
+        );
+    }
+    let rows = query
         .order_by_asc(goal_row::Column::UpdatedAt)
-        .order_by_asc(goal_row::Column::Id)
+        .order_by_asc(goal_row::Column::GoalId)
         .limit(limit.min(128))
         .all(db)
         .await?;
@@ -637,7 +710,15 @@ async fn expire_settled(
         .one(&txn)
         .await?
     else {
-        return Ok(None);
+        // The conversation is gone: end the orphan goal.
+        let previous = (goal.state_version, goal.lease_epoch);
+        goal.cancel_for_removal(GoalRemovalReason::ConversationRemoved, now_ms)
+            .map_err(|_| invalid())?;
+        if !replace_on(&txn, &goal, previous.0, previous.1, None, None).await? {
+            return Err(invalid());
+        }
+        txn.commit().await?;
+        return Ok(Some(goal));
     };
     let mut session =
         PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
@@ -827,8 +908,8 @@ async fn scheduler_transition(
         return Ok(None);
     };
     let mut goal = decode(&goal_record)?;
-    goal.apply_budget_policy(&crate::goal_budget_policy::read(&txn).await?)
-        .map_err(|_| invalid())?;
+    let policy = crate::goal_budget_policy::read(&txn).await?;
+    goal.apply_budget_policy(&policy).map_err(|_| invalid())?;
     if now_ms >= goal.deadline_unix_ms {
         return Ok(None);
     }
@@ -845,7 +926,19 @@ async fn scheduler_transition(
         .one(&txn)
         .await?
     else {
-        return Ok(None);
+        // An orphan goal can never run again; end it rather than letting it
+        // hold the head of the queue.
+        if goal.state == GoalState::Running {
+            return Ok(None);
+        }
+        let previous = (goal.state_version, goal.lease_epoch);
+        goal.cancel_for_removal(GoalRemovalReason::ConversationRemoved, now_ms)
+            .map_err(|_| invalid())?;
+        if !replace_on(&txn, &goal, previous.0, previous.1, None, None).await? {
+            return Err(invalid());
+        }
+        txn.commit().await?;
+        return Ok(Some(goal));
     };
     let mut session =
         PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
@@ -863,6 +956,11 @@ async fn scheduler_transition(
     let previous_lease_epoch = goal.lease_epoch;
     let completed_work_event_id = goal.completed_work_event_id(&session).map(str::to_owned);
     match (goal.state, transition) {
+        (GoalState::Waiting(GoalWaitReason::Device), SchedulerTransition::Device(false))
+            if goal.device_unavailable_exceeded(policy.device_unavailable_max_ms, now_ms) =>
+        {
+            goal.cancel_for_removal(GoalRemovalReason::DeviceUnavailableTimeout, now_ms)
+        }
         (GoalState::Queued, SchedulerTransition::BudgetPause)
             if !goal.next_slice_budget_available() =>
         {
@@ -1455,11 +1553,16 @@ pub async fn settle_slice(
         return Err(invalid());
     }
     let txn = crate::db::begin_write(db, agent_session::Entity).await?;
-    let session_row = agent_session::Entity::find()
+    let Some(session_row) = agent_session::Entity::find()
         .filter(agent_session::Column::ConversationId.eq(&session.conversation_id))
         .one(&txn)
         .await?
-        .ok_or_else(invalid)?;
+    else {
+        return settled_by_removal(&txn, &segment.goal_id).await;
+    };
+    if let Ok(goal) = settled_by_removal(&txn, &segment.goal_id).await {
+        return Ok(goal);
+    }
     if session_row.version != session.version
         || session_row.lease_token != as_i64(session.lease_token)?
         || session_row
@@ -1606,4 +1709,141 @@ pub async fn settle_slice(
     .await?;
     txn.commit().await?;
     Ok(goal)
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use sea_orm::Database;
+
+    async fn db() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        db
+    }
+
+    fn goal(conversation_id: &str, created_at: u64) -> GoalRun {
+        GoalRun::new(
+            format!("goal-{conversation_id}"),
+            conversation_id.into(),
+            "1".into(),
+            "device-1".into(),
+            "Finish the report".into(),
+            "message-1".into(),
+            desk_diagnose_core::goal::GoalOpening::OwnerRequest,
+            desk_diagnose_core::goal::GoalModelBinding {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                profile_revision: 1,
+                model_id: "model".into(),
+            },
+            1,
+            created_at,
+            desk_diagnose_core::goal::GoalLimits::default(),
+        )
+        .unwrap()
+    }
+
+    async fn insert(db: &DatabaseConnection, goal: &GoalRun) {
+        let txn = crate::db::begin_write(db, agent_session::Entity)
+            .await
+            .unwrap();
+        insert_on(&txn, goal).await.unwrap();
+        txn.commit().await.unwrap();
+    }
+
+    async fn seed_session(db: &DatabaseConnection, conversation_id: &str) {
+        let mut session = PersistedAgentSession::new(
+            conversation_id,
+            "1",
+            "device-1",
+            1,
+            desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            Utc::now().to_rfc3339(),
+        );
+        session.surface = AgentSessionSurface::AiAssistant;
+        session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
+        session.input_revision = 1;
+        agent_session::ActiveModel {
+            conversation_id: Set(conversation_id.into()),
+            actor_id: Set("1".into()),
+            device_id: Set("device-1".into()),
+            state_json: Set(session.encode_json_for_storage().unwrap()),
+            version: Set(0),
+            lease_token: Set(0),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn orphan_goal_is_cancelled_instead_of_holding_the_queue() {
+        let db = db().await;
+        let now = Utc::now();
+        let orphan = goal("missing", now.timestamp_millis() as u64 - 1_000);
+        insert(&db, &orphan).await;
+        let cancelled = update_device_availability(&db, &orphan, true, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.state, GoalState::Cancelled);
+        assert_eq!(
+            cancelled.status_reason.as_deref(),
+            Some("conversation_removed")
+        );
+        assert!(
+            queued_candidates(&db, now.timestamp_millis() as u64, 8, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn device_outage_longer_than_the_maximum_cancels_the_goal() {
+        let db = db().await;
+        seed_session(&db, "conversation-1").await;
+        let start = Utc::now();
+        let queued = goal("conversation-1", start.timestamp_millis() as u64 - 1_000);
+        insert(&db, &queued).await;
+        let waiting = update_device_availability(&db, &queued, false, start)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.state, GoalState::Waiting(GoalWaitReason::Device));
+        let max = crate::goal_budget_policy::read(&db)
+            .await
+            .unwrap()
+            .device_unavailable_max_ms as i64;
+        // Still inside the maximum: only a deferred recheck.
+        let recheck = update_device_availability(
+            &db,
+            &waiting,
+            false,
+            start + Duration::milliseconds(max - 1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(recheck.state, GoalState::Waiting(GoalWaitReason::Device));
+        let ended =
+            update_device_availability(&db, &recheck, false, start + Duration::milliseconds(max))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(ended.state, GoalState::Cancelled);
+        assert_eq!(
+            ended.status_reason.as_deref(),
+            Some("device_unavailable_timeout")
+        );
+    }
 }

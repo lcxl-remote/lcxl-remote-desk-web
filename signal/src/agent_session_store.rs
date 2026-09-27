@@ -1525,7 +1525,14 @@ impl SessionSeam for SignalAgentSessionStore {
         crate::schedule_store::ScheduleStore::new(self.db.clone())
             .manage_from_session(session, call)
             .await
-            .map_err(|_| desk_diagnose_core::schedule::proposal::unavailable())
+            .map_err(|error| match error {
+                crate::schedule_store::ScheduleStoreError::ExceedsSessionRetention {
+                    max_delay_seconds,
+                } => desk_diagnose_core::schedule::proposal::exceeds_session_retention(
+                    max_delay_seconds,
+                ),
+                _ => desk_diagnose_core::schedule::proposal::unavailable(),
+            })
     }
 
     async fn poll_schedule_review(
@@ -2559,8 +2566,42 @@ mod tests {
             )
             .await
             .unwrap();
+        crate::db::ensure_lifecycle_tables(&store.db).await;
         let mut session = store.claim_turn(claim("delete-turn")).await.unwrap();
         store.save(&mut session).await.unwrap();
+        // A running goal segment and a queued goal belong to the conversation.
+        let goal = |id: &str| {
+            desk_diagnose_core::goal::GoalRun::new(
+                id.into(),
+                "conversation-1".into(),
+                "1".into(),
+                "device-1".into(),
+                "Finish the report".into(),
+                "message-1".into(),
+                desk_diagnose_core::goal::GoalOpening::OwnerRequest,
+                desk_diagnose_core::goal::GoalModelBinding {
+                    connection_id: "gateway".into(),
+                    connection_revision: 1,
+                    profile_revision: 1,
+                    model_id: "model".into(),
+                },
+                1,
+                1_000,
+                desk_diagnose_core::goal::GoalLimits::default(),
+            )
+            .unwrap()
+        };
+        let mut running = goal("goal-running");
+        running.claim_slice(1_001).unwrap();
+        {
+            let txn = crate::db::begin_write(&store.db, agent_session::Entity)
+                .await
+                .unwrap();
+            crate::agent_goal_store::insert_on(&txn, &running)
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+        }
         assert!(
             store
                 .delete_for_subject("conversation-1", "other", "device-1")
@@ -2589,6 +2630,30 @@ mod tests {
                 .is_none()
         );
         assert!(store.save(&mut session).await.is_err());
+        // The goal no longer holds the owner/device running slot, and its
+        // stale segment is fenced.
+        let removed = crate::entity::agent_goal_run::Entity::find()
+            .filter(crate::entity::agent_goal_run::Column::GoalId.eq("goal-running"))
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed.status, "cancelled");
+        let removed = crate::agent_goal_store::decode(&removed).unwrap();
+        assert_eq!(
+            removed.status_reason.as_deref(),
+            Some("conversation_removed")
+        );
+        assert!(removed.lease_epoch > running.lease_epoch);
+        assert_eq!(
+            crate::entity::agent_goal_run::Entity::find()
+                .filter(crate::entity::agent_goal_run::Column::Status.eq("running"))
+                .all(&store.db)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
         let cleanup =
             crate::entity::agent_file_recovery_cleanup::Entity::find_by_id("conversation-1")
                 .one(&store.db)

@@ -877,6 +877,8 @@ mod tests {
             &desk_agent_protocol::ai_assistant::goal_budget::UpdateGoalBudgetPolicy {
                 expected_revision: 0,
                 limits: configured,
+                device_unavailable_max_ms:
+                    desk_diagnose_core::goal_budget::DEFAULT_DEVICE_UNAVAILABLE_MAX_MS,
             },
         )
         .await
@@ -924,12 +926,14 @@ mod tests {
             &desk_agent_protocol::ai_assistant::goal_budget::UpdateGoalBudgetPolicy {
                 expected_revision: 1,
                 limits: extended,
+                device_unavailable_max_ms:
+                    desk_diagnose_core::goal_budget::DEFAULT_DEVICE_UNAVAILABLE_MAX_MS,
             },
         )
         .await
         .unwrap();
         assert_eq!(
-            crate::agent_goal_store::queued_candidates(&db, goal.deadline_unix_ms + 1, 8,)
+            crate::agent_goal_store::queued_candidates(&db, goal.deadline_unix_ms + 1, 8, None)
                 .await
                 .unwrap()
                 .len(),

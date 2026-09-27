@@ -45,6 +45,11 @@ pub struct GoalBudgetPolicy {
     pub schema_version: u16,
     pub revision: u64,
     pub limits: GoalBudgetLimits,
+    /// How long a goal may keep waiting for an unavailable device (offline,
+    /// disabled or remote-access locked) before the system cancels it. Unlike
+    /// `limits`, this bound cannot be disabled and is independent of the goal
+    /// deadline, so every waiting goal eventually ends.
+    pub device_unavailable_max_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -52,6 +57,7 @@ pub struct GoalBudgetPolicy {
 pub struct UpdateGoalBudgetPolicy {
     pub expected_revision: u64,
     pub limits: GoalBudgetLimits,
+    pub device_unavailable_max_ms: u64,
 }
 
 #[cfg(test)]
