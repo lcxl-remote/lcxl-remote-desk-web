@@ -41,6 +41,27 @@ fn query_from_identity(
     (auth.user_id?.to_string() == query.actor_id).then_some(query)
 }
 
+pub async fn reply(
+    source: &ConnectionState,
+    request_id: &str,
+    query: ComputerActionTurnQuery,
+    state: ComputerActionTurnState,
+) {
+    let status = ComputerActionTurnStatus { query, state };
+    let Ok(model) = SignalingModel::success_response(
+        request_id,
+        SignalingType::ComputerActionTurnStatus,
+        None,
+        Some(source.model.connection_id.clone()),
+        Some(&status),
+    ) else {
+        return;
+    };
+    if let Ok(text) = serde_json::to_string(&model) {
+        let _ = source.session.write().await.text(text).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,26 +105,5 @@ mod tests {
         let mut response = model;
         response.signaling_type = SignalingType::ComputerActionTurnStatus;
         assert!(query_from_identity(&auth, RemoteDeskTypeEnum::Server, &response).is_none());
-    }
-}
-
-pub async fn reply(
-    source: &ConnectionState,
-    request_id: &str,
-    query: ComputerActionTurnQuery,
-    state: ComputerActionTurnState,
-) {
-    let status = ComputerActionTurnStatus { query, state };
-    let Ok(model) = SignalingModel::success_response(
-        request_id,
-        SignalingType::ComputerActionTurnStatus,
-        None,
-        Some(source.model.connection_id.clone()),
-        Some(&status),
-    ) else {
-        return;
-    };
-    if let Ok(text) = serde_json::to_string(&model) {
-        let _ = source.session.write().await.text(text).await;
     }
 }

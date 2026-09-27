@@ -273,23 +273,12 @@ fn terminal_authority_uses_only_original_attachment_refs() {
         let reference = ObjectRef {
             token: format!("original-{name}"),
             snapshot_id: "snapshot".into(),
-            object_kind: if name == "read_terminal_output" {
-                ObjectKind::TerminalOutput
-            } else {
-                ObjectKind::TerminalOutput
-            },
+            object_kind: ObjectKind::TerminalOutput,
             expires_at: "2030-01-01T00:00:00Z".into(),
         };
-        let operation = if name == "read_terminal_output" {
-            Op::AttachTerminalOutput {
-                object_ref: reference.clone(),
-                display_summary: "fixture".into(),
-            }
-        } else {
-            Op::AttachTerminalOutput {
-                object_ref: reference.clone(),
-                display_summary: "fixture".into(),
-            }
+        let operation = Op::AttachTerminalOutput {
+            object_ref: reference.clone(),
+            display_summary: "fixture".into(),
         };
         let ObjectContextMutation::Attach(attachment) = build_object_context_mutation(
             &AiAssistantObjectContextUpdate {

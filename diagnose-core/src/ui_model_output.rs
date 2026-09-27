@@ -47,10 +47,12 @@ pub fn serialize(output: &OperationOutput) -> Result<String, serde_json::Error> 
             }
             let fields = node.as_object_mut().expect("serialized UI node");
             fields.retain(|key, value| {
-                !value.is_null()
-                    && !(key == "enabled" && value == &Value::Bool(true))
-                    && !(key == "is_protected" && value == &Value::Bool(false))
-                    && !(key == "supported_actions" && value.as_array().is_some_and(Vec::is_empty))
+                // Nulls and default-valued flags carry no information for the model.
+                let redundant = value.is_null()
+                    || (key == "enabled" && value == &Value::Bool(true))
+                    || (key == "is_protected" && value == &Value::Bool(false))
+                    || (key == "supported_actions" && value.as_array().is_some_and(Vec::is_empty));
+                !redundant
             });
         }
     }

@@ -228,10 +228,10 @@ pub fn prepare_text(kind: ContentKind, content: String) -> Result<PreparedText, 
 
 /// Select without mutation. The storage transaction applies this plan only when
 /// the complete incoming batch is ready to commit under the conversation fence.
-pub fn eviction_candidates<'a>(
-    rows: &'a [AttachmentMetadata],
+pub fn eviction_candidates(
+    rows: &[AttachmentMetadata],
     incoming_bytes: u64,
-) -> Result<Vec<&'a AttachmentMetadata>, AgentError> {
+) -> Result<Vec<&AttachmentMetadata>, AgentError> {
     if incoming_bytes > MAX_SESSION_BYTES {
         return Err(invalid("Attachment batch exceeds the conversation quota"));
     }

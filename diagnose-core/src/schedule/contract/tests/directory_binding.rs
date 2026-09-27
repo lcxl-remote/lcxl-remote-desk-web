@@ -61,7 +61,8 @@ fn saved_directory_requires_current_approval_and_exact_device_object() {
             expires_at: "2030-01-01T00:00:00Z".into(),
         };
         let tool = ToolCall { id: "create".into(), name: "create_text_file".into(), arguments_json: serde_json::json!({"file_name":"report.txt", "content_utf8":"report", "directory_request_id":"selection"}).to_string() };
-        let resources = crate::capability_grant::fresh_object_resource_scope(&[directory.clone()]);
+        let resources =
+            crate::capability_grant::fresh_object_resource_scope(std::slice::from_ref(&directory));
         let proposal = DirectoryProposal {
             request_id: "task-selection".into(),
             requested_path: path.strip_prefix(r"\\?\").unwrap_or(path).into(),

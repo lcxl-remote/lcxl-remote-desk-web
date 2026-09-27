@@ -100,14 +100,13 @@ impl SearchConfig {
         if self.provider == SearchProvider::DuckDuckGo && self.api_key.is_some() {
             return Err("DuckDuckGo does not accept an API key");
         }
-        if let Some(key) = &self.api_key {
-            if key.is_empty()
+        if let Some(key) = &self.api_key
+            && (key.is_empty()
                 || key.len() > 4096
                 || key.trim() != key
-                || key.chars().any(char::is_control)
-            {
-                return Err("Web Search API key is invalid");
-            }
+                || key.chars().any(char::is_control))
+        {
+            return Err("Web Search API key is invalid");
         }
         Ok(())
     }

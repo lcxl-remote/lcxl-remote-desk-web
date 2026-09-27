@@ -265,6 +265,100 @@ fn envelope_source(
     }
 }
 
+/// Preserve authenticated receipt nodes and every parent while replacing only
+/// an approved artifact directory's ephemeral resource label with its contract label.
+pub fn verified_task_action_sources(
+    session: &crate::session::PersistedAgentSession,
+    contract: &crate::schedule::contract::ValidatedTaskContract,
+    observed: &crate::provider_preflight::ObservedCapabilityAuthority,
+    origin: &crate::action_result::ActionResultOrigin,
+    receipt: &crate::action_result::ActionResultReceipt,
+    artifact: Option<&desk_agent_protocol::computer_use::CreatedFileArtifactOutput>,
+    completed_at: u64,
+) -> Result<Vec<RehearsalToolSource>, InvalidReadSource> {
+    let mut sources = vec![verified_action_source(
+        &session.conversation,
+        observed,
+        origin,
+        receipt,
+    )?];
+    sources.extend(verified_action_status_sources(
+        &session.conversation,
+        observed,
+        origin,
+        receipt,
+    )?);
+    let Some(rule) = contract.contract().permissions.iter().find(|rule|
+        rule.provider_id == observed.provider_id && rule.tool_name == observed.tool_name
+            && matches!(rule.input, desk_agent_protocol::schedule::contract::TaskInputConstraint::GeneratedTextArtifact { .. }))
+    else { return Ok(sources); };
+    if rule.capability_id != observed.capability_id
+        || rule.tool_schema_version != observed.tool_schema_version
+        || rule.effect != observed.effect
+        || rule.risk_tier != observed.risk_tier
+    {
+        return Err(InvalidReadSource::Conflict);
+    }
+    let step = contract
+        .contract()
+        .steps
+        .iter()
+        .find(|step| step.rule_id == rule.rule_id)
+        .ok_or(InvalidReadSource::Conflict)?;
+    let calls: Vec<_> = session
+        .conversation
+        .iter()
+        .filter(|message| {
+            message.role == ChatRole::Assistant
+                && message.turn_id.as_deref() == Some(origin.turn_fence.turn_id.as_str())
+        })
+        .flat_map(|message| &message.tool_calls)
+        .filter(|call| call.id == origin.tool_call_id)
+        .collect();
+    if calls.len() != 1
+        || calls[0].name != observed.tool_name
+        || origin.turn_fence.conversation_id != session.conversation_id
+    {
+        return Err(InvalidReadSource::Conflict);
+    }
+    let call = ToolCall {
+        id: calls[0].id.clone(),
+        name: calls[0].name.clone(),
+        arguments_json: calls[0].arguments_json.clone(),
+    };
+    let canonical = crate::permission_tools::canonical_tool_permission_input_json(
+        &call.name,
+        serde_json::from_str(&call.arguments_json).map_err(|_| InvalidReadSource::Invalid)?,
+    )
+    .map_err(|_| InvalidReadSource::Invalid)?;
+    use sha2::{Digest, Sha256};
+    if format!("{:x}", Sha256::digest(canonical.as_bytes())) != observed.canonical_input_sha256 {
+        return Err(InvalidReadSource::Conflict);
+    }
+    crate::schedule::source_graph::attachment::verify_text_artifact_output(
+        &call.name,
+        &canonical,
+        artifact.ok_or(InvalidReadSource::Conflict)?,
+    )
+    .map_err(|_| InvalidReadSource::Conflict)?;
+    let stable = crate::schedule::contract::artifact::bind_directory(
+        contract,
+        session,
+        &call,
+        &step.step_id,
+        &observed.resources,
+        completed_at,
+    )
+    .map_err(|_| InvalidReadSource::Conflict)?;
+    for source in &mut sources {
+        if source.authority.authority != TaskSourceAuthority::Scopes(observed.resources.clone()) {
+            return Err(InvalidReadSource::Conflict);
+        }
+        source.authority.authority = TaskSourceAuthority::Scopes(stable.clone());
+    }
+    Ok(sources)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,98 +455,4 @@ mod tests {
         duplicated.push(messages[1].clone());
         assert!(verified_read_source(&duplicated, &read, ReadSourceDigest::ModelPayload).is_err());
     }
-}
-
-/// Preserve authenticated receipt nodes and every parent while replacing only
-/// an approved artifact directory's ephemeral resource label with its contract label.
-pub fn verified_task_action_sources(
-    session: &crate::session::PersistedAgentSession,
-    contract: &crate::schedule::contract::ValidatedTaskContract,
-    observed: &crate::provider_preflight::ObservedCapabilityAuthority,
-    origin: &crate::action_result::ActionResultOrigin,
-    receipt: &crate::action_result::ActionResultReceipt,
-    artifact: Option<&desk_agent_protocol::computer_use::CreatedFileArtifactOutput>,
-    completed_at: u64,
-) -> Result<Vec<RehearsalToolSource>, InvalidReadSource> {
-    let mut sources = vec![verified_action_source(
-        &session.conversation,
-        observed,
-        origin,
-        receipt,
-    )?];
-    sources.extend(verified_action_status_sources(
-        &session.conversation,
-        observed,
-        origin,
-        receipt,
-    )?);
-    let Some(rule) = contract.contract().permissions.iter().find(|rule|
-        rule.provider_id == observed.provider_id && rule.tool_name == observed.tool_name
-            && matches!(rule.input, desk_agent_protocol::schedule::contract::TaskInputConstraint::GeneratedTextArtifact { .. }))
-    else { return Ok(sources); };
-    if rule.capability_id != observed.capability_id
-        || rule.tool_schema_version != observed.tool_schema_version
-        || rule.effect != observed.effect
-        || rule.risk_tier != observed.risk_tier
-    {
-        return Err(InvalidReadSource::Conflict);
-    }
-    let step = contract
-        .contract()
-        .steps
-        .iter()
-        .find(|step| step.rule_id == rule.rule_id)
-        .ok_or(InvalidReadSource::Conflict)?;
-    let calls: Vec<_> = session
-        .conversation
-        .iter()
-        .filter(|message| {
-            message.role == ChatRole::Assistant
-                && message.turn_id.as_deref() == Some(origin.turn_fence.turn_id.as_str())
-        })
-        .flat_map(|message| &message.tool_calls)
-        .filter(|call| call.id == origin.tool_call_id)
-        .collect();
-    if calls.len() != 1
-        || calls[0].name != observed.tool_name
-        || origin.turn_fence.conversation_id != session.conversation_id
-    {
-        return Err(InvalidReadSource::Conflict);
-    }
-    let call = ToolCall {
-        id: calls[0].id.clone(),
-        name: calls[0].name.clone(),
-        arguments_json: calls[0].arguments_json.clone(),
-    };
-    let canonical = crate::permission_tools::canonical_tool_permission_input_json(
-        &call.name,
-        serde_json::from_str(&call.arguments_json).map_err(|_| InvalidReadSource::Invalid)?,
-    )
-    .map_err(|_| InvalidReadSource::Invalid)?;
-    use sha2::{Digest, Sha256};
-    if format!("{:x}", Sha256::digest(canonical.as_bytes())) != observed.canonical_input_sha256 {
-        return Err(InvalidReadSource::Conflict);
-    }
-    crate::schedule::source_graph::attachment::verify_text_artifact_output(
-        &call.name,
-        &canonical,
-        artifact.ok_or(InvalidReadSource::Conflict)?,
-    )
-    .map_err(|_| InvalidReadSource::Conflict)?;
-    let stable = crate::schedule::contract::artifact::bind_directory(
-        contract,
-        session,
-        &call,
-        &step.step_id,
-        &observed.resources,
-        completed_at,
-    )
-    .map_err(|_| InvalidReadSource::Conflict)?;
-    for source in &mut sources {
-        if source.authority.authority != TaskSourceAuthority::Scopes(observed.resources.clone()) {
-            return Err(InvalidReadSource::Conflict);
-        }
-        source.authority.authority = TaskSourceAuthority::Scopes(stable.clone());
-    }
-    Ok(sources)
 }

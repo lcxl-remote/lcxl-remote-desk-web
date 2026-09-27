@@ -257,6 +257,25 @@ pub fn validate_set(frames: &[VisualEvidenceFrame]) -> Result<(), &'static str> 
     Ok(())
 }
 
+/// Retain receipt timing in owner history without exporting the device's input reference.
+fn observation_timing(
+    text: &str,
+) -> Option<desk_agent_protocol::visual_evidence::VisualFrameTiming> {
+    let value = crate::image_input::structured_tool_result(text).ok()?;
+    let frame: desk_agent_protocol::ScreenFrameObservation = serde_json::from_value(
+        value
+            .pointer("/ReadContext/ScreenCaptureCurrent/frame_observation")?
+            .clone(),
+    )
+    .ok()?;
+    Some(desk_agent_protocol::visual_evidence::VisualFrameTiming {
+        received_at_unix_ms: frame.received_at_unix_ms,
+        receipt_age_ms: frame.receipt_age_ms,
+        source_timestamp_ns: frame.source_timestamp_ns,
+        freshness: frame.freshness,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,23 +495,4 @@ mod tests {
         assert!(!blocks_targeting(&session, "send_raw_input"));
         assert!(!blocks_targeting(&session, "execute_wayland_output_input"));
     }
-}
-
-/// Retain receipt timing in owner history without exporting the device's input reference.
-fn observation_timing(
-    text: &str,
-) -> Option<desk_agent_protocol::visual_evidence::VisualFrameTiming> {
-    let value = crate::image_input::structured_tool_result(text).ok()?;
-    let frame: desk_agent_protocol::ScreenFrameObservation = serde_json::from_value(
-        value
-            .pointer("/ReadContext/ScreenCaptureCurrent/frame_observation")?
-            .clone(),
-    )
-    .ok()?;
-    Some(desk_agent_protocol::visual_evidence::VisualFrameTiming {
-        received_at_unix_ms: frame.received_at_unix_ms,
-        receipt_age_ms: frame.receipt_age_ms,
-        source_timestamp_ns: frame.source_timestamp_ns,
-        freshness: frame.freshness,
-    })
 }

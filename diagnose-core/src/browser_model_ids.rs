@@ -214,12 +214,11 @@ pub(crate) fn resolve(
             }
         }
     }
-    if call.name == "prepare_gmail_draft" {
-        if let Some(Some(attachment)) = object.get_mut("attachment").map(Value::as_object_mut) {
-            if let Some(id) = remove_element_id(attachment, "element")? {
-                requested.push(("attachment.element".into(), id));
-            }
-        }
+    if call.name == "prepare_gmail_draft"
+        && let Some(Some(attachment)) = object.get_mut("attachment").map(Value::as_object_mut)
+        && let Some(id) = remove_element_id(attachment, "element")?
+    {
+        requested.push(("attachment.element".into(), id));
     }
     let results = observed_browser_results(history, now_ms);
     let latest = results
@@ -289,10 +288,10 @@ pub(crate) fn project_arguments(tool: &str, value: &mut Value) {
         object.remove("locale");
         return;
     }
-    if matches!(tool, "browser_open_page" | "browser_navigate_page") {
-        if let Some(target) = object.get_mut("target").and_then(Value::as_object_mut) {
-            target.remove("origin");
-        }
+    if matches!(tool, "browser_open_page" | "browser_navigate_page")
+        && let Some(target) = object.get_mut("target").and_then(Value::as_object_mut)
+    {
+        target.remove("origin");
     }
     if tool == "browser_wait_for" {
         object.remove("state");
@@ -304,19 +303,19 @@ pub(crate) fn project_arguments(tool: &str, value: &mut Value) {
     for field in element_fields(tool) {
         replace_reference(object, field, &format!("{field}_id"));
     }
-    if tool == "browser_fill_form" {
-        if let Some(fields) = object.get_mut("fields").and_then(Value::as_array_mut) {
-            for field in fields {
-                if let Some(item) = field.as_object_mut() {
-                    replace_reference(item, "element", "element_id");
-                }
+    if tool == "browser_fill_form"
+        && let Some(fields) = object.get_mut("fields").and_then(Value::as_array_mut)
+    {
+        for field in fields {
+            if let Some(item) = field.as_object_mut() {
+                replace_reference(item, "element", "element_id");
             }
         }
     }
-    if tool == "prepare_gmail_draft" {
-        if let Some(attachment) = object.get_mut("attachment").and_then(Value::as_object_mut) {
-            replace_reference(attachment, "element", "element_id");
-        }
+    if tool == "prepare_gmail_draft"
+        && let Some(attachment) = object.get_mut("attachment").and_then(Value::as_object_mut)
+    {
+        replace_reference(attachment, "element", "element_id");
     }
 }
 
@@ -357,17 +356,16 @@ pub(crate) fn project_tool(tool: &mut ToolSpec) {
     if matches!(
         tool.name.as_str(),
         "browser_open_page" | "browser_navigate_page"
-    ) {
-        if let Some(target) = schema.pointer_mut("/properties/target") {
-            target["properties"]
-                .as_object_mut()
-                .unwrap()
-                .remove("origin");
-            target["required"]
-                .as_array_mut()
-                .unwrap()
-                .retain(|item| item != "origin");
-        }
+    ) && let Some(target) = schema.pointer_mut("/properties/target")
+    {
+        target["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("origin");
+        target["required"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|item| item != "origin");
     }
     if tool.name == "browser_wait_for" {
         schema["properties"]
@@ -386,15 +384,15 @@ pub(crate) fn project_tool(tool: &mut ToolSpec) {
     for field in element_fields(&tool.name) {
         replace_schema_reference(schema, field, &format!("{field}_id"));
     }
-    if tool.name == "browser_fill_form" {
-        if let Some(field) = schema.pointer_mut("/properties/fields/items") {
-            replace_schema_reference(field, "element", "element_id");
-        }
+    if tool.name == "browser_fill_form"
+        && let Some(field) = schema.pointer_mut("/properties/fields/items")
+    {
+        replace_schema_reference(field, "element", "element_id");
     }
-    if tool.name == "prepare_gmail_draft" {
-        if let Some(attachment) = schema.pointer_mut("/properties/attachment") {
-            replace_schema_reference(attachment, "element", "element_id");
-        }
+    if tool.name == "prepare_gmail_draft"
+        && let Some(attachment) = schema.pointer_mut("/properties/attachment")
+    {
+        replace_schema_reference(attachment, "element", "element_id");
     }
 }
 

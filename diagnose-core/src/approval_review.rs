@@ -377,6 +377,7 @@ pub struct ApprovalAuthorityFact {
 /// Derive per-item authority from the persisted decision and the grants issued
 /// for that exact request. A request-level partial approval never implies that
 /// every item in its batch was approved.
+#[allow(clippy::too_many_arguments)]
 pub fn project_permission_authority(
     run_id: &str,
     owner_id: &str,
@@ -503,9 +504,11 @@ pub fn project_permission_authority(
                         } else {
                             ApprovalAuthorityStatus::ActiveGrant
                         };
-                        let ids = (status == ApprovalAuthorityStatus::ActiveGrant)
-                            .then(|| vec![grant.grant_id.clone()])
-                            .unwrap_or_default();
+                        let ids = if status == ApprovalAuthorityStatus::ActiveGrant {
+                            vec![grant.grant_id.clone()]
+                        } else {
+                            Vec::new()
+                        };
                         (status, ids)
                     }
                     _ => return Err(ApprovalReviewError::InvalidContext),
@@ -2681,7 +2684,7 @@ mod tests {
             "device",
             &request,
             Some(&decision),
-            &[grant.clone()],
+            std::slice::from_ref(&grant),
             10,
             1,
         )

@@ -90,8 +90,8 @@ async fn check_completion_usage(with_usage: bool, invalid_count: usize) {
         let event = format!("completed-{index}");
         let mut result = ChatMessage::untrusted_output(
             &event,
-            &format!("call-{index}"),
-            &format!("task-{index}"),
+            format!("call-{index}"),
+            format!("task-{index}"),
             "du completed",
         );
         result.data_envelope = crate::model_message_labels::internal_tool_result_envelope(

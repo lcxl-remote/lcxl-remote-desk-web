@@ -2278,18 +2278,16 @@ fn provider_for_tool(
     mut tool: RegisteredTool,
 ) -> ProviderDescriptor {
     crate::provider_preflight::text_file::selection::add_schema(&mut tool);
-    if crate::provider_preflight::ArtifactCallPreflight::supports(tool.name())
-        || tool.name() == "convert_document"
-    {
-        if let Some(properties) = tool
+    if (crate::provider_preflight::ArtifactCallPreflight::supports(tool.name())
+        || tool.name() == "convert_document")
+        && let Some(properties) = tool
             .spec
             .parameters_schema
             .get_mut("properties")
             .and_then(serde_json::Value::as_object_mut)
-        {
-            properties.insert("directory_request_id".into(), serde_json::json!({"type":"string","minLength":1,"maxLength":256,
+    {
+        properties.insert("directory_request_id".into(), serde_json::json!({"type":"string","minLength":1,"maxLength":256,
                 "description":"Approved conversation directory request id. Required when more than one directory is approved; never a filesystem path or object token."}));
-        }
     }
     let requires_edge_connection = locality != ExecutionLocality::Central;
     let wire = CapabilityWireDescriptor {

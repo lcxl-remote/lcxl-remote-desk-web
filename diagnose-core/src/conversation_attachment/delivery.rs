@@ -393,13 +393,12 @@ pub async fn externalize_with(
             value["tool"] = json!(tool);
         }
         // Only carry a bounded status declared by the source, never infer success.
-        if let Ok(original) = serde_json::from_str::<Value>(&source.text) {
-            if let Some(status) = original
+        if let Ok(original) = serde_json::from_str::<Value>(&source.text)
+            && let Some(status) = original
                 .get("result")
                 .filter(|status| status.to_string().len() <= 256)
-            {
-                value["result"] = status.clone();
-            }
+        {
+            value["result"] = status.clone();
         }
         value.to_string()
     };

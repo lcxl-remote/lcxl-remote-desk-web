@@ -3730,7 +3730,7 @@ async fn run_inner_impl(
                     };
                     session
                         .capability_disclosure
-                        .record_use(&[call.name.clone()]);
+                        .record_use(std::slice::from_ref(&call.name));
                     let resolved_call = match crate::ui_model_ids::resolve_call(
                         call,
                         &session.conversation,
@@ -4629,13 +4629,13 @@ async fn run_inner_impl(
                                     .unwrap_or(0);
                                 for item in &request.items {
                                     crate::provider_preflight::text_file::validate_mutation_permission_input(
-                                        &session,
+                                        session,
                                         &item.tool_name,
                                         item.canonical_input_json.as_deref(),
                                         now,
                                     )?;
                                     crate::provider_preflight::text_file::validate_read_permission_input(
-                                        &session,
+                                        session,
                                         &item.tool_name,
                                         item.canonical_input_json.as_deref(),
                                         now,
@@ -6088,7 +6088,7 @@ pub(crate) fn bind_tool_input_envelopes(
         let id = arguments
             .get("file_result_call_id")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| crate::directory_tools::unavailable())?;
+            .ok_or_else(crate::directory_tools::unavailable)?;
         // Freeze authenticated source identity here. Current expiry and consent
         // are independently revalidated by preflight and dispatch.
         let source_id = if call.name == "read_text_file" {
@@ -6963,12 +6963,12 @@ async fn read_conversation_attachment(
             .source_envelope
             .as_ref()
             .ok_or_else(|| invalid("Attachment source authorization is unavailable"))?;
-        if let Some(policy) = &policy {
-            if !policy.has_gateway_authority(envelope) {
-                return Err(invalid(
-                    "Attachment is not authorized for the current model gateway",
-                ));
-            }
+        if let Some(policy) = &policy
+            && !policy.has_gateway_authority(envelope)
+        {
+            return Err(invalid(
+                "Attachment is not authorized for the current model gateway",
+            ));
         }
         part.metadata.verify(&part.content)?;
         let source_envelope = envelope.clone();

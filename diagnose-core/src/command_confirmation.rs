@@ -3,9 +3,7 @@
 use desk_agent_protocol::authz::ExecAdmissionPolicy;
 use desk_agent_protocol::command_blocklist::BlocklistRule;
 use desk_agent_protocol::command_template::SyncedCommandTemplate;
-use desk_agent_protocol::exec::{
-    CommandDraft, CommandIoMode, ExecDecision, ExecIoMode, ExecPlanDraft,
-};
+use desk_agent_protocol::exec::{CommandDraft, CommandIoMode, ExecDecision, ExecPlanDraft};
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, ExecInput, ExecTarget, ExecutionMode, RiskLevel,
 };
@@ -61,6 +59,7 @@ pub(crate) fn test_policy() -> CommandPolicyContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desk_agent_protocol::exec::ExecIoMode;
     fn input(command: &str) -> String {
         input_with(command, CommandIoMode::NonInteractive)
     }
@@ -245,13 +244,13 @@ impl CommandPolicyContext {
             ));
         }
         let proposal: CommandDraft = serde_json::from_str(canonical).map_err(|e| {
-            denied(&crate::model_input::describe_error(
+            denied(crate::model_input::describe_error(
                 COMMAND_TOOL,
                 &format!("Invalid exact command input: {e}"),
             ))
         })?;
         proposal.validate().map_err(|e| {
-            denied(&crate::model_input::describe_error(
+            denied(crate::model_input::describe_error(
                 COMMAND_TOOL,
                 &format!("Invalid exact command input: {e}"),
             ))

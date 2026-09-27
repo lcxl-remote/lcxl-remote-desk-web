@@ -140,19 +140,20 @@ fn replace_caches(xml: &[u8], targets: &BTreeMap<String, &Scalar>) -> PackageRes
                             value_start: None,
                         });
                     }
-                } else if is_sheet && element.local_name().as_ref() == b"v" {
-                    if let Some(cell) = &mut active {
-                        if depth != cell.depth + 1
-                            || cell.old_value.is_some()
-                            || cell.value_start.is_some()
-                        {
-                            return Err("ambiguous formula cache value".into());
-                        }
-                        if empty {
-                            cell.old_value = Some((before, reader.buffer_position() as usize));
-                        } else {
-                            cell.value_start = Some(before);
-                        }
+                } else if is_sheet
+                    && element.local_name().as_ref() == b"v"
+                    && let Some(cell) = &mut active
+                {
+                    if depth != cell.depth + 1
+                        || cell.old_value.is_some()
+                        || cell.value_start.is_some()
+                    {
+                        return Err("ambiguous formula cache value".into());
+                    }
+                    if empty {
+                        cell.old_value = Some((before, reader.buffer_position() as usize));
+                    } else {
+                        cell.value_start = Some(before);
                     }
                 }
                 if !empty {
@@ -162,10 +163,10 @@ fn replace_caches(xml: &[u8], targets: &BTreeMap<String, &Scalar>) -> PackageRes
             Event::End(_) => {
                 depth = depth.checked_sub(1).ok_or("invalid cache XML nesting")?;
                 if let Some(cell) = &mut active {
-                    if depth == cell.depth + 1 {
-                        if let Some(start) = cell.value_start.take() {
-                            cell.old_value = Some((start, reader.buffer_position() as usize));
-                        }
+                    if depth == cell.depth + 1
+                        && let Some(start) = cell.value_start.take()
+                    {
+                        cell.old_value = Some((start, reader.buffer_position() as usize));
                     }
                     if depth == cell.depth {
                         let mut cell = active.take().ok_or("missing cache cell")?;

@@ -134,6 +134,8 @@ pub struct FileRecoveryCleanupDto {
     pub unknown_outcomes: u64,
 }
 
+// Wire enum: variants stay inline so serde, wincode and OpenAPI shapes are unchanged.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FileRecoveryOutcome {

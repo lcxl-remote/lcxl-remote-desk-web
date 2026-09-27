@@ -54,12 +54,12 @@ impl ExcelReadBinding {
             || formula.as_ref().is_some_and(|f| f.len() > 4096)
             || worker.is_empty()
             || worker.len() > 4096
-            || !output
+            || output
                 .snapshot_id
                 .strip_prefix(worker)
                 .and_then(|s| s.strip_prefix(':'))
                 .and_then(|s| s.parse::<u64>().ok())
-                .is_some_and(|n| n > 0)
+                .is_none_or(|n| n == 0)
         {
             return Err(denied());
         }
@@ -125,7 +125,7 @@ impl ExcelReadBinding {
                     formula,
                     &self.address,
                     crate::spreadsheet_formula::FORMULA_LOCALE_V1,
-                    &[self.sheet.clone()],
+                    std::slice::from_ref(&self.sheet),
                 )
                 .map_err(|_| denied())?;
             }

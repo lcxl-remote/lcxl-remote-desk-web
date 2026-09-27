@@ -246,8 +246,8 @@ pub fn capability_authorization_prompt(
             "resource_scope": grant.resource_scope,
             "operation_scope": grant.operation_scope,
         });
-        if grant.canonical_input_digest_sha256.is_none() {
-            if let Some(mut scope) = permission_requests
+        if grant.canonical_input_digest_sha256.is_none()
+            && let Some(mut scope) = permission_requests
                 .iter()
                 .filter(|r| {
                     matches!(
@@ -266,22 +266,21 @@ pub fn capability_authorization_prompt(
                         item.canonical_input_json.as_deref(),
                     )
                 })
-            {
-                scope.actions.retain(|action| {
-                    grant
-                        .operation_scope
-                        .contains(&crate::application_ui::operation_for_tool(
-                            &grant.tool_name,
-                            *action,
-                        ))
-                });
-                entry["application_scope"] = json!(scope);
-                approved_exact_input_expires_at_unix_ms = Some(
-                    approved_exact_input_expires_at_unix_ms.map_or(grant.expires_at_unix_ms, |v| {
-                        v.min(grant.expires_at_unix_ms)
-                    }),
-                );
-            }
+        {
+            scope.actions.retain(|action| {
+                grant
+                    .operation_scope
+                    .contains(&crate::application_ui::operation_for_tool(
+                        &grant.tool_name,
+                        *action,
+                    ))
+            });
+            entry["application_scope"] = json!(scope);
+            approved_exact_input_expires_at_unix_ms = Some(
+                approved_exact_input_expires_at_unix_ms.map_or(grant.expires_at_unix_ms, |v| {
+                    v.min(grant.expires_at_unix_ms)
+                }),
+            );
         }
         if state == "active"
             && let Some((canonical_input, digest)) = approved_exact
@@ -1479,6 +1478,13 @@ fn normalize_scope(values: Vec<String>) -> Vec<String> {
     values
 }
 
+/// Deterministic control text only; this is not a grant or current policy snapshot.
+pub(crate) fn existing_request_result(request_id: &str, decision_state: &str) -> serde_json::Value {
+    json!({"status":"existing_permission_request", "decision_state":decision_state,
+        "request_id":request_id, "authority":"unchanged",
+        "message":"An authority-equivalent permission batch already exists for this input revision. Do not request it again; use the current authorization snapshot or adapt to the recorded decision."})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1642,8 +1648,8 @@ mod tests {
         decision.validate_for(&request).unwrap();
         let projection = capability_authorization_prompt(
             &[],
-            &[request.clone()],
-            &[decision.clone()],
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&decision),
             500,
             3,
             1,
@@ -1655,8 +1661,8 @@ mod tests {
         assert!(!projection.text.contains("private-display"));
         assert!(!projection.text.contains("private-reason"));
         assert!(!latest_tool_request_denied(
-            &[request.clone()],
-            &[decision.clone()],
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&decision),
             "read_current_screen",
             3,
         ));
@@ -1668,7 +1674,11 @@ mod tests {
         retry.items[0].reason = "new explanation".into();
         retry.items[0].suggested_ttl_seconds = 60;
         assert_eq!(
-            unchanged_ai_denied_item(&[request.clone()], &[decision.clone()], &retry),
+            unchanged_ai_denied_item(
+                std::slice::from_ref(&request),
+                std::slice::from_ref(&decision),
+                &retry
+            ),
             Some(("permission-partial", "second")),
         );
         retry.items[0].resource_scope = vec!["specific-resource".into()];
@@ -3304,11 +3314,4 @@ mod tests {
             assert!(error.message.contains("must be requested separately"));
         }
     }
-}
-
-/// Deterministic control text only; this is not a grant or current policy snapshot.
-pub(crate) fn existing_request_result(request_id: &str, decision_state: &str) -> serde_json::Value {
-    json!({"status":"existing_permission_request", "decision_state":decision_state,
-        "request_id":request_id, "authority":"unchanged",
-        "message":"An authority-equivalent permission batch already exists for this input revision. Do not request it again; use the current authorization snapshot or adapt to the recorded decision."})
 }

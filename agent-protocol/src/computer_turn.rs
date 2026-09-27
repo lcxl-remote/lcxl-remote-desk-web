@@ -19,7 +19,7 @@ impl ComputerActionTurnQuery {
             || self.actor_id.chars().any(char::is_control)
         {
             return Err(ComputerUseValidationError::InvalidContextReference(
-                "invalid turn query actor".into(),
+                "invalid turn query actor",
             ));
         }
         Ok(())

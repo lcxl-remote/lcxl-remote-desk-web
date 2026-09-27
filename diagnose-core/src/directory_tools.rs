@@ -109,43 +109,6 @@ pub fn unavailable() -> AgentError {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn proposals_are_bounded_and_cannot_supply_confirmation_or_device_references() {
-        for input in [
-            r#"{"path":"/tmp/work","purpose":"write a report"}"#,
-            r#"{"path":"/tmp/work ","purpose":"write a report"}"#,
-        ] {
-            assert!(
-                parse(&ToolCall {
-                    id: "call".into(),
-                    name: REQUEST_DIRECTORY.into(),
-                    arguments_json: input.into()
-                })
-                .is_ok()
-            );
-        }
-        for input in [
-            r#"{"path":"/tmp/work","purpose":"report","approve":true}"#,
-            r#"{"path":"/tmp/work","purpose":"report","directory":{"token":"invented"}}"#,
-            r#"{"path":"/tmp/\nwork","purpose":"report"}"#,
-            r#"{"path":"/tmp/work","purpose":""}"#,
-        ] {
-            assert!(
-                parse(&ToolCall {
-                    id: "call".into(),
-                    name: REQUEST_DIRECTORY.into(),
-                    arguments_json: input.into()
-                })
-                .is_err()
-            );
-        }
-        assert_eq!(registry()[0].effect, ToolEffect::DirectoryPlanning);
-    }
-}
-
 /// Only the runtime may emit this after durable task-contract consent.
 pub fn task_approved_result(request_id: &str) -> serde_json::Value {
     json!({"directory_request_id":request_id, "state":"approved", "authority":"task_contract",
@@ -206,4 +169,41 @@ pub fn decision_result(request_id: &str, approved: bool) -> serde_json::Value {
     } else {
         "The owner rejected or removed this directory. Do not access it or request the same directory again unless the user asks. Explain the blocker or continue with an already approved alternative."
     }})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn proposals_are_bounded_and_cannot_supply_confirmation_or_device_references() {
+        for input in [
+            r#"{"path":"/tmp/work","purpose":"write a report"}"#,
+            r#"{"path":"/tmp/work ","purpose":"write a report"}"#,
+        ] {
+            assert!(
+                parse(&ToolCall {
+                    id: "call".into(),
+                    name: REQUEST_DIRECTORY.into(),
+                    arguments_json: input.into()
+                })
+                .is_ok()
+            );
+        }
+        for input in [
+            r#"{"path":"/tmp/work","purpose":"report","approve":true}"#,
+            r#"{"path":"/tmp/work","purpose":"report","directory":{"token":"invented"}}"#,
+            r#"{"path":"/tmp/\nwork","purpose":"report"}"#,
+            r#"{"path":"/tmp/work","purpose":""}"#,
+        ] {
+            assert!(
+                parse(&ToolCall {
+                    id: "call".into(),
+                    name: REQUEST_DIRECTORY.into(),
+                    arguments_json: input.into()
+                })
+                .is_err()
+            );
+        }
+        assert_eq!(registry()[0].effect, ToolEffect::DirectoryPlanning);
+    }
 }

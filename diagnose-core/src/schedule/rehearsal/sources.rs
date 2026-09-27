@@ -361,89 +361,6 @@ impl RehearsalSourceGraph {
     }
 }
 
-#[cfg(test)]
-mod attachment_graph_tests {
-    use super::*;
-    use crate::schedule::source_graph::attachment::TaskAttachmentReceipt;
-    use desk_agent_protocol::{
-        communication::ImmutableAttachmentSnapshot, data_lineage::ContentRef,
-    };
-
-    #[test]
-    fn artifact_graph_uses_receipt_digest_and_keeps_upstream_scope() {
-        let artifact = ImmutableAttachmentSnapshot {
-            content: ContentRef::Artifact {
-                artifact_id: "file".into(),
-                sha256: "a".repeat(64),
-                size_bytes: 1,
-                media_type: "text/plain".into(),
-            },
-            file_name: "report.txt".into(),
-            media_type: "text/plain".into(),
-            size_bytes: 1,
-            digest_sha256: "a".repeat(64),
-        };
-        let receipt_digest = "b".repeat(64);
-        let receipt = TaskAttachmentReceipt {
-            run_id: "run",
-            envelope_id: "receipt",
-            receipt_digest_sha256: &receipt_digest,
-            attachment: &artifact,
-        };
-        let node = |id: &str, parents: Vec<String>| ModelInputLineage {
-            public_system_prompt: false,
-            envelope_id: id.into(),
-            digest_sha256: receipt_digest.clone(),
-            source_provider_id: "device".into(),
-            source_tool_name: "read".into(),
-            source_envelope_ids: parents,
-        };
-        let graph = RehearsalSourceGraph {
-            nodes: vec![
-                node("receipt", vec!["original".into()]),
-                node("original", vec![]),
-            ],
-            bindings: vec![TaskSourceBinding {
-                envelope_id: "original".into(),
-                digest_sha256: receipt_digest.clone(),
-                authority: TaskSourceAuthority::Scopes(vec!["file:original".into()]),
-            }],
-            verified_model_messages: BTreeSet::new(),
-        };
-        assert_eq!(
-            graph
-                .resolve_attachment("run", &artifact, &receipt)
-                .unwrap()
-                .scopes,
-            vec!["file:original"]
-        );
-        assert_eq!(
-            graph.resolve_attachment("other", &artifact, &receipt),
-            Err(TaskSourceError::InvalidRoot)
-        );
-        let wrong_digest = "c".repeat(64);
-        let wrong_receipt = TaskAttachmentReceipt {
-            run_id: "run",
-            envelope_id: "receipt",
-            receipt_digest_sha256: &wrong_digest,
-            attachment: &artifact,
-        };
-        assert_eq!(
-            graph.resolve_attachment("run", &artifact, &wrong_receipt),
-            Err(TaskSourceError::ConflictingNode)
-        );
-        let incomplete = RehearsalSourceGraph {
-            nodes: graph.nodes[..1].to_vec(),
-            bindings: vec![],
-            verified_model_messages: BTreeSet::new(),
-        };
-        assert_eq!(
-            incomplete.resolve_attachment("run", &artifact, &receipt),
-            Err(TaskSourceError::MissingSource)
-        );
-    }
-}
-
 /// Directory results are deterministic control messages. They inherit the model
 /// proposal's parents and introduce no permission or independent data root.
 type ControlLineage = (Vec<ModelInputLineage>, Vec<(String, String)>);
@@ -559,4 +476,87 @@ pub fn directory_control_requests(
     session: &PersistedAgentSession,
 ) -> Result<Vec<(String, String)>, TaskSourceError> {
     directory_control_nodes(session).map(|(_, requests)| requests)
+}
+
+#[cfg(test)]
+mod attachment_graph_tests {
+    use super::*;
+    use crate::schedule::source_graph::attachment::TaskAttachmentReceipt;
+    use desk_agent_protocol::{
+        communication::ImmutableAttachmentSnapshot, data_lineage::ContentRef,
+    };
+
+    #[test]
+    fn artifact_graph_uses_receipt_digest_and_keeps_upstream_scope() {
+        let artifact = ImmutableAttachmentSnapshot {
+            content: ContentRef::Artifact {
+                artifact_id: "file".into(),
+                sha256: "a".repeat(64),
+                size_bytes: 1,
+                media_type: "text/plain".into(),
+            },
+            file_name: "report.txt".into(),
+            media_type: "text/plain".into(),
+            size_bytes: 1,
+            digest_sha256: "a".repeat(64),
+        };
+        let receipt_digest = "b".repeat(64);
+        let receipt = TaskAttachmentReceipt {
+            run_id: "run",
+            envelope_id: "receipt",
+            receipt_digest_sha256: &receipt_digest,
+            attachment: &artifact,
+        };
+        let node = |id: &str, parents: Vec<String>| ModelInputLineage {
+            public_system_prompt: false,
+            envelope_id: id.into(),
+            digest_sha256: receipt_digest.clone(),
+            source_provider_id: "device".into(),
+            source_tool_name: "read".into(),
+            source_envelope_ids: parents,
+        };
+        let graph = RehearsalSourceGraph {
+            nodes: vec![
+                node("receipt", vec!["original".into()]),
+                node("original", vec![]),
+            ],
+            bindings: vec![TaskSourceBinding {
+                envelope_id: "original".into(),
+                digest_sha256: receipt_digest.clone(),
+                authority: TaskSourceAuthority::Scopes(vec!["file:original".into()]),
+            }],
+            verified_model_messages: BTreeSet::new(),
+        };
+        assert_eq!(
+            graph
+                .resolve_attachment("run", &artifact, &receipt)
+                .unwrap()
+                .scopes,
+            vec!["file:original"]
+        );
+        assert_eq!(
+            graph.resolve_attachment("other", &artifact, &receipt),
+            Err(TaskSourceError::InvalidRoot)
+        );
+        let wrong_digest = "c".repeat(64);
+        let wrong_receipt = TaskAttachmentReceipt {
+            run_id: "run",
+            envelope_id: "receipt",
+            receipt_digest_sha256: &wrong_digest,
+            attachment: &artifact,
+        };
+        assert_eq!(
+            graph.resolve_attachment("run", &artifact, &wrong_receipt),
+            Err(TaskSourceError::ConflictingNode)
+        );
+        let incomplete = RehearsalSourceGraph {
+            nodes: graph.nodes[..1].to_vec(),
+            bindings: vec![],
+            verified_model_messages: BTreeSet::new(),
+        };
+        assert_eq!(
+            incomplete.resolve_attachment("run", &artifact, &receipt),
+            Err(TaskSourceError::MissingSource)
+        );
+    }
 }

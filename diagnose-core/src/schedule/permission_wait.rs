@@ -196,95 +196,6 @@ fn close(
     Some(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::file_scope::{DirectoryConsentSource, DirectoryProposal, FileScopeSubject};
-    use desk_agent_protocol::{
-        AgentScope, ExecutionMode,
-        computer_use::{ObjectKind, ObjectRef},
-    };
-
-    #[test]
-    fn reference_requires_one_current_request_and_keeps_directory_namespace_separate() {
-        let mut session = PersistedAgentSession::new(
-            "conversation",
-            "owner",
-            "device",
-            1,
-            AgentScope {
-                granted: vec![],
-                mode: ExecutionMode::ReadOnly,
-                expires_at: None,
-                policy_name: None,
-            },
-            "2026-09-06T00:00:00Z",
-        );
-        session.input_revision = 1;
-        session.permission_requests.push(serde_json::from_value(serde_json::json!({
-            "schema_version":1, "request_id":"request", "input_revision":1, "state":"pending",
-            "created_at":"2026-09-06T00:00:00Z", "items":[{
-                "item_id":"read", "provider_id":"desktop.session", "tool_name":"inspect_desktop_session",
-                "expected_effect":"read_device", "resource_scope":["target:current_device"],
-                "operation_scope":["observe"], "suggested_ttl_seconds":120,
-                "suggested_max_uses":1, "reason":"Inspect current device"
-            }]
-        })).unwrap());
-        assert_eq!(
-            reference(&session, "request").as_deref(),
-            Some("permission:request")
-        );
-        session.permission_requests[0].state = PermissionRequestState::Approved;
-        assert!(
-            reference(&session, "request").is_some(),
-            "decision may race the pause transaction"
-        );
-        session.permission_requests[0].state = PermissionRequestState::Withdrawn;
-        assert!(reference(&session, "request").is_none());
-        session.permission_requests[0].state = PermissionRequestState::Pending;
-        session.input_revision = 2;
-        assert!(reference(&session, "request").is_none());
-        session.input_revision = 1;
-        let subject = FileScopeSubject {
-            actor_id: "owner".into(),
-            device_id: "device".into(),
-            conversation_id: "conversation".into(),
-        };
-        session
-            .file_scope
-            .propose(
-                &subject,
-                0,
-                DirectoryProposal {
-                    request_id: "directory".into(),
-                    requested_path: "/tmp/output".into(),
-                    canonical_path: "/tmp/output".into(),
-                    directory: ObjectRef {
-                        token: "opaque".into(),
-                        snapshot_id: "snapshot".into(),
-                        object_kind: ObjectKind::Directory,
-                        expires_at: "2099-01-01T00:00:00Z".into(),
-                    },
-                    purpose: "Save report".into(),
-                    source: DirectoryConsentSource::ModelProposal,
-                },
-                0,
-            )
-            .unwrap();
-        assert_eq!(
-            reference(&session, "directory").as_deref(),
-            Some("directory:directory")
-        );
-        session.permission_requests[0].request_id = "directory".into();
-        assert!(
-            reference(&session, "directory").is_none(),
-            "ambiguous namespaces cannot pick authority"
-        );
-        assert!(reference(&session, "directory\n").is_none());
-        assert!(reference(&session, "missing").is_none());
-    }
-}
-
 /// Recognize the exact pause checkpoint saved atomically with a permission event,
 /// before the outer loop persisted Idle. The store must still verify that original
 /// event; model prose or a request list alone is not a recovery receipt.
@@ -462,5 +373,94 @@ pub fn approved(session: &PersistedAgentSession, stored_reference: &str, now_uni
                 .is_ok()
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_scope::{DirectoryConsentSource, DirectoryProposal, FileScopeSubject};
+    use desk_agent_protocol::{
+        AgentScope, ExecutionMode,
+        computer_use::{ObjectKind, ObjectRef},
+    };
+
+    #[test]
+    fn reference_requires_one_current_request_and_keeps_directory_namespace_separate() {
+        let mut session = PersistedAgentSession::new(
+            "conversation",
+            "owner",
+            "device",
+            1,
+            AgentScope {
+                granted: vec![],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-09-06T00:00:00Z",
+        );
+        session.input_revision = 1;
+        session.permission_requests.push(serde_json::from_value(serde_json::json!({
+            "schema_version":1, "request_id":"request", "input_revision":1, "state":"pending",
+            "created_at":"2026-09-06T00:00:00Z", "items":[{
+                "item_id":"read", "provider_id":"desktop.session", "tool_name":"inspect_desktop_session",
+                "expected_effect":"read_device", "resource_scope":["target:current_device"],
+                "operation_scope":["observe"], "suggested_ttl_seconds":120,
+                "suggested_max_uses":1, "reason":"Inspect current device"
+            }]
+        })).unwrap());
+        assert_eq!(
+            reference(&session, "request").as_deref(),
+            Some("permission:request")
+        );
+        session.permission_requests[0].state = PermissionRequestState::Approved;
+        assert!(
+            reference(&session, "request").is_some(),
+            "decision may race the pause transaction"
+        );
+        session.permission_requests[0].state = PermissionRequestState::Withdrawn;
+        assert!(reference(&session, "request").is_none());
+        session.permission_requests[0].state = PermissionRequestState::Pending;
+        session.input_revision = 2;
+        assert!(reference(&session, "request").is_none());
+        session.input_revision = 1;
+        let subject = FileScopeSubject {
+            actor_id: "owner".into(),
+            device_id: "device".into(),
+            conversation_id: "conversation".into(),
+        };
+        session
+            .file_scope
+            .propose(
+                &subject,
+                0,
+                DirectoryProposal {
+                    request_id: "directory".into(),
+                    requested_path: "/tmp/output".into(),
+                    canonical_path: "/tmp/output".into(),
+                    directory: ObjectRef {
+                        token: "opaque".into(),
+                        snapshot_id: "snapshot".into(),
+                        object_kind: ObjectKind::Directory,
+                        expires_at: "2099-01-01T00:00:00Z".into(),
+                    },
+                    purpose: "Save report".into(),
+                    source: DirectoryConsentSource::ModelProposal,
+                },
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            reference(&session, "directory").as_deref(),
+            Some("directory:directory")
+        );
+        session.permission_requests[0].request_id = "directory".into();
+        assert!(
+            reference(&session, "directory").is_none(),
+            "ambiguous namespaces cannot pick authority"
+        );
+        assert!(reference(&session, "directory\n").is_none());
+        assert!(reference(&session, "missing").is_none());
     }
 }

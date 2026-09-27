@@ -503,34 +503,6 @@ pub(crate) fn unique_original_call(
     call == &original.to_ref() && matches.next().is_none()
 }
 
-#[cfg(test)]
-mod candidate_tests {
-    use super::*;
-    use crate::chat::{ChatMessage, ChatRole, ToolCall};
-
-    #[test]
-    fn candidate_requires_unique_unchanged_original_call() {
-        let original = ToolCall {
-            id: "call-1".into(),
-            name: "send_slack_message".into(),
-            arguments_json: "{\"body_plain_text\":\"Original\"}".into(),
-        };
-        let mut message = ChatMessage::text("proposal", ChatRole::Assistant, "");
-        message.tool_calls.push(original.to_ref());
-        assert!(unique_original_call(&[message.clone()], &original));
-        assert!(!unique_original_call(&[], &original));
-        assert!(!unique_original_call(
-            &[message.clone(), message.clone()],
-            &original
-        ));
-        let changed = ToolCall {
-            arguments_json: "{\"body_plain_text\":\"Replacement\"}".into(),
-            ..original
-        };
-        assert!(!unique_original_call(&[message], &changed));
-    }
-}
-
 fn validate_artifact_resources(
     contract: &super::ValidatedTaskContract,
     session: &PersistedAgentSession,
@@ -562,4 +534,32 @@ fn validate_artifact_resources(
         return Err(super::TaskContractError::InvalidScope);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+    use crate::chat::{ChatMessage, ChatRole, ToolCall};
+
+    #[test]
+    fn candidate_requires_unique_unchanged_original_call() {
+        let original = ToolCall {
+            id: "call-1".into(),
+            name: "send_slack_message".into(),
+            arguments_json: "{\"body_plain_text\":\"Original\"}".into(),
+        };
+        let mut message = ChatMessage::text("proposal", ChatRole::Assistant, "");
+        message.tool_calls.push(original.to_ref());
+        assert!(unique_original_call(&[message.clone()], &original));
+        assert!(!unique_original_call(&[], &original));
+        assert!(!unique_original_call(
+            &[message.clone(), message.clone()],
+            &original
+        ));
+        let changed = ToolCall {
+            arguments_json: "{\"body_plain_text\":\"Replacement\"}".into(),
+            ..original
+        };
+        assert!(!unique_original_call(&[message], &changed));
+    }
 }

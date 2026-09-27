@@ -42,6 +42,7 @@ pub struct OutlookCallPreflight {
 }
 
 impl OutlookCallPreflight {
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         registry: &ProviderRegistry,
         product_surface: ProductSurface,

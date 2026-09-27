@@ -26,6 +26,7 @@ impl ApprovalDelegationStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct ApprovalDelegationUsage {
     pub reviews_used: u64,
     pub reviews_reserved: u32,
@@ -33,19 +34,6 @@ pub struct ApprovalDelegationUsage {
     pub tokens_reserved: u64,
     pub cost_used_micros: u64,
     pub cost_reserved_micros: u64,
-}
-
-impl Default for ApprovalDelegationUsage {
-    fn default() -> Self {
-        Self {
-            reviews_used: 0,
-            reviews_reserved: 0,
-            tokens_used: 0,
-            tokens_reserved: 0,
-            cost_used_micros: 0,
-            cost_reserved_micros: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

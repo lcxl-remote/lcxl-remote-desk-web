@@ -322,7 +322,7 @@ impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
         self.sink.emit(AgentEvent::status_for_turn(
             &self.request_id,
             seq,
-            &kind.status().replace('-', "_"),
+            kind.status().replace('-', "_"),
             turn_id,
         ));
     }

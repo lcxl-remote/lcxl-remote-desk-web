@@ -511,7 +511,7 @@ impl SpreadsheetBatchInspectParams {
         if row.starts_with('0')
             || !row.bytes().all(|c| c.is_ascii_digit())
             || column > 16384
-            || !row.parse::<u32>().ok().is_some_and(|r| r <= 1_048_576)
+            || row.parse::<u32>().ok().is_none_or(|r| r > 1_048_576)
         {
             return Err("Excel batch cell address exceeds worksheet bounds");
         }
@@ -1377,6 +1377,8 @@ impl FilePatchAction {
     }
 }
 
+// Wire enum: variants stay inline so serde, wincode and OpenAPI shapes are unchanged.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
 #[serde(tag = "adapter", content = "action", rename_all = "snake_case")]
 pub enum ComputerActionKind {
@@ -1737,95 +1739,90 @@ fn validate_actions(
     if matches!(
         actions[0].action,
         ComputerActionKind::UiInApplication { .. } | ComputerActionKind::BackgroundInput { .. }
-    ) {
-        if actions.len() > 20
-            || actions
-                .iter()
-                .any(|step| match (&actions[0].action, &step.action) {
-                    (
-                        ComputerActionKind::UiInApplication { application: a, .. },
-                        ComputerActionKind::UiInApplication { application: b, .. },
-                    ) => a != b,
-                    (
-                        ComputerActionKind::BackgroundInput { application: a, .. },
-                        ComputerActionKind::BackgroundInput { application: b, .. },
-                    ) => a != b || step.target != actions[0].target,
-                    _ => true,
-                })
-        {
-            return Err(ComputerUseValidationError::InvalidContextReference(
-                "application batches require 1–20 steps in one application and one background window",
-            ));
-        }
+    ) && (actions.len() > 20
+        || actions
+            .iter()
+            .any(|step| match (&actions[0].action, &step.action) {
+                (
+                    ComputerActionKind::UiInApplication { application: a, .. },
+                    ComputerActionKind::UiInApplication { application: b, .. },
+                ) => a != b,
+                (
+                    ComputerActionKind::BackgroundInput { application: a, .. },
+                    ComputerActionKind::BackgroundInput { application: b, .. },
+                ) => a != b || step.target != actions[0].target,
+                _ => true,
+            }))
+    {
+        return Err(ComputerUseValidationError::InvalidContextReference(
+            "application batches require 1–20 steps in one application and one background window",
+        ));
     }
     let snapshot_id = actions[0].target.snapshot_id.as_str();
     require_non_empty("object_ref.snapshot_id", snapshot_id)?;
     for step in actions {
-        let adapter_matches =
-            office_batch::action_support(adapter, &step.action).unwrap_or_else(|| {
-                matches!(
-                    (&adapter.kind, &step.action),
-                    (
-                        ComputerUseAdapterKind::WindowsUia
-                            | ComputerUseAdapterKind::MacosAccessibility
-                            | ComputerUseAdapterKind::LinuxAtspi,
-                        ComputerActionKind::UiInApplication { .. }
-                    ) | (
-                        ComputerUseAdapterKind::MacosBackgroundInput,
-                        ComputerActionKind::BackgroundInput { .. }
-                    ) | (
-                        ComputerUseAdapterKind::WindowsRawInput,
-                        ComputerActionKind::RawInput(_)
-                    ) | (
-                        ComputerUseAdapterKind::LinuxWaylandOutput,
-                        ComputerActionKind::WaylandOutputInput(_)
-                    ) | (
-                        ComputerUseAdapterKind::OfficeExcel,
-                        ComputerActionKind::Excel(_)
-                    ) | (
-                        ComputerUseAdapterKind::OfficePowerPoint,
-                        ComputerActionKind::PowerPoint(_)
-                    ) | (
-                        ComputerUseAdapterKind::IworkNumbers,
-                        ComputerActionKind::SpreadsheetLive(_)
-                            | ComputerActionKind::SpreadsheetLiveBatch(_)
-                    ) | (
-                        ComputerUseAdapterKind::IworkPages,
-                        ComputerActionKind::DocumentLive(_)
-                            | ComputerActionKind::DocumentLiveBatch(_)
-                    ) | (
-                        ComputerUseAdapterKind::IworkKeynote,
-                        ComputerActionKind::PresentationLive(_)
-                            | ComputerActionKind::PresentationLiveBatch(_)
-                    ) | (
-                        ComputerUseAdapterKind::FileSystem,
-                        ComputerActionKind::File(_)
-                    ) | (
-                        ComputerUseAdapterKind::BrowserExtension,
-                        ComputerActionKind::Browser(_)
-                    ) | (
-                        ComputerUseAdapterKind::NativeApplication,
-                        ComputerActionKind::LaunchApplication(_)
-                    ) | (
-                        ComputerUseAdapterKind::OutlookNewMailto,
-                        ComputerActionKind::Communication(_)
-                    )
+        let adapter_matches = office_batch::action_support(adapter, &step.action).unwrap_or({
+            matches!(
+                (&adapter.kind, &step.action),
+                (
+                    ComputerUseAdapterKind::WindowsUia
+                        | ComputerUseAdapterKind::MacosAccessibility
+                        | ComputerUseAdapterKind::LinuxAtspi,
+                    ComputerActionKind::UiInApplication { .. }
+                ) | (
+                    ComputerUseAdapterKind::MacosBackgroundInput,
+                    ComputerActionKind::BackgroundInput { .. }
+                ) | (
+                    ComputerUseAdapterKind::WindowsRawInput,
+                    ComputerActionKind::RawInput(_)
+                ) | (
+                    ComputerUseAdapterKind::LinuxWaylandOutput,
+                    ComputerActionKind::WaylandOutputInput(_)
+                ) | (
+                    ComputerUseAdapterKind::OfficeExcel,
+                    ComputerActionKind::Excel(_)
+                ) | (
+                    ComputerUseAdapterKind::OfficePowerPoint,
+                    ComputerActionKind::PowerPoint(_)
+                ) | (
+                    ComputerUseAdapterKind::IworkNumbers,
+                    ComputerActionKind::SpreadsheetLive(_)
+                        | ComputerActionKind::SpreadsheetLiveBatch(_)
+                ) | (
+                    ComputerUseAdapterKind::IworkPages,
+                    ComputerActionKind::DocumentLive(_) | ComputerActionKind::DocumentLiveBatch(_)
+                ) | (
+                    ComputerUseAdapterKind::IworkKeynote,
+                    ComputerActionKind::PresentationLive(_)
+                        | ComputerActionKind::PresentationLiveBatch(_)
+                ) | (
+                    ComputerUseAdapterKind::FileSystem,
+                    ComputerActionKind::File(_)
+                ) | (
+                    ComputerUseAdapterKind::BrowserExtension,
+                    ComputerActionKind::Browser(_)
+                ) | (
+                    ComputerUseAdapterKind::NativeApplication,
+                    ComputerActionKind::LaunchApplication(_)
+                ) | (
+                    ComputerUseAdapterKind::OutlookNewMailto,
+                    ComputerActionKind::Communication(_)
                 )
-            });
+            )
+        });
         if !adapter_matches {
             return Err(ComputerUseValidationError::IncompatibleActionAdapter);
         }
-        if let ComputerActionKind::LaunchApplication(binding) = &step.action {
-            if actions.len() != 1
+        if let ComputerActionKind::LaunchApplication(binding) = &step.action
+            && (actions.len() != 1
                 || binding.target() != Some(&step.target)
                 || binding
                     .revalidate(binding.subject(), binding.request(), binding.identity())
-                    .is_err()
-            {
-                return Err(ComputerUseValidationError::InvalidContextReference(
-                    "invalid exact launch binding",
-                ));
-            }
+                    .is_err())
+        {
+            return Err(ComputerUseValidationError::InvalidContextReference(
+                "invalid exact launch binding",
+            ));
         }
         if let ComputerActionKind::BackgroundInput {
             application, input, ..

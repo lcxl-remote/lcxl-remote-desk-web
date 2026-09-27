@@ -126,6 +126,8 @@ impl EdgeExecRequestPayload {
 /// - [`EdgeExecDisposition::ExecutionStateUnknown`]: the plan was handed to the
 ///   worker but the result is unknown (the daemon lost the worker mid-flight).
 ///   A mutating plan in this state is held for review, never reported as failed.
+// Wire enum: variants stay inline so serde, wincode and OpenAPI shapes are unchanged.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EdgeExecDisposition {

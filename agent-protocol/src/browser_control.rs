@@ -249,8 +249,10 @@ impl BrowserReadiness {
         if self.observed_at_unix_ms == 0 {
             return Err(BrowserControlContractError::InvalidTimestamp);
         }
-        if self.user_authorized && !self.adapter_enabled
-            || self.connected && (!self.adapter_enabled || !self.user_authorized)
+        // Authorization or a live connection both require an enabled adapter;
+        // a live connection also requires authorization.
+        if (self.connected || self.user_authorized)
+            && (!self.adapter_enabled || !self.user_authorized)
         {
             return Err(BrowserControlContractError::InvalidReadiness);
         }
@@ -1144,6 +1146,8 @@ fn validate_safe_leaf_name(value: &str) -> Result<(), BrowserControlContractErro
     Ok(())
 }
 
+// Each argument is one independently validated field of the upload contract.
+#[allow(clippy::too_many_arguments)]
 fn validate_upload(
     page: &BrowserPageRef,
     element: &BrowserElementRef,

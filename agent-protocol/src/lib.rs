@@ -565,6 +565,8 @@ pub enum OperationInput {
     Exec(ExecInput),
 }
 
+// Wire enum: variants stay inline so serde, wincode and OpenAPI shapes are unchanged.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
 pub enum OperationOutput {
     ReadContext(ReadContextOutput),
@@ -1246,6 +1248,8 @@ pub struct AgentRequestData {
 
 /// Result of one capability call. Reused verbatim by the IPC layer so the
 /// daemon ↔ worker reply and the control-end reply share one shape.
+// Wire enum: variants stay inline so serde, wincode and OpenAPI shapes are unchanged.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema)]
 #[serde(tag = "status", content = "data")]
 pub enum AgentOutcome {

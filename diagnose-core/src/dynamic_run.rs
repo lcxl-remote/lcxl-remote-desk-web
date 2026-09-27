@@ -659,16 +659,15 @@ impl GrantRequestItem {
         if self.suggested_ttl_seconds == 0 || self.suggested_max_uses == 0 {
             return Err(DynamicRunContractError::InvalidPermissionLimit);
         }
-        if let Some(confirmation) = &self.command_confirmation {
-            if self.tool_name != crate::command_confirmation::COMMAND_TOOL
+        if let Some(confirmation) = &self.command_confirmation
+            && (self.tool_name != crate::command_confirmation::COMMAND_TOOL
                 || self
                     .canonical_input_json
                     .as_deref()
                     .is_none_or(|canonical| confirmation.validate(canonical).is_err())
-                || confirmation.resource_scope().ok().as_ref() != Some(&self.resource_scope)
-            {
-                return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
-            }
+                || confirmation.resource_scope().ok().as_ref() != Some(&self.resource_scope))
+        {
+            return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
         }
         if let Some(binding) = &self.launch_confirmation {
             let canonical = self
@@ -971,8 +970,7 @@ impl PermissionDecidedEvent {
             reason_code,
             reason,
         } = &self.decision_source
-        {
-            if self.resulting_state != PermissionRequestState::Denied
+            && (self.resulting_state != PermissionRequestState::Denied
                 || approved != 0
                 || reason_code.is_empty()
                 || reason_code.len() > 64
@@ -980,10 +978,9 @@ impl PermissionDecidedEvent {
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
                 || reason.trim().is_empty()
-                || reason.len() > 2_048
-            {
-                return Err(DynamicRunContractError::PermissionEventMismatch);
-            }
+                || reason.len() > 2_048)
+        {
+            return Err(DynamicRunContractError::PermissionEventMismatch);
         }
         if let PermissionDecisionSource::AiApproval {
             delegation_id,

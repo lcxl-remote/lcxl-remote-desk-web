@@ -126,7 +126,7 @@ pub(crate) fn resolve_single_call(
 ) -> Result<ToolCall, AgentError> {
     if !needs_resolution(&call.name) {
         let mut value: Value = serde_json::from_str(&call.arguments_json).map_err(|e| {
-            invalid(&crate::model_input::describe_error(
+            invalid(crate::model_input::describe_error(
                 &call.name,
                 &e.to_string(),
             ))
@@ -266,11 +266,11 @@ pub(crate) fn resolve_single_call(
             else {
                 continue;
             };
-            if let Some(frame) = output.pointer("/ReadContext/ScreenCaptureCurrent") {
-                if frame.get("window") == Some(&window) {
-                    geometry = frame.get("window_geometry").cloned().unwrap_or(Value::Null);
-                    break;
-                }
+            if let Some(frame) = output.pointer("/ReadContext/ScreenCaptureCurrent")
+                && frame.get("window") == Some(&window)
+            {
+                geometry = frame.get("window_geometry").cloned().unwrap_or(Value::Null);
+                break;
             }
         }
         object.insert("geometry".into(), geometry);
@@ -294,72 +294,75 @@ pub(crate) fn resolve_single_call(
             }
         }
     }
-    if call.name == "request_permissions" {
-        if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
-            for item in items {
-                if let Some(tool) = item["tool_name"].as_str().map(str::to_owned)
-                    && crate::browser_model_ids::supports(&tool)
-                    && let Some(exact) = item.get_mut("exact_input")
-                {
+    if call.name == "request_permissions"
+        && let Some(items) = object.get_mut("items").and_then(Value::as_array_mut)
+    {
+        for item in items {
+            if let Some(tool) = item["tool_name"].as_str().map(str::to_owned)
+                && crate::browser_model_ids::supports(&tool)
+                && let Some(exact) = item.get_mut("exact_input")
+            {
+                let nested = ToolCall {
+                    id: call.id.clone(),
+                    name: tool,
+                    arguments_json: exact.to_string(),
+                };
+                *exact =
+                    serde_json::from_str(&resolve_call(&nested, history, now_ms)?.arguments_json)
+                        .unwrap();
+                continue;
+            }
+            if matches!(
+                item["tool_name"].as_str(),
+                Some("send_raw_input" | "execute_wayland_output_input")
+            ) {
+                let exact_tool = item["tool_name"].as_str().unwrap().to_owned();
+                if let Some(exact) = item.get_mut("exact_input") {
                     let nested = ToolCall {
                         id: call.id.clone(),
-                        name: tool,
+                        name: exact_tool.clone(),
                         arguments_json: exact.to_string(),
                     };
                     *exact = serde_json::from_str(
                         &resolve_call(&nested, history, now_ms)?.arguments_json,
                     )
                     .unwrap();
-                    continue;
                 }
-                if matches!(
-                    item["tool_name"].as_str(),
-                    Some("send_raw_input" | "execute_wayland_output_input")
-                ) {
-                    let exact_tool = item["tool_name"].as_str().unwrap().to_owned();
-                    if let Some(exact) = item.get_mut("exact_input") {
-                        let nested = ToolCall {
-                            id: call.id.clone(),
-                            name: exact_tool.clone(),
-                            arguments_json: exact.to_string(),
-                        };
-                        *exact = serde_json::from_str(
-                            &resolve_call(&nested, history, now_ms)?.arguments_json,
-                        )
-                        .unwrap();
-                    }
-                    continue;
-                }
-                if !matches!(
-                    item["tool_name"].as_str(),
-                    Some("execute_ui_actions" | "send_background_input")
-                ) {
-                    continue;
-                }
-                let scope = item.get_mut("application_scope").and_then(Value::as_object_mut)
-                    .ok_or_else(|| invalid(r#"Native UI permission requires application_scope: {"application_id":"<observed application ID>","actions":["invoke","set_value"]}. No approval card was created."#))?;
-                if scope.contains_key("application") {
-                    return Err(invalid(
-                        "Use application_scope.application_id, not a full application reference. No approval card was created.",
-                    ));
-                }
-                let id = scope.remove("application_id").ok_or_else(|| invalid("application_scope.application_id is required. No approval card was created."))?;
-                let reference = resolve(
-                    history,
-                    id.as_str()
-                        .ok_or_else(|| invalid("application_id must be a string."))?,
-                    now_ms,
-                )?;
-                if reference.object_kind != ObjectKind::Application {
-                    return Err(invalid(
-                        "application_id must identify an observed application. No approval card was created.",
-                    ));
-                }
-                scope.insert(
-                    "application".into(),
-                    serde_json::to_value(reference).unwrap(),
-                );
+                continue;
             }
+            if !matches!(
+                item["tool_name"].as_str(),
+                Some("execute_ui_actions" | "send_background_input")
+            ) {
+                continue;
+            }
+            let scope = item.get_mut("application_scope").and_then(Value::as_object_mut)
+                    .ok_or_else(|| invalid(r#"Native UI permission requires application_scope: {"application_id":"<observed application ID>","actions":["invoke","set_value"]}. No approval card was created."#))?;
+            if scope.contains_key("application") {
+                return Err(invalid(
+                    "Use application_scope.application_id, not a full application reference. No approval card was created.",
+                ));
+            }
+            let id = scope.remove("application_id").ok_or_else(|| {
+                invalid(
+                    "application_scope.application_id is required. No approval card was created.",
+                )
+            })?;
+            let reference = resolve(
+                history,
+                id.as_str()
+                    .ok_or_else(|| invalid("application_id must be a string."))?,
+                now_ms,
+            )?;
+            if reference.object_kind != ObjectKind::Application {
+                return Err(invalid(
+                    "application_id must identify an observed application. No approval card was created.",
+                ));
+            }
+            scope.insert(
+                "application".into(),
+                serde_json::to_value(reference).unwrap(),
+            );
         }
     }
     Ok(ToolCall {
@@ -398,11 +401,11 @@ fn project_arguments(tool: &str, value: &mut Value) {
             project_arguments(tool, item);
         }
         let mut result = json!({"application_id":all[0]["application_id"],"steps":[]});
-        if tool == crate::ai_assistant::linux::OUTPUT_TOOL {
-            if let Some(action) = value.get_mut("action").and_then(Value::as_object_mut) {
-                action.remove("screen");
-                action.remove("frame");
-            }
+        if tool == crate::ai_assistant::linux::OUTPUT_TOOL
+            && let Some(action) = value.get_mut("action").and_then(Value::as_object_mut)
+        {
+            action.remove("screen");
+            action.remove("frame");
         }
         if tool == "send_background_input" {
             result["window_id"] = all[0]["window_id"].clone();
@@ -420,10 +423,10 @@ fn project_arguments(tool: &str, value: &mut Value) {
         if let Some(object) = value.as_object_mut() {
             object.remove("geometry");
         }
-        if let Some(action) = value.get_mut("action").and_then(Value::as_object_mut) {
-            if let Some(element) = action.remove("element") {
-                action.insert("element_id".into(), element["token"].clone());
-            }
+        if let Some(action) = value.get_mut("action").and_then(Value::as_object_mut)
+            && let Some(element) = action.remove("element")
+        {
+            action.insert("element_id".into(), element["token"].clone());
         }
     }
 
@@ -436,27 +439,27 @@ fn project_arguments(tool: &str, value: &mut Value) {
                 );
             }
         }
-        if tool == "request_permissions" {
-            if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
-                for item in items {
-                    project_scope(item);
-                    if let Some(tool) = item["tool_name"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .filter(|tool| crate::browser_model_ids::supports(tool))
-                        && let Some(exact) = item.get_mut("exact_input")
-                    {
-                        project_arguments(&tool, exact);
-                        continue;
-                    }
-                    if matches!(
-                        item["tool_name"].as_str(),
-                        Some("send_raw_input" | "execute_wayland_output_input")
-                    ) {
-                        let exact_tool = item["tool_name"].as_str().unwrap().to_owned();
-                        if let Some(exact) = item.get_mut("exact_input") {
-                            project_arguments(&exact_tool, exact);
-                        }
+        if tool == "request_permissions"
+            && let Some(items) = object.get_mut("items").and_then(Value::as_array_mut)
+        {
+            for item in items {
+                project_scope(item);
+                if let Some(tool) = item["tool_name"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .filter(|tool| crate::browser_model_ids::supports(tool))
+                    && let Some(exact) = item.get_mut("exact_input")
+                {
+                    project_arguments(&tool, exact);
+                    continue;
+                }
+                if matches!(
+                    item["tool_name"].as_str(),
+                    Some("send_raw_input" | "execute_wayland_output_input")
+                ) {
+                    let exact_tool = item["tool_name"].as_str().unwrap().to_owned();
+                    if let Some(exact) = item.get_mut("exact_input") {
+                        project_arguments(&exact_tool, exact);
                     }
                 }
             }
@@ -468,10 +471,9 @@ fn project_scope(value: &mut Value) {
     if let Some(scope) = value
         .get_mut("application_scope")
         .and_then(Value::as_object_mut)
+        && let Some(reference) = scope.remove("application")
     {
-        if let Some(reference) = scope.remove("application") {
-            scope.insert("application_id".into(), reference["token"].clone());
-        }
+        scope.insert("application_id".into(), reference["token"].clone());
     }
 }
 
@@ -522,83 +524,82 @@ fn hide_references(value: &mut Value) {
 
 /// Convert the entire trusted result before attachment paging.
 pub(crate) fn project_tool_message(message: &mut ChatMessage) {
-    if message.role == ChatRole::Tool {
-        if let Ok(mut value) = crate::image_input::structured_tool_result(&message.text)
-            && value.pointer("/ReadContext/ScreenCaptureCurrent").is_some()
-        {
-            let omitted = message
+    if message.role == ChatRole::Tool
+        && let Ok(mut value) = crate::image_input::structured_tool_result(&message.text)
+        && value.pointer("/ReadContext/ScreenCaptureCurrent").is_some()
+    {
+        let omitted = message
+            .text
+            .trim_end()
+            .ends_with(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER);
+        hide_references(&mut value);
+        message.text = value.to_string();
+        if omitted {
+            message.text.push('\n');
+            message
                 .text
-                .trim_end()
-                .ends_with(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER);
-            hide_references(&mut value);
-            message.text = value.to_string();
-            if omitted {
-                message.text.push('\n');
-                message
-                    .text
-                    .push_str(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER);
-            }
+                .push_str(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER);
         }
     }
     crate::browser_model_ids::project_result_message(message);
     crate::output_contracts::project_status(message);
-    if message.role == ChatRole::Tool {
-        if let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
-            && (value.pointer("/ReadContext/DesktopUiInspect").is_some()
-                || value
-                    .pointer("/ReadContext/DesktopSessionInspect")
-                    .is_some())
-        {
-            // Expansion is needed to resolve compact internal references, but
-            // must not discard model guidance or duplicate fields on the wire.
-            let hints: Vec<_> = ["search_hint", "truncation_hint", "window_discovery_hint"]
-                .into_iter()
-                .filter_map(|key| {
-                    value
-                        .pointer("/ReadContext/DesktopUiInspect")
-                        .and_then(|body| body.get(key))
-                        .cloned()
-                        .map(|v| (key, v))
-                })
-                .collect();
-            crate::ui_model_output::expand_value(&mut value);
-            if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
-                for (key, hint) in hints {
-                    body[key] = hint;
-                }
+    if message.role == ChatRole::Tool
+        && let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
+        && (value.pointer("/ReadContext/DesktopUiInspect").is_some()
+            || value
+                .pointer("/ReadContext/DesktopSessionInspect")
+                .is_some())
+    {
+        // Expansion is needed to resolve compact internal references, but
+        // must not discard model guidance or duplicate fields on the wire.
+        let hints: Vec<_> = ["search_hint", "truncation_hint", "window_discovery_hint"]
+            .into_iter()
+            .filter_map(|key| {
+                value
+                    .pointer("/ReadContext/DesktopUiInspect")
+                    .and_then(|body| body.get(key))
+                    .cloned()
+                    .map(|v| (key, v))
+            })
+            .collect();
+        crate::ui_model_output::expand_value(&mut value);
+        if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
+            for (key, hint) in hints {
+                body[key] = hint;
             }
-            crate::ui_model_output::add_window_discovery_hint(&mut value);
-            hide_references(&mut value);
-            // Omit default node fields without removing useful semantic IDs.
-            if let Some(nodes) = value
-                .pointer_mut("/ReadContext/DesktopUiInspect/nodes")
-                .and_then(Value::as_array_mut)
-            {
-                for node in nodes {
-                    let Some(fields) = node.as_object_mut() else {
-                        continue;
-                    };
-                    if fields.get("element_id").is_some_and(|id| {
-                        !id.is_null()
-                            && fields.get("object_ref")
-                                == Some(&json!({"id":id,"kind":"ui_element"}))
-                    }) {
-                        fields.remove("object_ref");
-                    }
-                    fields.retain(|key, value| {
-                        !value.is_null()
-                            && !(key == "enabled" && value == &Value::Bool(true))
-                            && !(key == "is_protected" && value == &Value::Bool(false))
-                            && !(key == "supported_actions"
-                                && value.as_array().is_some_and(Vec::is_empty))
-                    });
-                }
-            }
-            if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
-                body["node_defaults"] = json!({"enabled":true,"is_protected":false});
-            }
-            message.text = value.to_string();
         }
+        crate::ui_model_output::add_window_discovery_hint(&mut value);
+        hide_references(&mut value);
+        // Omit default node fields without removing useful semantic IDs.
+        if let Some(nodes) = value
+            .pointer_mut("/ReadContext/DesktopUiInspect/nodes")
+            .and_then(Value::as_array_mut)
+        {
+            for node in nodes {
+                let Some(fields) = node.as_object_mut() else {
+                    continue;
+                };
+                if fields.get("element_id").is_some_and(|id| {
+                    !id.is_null()
+                        && fields.get("object_ref") == Some(&json!({"id":id,"kind":"ui_element"}))
+                }) {
+                    fields.remove("object_ref");
+                }
+                fields.retain(|key, value| {
+                    // Nulls and default-valued flags carry no information for the model.
+                    let redundant = value.is_null()
+                        || (key == "enabled" && value == &Value::Bool(true))
+                        || (key == "is_protected" && value == &Value::Bool(false))
+                        || (key == "supported_actions"
+                            && value.as_array().is_some_and(Vec::is_empty));
+                    !redundant
+                });
+            }
+        }
+        if let Some(body) = value.pointer_mut("/ReadContext/DesktopUiInspect") {
+            body["node_defaults"] = json!({"enabled":true,"is_protected":false});
+        }
+        message.text = value.to_string();
     }
 }
 
@@ -627,10 +628,9 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
                             && (tool == "send_raw_input"
                                 || tool == "execute_wayland_output_input"
                                 || crate::browser_model_ids::supports(&tool))
+                            && let Some(exact) = entry.get_mut("approved_exact_input")
                         {
-                            if let Some(exact) = entry.get_mut("approved_exact_input") {
-                                project_arguments(&tool, exact);
-                            }
+                            project_arguments(&tool, exact);
                         }
                     }
                     message
@@ -671,21 +671,20 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
             }
         }
     }
-    if tool.name == "request_permissions" {
-        if let Some(scope) =
+    if tool.name == "request_permissions"
+        && let Some(scope) =
             schema.pointer_mut("/properties/items/items/properties/application_scope")
-        {
-            scope["properties"]
-                .as_object_mut()
-                .unwrap()
-                .remove("application");
-            scope["properties"]["application_id"] =
-                json!({"type":"string","minLength":1,"maxLength":512});
-            scope["required"] = json!(["application_id", "actions"]);
-            scope["description"] = json!(
-                "Native UI permission requires the observed application_id and needed actions. The server supplies all reference metadata. Do not supply exact_input."
-            );
-        }
+    {
+        scope["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("application");
+        scope["properties"]["application_id"] =
+            json!({"type":"string","minLength":1,"maxLength":512});
+        scope["required"] = json!(["application_id", "actions"]);
+        scope["description"] = json!(
+            "Native UI permission requires the observed application_id and needed actions. The server supplies all reference metadata. Do not supply exact_input."
+        );
     }
     if tool.name == crate::ai_assistant::linux::OUTPUT_TOOL {
         if let Some(properties) = schema

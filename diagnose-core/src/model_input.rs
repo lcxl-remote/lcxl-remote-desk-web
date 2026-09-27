@@ -80,16 +80,15 @@ fn fill(schema: &Value, input: &mut Value) {
 }
 
 pub fn fill_versions(name: &str, input: &mut Value) {
-    if name == "request_permissions" {
-        if let Some(items) = input.get_mut("items").and_then(Value::as_array_mut) {
-            for item in items {
-                if let Some(name) = item["tool_name"].as_str().map(str::to_owned) {
-                    if name != "request_permissions" {
-                        if let Some(exact) = item.get_mut("exact_input") {
-                            fill_versions(&name, exact);
-                        }
-                    }
-                }
+    if name == "request_permissions"
+        && let Some(items) = input.get_mut("items").and_then(Value::as_array_mut)
+    {
+        for item in items {
+            if let Some(name) = item["tool_name"].as_str().map(str::to_owned)
+                && name != "request_permissions"
+                && let Some(exact) = item.get_mut("exact_input")
+            {
+                fill_versions(&name, exact);
             }
         }
     }
@@ -220,18 +219,18 @@ fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), 
             schema["type"]
         ));
     }
-    if let Some(expected) = schema.get("const") {
-        if expected != value {
-            return Err(format!("Invalid input at {path}: expected {expected}"));
-        }
+    if let Some(expected) = schema.get("const")
+        && expected != value
+    {
+        return Err(format!("Invalid input at {path}: expected {expected}"));
     }
-    if let Some(allowed) = schema["enum"].as_array() {
-        if !allowed.contains(value) {
-            return Err(format!(
-                "Invalid input at {path}: allowed values {}",
-                schema["enum"]
-            ));
-        }
+    if let Some(allowed) = schema["enum"].as_array()
+        && !allowed.contains(value)
+    {
+        return Err(format!(
+            "Invalid input at {path}: allowed values {}",
+            schema["enum"]
+        ));
     }
     if let Some(object) = value.as_object() {
         if let Some(required) = schema["required"].as_array() {
@@ -269,15 +268,14 @@ fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), 
         ),
         ("minimum", "maximum", value.as_f64()),
     ] {
-        if let Some(n) = n {
-            if schema[min].as_f64().is_some_and(|m| n < m)
-                || schema[max].as_f64().is_some_and(|m| n > m)
-            {
-                return Err(format!(
-                    "Invalid input at {path}: bounds {min}={}, {max}={}",
-                    schema[min], schema[max]
-                ));
-            }
+        if let Some(n) = n
+            && (schema[min].as_f64().is_some_and(|m| n < m)
+                || schema[max].as_f64().is_some_and(|m| n > m))
+        {
+            return Err(format!(
+                "Invalid input at {path}: bounds {min}={}, {max}={}",
+                schema[min], schema[max]
+            ));
         }
     }
     Ok(())

@@ -126,7 +126,8 @@ mod tests {
         let restored: ContextUsageBasis =
             serde_json::from_str(&serde_json::to_string(&basis).unwrap()).unwrap();
         assert_eq!(restored.usage(&history), Some(usage));
-        let refreshed = ContextUsageBasis::observe(&history, &[result.clone()], &policy);
+        let refreshed =
+            ContextUsageBasis::observe(&history, std::slice::from_ref(&result), &policy);
         assert_eq!(
             refreshed.usage(&history).unwrap().used_bytes,
             model_context_cost(&result)

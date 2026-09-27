@@ -157,7 +157,7 @@ pub fn artifact_action_from_call(call: &ToolCall) -> Result<FilePatchAction, Age
             if !preview_id(&args.preview_id)
                 || !safe_leaf(&args.file_name, Some(".docx"))
                 || !bounded_text(&args.title, 160)
-                || args.web_search_call_id.is_some() != !args.web_sources.is_empty()
+                || args.web_search_call_id.is_some() == args.web_sources.is_empty()
                 || args
                     .web_search_call_id
                     .as_ref()
@@ -208,13 +208,12 @@ pub fn without_directory_selector(call: &ToolCall) -> Result<ToolCall, AgentErro
     let mut args: serde_json::Value =
         serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
     let args = args.as_object_mut().ok_or_else(unavailable)?;
-    if let Some(selector) = args.remove("directory_request_id") {
-        if selector
+    if let Some(selector) = args.remove("directory_request_id")
+        && selector
             .as_str()
             .is_none_or(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
-        {
-            return Err(unavailable());
-        }
+    {
+        return Err(unavailable());
     }
     Ok(ToolCall {
         arguments_json: serde_json::to_string(args).map_err(|_| unavailable())?,

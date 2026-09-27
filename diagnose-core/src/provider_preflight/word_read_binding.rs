@@ -47,12 +47,12 @@ impl WordReadBinding {
             || document.snapshot_id != output.snapshot_id
             || worker_incarnation.is_empty()
             || worker_incarnation.len() > 4096
-            || !output
+            || output
                 .snapshot_id
                 .strip_prefix(worker_incarnation)
                 .and_then(|suffix| suffix.strip_prefix(':'))
                 .and_then(|sequence| sequence.parse::<u64>().ok())
-                .is_some_and(|sequence| sequence > 0)
+                .is_none_or(|sequence| sequence == 0)
         {
             return Err(denied());
         }

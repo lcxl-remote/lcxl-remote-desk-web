@@ -201,12 +201,10 @@ pub fn validate_completion(
         },
         Some(file),
     ) = (action, &output.updated_file)
+        && (file.size_bytes != content_utf8.len() as u64
+            || file.digest_sha256 != format!("{:x}", Sha256::digest(content_utf8.as_bytes())))
     {
-        if file.size_bytes != content_utf8.len() as u64
-            || file.digest_sha256 != format!("{:x}", Sha256::digest(content_utf8.as_bytes()))
-        {
-            return Err(unavailable());
-        }
+        return Err(unavailable());
     }
     Ok(())
 }
@@ -560,7 +558,7 @@ fn validate_read_selector(
         let example = serde_json::json!({"file_result_call_id":id});
         return Err(error(
             AgentErrorKind::InvalidInput,
-            &format!(
+            format!(
                 "Invalid entry_name: this call ID identifies a creation/read/update result for one file, not a directory listing. Remove entry_name. Required fields: [file_result_call_id]. Corrected tool arguments (also use as permission exact_input): {example}. This is a parameter mismatch, not evidence of expiry; do not refresh directory metadata. If the existing content and verified SHA-256 already suffice for the requested update, request update_text_file directly instead of this read."
             ),
             false,
@@ -571,7 +569,7 @@ fn validate_read_selector(
         let example = serde_json::json!({"file_result_call_id":id,"entry_name":"<exact regular-file name from this metadata result>"});
         return Err(error(
             AgentErrorKind::InvalidInput,
-            &format!(
+            format!(
                 "Missing entry_name for a metadata-result source. Required fields: [file_result_call_id, entry_name]. Tool arguments (also use as permission exact_input): {example}. Choose the exact child name from that result; do not repeat the directory listing merely to fix this missing field."
             ),
             false,
@@ -840,10 +838,10 @@ pub(super) fn batch_source_files(
             name: source.name.clone(),
             arguments_json: source.arguments_json.clone(),
         };
-        if let Ok(file) = batch_source_file(session, &call, now) {
-            if !files.contains(&file) {
-                files.push(file);
-            }
+        if let Ok(file) = batch_source_file(session, &call, now)
+            && !files.contains(&file)
+        {
+            files.push(file);
         }
     }
     files
@@ -877,10 +875,10 @@ pub(super) fn directory_file_target(
                     serde_json::json!({"file_result_call_id":id,"entry_name":entry.display_name})
                         .to_string(),
             };
-            if let Ok(file) = batch_source_file(session, &read, now) {
-                if &file == target {
-                    return Ok(file);
-                }
+            if let Ok(file) = batch_source_file(session, &read, now)
+                && &file == target
+            {
+                return Ok(file);
             }
         }
     }

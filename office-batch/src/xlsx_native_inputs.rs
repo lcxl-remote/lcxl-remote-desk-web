@@ -35,10 +35,10 @@ fn values(
     let mut total_bytes = 0usize;
     for sheet in &inventory.worksheet_names {
         let selected = xlsx_parts::locate(parts, sheet)?;
-        if let Some(path) = &selected.shared_strings {
-            if !strings.contains_key(path) {
-                strings.insert(path.clone(), xlsx_strings::shared_all(&parts[path], 65536)?);
-            }
+        if let Some(path) = &selected.shared_strings
+            && !strings.contains_key(path)
+        {
+            strings.insert(path.clone(), xlsx_strings::shared_all(&parts[path], 65536)?);
         }
         for (address, cell) in xlsx_cells::read_all(&parts[&selected.worksheet], 65536)? {
             let value = if cell.formula.is_some() {

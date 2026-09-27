@@ -74,12 +74,12 @@ impl PresentationReadBinding {
             || presentation.token == slide.token
             || presentation.snapshot_id != output.snapshot_id
             || slide.snapshot_id != output.snapshot_id
-            || !output
+            || output
                 .snapshot_id
                 .strip_prefix(worker_incarnation)
                 .and_then(|s| s.strip_prefix(':'))
                 .and_then(|s| s.parse::<u64>().ok())
-                .is_some_and(|n| n > 0)
+                .is_none_or(|n| n == 0)
         {
             return Err(denied());
         }

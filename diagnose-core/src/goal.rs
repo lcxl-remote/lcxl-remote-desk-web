@@ -332,13 +332,12 @@ impl GoalOpenRequest {
                     && self.resulting_goal_id.is_none() => {}
             _ => return Err(GoalError::InvalidState),
         }
-        if let Some(decided_at) = self.decided_at_unix_ms {
-            if decided_at < self.created_at_unix_ms
+        if let Some(decided_at) = self.decided_at_unix_ms
+            && (decided_at < self.created_at_unix_ms
                 || (self.state != GoalOpenRequestState::Expired
-                    && decided_at >= self.expires_at_unix_ms)
-            {
-                return Err(GoalError::InvalidState);
-            }
+                    && decided_at >= self.expires_at_unix_ms))
+        {
+            return Err(GoalError::InvalidState);
         }
         if let Some(id) = &self.decision_event_id {
             valid_id(id)?;
@@ -1219,6 +1218,7 @@ impl GoalRun {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         goal_id: String,
         conversation_id: String,
@@ -1541,6 +1541,7 @@ impl GoalRun {
         Ok(newly_seen)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn finish_slice(
         &mut self,
         input_revision: u64,
@@ -1653,6 +1654,7 @@ impl GoalRun {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn finish_paused_slice(
         &mut self,
         input_revision: u64,
@@ -1702,6 +1704,7 @@ impl GoalRun {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn finish_model_wait_slice(
         &mut self,
         input_revision: u64,
@@ -3285,7 +3288,7 @@ mod tests {
         };
         goal.claim_slice(1_001).unwrap();
         assert!(
-            goal.observe_result_fingerprints(&[receipt.clone()])
+            goal.observe_result_fingerprints(std::slice::from_ref(&receipt))
                 .unwrap()
         );
         goal.finish_slice(1, 1, 1, &control, true, true, 1, vec![], 1_002)

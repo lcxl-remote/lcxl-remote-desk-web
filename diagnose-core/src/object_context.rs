@@ -17,6 +17,8 @@ use crate::{
     session::{AgentSessionSurface, PersistedAgentSession},
 };
 
+// A mutation is built once and consumed immediately; boxing would only add an allocation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ObjectContextMutation {
     Attach(ContextAttachment),

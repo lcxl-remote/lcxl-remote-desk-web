@@ -265,7 +265,7 @@ impl IworkCallPreflight {
             let mut bindings = files.iter().filter_map(|file| {
                 super::batch_document::resolve_presentation_read(
                     session,
-                    &file,
+                    file,
                     worker,
                     &args.target,
                     now_unix_ms,
@@ -295,7 +295,7 @@ impl IworkCallPreflight {
             let mut bindings = files.iter().filter_map(|file| {
                 super::word_read_binding::resolve_word_read(
                     session,
-                    &file,
+                    file,
                     worker,
                     &args.target,
                     now_unix_ms,
@@ -325,7 +325,7 @@ impl IworkCallPreflight {
             let mut bindings = files.iter().filter_map(|file| {
                 super::excel_read_binding::resolve_excel_read(
                     session,
-                    &file,
+                    file,
                     worker,
                     &args.target,
                     now_unix_ms,
@@ -397,6 +397,7 @@ impl IworkCallPreflight {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_with_batch_bindings(
         registry: &ProviderRegistry,
         surface: ProductSurface,

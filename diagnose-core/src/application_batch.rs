@@ -30,7 +30,7 @@ pub fn resolve(call: &ToolCall, history: &[ChatMessage], now: u64) -> Result<Too
     let background = call.name == "send_background_input";
     for key in obj.keys() {
         if !matches!(key.as_str(), "application_id" | "steps")
-            && !(background && key == "window_id")
+            && (!background || key != "window_id")
         {
             return Err(invalid(key, "unexpected field"));
         }
@@ -53,7 +53,7 @@ pub fn resolve(call: &ToolCall, history: &[ChatMessage], now: u64) -> Result<Too
             .ok_or_else(|| invalid(&path, "expected object"))?;
         if step
             .keys()
-            .any(|k| k != "action" && !(k == "element_id" && !background))
+            .any(|k| k != "action" && (k != "element_id" || background))
             || !step.contains_key("action")
         {
             return Err(invalid(
@@ -373,18 +373,12 @@ mod receipt_tests {
             message: Some(json!({"status":"completed","completed_steps":2}).to_string()),
             output: None,
         };
-        assert_eq!(
-            completion_receipt(&completed, Some(2)).unwrap().unwrap().0,
-            false
-        );
+        assert!(!completion_receipt(&completed, Some(2)).unwrap().unwrap().0);
         assert!(completion_receipt(&completed, Some(3)).is_err());
         completed.result = ComputerActionResultClass::Failed;
         assert!(completion_receipt(&completed, Some(2)).is_err());
         completed.message=Some(json!({"status":"stopped_on_error","failed_step_number":2,"effect":"may_have_effect","error":{"message":"AX rejected"}}).to_string());
-        assert_eq!(
-            completion_receipt(&completed, Some(2)).unwrap().unwrap().0,
-            true
-        );
+        assert!(completion_receipt(&completed, Some(2)).unwrap().unwrap().0);
         assert!(completion_receipt(&completed, Some(1)).is_err());
     }
 }

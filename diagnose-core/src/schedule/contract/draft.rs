@@ -146,6 +146,63 @@ pub fn observed_rule(
     Ok(())
 }
 
+/// Generalize only text content after verifying the original create receipt and
+/// owner-selected directory. The resulting contract still requires review.
+pub fn generalize_text_artifact(
+    contract: &mut TaskContract,
+    session: &crate::session::PersistedAgentSession,
+    tool: &crate::chat::ToolCall,
+    observed: &ObservedCapabilityAuthority,
+    output: &desk_agent_protocol::computer_use::CreatedFileArtifactOutput,
+    completed_at: u64,
+) -> Result<(), TaskContractError> {
+    let canonical_input = crate::permission_tools::canonical_tool_permission_input_json(
+        &tool.name,
+        serde_json::from_str(&tool.arguments_json).map_err(|_| TaskContractError::InvalidInput)?,
+    )
+    .map_err(|_| TaskContractError::InvalidInput)?;
+    if session.device_id != contract.target_device_id
+        || tool.name != observed.tool_name
+        || format!("{:x}", Sha256::digest(canonical_input.as_bytes()))
+            != observed.canonical_input_sha256
+    {
+        return Err(TaskContractError::InvalidIdentity);
+    }
+    crate::schedule::source_graph::attachment::verify_text_artifact_output(
+        &tool.name,
+        &canonical_input,
+        output,
+    )
+    .map_err(|_| TaskContractError::InvalidInput)?;
+    let generated = artifact::generated_text_input(tool)?;
+    let path = artifact::observed_directory(session, tool, &observed.resources, completed_at)?;
+    let scope = artifact::directory_resource_scope(&session.device_id, path)?;
+    let input_scope =
+        crate::schedule::rehearsal::fixed_input::task_input_scope(&validate_contract(contract)?);
+    let rule = contract
+        .permissions
+        .iter_mut()
+        .find(|rule| rule.tool_name == tool.name)
+        .ok_or(TaskContractError::InvalidIdentity)?;
+    let step = contract
+        .steps
+        .iter_mut()
+        .find(|step| step.rule_id == rule.rule_id)
+        .ok_or(TaskContractError::InvalidSteps)?;
+    rule.input = TaskInputConstraint::GeneratedTextArtifact {
+        file_name: generated.file_name,
+        max_content_bytes: u32::try_from(generated.content_utf8.len().max(4096))
+            .map_err(|_| TaskContractError::InvalidLimits)?,
+    };
+    rule.automatic.resources = scope.clone();
+    rule.approval_ceiling.resources = scope;
+    step.binding = TaskStepBinding::ProduceTextArtifact {
+        canonical_directory: path.into(),
+        allowed_source_scopes: vec![input_scope],
+    };
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,61 +290,4 @@ mod tests {
         assert!(observed_rule(&mut contract, &different, None, None, &registry).is_err());
         assert_eq!(contract, before);
     }
-}
-
-/// Generalize only text content after verifying the original create receipt and
-/// owner-selected directory. The resulting contract still requires review.
-pub fn generalize_text_artifact(
-    contract: &mut TaskContract,
-    session: &crate::session::PersistedAgentSession,
-    tool: &crate::chat::ToolCall,
-    observed: &ObservedCapabilityAuthority,
-    output: &desk_agent_protocol::computer_use::CreatedFileArtifactOutput,
-    completed_at: u64,
-) -> Result<(), TaskContractError> {
-    let canonical_input = crate::permission_tools::canonical_tool_permission_input_json(
-        &tool.name,
-        serde_json::from_str(&tool.arguments_json).map_err(|_| TaskContractError::InvalidInput)?,
-    )
-    .map_err(|_| TaskContractError::InvalidInput)?;
-    if session.device_id != contract.target_device_id
-        || tool.name != observed.tool_name
-        || format!("{:x}", Sha256::digest(canonical_input.as_bytes()))
-            != observed.canonical_input_sha256
-    {
-        return Err(TaskContractError::InvalidIdentity);
-    }
-    crate::schedule::source_graph::attachment::verify_text_artifact_output(
-        &tool.name,
-        &canonical_input,
-        output,
-    )
-    .map_err(|_| TaskContractError::InvalidInput)?;
-    let generated = artifact::generated_text_input(tool)?;
-    let path = artifact::observed_directory(session, tool, &observed.resources, completed_at)?;
-    let scope = artifact::directory_resource_scope(&session.device_id, path)?;
-    let input_scope =
-        crate::schedule::rehearsal::fixed_input::task_input_scope(&validate_contract(contract)?);
-    let rule = contract
-        .permissions
-        .iter_mut()
-        .find(|rule| rule.tool_name == tool.name)
-        .ok_or(TaskContractError::InvalidIdentity)?;
-    let step = contract
-        .steps
-        .iter_mut()
-        .find(|step| step.rule_id == rule.rule_id)
-        .ok_or(TaskContractError::InvalidSteps)?;
-    rule.input = TaskInputConstraint::GeneratedTextArtifact {
-        file_name: generated.file_name,
-        max_content_bytes: u32::try_from(generated.content_utf8.len().max(4096))
-            .map_err(|_| TaskContractError::InvalidLimits)?,
-    };
-    rule.automatic.resources = scope.clone();
-    rule.approval_ceiling.resources = scope;
-    step.binding = TaskStepBinding::ProduceTextArtifact {
-        canonical_directory: path.into(),
-        allowed_source_scopes: vec![input_scope],
-    };
-    Ok(())
 }

@@ -73,10 +73,10 @@ pub fn apply_anthropic(body: &mut Value, request: &ModelRequest, options: &Value
     };
     if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
         for message in messages[..boundary].iter_mut().rev() {
-            if let Some(content) = message.get_mut("content") {
-                if mark_last(content) {
-                    break;
-                }
+            if let Some(content) = message.get_mut("content")
+                && mark_last(content)
+            {
+                break;
             }
         }
     }
@@ -245,18 +245,16 @@ pub fn observe(
                 .take_while(|(left, right)| left == right)
                 .count()
         });
-    if let Some((old_anchor, latest_anchor)) = previous.and_then(|old| old.anchor).zip(anchor) {
-        if old_anchor < common_prefix_blocks && old_anchor < latest_anchor {
-            if let (Some((mi, bi, old_position)), Some((_, _, new_position))) = (
-                positions.get(old_anchor).copied().flatten(),
-                positions.get(latest_anchor).copied().flatten(),
-            ) {
-                if new_position.saturating_sub(old_position) > 20 {
-                    body["messages"][mi]["content"][bi]["cache_control"] =
-                        json!({"type":"ephemeral"});
-                }
-            }
-        }
+    if let Some((old_anchor, latest_anchor)) = previous.and_then(|old| old.anchor).zip(anchor)
+        && old_anchor < common_prefix_blocks
+        && old_anchor < latest_anchor
+        && let (Some((mi, bi, old_position)), Some((_, _, new_position))) = (
+            positions.get(old_anchor).copied().flatten(),
+            positions.get(latest_anchor).copied().flatten(),
+        )
+        && new_position.saturating_sub(old_position) > 20
+    {
+        body["messages"][mi]["content"][bi]["cache_control"] = json!({"type":"ephemeral"});
     }
     let change_reason = match previous {
         None => ChangeReason::Initial,
