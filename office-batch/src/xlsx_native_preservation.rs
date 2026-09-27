@@ -101,7 +101,7 @@ fn canonical(xml: &[u8], formulas: &HashSet<String>) -> PackageResult<Vec<Token>
                     {
                         continue;
                     }
-                    let (attribute_ns, key) = reader.resolve_attribute(attribute.key);
+                    let (attribute_ns, key) = reader.resolver().resolve_attribute(attribute.key);
                     let attribute_ns = namespace(attribute_ns)?;
                     let key = std::str::from_utf8(key.as_ref())?.to_owned();
                     if attribute_ns == "http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -113,7 +113,10 @@ fn canonical(xml: &[u8], formulas: &HashSet<String>) -> PackageResult<Vec<Token>
                         attribute_ns,
                         key,
                         attribute
-                            .decode_and_unescape_value(reader.decoder())?
+                            .decoded_and_normalized_value(
+                                crate::ooxml_package::XML_VERSION,
+                                reader.decoder(),
+                            )?
                             .into_owned(),
                     ));
                 }

@@ -85,8 +85,10 @@ pub fn replace(xml: &[u8], title: bool, replacement: &str) -> PackageResult<Vec<
                         for attribute in element.attributes() {
                             let attribute = attribute?;
                             if attribute.key.as_ref() == b"type" {
-                                let value =
-                                    attribute.decode_and_unescape_value(reader.decoder())?;
+                                let value = attribute.decoded_and_normalized_value(
+                                    crate::ooxml_package::XML_VERSION,
+                                    reader.decoder(),
+                                )?;
                                 selected |= if title {
                                     matches!(value.as_ref(), "title" | "ctrTitle")
                                 } else {

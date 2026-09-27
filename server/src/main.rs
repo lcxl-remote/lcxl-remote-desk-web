@@ -143,6 +143,10 @@ fn confirm_cli_lock() -> anyhow::Result<()> {
 }
 
 fn main() {
+    // Before anything else: the sandbox child's stdout carries only its frame.
+    if let Some(code) = lcxl_remote_desk_server::typst_sandbox::run_child_if_requested() {
+        std::process::exit(code);
+    }
     #[cfg(windows)]
     if let Some(code) = lcxl_remote_desk_server::windows_application_host::run_if_requested() {
         std::process::exit(code);

@@ -46,8 +46,10 @@ pub fn replace(xml: &[u8], text: &str) -> PackageResult<Vec<u8>> {
                         for attr in element.attributes() {
                             let attr = attr?;
                             if attr.key.as_ref() == b"type" {
-                                selected |=
-                                    attr.decode_and_unescape_value(reader.decoder())? == "body";
+                                selected |= attr.decoded_and_normalized_value(
+                                    crate::ooxml_package::XML_VERSION,
+                                    reader.decoder(),
+                                )? == "body";
                             }
                         }
                     }

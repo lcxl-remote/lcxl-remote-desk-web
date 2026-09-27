@@ -1381,6 +1381,9 @@ impl BrowserExtensionBridgeError {
                 "content_script_timeout" => {
                     "browser_observation_timeout: use a fresh read to check the page. The previous mutation must not be repeated."
                 }
+                "open_page_outcome_unknown" => {
+                    "browser_open_outcome_unknown: an earlier attempt of this request may already have opened the page, but that tab now shows a different page. Check the open pages with a read; do not open the target again automatically."
+                }
                 _ => {
                     "browser_extension_error: the extension could not verify the result. Read current page state; do not repeat a mutation."
                 }
@@ -1468,6 +1471,14 @@ mod tests {
             !BrowserExtensionBridgeError::ExtensionRejected("private-page-secret".into())
                 .model_message()
                 .contains("private-page-secret")
+        );
+        let unknown =
+            BrowserExtensionBridgeError::ExtensionRejected("open_page_outcome_unknown".into());
+        assert!(unknown.may_have_started());
+        assert!(
+            unknown
+                .model_message()
+                .starts_with("browser_open_outcome_unknown")
         );
     }
 

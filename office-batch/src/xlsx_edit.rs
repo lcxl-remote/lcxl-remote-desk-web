@@ -152,7 +152,10 @@ fn replace_content(
                     for attr in element.attributes() {
                         let attr = attr?;
                         if attr.key.as_ref() == b"r"
-                            && attr.decode_and_unescape_value(reader.decoder())? == address
+                            && attr.decoded_and_normalized_value(
+                                crate::ooxml_package::XML_VERSION,
+                                reader.decoder(),
+                            )? == address
                         {
                             is_target = true;
                         }

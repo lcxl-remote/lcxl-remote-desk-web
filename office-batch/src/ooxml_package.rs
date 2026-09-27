@@ -8,6 +8,50 @@ pub type PackageResult<T> = Result<T, Box<dyn std::error::Error>>;
 const MAX_ARCHIVE: usize = 16 * 1024 * 1024;
 const MAX_PART: usize = 4 * 1024 * 1024;
 const MAX_EXPANDED: usize = 32 * 1024 * 1024;
+/// Attributes on one element. Real OOXML elements carry a handful; a cap keeps
+/// the per-element attribute and duplicate checks bounded.
+const MAX_ELEMENT_ATTRIBUTES: usize = 256;
+/// Namespace declarations on one element, which namespace-aware readers must
+/// allocate bindings for.
+const MAX_ELEMENT_NAMESPACES: usize = 64;
+/// Parser work shared by every XML part of one package, so many individually
+/// small parts cannot add up to an unbounded amount of synchronous parsing.
+const MAX_PACKAGE_XML_EVENTS: usize = 4_000_000;
+const MAX_PACKAGE_XML_ATTRIBUTES: usize = 2_000_000;
+
+/// Remaining XML parsing work for one package.
+struct ParseBudget {
+    events: usize,
+    attributes: usize,
+}
+
+impl ParseBudget {
+    fn new() -> Self {
+        Self {
+            events: MAX_PACKAGE_XML_EVENTS,
+            attributes: MAX_PACKAGE_XML_ATTRIBUTES,
+        }
+    }
+
+    fn event(&mut self) -> PackageResult<()> {
+        self.events = self
+            .events
+            .checked_sub(1)
+            .ok_or("OOXML parsing work exceeds limit")?;
+        Ok(())
+    }
+
+    fn attribute(&mut self) -> PackageResult<()> {
+        self.attributes = self
+            .attributes
+            .checked_sub(1)
+            .ok_or("OOXML attribute work exceeds limit")?;
+        Ok(())
+    }
+}
+
+/// OOXML parts are XML 1.0 documents.
+pub(crate) const XML_VERSION: quick_xml::XmlVersion = quick_xml::XmlVersion::Implicit1_0;
 
 pub fn read(bytes: &[u8]) -> PackageResult<BTreeMap<String, Vec<u8>>> {
     if bytes.len() > MAX_ARCHIVE {
@@ -20,6 +64,7 @@ pub fn read(bytes: &[u8]) -> PackageResult<BTreeMap<String, Vec<u8>>> {
     let mut names = HashSet::new();
     let mut parts = BTreeMap::new();
     let mut total = 0usize;
+    let mut budget = ParseBudget::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index)?;
         let name = std::str::from_utf8(entry.name_raw())?.to_owned();
@@ -57,7 +102,7 @@ pub fn read(bytes: &[u8]) -> PackageResult<BTreeMap<String, Vec<u8>>> {
             return Err("expanded OOXML exceeds limit".into());
         }
         if folded.ends_with(".xml") || folded.ends_with(".rels") {
-            inspect_xml(&data)?;
+            inspect_xml(&data, &mut budget)?;
         }
         parts.insert(name, data);
     }
@@ -116,7 +161,7 @@ fn printer_settings(name: &str, content_types: &[u8]) -> PackageResult<bool> {
                         attrs.insert(
                             std::str::from_utf8(attribute.key.as_ref())?.to_owned(),
                             attribute
-                                .decode_and_unescape_value(reader.decoder())?
+                                .decoded_and_normalized_value(XML_VERSION, reader.decoder())?
                                 .into_owned(),
                         );
                     }
@@ -170,7 +215,7 @@ fn valid_name(name: &str) -> bool {
             .all(|part| !matches!(part, "" | "." | ".."))
 }
 
-fn inspect_xml(bytes: &[u8]) -> PackageResult<()> {
+fn inspect_xml(bytes: &[u8], budget: &mut ParseBudget) -> PackageResult<()> {
     let text = std::str::from_utf8(bytes)?;
     let mut reader = quick_xml::Reader::from_str(text);
     reader.config_mut().expand_empty_elements = true;
@@ -178,6 +223,7 @@ fn inspect_xml(bytes: &[u8]) -> PackageResult<()> {
     let mut roots = 0usize;
     loop {
         use quick_xml::events::Event;
+        budget.event()?;
         match reader.read_event()? {
             Event::DocType(_) => return Err("DTD is unsupported in OOXML".into()),
             Event::Start(element) | Event::Empty(element) => {
@@ -191,9 +237,24 @@ fn inspect_xml(bytes: &[u8]) -> PackageResult<()> {
                 if depth > 128 {
                     return Err("XML nesting exceeds limit".into());
                 }
+                let mut attributes = 0usize;
+                let mut namespaces = 0usize;
                 for attribute in element.attributes() {
                     let attribute = attribute?;
-                    let value = attribute.decode_and_unescape_value(reader.decoder())?;
+                    budget.attribute()?;
+                    attributes += 1;
+                    if attributes > MAX_ELEMENT_ATTRIBUTES {
+                        return Err("XML element has too many attributes".into());
+                    }
+                    let key = attribute.key.as_ref();
+                    if key == b"xmlns" || key.starts_with(b"xmlns:") {
+                        namespaces += 1;
+                        if namespaces > MAX_ELEMENT_NAMESPACES {
+                            return Err("XML element declares too many namespaces".into());
+                        }
+                    }
+                    let value =
+                        attribute.decoded_and_normalized_value(XML_VERSION, reader.decoder())?;
                     match attribute.key.local_name().as_ref() {
                         b"TargetMode" if value != "Internal" => {
                             return Err("external relationship is unsupported".into());
@@ -269,6 +330,59 @@ mod tests {
             bytes
         );
     }
+    fn inspect_xml_alone(bytes: &[u8]) -> PackageResult<()> {
+        inspect_xml(bytes, &mut ParseBudget::new())
+    }
+
+    fn attributes(count: usize, prefix: &str) -> String {
+        (0..count)
+            .map(|index| format!(" {prefix}{index}=\"x\""))
+            .collect()
+    }
+
+    #[test]
+    fn many_attributes_on_one_element_are_rejected_at_the_package_boundary() {
+        let accepted = format!("<Types{}/>", attributes(MAX_ELEMENT_ATTRIBUTES, "a"));
+        assert!(inspect_xml_alone(accepted.as_bytes()).is_ok());
+        // The advisory's shape: one short tag with thousands of distinct
+        // attributes. It must be refused, not parsed quadratically.
+        let hostile = format!("<Types{}/>", attributes(16_000, "a"));
+        let started = std::time::Instant::now();
+        assert!(
+            read(&package_types(
+                "word/document.xml",
+                b"<w/>",
+                hostile.as_bytes()
+            ))
+            .is_err()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn namespace_declarations_per_element_are_bounded() {
+        let accepted = format!("<r{}/>", attributes(MAX_ELEMENT_NAMESPACES, "xmlns:n"));
+        assert!(inspect_xml_alone(accepted.as_bytes()).is_ok());
+        let hostile = format!("<r{}/>", attributes(MAX_ELEMENT_NAMESPACES + 1, "xmlns:n"));
+        assert!(inspect_xml_alone(hostile.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn parsing_work_is_shared_across_every_part_of_a_package() {
+        let mut budget = ParseBudget {
+            events: 10,
+            attributes: 3,
+        };
+        assert!(inspect_xml(b"<a x=\"1\"><b/></a>", &mut budget).is_ok());
+        // The second part inherits what the first one spent.
+        assert!(inspect_xml(b"<a x=\"1\" y=\"2\" z=\"3\"/>", &mut budget).is_err());
+        let mut budget = ParseBudget {
+            events: 3,
+            attributes: 100,
+        };
+        assert!(inspect_xml(b"<a><b/><c/><d/></a>", &mut budget).is_err());
+    }
+
     #[test]
     fn preserves_only_explicitly_typed_printer_settings_binary() {
         let name = "ppt/printerSettings/printerSettings1.bin";
@@ -290,7 +404,8 @@ mod tests {
             .is_err()
         );
         assert!(
-            inspect_xml(b"<Relationship Type=\"http://example.invalid/vbaProject\"/>").is_err()
+            inspect_xml_alone(b"<Relationship Type=\"http://example.invalid/vbaProject\"/>")
+                .is_err()
         );
     }
     #[test]

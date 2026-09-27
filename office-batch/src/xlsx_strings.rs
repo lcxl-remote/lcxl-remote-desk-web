@@ -174,8 +174,12 @@ fn read_shared(xml: &[u8], requested: Option<usize>, limit: usize) -> PackageRes
 
 pub(crate) fn event_text(event: Event<'_>) -> PackageResult<String> {
     Ok(match event {
-        Event::Text(t) => t.xml_content()?.into_owned(),
-        Event::CData(t) => t.xml_content()?.into_owned(),
+        Event::Text(t) => t
+            .xml_content(crate::ooxml_package::XML_VERSION)?
+            .into_owned(),
+        Event::CData(t) => t
+            .xml_content(crate::ooxml_package::XML_VERSION)?
+            .into_owned(),
         Event::GeneralRef(r) => {
             quick_xml::escape::unescape(&format!("&{};", r.decode()?))?.into_owned()
         }

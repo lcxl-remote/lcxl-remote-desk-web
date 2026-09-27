@@ -7,6 +7,7 @@
 mod markdown;
 mod pdf_extract;
 mod pdf_preflight;
+pub mod sandbox;
 mod typst_engine;
 
 use serde::{Deserialize, Serialize};

@@ -100,8 +100,12 @@ pub(crate) fn body_text(xml: &[u8], limit: usize) -> PackageResult<String> {
                     return Err("Word text outside a paragraph".into());
                 }
                 let decoded = match event {
-                    Event::Text(text) => text.xml_content()?.into_owned(),
-                    Event::CData(text) => text.xml_content()?.into_owned(),
+                    Event::Text(text) => text
+                        .xml_content(crate::ooxml_package::XML_VERSION)?
+                        .into_owned(),
+                    Event::CData(text) => text
+                        .xml_content(crate::ooxml_package::XML_VERSION)?
+                        .into_owned(),
                     Event::GeneralRef(reference) => {
                         quick_xml::escape::unescape(&format!("&{};", reference.decode()?))?
                             .into_owned()

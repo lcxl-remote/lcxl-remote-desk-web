@@ -34,14 +34,20 @@ ignore = [
     { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version via urlpattern (Tauri); unmaintained, no upgrade" },
     { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident via urlpattern (Tauri); unmaintained, no upgrade" },
 
-    # quick-xml (<0.41) DoS advisories. Every quick-xml in the tree is a
-    # build-time / app-controlled XML path, never a parser of untrusted remote
-    # input: 0.30 via xcb (XCB protocol codegen), 0.38 via wayland-scanner
-    # (Wayland protocol codegen), 0.37 via tauri-winrt-notification (Windows
-    # toast XML the app itself emits). No upgrade: these parents pin quick-xml
-    # <0.41, which has no compatible release yet.
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic-attr DoS; only build-time/app-controlled XML (xcb/wayland-scanner/tauri toast), parents pin <0.41" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml namespace-alloc DoS; only build-time/app-controlled XML (xcb/wayland-scanner/tauri toast), parents pin <0.41" },
+    # quick-xml DoS advisories (quadratic duplicate-attribute check, namespace
+    # allocation), fixed in 0.41. Every runtime parser of user documents —
+    # desk-office-batch (DOCX/XLSX/PPTX) and the server's spreadsheet and APPX
+    # manifest readers — uses the workspace quick-xml >=0.41; the OOXML package
+    # boundary additionally caps attributes, namespace declarations and total
+    # parse work per package. The advisories still match only these older
+    # copies, each reached solely through a build-time protocol generator or XML
+    # the application itself emits: 0.30.0 via xcb (build script), 0.38.4 via
+    # wayland-scanner (proc-macro), 0.37.5 via tauri-winrt-notification (toast
+    # XML we generate). cargo-deny cannot scope an advisory ignore to a version,
+    # so a new runtime consumer must be checked with
+    # `cargo tree -i quick-xml@<old version>` before relying on this entry.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml <0.41 only in build-time/app-emitted XML (xcb, wayland-scanner, tauri toast); runtime parsers use >=0.41" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml <0.41 only in build-time/app-emitted XML (xcb, wayland-scanner, tauri toast); runtime parsers use >=0.41" },
 
     # Other unmaintained transitives with no safe upgrade.
     { id = "RUSTSEC-2024-0436", reason = "paste via rav1e encoder; unmaintained, no replacement" },

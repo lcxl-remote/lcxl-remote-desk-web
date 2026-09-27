@@ -471,7 +471,16 @@ test("open_page reuses the remembered tab after an exact target redirects", asyn
         storage: {
             ...extensionChrome().storage,
             session: {
-                get: async () => ({ openedTargetTabs: { [target]: 31 } }),
+                get: async () => ({
+                    openedTargetTabs: {
+                        [target]: {
+                            tabId: 31,
+                            requestId: "request-1",
+                            phase: "confirmed",
+                            finalUrl: "https://app.slack.com/client/workspace/channel"
+                        }
+                    }
+                }),
                 set: async () => undefined
             }
         },
@@ -509,7 +518,7 @@ test("open_page reuses the remembered tab after an exact target redirects", asyn
         origin: { kind: "https", host_ascii: "lcxl-remote.slack.com", port: 443 }
     };
 
-    const result = await execute(action);
+    const result = await execute(action, () => {}, "request-1");
 
     assert.equal(createdTabs, 0);
     assert.equal(result.page.page_id, "tab-31");
@@ -821,4 +830,178 @@ test('lost click response never injects and replays the mutation', async () => {
         await assert.rejects(()=>execute({action:'activate_element',page:recoveryPage()}),/message port closed/);
         assert.equal(clicks,1); assert.equal(injections,0);
     } finally {delete globalThis.chrome;}
+});
+
+function rememberedChrome({ entry, tabUrl, permitted = true, onCreate = () => {} }) {
+    const target = "https://lcxl-remote.slack.com/";
+    let stored = { openedTargetTabs: { [target]: entry } };
+    return {
+        target,
+        stored: () => stored,
+        chrome: extensionChrome({
+            permissions: {
+                contains: async ({ origins }) => permitted || origins[0] === "https://lcxl-remote.slack.com/*"
+            },
+            storage: {
+                ...extensionChrome().storage,
+                session: {
+                    get: async () => stored,
+                    set: async value => { stored = { ...stored, ...value }; }
+                }
+            },
+            tabs: {
+                ...extensionChrome().tabs,
+                create: async () => {
+                    onCreate();
+                    return { id: 40, status: "complete" };
+                },
+                get: async (id) => ({
+                    id,
+                    status: "complete",
+                    url: id === 31 ? tabUrl : "https://lcxl-remote.slack.com/"
+                }),
+                query: async () => [],
+                sendMessage: async () => ({
+                    ok: true,
+                    result: {
+                        page: {
+                            page_id: null,
+                            page_incarnation: "document",
+                            origin: { kind: "https", host_ascii: "app.slack.com", port: 443 },
+                            document_revision: 1,
+                            url_sha256: "d".repeat(64)
+                        }
+                    }
+                })
+            }
+        })
+    };
+}
+
+function slackAction(target) {
+    const action = openCommand().action;
+    action.target = {
+        url: target,
+        origin: { kind: "https", host_ascii: "lcxl-remote.slack.com", port: 443 }
+    };
+    return action;
+}
+
+test("a remembered tab is never adopted by a different request", async () => {
+    let createdTabs = 0;
+    const fixture = rememberedChrome({
+        entry: {
+            tabId: 31,
+            requestId: "request-1",
+            phase: "confirmed",
+            finalUrl: "https://app.slack.com/client/workspace/channel"
+        },
+        tabUrl: "https://app.slack.com/client/workspace/channel",
+        onCreate: () => { createdTabs += 1; }
+    });
+    globalThis.chrome = fixture.chrome;
+    const { execute } = await import(new URL("../src/service-worker.js?other-request-test", import.meta.url));
+
+    const result = await execute(slackAction(fixture.target), () => {}, "request-2");
+
+    assert.equal(createdTabs, 1);
+    assert.equal(result.page.page_id, "tab-40");
+    await new Promise(resolve => setImmediate(resolve));
+    delete globalThis.chrome;
+});
+
+test("a remembered tab the user navigated elsewhere is outcome unknown, not a new tab", async () => {
+    for (const entry of [
+        // Interrupted after a redirect that was never confirmed.
+        { tabId: 31, requestId: "request-1", phase: "pending" },
+        // Confirmed, then navigated by the user before the retry.
+        {
+            tabId: 31,
+            requestId: "request-1",
+            phase: "confirmed",
+            finalUrl: "https://app.slack.com/client/workspace/channel"
+        }
+    ]) {
+        let createdTabs = 0;
+        const fixture = rememberedChrome({
+            entry,
+            tabUrl: "https://unrelated.example/inbox",
+            onCreate: () => { createdTabs += 1; }
+        });
+        globalThis.chrome = fixture.chrome;
+        const { execute } = await import(new URL(`../src/service-worker.js?navigated-${entry.phase}`, import.meta.url));
+
+        await assert.rejects(
+            () => execute(slackAction(fixture.target), () => {}, "request-1"),
+            /open_page_outcome_unknown/u
+        );
+        assert.equal(createdTabs, 0);
+        // The navigated tab is spent: a retry of any request no longer sees it.
+        assert.deepEqual(fixture.stored().openedTargetTabs, {});
+        await new Promise(resolve => setImmediate(resolve));
+        delete globalThis.chrome;
+    }
+});
+
+test("an interrupted open of the same request resumes on its still-loading target tab", async () => {
+    let createdTabs = 0;
+    const fixture = rememberedChrome({
+        entry: { tabId: 31, requestId: "request-1", phase: "pending" },
+        tabUrl: "https://lcxl-remote.slack.com/",
+        onCreate: () => { createdTabs += 1; }
+    });
+    globalThis.chrome = fixture.chrome;
+    const { execute } = await import(new URL("../src/service-worker.js?pending-same-request", import.meta.url));
+
+    const result = await execute(slackAction(fixture.target), () => {}, "request-1");
+
+    assert.equal(createdTabs, 0);
+    assert.equal(result.page.page_id, "tab-31");
+    const confirmed = fixture.stored().openedTargetTabs[fixture.target];
+    assert.equal(confirmed.phase, "confirmed");
+    assert.equal(confirmed.finalUrl, "https://lcxl-remote.slack.com/");
+    await new Promise(resolve => setImmediate(resolve));
+    delete globalThis.chrome;
+});
+
+test("reusing a remembered tab rechecks host permission for its current origin", async () => {
+    const fixture = rememberedChrome({
+        entry: {
+            tabId: 31,
+            requestId: "request-1",
+            phase: "confirmed",
+            finalUrl: "https://app.slack.com/client/workspace/channel"
+        },
+        tabUrl: "https://app.slack.com/client/workspace/channel",
+        permitted: false
+    });
+    globalThis.chrome = fixture.chrome;
+    const { execute } = await import(new URL("../src/service-worker.js?revoked-remembered", import.meta.url));
+
+    await assert.rejects(
+        () => execute(slackAction(fixture.target), () => {}, "request-1"),
+        /host_permission_revoked/u
+    );
+    await new Promise(resolve => setImmediate(resolve));
+    delete globalThis.chrome;
+});
+
+test("closing a remembered tab forgets it", async () => {
+    const fixture = rememberedChrome({
+        entry: {
+            tabId: 31,
+            requestId: "request-1",
+            phase: "confirmed",
+            finalUrl: "https://app.slack.com/client/workspace/channel"
+        },
+        tabUrl: "https://app.slack.com/client/workspace/channel"
+    });
+    globalThis.chrome = fixture.chrome;
+    const { forgetRememberedTab } = await import(new URL("../src/service-worker.js?forget-remembered", import.meta.url));
+
+    await forgetRememberedTab(31);
+
+    assert.deepEqual(fixture.stored().openedTargetTabs, {});
+    await new Promise(resolve => setImmediate(resolve));
+    delete globalThis.chrome;
 });

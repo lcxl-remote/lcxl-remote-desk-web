@@ -3,6 +3,10 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // Before anything else: the sandbox child's stdout carries only its frame.
+    if let Some(code) = lcxl_remote_desk_server::typst_sandbox::run_child_if_requested() {
+        return ExitCode::from(code as u8);
+    }
     #[cfg(windows)]
     if let Some(code) = lcxl_remote_desk_server::windows_application_host::run_if_requested() {
         return ExitCode::from(code as u8);

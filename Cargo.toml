@@ -175,7 +175,7 @@ lru = "0.18.2"
 prometheus = "0.14"
 png = "0.17"
 image = "0.25"
-quick-xml = "0.38.4"
+quick-xml = "0.41"
 zip = { version = "6.0.0", default-features = false, features = ["deflate"] }
 
 sysinfo = "0.37"

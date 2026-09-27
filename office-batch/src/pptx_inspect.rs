@@ -94,7 +94,10 @@ fn placeholder(xml: &[u8], title: bool, limit: usize) -> PackageResult<Option<St
                         for attr in element.attributes() {
                             let attr = attr?;
                             if attr.key.as_ref() == b"type" {
-                                let value = attr.decode_and_unescape_value(reader.decoder())?;
+                                let value = attr.decoded_and_normalized_value(
+                                    crate::ooxml_package::XML_VERSION,
+                                    reader.decoder(),
+                                )?;
                                 selected |= if title {
                                     matches!(value.as_ref(), "title" | "ctrTitle")
                                 } else {
@@ -135,8 +138,12 @@ fn placeholder(xml: &[u8], title: bool, limit: usize) -> PackageResult<Option<St
                     stack[depth..] == [Tag::Shape, Tag::Body, Tag::Paragraph, Tag::Run, Tag::Text]
                 }) {
                     let decoded = match event {
-                        Event::Text(text) => text.xml_content()?.into_owned(),
-                        Event::CData(text) => text.xml_content()?.into_owned(),
+                        Event::Text(text) => text
+                            .xml_content(crate::ooxml_package::XML_VERSION)?
+                            .into_owned(),
+                        Event::CData(text) => text
+                            .xml_content(crate::ooxml_package::XML_VERSION)?
+                            .into_owned(),
                         Event::GeneralRef(reference) => {
                             quick_xml::escape::unescape(&format!("&{};", reference.decode()?))?
                                 .into_owned()

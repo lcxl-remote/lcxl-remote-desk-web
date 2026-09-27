@@ -286,54 +286,72 @@ pub fn observe_batch(
     })?
 }
 
+/// `before_write` runs immediately before the native write, after the target
+/// was resolved and verified, so a lost writer lease stops the write itself.
 pub fn apply_numbers(
     locator: &NumbersCellLocator,
     action: &SpreadsheetLivePatchAction,
+    before_write: &(dyn Fn() -> Result<(), AgentError> + Sync),
 ) -> Result<IworkMutationResult, AgentError> {
     let spec = spec(IworkApplication::Numbers);
     verify_contract(spec)?;
     ensure_automation_permission(spec)?;
     let locator = locator.clone();
     let action = action.clone();
-    with_bridge(|| unsafe {
+    // The callback only checks the writer lease; it performs no Objective-C
+    // sends and leaves no shared state half-updated if it unwinds.
+    let before_write = std::panic::AssertUnwindSafe(before_write);
+    with_bridge(move || unsafe {
         let app = running_application(spec)?;
         verify_app_version(app, spec)?;
         let document = front_document(app)?;
-        apply_numbers_document(document, &locator, &action)
+        apply_numbers_document(document, &locator, &action, *before_write)
     })?
 }
 
+/// `before_write` runs immediately before the native write, after the target
+/// was resolved and verified, so a lost writer lease stops the write itself.
 pub fn apply_pages(
     locator: &PagesDocumentLocator,
     action: &DocumentLivePatchAction,
+    before_write: &(dyn Fn() -> Result<(), AgentError> + Sync),
 ) -> Result<IworkMutationResult, AgentError> {
     let spec = spec(IworkApplication::Pages);
     verify_contract(spec)?;
     ensure_automation_permission(spec)?;
     let locator = locator.clone();
     let action = action.clone();
-    with_bridge(|| unsafe {
+    // The callback only checks the writer lease; it performs no Objective-C
+    // sends and leaves no shared state half-updated if it unwinds.
+    let before_write = std::panic::AssertUnwindSafe(before_write);
+    with_bridge(move || unsafe {
         let app = running_application(spec)?;
         verify_app_version(app, spec)?;
         let document = front_document(app)?;
-        apply_pages_document(document, &locator, &action)
+        apply_pages_document(document, &locator, &action, *before_write)
     })?
 }
 
+/// `before_write` runs immediately before the native write, after the target
+/// was resolved and verified, so a lost writer lease stops the write itself.
 pub fn apply_keynote(
     locator: &KeynoteSlideLocator,
     action: &PresentationLivePatchAction,
+    before_write: &(dyn Fn() -> Result<(), AgentError> + Sync),
 ) -> Result<IworkMutationResult, AgentError> {
     let spec = spec(IworkApplication::Keynote);
     verify_contract(spec)?;
     ensure_automation_permission(spec)?;
     let locator = locator.clone();
     let action = action.clone();
-    with_bridge(|| unsafe {
+    // The callback only checks the writer lease; it performs no Objective-C
+    // sends and leaves no shared state half-updated if it unwinds.
+    let before_write = std::panic::AssertUnwindSafe(before_write);
+    with_bridge(move || unsafe {
         let app = running_application(spec)?;
         verify_app_version(app, spec)?;
         let document = front_document(app)?;
-        apply_keynote_document(document, &locator, &action)
+        apply_keynote_document(document, &locator, &action, *before_write)
     })?
 }
 
@@ -351,7 +369,7 @@ pub fn apply_numbers_batch(
         |document| unsafe {
             let mut locator = locator.clone();
             locator.document_identity_sha256 = document_identity(document)?;
-            apply_numbers_document(document, &locator, action)
+            apply_numbers_document(document, &locator, action, &|| Ok(()))
         },
     )
 }
@@ -370,7 +388,7 @@ pub fn apply_pages_batch(
         |document| unsafe {
             let mut locator = locator.clone();
             locator.document_identity_sha256 = document_identity(document)?;
-            apply_pages_document(document, &locator, action)
+            apply_pages_document(document, &locator, action, &|| Ok(()))
         },
     )
 }
@@ -389,7 +407,7 @@ pub fn apply_keynote_batch(
         |document| unsafe {
             let mut locator = locator.clone();
             locator.document_identity_sha256 = document_identity(document)?;
-            apply_keynote_document(document, &locator, action)
+            apply_keynote_document(document, &locator, action, &|| Ok(()))
         },
     )
 }
@@ -456,25 +474,28 @@ fn apply_batch(
     })?
 }
 
+/// Writes the approved cell, located by the approved sheet, table and cell
+/// names on one resolved document. The current selection is never consulted
+/// again, so a user changing the selection cannot redirect the write.
 unsafe fn apply_numbers_document(
     document: *mut AnyObject,
     locator: &NumbersCellLocator,
     action: &SpreadsheetLivePatchAction,
+    before_write: &(dyn Fn() -> Result<(), AgentError> + Sync),
 ) -> Result<IworkMutationResult, AgentError> {
-    let observed = observe_numbers_document(document)?;
-    let IworkObservation::Numbers {
-        locator: current,
-        value: before_value,
-        formula: before_formula,
-        ..
-    } = observed
-    else {
-        unreachable!();
-    };
-    if current != *locator {
+    let document = concrete(document, "the iWork application has no open document")?;
+    ensure_document_is_supported(document)?;
+    if document_identity(document)? != locator.document_identity_sha256 {
+        return Err(stale("the Numbers document changed after observation"));
+    }
+    let cell = locate_numbers_cell(document, locator)?;
+    let before_value = optional_property_string(cell, CELL_VALUE)?.unwrap_or_default();
+    let before_formula =
+        optional_property_string(cell, CELL_FORMULA)?.filter(|value| !value.is_empty());
+    if sha256_pair(&before_value, before_formula.as_deref().unwrap_or("")) != locator.before_sha256
+    {
         return Err(stale("the Numbers cell changed after observation"));
     }
-    let cell = numbers_cell(document)?;
     let requested = match action {
         SpreadsheetLivePatchAction::SetCellNumber { .. }
         | SpreadsheetLivePatchAction::SetCellBoolean { .. } => {
@@ -487,6 +508,7 @@ unsafe fn apply_numbers_document(
         // formula text to be assigned through the writable `value` property.
         SpreadsheetLivePatchAction::SetCellFormula { formula } => formula,
     };
+    before_write()?;
     set_property_string(
         cell,
         CELL_VALUE,
@@ -523,7 +545,9 @@ unsafe fn apply_pages_document(
     document: *mut AnyObject,
     locator: &PagesDocumentLocator,
     action: &DocumentLivePatchAction,
+    before_write: &(dyn Fn() -> Result<(), AgentError> + Sync),
 ) -> Result<IworkMutationResult, AgentError> {
+    let document = concrete(document, "the iWork application has no open document")?;
     let observed = observe_pages_document(document)?;
     let IworkObservation::Pages {
         locator: current,
@@ -536,6 +560,7 @@ unsafe fn apply_pages_document(
         return Err(stale("the Pages document changed after observation"));
     }
     let DocumentLivePatchAction::ReplaceBodyText { text } = action;
+    before_write()?;
     set_property_string(
         document,
         BODY_TEXT,
@@ -546,24 +571,32 @@ unsafe fn apply_pages_document(
     Ok(exact_text_result("Pages body", &before, &after, text))
 }
 
+/// Resolves the current slide once to the application's own reference for
+/// that slide and verifies number, title and notes on it. Validation, write
+/// and read-back all use that one reference, so changing the current slide
+/// afterwards cannot redirect the write.
 unsafe fn apply_keynote_document(
     document: *mut AnyObject,
     locator: &KeynoteSlideLocator,
     action: &PresentationLivePatchAction,
+    before_write: &(dyn Fn() -> Result<(), AgentError> + Sync),
 ) -> Result<IworkMutationResult, AgentError> {
-    let observed = observe_keynote_document(document)?;
-    let IworkObservation::Keynote {
-        locator: current,
-        title: before_title,
-        presenter_notes: before_notes,
-    } = observed
-    else {
-        unreachable!();
-    };
-    if current != *locator {
+    let document = concrete(document, "the iWork application has no open document")?;
+    ensure_document_is_supported(document)?;
+    if document_identity(document)? != locator.document_identity_sha256 {
+        return Err(stale("the Keynote document changed after observation"));
+    }
+    let slide = concrete(
+        current_keynote_slide(document)?,
+        "Keynote has no current slide",
+    )?;
+    let (slide_number, before_title, before_notes) = keynote_slide_state(slide)?;
+    if slide_number != locator.slide_number
+        || sha256(before_title.as_bytes()) != locator.title_before_sha256
+        || sha256(before_notes.as_bytes()) != locator.notes_before_sha256
+    {
         return Err(stale("the Keynote slide changed after observation"));
     }
-    let slide = current_keynote_slide(document)?;
     let (label, before, expected, readback) = match action {
         PresentationLivePatchAction::ReplaceSlideTitle { text } => {
             let title = property_object(slide, DEFAULT_TITLE_ITEM)?;
@@ -574,6 +607,7 @@ unsafe fn apply_keynote_document(
                     false,
                 ));
             }
+            before_write()?;
             set_property_string(
                 title,
                 OBJECT_TEXT,
@@ -588,6 +622,7 @@ unsafe fn apply_keynote_document(
             )
         }
         PresentationLivePatchAction::SetPresenterNotes { text } => {
+            before_write()?;
             set_property_string(
                 slide,
                 PRESENTER_NOTES,
@@ -665,19 +700,89 @@ unsafe fn observe_numbers_document(
     })
 }
 
-unsafe fn numbers_cell(document: *mut AnyObject) -> Result<*mut AnyObject, AgentError> {
+/// Resolves the approved cell by name on concrete sheet and table references.
+/// The sheet must still be the active one: the frozen contract has no sheet
+/// collection, so a changed active sheet is rejected rather than searched.
+unsafe fn locate_numbers_cell(
+    document: *mut AnyObject,
+    locator: &NumbersCellLocator,
+) -> Result<*mut AnyObject, AgentError> {
     let sheet = property_object(document, ACTIVE_SHEET)?;
     if sheet.is_null() {
         return Err(unavailable("Numbers has no active sheet"));
     }
-    let tables = element_array(sheet, TABLES)?;
-    let table = first_element(tables, "Numbers active sheet has no table")?;
-    let range = property_object(table, SELECTION_RANGE)?;
-    if range.is_null() {
-        return Err(unavailable("Numbers has no selected cell range"));
+    let sheet = concrete(sheet, "Numbers has no active sheet")?;
+    if property_string(sheet, NAME)? != locator.sheet_name {
+        return Err(stale("the Numbers sheet changed after observation"));
     }
-    let cells = element_array(range, CELLS)?;
-    first_element(cells, "Numbers selection contains no cell")
+    let table = named_element(
+        element_array(sheet, TABLES)?,
+        &locator.table_name,
+        "the approved Numbers table no longer exists",
+    )?;
+    named_element(
+        element_array(table, CELLS)?,
+        &locator.cell_address,
+        "the approved Numbers cell no longer exists",
+    )
+}
+
+/// Forces a lazy ScriptingBridge reference (for example "current slide" or
+/// "document 1") to be evaluated once and returns the application's own
+/// reference to the object it designated at that moment.
+unsafe fn concrete(object: *mut AnyObject, missing: &str) -> Result<*mut AnyObject, AgentError> {
+    if object.is_null() {
+        return Err(unavailable(missing));
+    }
+    let resolved: *mut AnyObject = msg_send![object, get];
+    if resolved.is_null() {
+        return Err(unavailable(missing));
+    }
+    let is_object: bool = msg_send![resolved, isKindOfClass: class!(SBObject)];
+    if is_object {
+        Ok(resolved)
+    } else {
+        Err(unavailable(missing))
+    }
+}
+
+/// Resolves exactly the element with `name` and verifies its name, so a
+/// missing or renamed element is rejected instead of silently matched.
+unsafe fn named_element(
+    elements: *mut AnyObject,
+    name: &str,
+    missing: &str,
+) -> Result<*mut AnyObject, AgentError> {
+    if elements.is_null() {
+        return Err(stale(missing));
+    }
+    let key = nsstring(name)?;
+    let element: *mut AnyObject = msg_send![elements, objectWithName: key];
+    let element = concrete(element, missing).map_err(|_| stale(missing))?;
+    if property_string(element, NAME).map_err(|_| stale(missing))? != name {
+        return Err(stale(missing));
+    }
+    Ok(element)
+}
+
+unsafe fn keynote_slide_state(slide: *mut AnyObject) -> Result<(i64, String, String), AgentError> {
+    let slide_number = property_string(slide, SLIDE_NUMBER)?
+        .parse::<i64>()
+        .map_err(|_| {
+            failure(
+                AgentErrorKind::TransportError,
+                "Keynote returned an invalid slide number",
+                true,
+            )
+        })?;
+    let title = property_object(slide, DEFAULT_TITLE_ITEM)?;
+    let title = if title.is_null() {
+        String::new()
+    } else {
+        property_string(title, OBJECT_TEXT)?
+    };
+    let presenter_notes = optional_property_string(slide, PRESENTER_NOTES)?.unwrap_or_default();
+    Ok((slide_number, title, presenter_notes))
 }
 
 unsafe fn observe_pages_document(document: *mut AnyObject) -> Result<IworkObservation, AgentError> {
@@ -697,22 +802,7 @@ unsafe fn observe_keynote_document(
 ) -> Result<IworkObservation, AgentError> {
     ensure_document_is_supported(document)?;
     let slide = current_keynote_slide(document)?;
-    let slide_number = property_string(slide, SLIDE_NUMBER)?
-        .parse::<i64>()
-        .map_err(|_| {
-            failure(
-                AgentErrorKind::TransportError,
-                "Keynote returned an invalid slide number",
-                true,
-            )
-        })?;
-    let title = property_object(slide, DEFAULT_TITLE_ITEM)?;
-    let title = if title.is_null() {
-        String::new()
-    } else {
-        property_string(title, OBJECT_TEXT)?
-    };
-    let presenter_notes = optional_property_string(slide, PRESENTER_NOTES)?.unwrap_or_default();
+    let (slide_number, title, presenter_notes) = keynote_slide_state(slide)?;
     Ok(IworkObservation::Keynote {
         locator: KeynoteSlideLocator {
             document_identity_sha256: document_identity(document)?,
@@ -1580,6 +1670,7 @@ mod tests {
                         &SpreadsheetLivePatchAction::SetCellValue {
                             value: "must-not-be-written".into(),
                         },
+                        &|| Ok(()),
                     )
                     .unwrap_err(),
                 )
@@ -1598,6 +1689,7 @@ mod tests {
                         &DocumentLivePatchAction::ReplaceBodyText {
                             text: "must-not-be-written".into(),
                         },
+                        &|| Ok(()),
                     )
                     .unwrap_err(),
                 )
@@ -1616,6 +1708,7 @@ mod tests {
                         &PresentationLivePatchAction::ReplaceSlideTitle {
                             text: "must-not-be-written".into(),
                         },
+                        &|| Ok(()),
                     )
                     .unwrap_err(),
                 )
@@ -1648,6 +1741,7 @@ mod tests {
                     &SpreadsheetLivePatchAction::SetCellValue {
                         value: marker.clone(),
                     },
+                    &|| Ok(()),
                 )
                 .unwrap();
                 assert!(changed.changed && changed.verified);
@@ -1662,7 +1756,11 @@ mod tests {
                     SpreadsheetLivePatchAction::SetCellValue { value },
                     |formula| SpreadsheetLivePatchAction::SetCellFormula { formula },
                 );
-                assert!(apply_numbers(&restore_locator, &restore).unwrap().verified);
+                assert!(
+                    apply_numbers(&restore_locator, &restore, &|| Ok(()))
+                        .unwrap()
+                        .verified
+                );
             }
             "pages" => {
                 let IworkObservation::Pages { locator, body_text } =
@@ -1675,6 +1773,7 @@ mod tests {
                     &DocumentLivePatchAction::ReplaceBodyText {
                         text: marker.clone(),
                     },
+                    &|| Ok(()),
                 )
                 .unwrap();
                 assert!(changed.changed && changed.verified);
@@ -1688,7 +1787,8 @@ mod tests {
                 assert!(
                     apply_pages(
                         &restore_locator,
-                        &DocumentLivePatchAction::ReplaceBodyText { text: body_text }
+                        &DocumentLivePatchAction::ReplaceBodyText { text: body_text },
+                        &|| Ok(())
                     )
                     .unwrap()
                     .verified
@@ -1703,6 +1803,7 @@ mod tests {
                 let changed = apply_keynote(
                     &locator,
                     &PresentationLivePatchAction::ReplaceSlideTitle { text: marker },
+                    &|| Ok(()),
                 )
                 .unwrap();
                 assert!(changed.changed && changed.verified);
@@ -1716,7 +1817,8 @@ mod tests {
                 assert!(
                     apply_keynote(
                         &restore_locator,
-                        &PresentationLivePatchAction::ReplaceSlideTitle { text: title }
+                        &PresentationLivePatchAction::ReplaceSlideTitle { text: title },
+                        &|| Ok(())
                     )
                     .unwrap()
                     .verified
@@ -1743,6 +1845,7 @@ mod tests {
             &SpreadsheetLivePatchAction::SetCellFormula {
                 formula: "=1+41".into(),
             },
+            &|| Ok(()),
         )
         .unwrap();
         assert!(applied.changed);
@@ -1759,7 +1862,7 @@ mod tests {
             SpreadsheetLivePatchAction::SetCellValue { value },
             |formula| SpreadsheetLivePatchAction::SetCellFormula { formula },
         );
-        let restored = apply_numbers(&restore_locator, &restore).unwrap();
+        let restored = apply_numbers(&restore_locator, &restore, &|| Ok(())).unwrap();
         assert!(restored.verified || restored.changed);
     }
 }

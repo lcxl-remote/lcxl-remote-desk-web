@@ -252,47 +252,117 @@ export async function findExistingTabForTarget(targetUrl, queryTimeoutMs = TAB_Q
         && navigationUrlWithoutFragment(tab.url) === expected) || null;
 }
 
-async function rememberedTabForTarget(targetUrl, queryTimeoutMs = TAB_QUERY_TIMEOUT_MS) {
+// A remembered tab only recovers the *same* open_page request after the
+// service worker lost it mid-flight. Entries are keyed by target URL and carry
+// the host request id and a phase:
+// - "pending": the tab was created for this request but its final document was
+//   never observed. It can be reused only while it still shows the target.
+// - "confirmed": the request observed the tab's final URL (e.g. after a
+//   legitimate redirect). It can be reused only while the tab still shows it.
+// Any later navigation or closing of the tab removes the entry, and a
+// different request never adopts it: it opens the exact target or a new tab.
+function validRememberedEntry(value) {
+    return value
+        && Number.isInteger(value.tabId)
+        && typeof value.requestId === "string"
+        && (value.phase === "pending" || value.phase === "confirmed")
+        && (value.phase === "pending" || typeof value.finalUrl === "string");
+}
+
+async function readRememberedTargets(timeoutMs) {
+    const stored = await withTimeout(
+        storageGet("session", [TARGET_TAB_CACHE_KEY]),
+        timeoutMs,
+        "target_tab_cache_timeout"
+    );
+    return Object.fromEntries(
+        Object.entries(stored?.[TARGET_TAB_CACHE_KEY] || {})
+            .filter(([, value]) => validRememberedEntry(value))
+    );
+}
+
+async function writeRememberedTargets(entries) {
+    await withTimeout(
+        chrome.storage.session.set({ [TARGET_TAB_CACHE_KEY]: entries }),
+        1000,
+        "target_tab_cache_timeout"
+    );
+}
+
+async function rememberedTabForTarget(targetUrl, requestId, queryTimeoutMs = TAB_QUERY_TIMEOUT_MS) {
+    let entry;
+    let tab;
     try {
-        const stored = await withTimeout(
-            storageGet("session", [TARGET_TAB_CACHE_KEY]),
-            queryTimeoutMs,
-            "target_tab_cache_timeout"
-        );
-        const tabId = stored?.[TARGET_TAB_CACHE_KEY]?.[targetUrl];
-        if (!Number.isInteger(tabId)) return null;
-        const tab = await withTimeout(
-            chrome.tabs.get(tabId),
+        entry = (await readRememberedTargets(queryTimeoutMs))[targetUrl];
+        if (!entry || entry.requestId !== requestId) return null;
+        tab = await withTimeout(
+            chrome.tabs.get(entry.tabId),
             queryTimeoutMs,
             "target_tab_lookup_timeout"
         );
-        return tab?.id === tabId ? tab : null;
     } catch {
         return null;
     }
+    if (tab?.id !== entry.tabId || typeof tab.url !== "string") return null;
+    const expected = entry.phase === "confirmed" ? entry.finalUrl : targetUrl;
+    if (navigationUrlWithoutFragment(tab.url) !== navigationUrlWithoutFragment(expected)) {
+        // The tab this request created now shows something else: a redirect
+        // that was never confirmed, or a later navigation. It cannot be shown
+        // to be this request's page, and opening another tab could duplicate a
+        // page the first attempt already opened. The entry is spent.
+        await forgetRememberedTab(entry.tabId);
+        throw new Error("open_page_outcome_unknown");
+    }
+    // The remembered tab may now be on an origin whose access was revoked.
+    await assertHostPermissionForUrl(chrome, tab.url);
+    return tab;
 }
 
-async function rememberTargetTab(targetUrl, tabId) {
+async function rememberTargetTab(targetUrl, entry) {
     try {
-        const stored = await withTimeout(
-            storageGet("session", [TARGET_TAB_CACHE_KEY]),
-            1000,
-            "target_tab_cache_timeout"
-        );
-        const entries = Object.entries(stored?.[TARGET_TAB_CACHE_KEY] || {})
-            .filter(([, value]) => Number.isInteger(value) && value !== tabId)
+        const current = await readRememberedTargets(1000);
+        const entries = Object.entries(current)
+            .filter(([url, value]) => url !== targetUrl && value.tabId !== entry.tabId)
             .slice(-(MAX_REMEMBERED_TARGET_TABS - 1));
         const next = Object.fromEntries(entries);
-        next[targetUrl] = tabId;
-        await withTimeout(
-            chrome.storage.session.set({ [TARGET_TAB_CACHE_KEY]: next }),
-            1000,
-            "target_tab_cache_timeout"
-        );
+        next[targetUrl] = entry;
+        await writeRememberedTargets(next);
     } catch {
         // Recovery metadata is best-effort. Failing to remember a created tab
         // must not turn a completed create into an automatic second create.
     }
+}
+
+export async function forgetRememberedTab(tabId) {
+    try {
+        const current = await readRememberedTargets(1000);
+        const next = Object.fromEntries(
+            Object.entries(current).filter(([, value]) => value.tabId !== tabId)
+        );
+        if (Object.keys(next).length !== Object.keys(current).length) {
+            await writeRememberedTargets(next);
+        }
+    } catch {
+        // A stale entry is still rejected by the URL check on reuse.
+    }
+}
+
+async function confirmedDescription(targetUrl, requestId, tabId) {
+    const description = await describeTabWithRetry(tabId);
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        if (typeof tab?.url === "string") {
+            await rememberTargetTab(targetUrl, {
+                tabId,
+                requestId,
+                phase: "confirmed",
+                finalUrl: tab.url
+            });
+        }
+    } catch {
+        // Keep the pending entry; it is still bounded by its URL check.
+    }
+    return description;
 }
 
 function rawPageFromAction(action) {
@@ -306,20 +376,33 @@ function rawPageFromAction(action) {
     };
 }
 
-async function executeOnce(action, guard) {
+async function executeOnce(action, guard, requestId = null) {
     guard();
     if (action.action === "open_page") {
         await assertHostPermissionForUrl(chrome, action.target.url);
-        const existing = await findExistingTabForTarget(action.target.url)
-            || await rememberedTabForTarget(action.target.url);
+        const exact = await findExistingTabForTarget(action.target.url);
+        const remembered = exact || requestId === null
+            ? null
+            : await rememberedTabForTarget(action.target.url, requestId);
         guard();
-        if (existing) {
-            return describeTabWithRetry(existing.id);
+        if (exact) {
+            return describeTabWithRetry(exact.id);
+        }
+        if (remembered) {
+            return confirmedDescription(action.target.url, requestId, remembered.id);
         }
         const tab = await chrome.tabs.create({ url: action.target.url, active: true });
-        await rememberTargetTab(action.target.url, tab.id);
+        if (requestId !== null) {
+            await rememberTargetTab(action.target.url, {
+                tabId: tab.id,
+                requestId,
+                phase: "pending"
+            });
+        }
         const tabId = await waitForComplete(tab);
-        return describeTabWithRetry(tabId);
+        return requestId === null
+            ? describeTabWithRetry(tabId)
+            : confirmedDescription(action.target.url, requestId, tabId);
     }
     const tabId = tabIdFromPage(action.page);
     await assertTabHostPermission(chrome, tabId, action.page.origin);
@@ -356,10 +439,10 @@ export function sameReadScope(expected, current) {
         && expected.origin?.port === current.origin?.port;
 }
 
-export async function execute(action, guard = () => {}) {
+export async function execute(action, guard = () => {}, requestId = null) {
     guard();
     const send = action.action === "activate_element" && action.activation_class?.kind === "send_external";
-    if (!send) return executeOnce(action, guard);
+    if (!send) return executeOnce(action, guard, requestId);
     return executeSend(action, guard);
 }
 
@@ -378,7 +461,7 @@ async function handleMessage(event, activeSocket, deadline) {
         }
         command = parseHostCommand(event.data);
         const result = await runBoundedCommand(
-            guard => execute(command.action, guard),
+            guard => execute(command.action, guard, command.request_id),
             () => socket === activeSocket && activeSocket.readyState === WebSocket.OPEN,
             () => activeSocket.close(),
             Math.max(0, deadline - performance.now()),
@@ -498,6 +581,10 @@ async function connect() {
     });
     activeSocket.addEventListener("error", () => activeSocket.close());
 }
+
+// A closed tab can no longer be recovered. A navigated one is rejected and
+// forgotten by the URL check when its request retries.
+chrome.tabs?.onRemoved?.addListener((tabId) => void forgetRememberedTab(tabId));
 
 chrome.runtime.onInstalled.addListener(() => void connect());
 chrome.runtime.onStartup.addListener(() => void connect());

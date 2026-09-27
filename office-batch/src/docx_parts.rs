@@ -24,7 +24,10 @@ pub(crate) fn validate_main_type(bytes: &[u8], main: &str) -> PackageResult<()> 
                 for attr in element.attributes() {
                     let attr = attr?;
                     let value = attr
-                        .decode_and_unescape_value(reader.decoder())?
+                        .decoded_and_normalized_value(
+                            crate::ooxml_package::XML_VERSION,
+                            reader.decoder(),
+                        )?
                         .into_owned();
                     match attr.key.as_ref() {
                         b"PartName" => name = Some(value),

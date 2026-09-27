@@ -74,13 +74,16 @@ fn slide_ids(xml: &str) -> PackageResult<Vec<String>> {
                     let mut id = None;
                     for attribute in element.attributes() {
                         let attribute = attribute?;
-                        let (ns, local) = reader.resolve_attribute(attribute.key);
+                        let (ns, local) = reader.resolver().resolve_attribute(attribute.key);
                         if local.as_ref() == b"id"
                             && matches!(ns, ResolveResult::Bound(ref ns) if ns.as_ref() == R)
                         {
                             id = Some(
                                 attribute
-                                    .decode_and_unescape_value(reader.decoder())?
+                                    .decoded_and_normalized_value(
+                                        crate::ooxml_package::XML_VERSION,
+                                        reader.decoder(),
+                                    )?
                                     .into_owned(),
                             );
                         }

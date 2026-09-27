@@ -1,6 +1,6 @@
 [package]
 name = "desk-document-conversion"
-description = "Bounded in-process PDF, Markdown, TXT, and Typst document conversion"
+description = "Bounded PDF, Markdown, TXT, and Typst document conversion with a sandbox process protocol"
 license.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -11,6 +11,7 @@ flate2 = { workspace = true }
 png = { workspace = true }
 pulldown-cmark = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 typst = { workspace = true }
 typst-pdf = { workspace = true }

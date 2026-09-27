@@ -111,7 +111,7 @@ pub(crate) fn attributes(
         attrs.insert(
             std::str::from_utf8(attribute.key.as_ref())?.into(),
             attribute
-                .decode_and_unescape_value(reader.decoder())?
+                .decoded_and_normalized_value(crate::ooxml_package::XML_VERSION, reader.decoder())?
                 .into_owned(),
         );
     }

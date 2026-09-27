@@ -2703,12 +2703,15 @@ impl ComputerUseBroker {
         Ok(())
     }
 
+    /// `before_write` is checked immediately before each native live write,
+    /// after the target was re-resolved and verified.
     #[cfg(target_os = "macos")]
     pub(crate) fn execute_iwork_action(
         &self,
         target: &ObjectRef,
         action: &ComputerActionKind,
         ceiling: &ComputerUseSettings,
+        before_write: &(dyn Fn() -> Result<(), AgentError> + Sync),
     ) -> Result<SemanticActionResult, AgentError> {
         self.preflight_iwork_action(target, action, ceiling)?;
         let resolved = self.resolve_ref(target)?;
@@ -2739,6 +2742,7 @@ impl ComputerUseBroker {
                     before_sha256,
                 },
                 action,
+                before_write,
             )?,
             (
                 ResolvedObject::IworkPagesDocument {
@@ -2752,6 +2756,7 @@ impl ComputerUseBroker {
                     before_sha256,
                 },
                 action,
+                before_write,
             )?,
             (
                 ResolvedObject::IworkKeynoteSlide {
@@ -2769,6 +2774,7 @@ impl ComputerUseBroker {
                     notes_before_sha256,
                 },
                 action,
+                before_write,
             )?,
             _ => {
                 return Err(error(

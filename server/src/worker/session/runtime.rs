@@ -2229,10 +2229,14 @@ impl WorkerSession {
                                                 let ceiling = ceiling.clone();
                                                 tokio::task::spawn_blocking(move || -> Result<_, desk_agent_protocol::AgentError> {
                                                     broker.require_writer_lease(&generation_for_call)?;
+                                                    // Recheck the lease right before the native
+                                                    // write as well: user input between target
+                                                    // verification and the write must stop it.
                                                     let result = broker.execute_iwork_action(
                                                         &target,
                                                         &action,
                                                         &ceiling,
+                                                        &|| broker.require_writer_lease(&generation_for_call).map(|_| ()),
                                                     )?;
                                                     broker.require_writer_lease(&generation_for_call)?;
                                                     Ok(result)

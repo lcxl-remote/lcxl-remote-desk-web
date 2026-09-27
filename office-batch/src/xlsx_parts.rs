@@ -151,7 +151,7 @@ fn sheet_ids(text: &str) -> PackageResult<Vec<(String, String)>> {
                     let mut relationship = None;
                     for attr in element.attributes() {
                         let attr = attr?;
-                        let (ns, local) = reader.resolve_attribute(attr.key);
+                        let (ns, local) = reader.resolver().resolve_attribute(attr.key);
                         if local.as_ref() == b"id"
                             && matches!(ns, ResolveResult::Bound(ref ns) if ns.as_ref() == R)
                         {
@@ -159,8 +159,11 @@ fn sheet_ids(text: &str) -> PackageResult<Vec<(String, String)>> {
                                 return Err("ambiguous worksheet relationship".into());
                             }
                             relationship = Some(
-                                attr.decode_and_unescape_value(reader.decoder())?
-                                    .into_owned(),
+                                attr.decoded_and_normalized_value(
+                                    crate::ooxml_package::XML_VERSION,
+                                    reader.decoder(),
+                                )?
+                                .into_owned(),
                             );
                         }
                     }

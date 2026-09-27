@@ -1620,7 +1620,7 @@ fn xml_attribute(
         let attribute = attribute.map_err(|_| invalid("XML attribute is malformed"))?;
         if attribute.key.as_ref() == key {
             return attribute
-                .decode_and_unescape_value(reader.decoder())
+                .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, reader.decoder())
                 .map(|value| Some(value.into_owned()))
                 .map_err(|_| invalid("XML attribute value is malformed"));
         }
